@@ -1,0 +1,16 @@
+[package]
+name = "moonfield"
+version = "0.1.0"
+edition = "2024"
+
+[dependencies]
+moonfield-app = { path = "../moonfield/moonfield-app" }
+winit = { workspace = true }
+
+[features]
+default = []
+
+
+[[bin]]
+name = "moonfield"
+path = "main.rs"
