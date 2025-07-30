@@ -1,7 +1,7 @@
 pub mod handle;
 pub mod slot;
 
-use std::{cell::UnsafeCell, marker::PhantomData, thread::panicking};
+use std::{cell::UnsafeCell, marker::PhantomData};
 
 pub use handle::*;
 pub use slot::*;
@@ -108,12 +108,10 @@ where
     /// let object = MyObject::new();
     ///
     /// pool.store(handle, object);
-
     /// ```
     ///
     /// ```
     /// let handle = pool.spawn_with(|handle| {MyObject::new(handle)});
-
     /// ```
     pub fn spawn_with<F: FnOnce(Handle<T>) -> T>(&mut self, callback: F) -> Handle<T> {
         if let Some(free_index) = self.free_stack.pop() {
@@ -200,7 +198,6 @@ where
 
     pub fn borrow(&self, handle: Handle<T>) -> &T {
         // store the records length on stack can let it not depend on borrowing
-        let records_len = self.records.len();
 
         if let Some(record) = self.records_get(handle.index) {
             if record.generation == handle.generation {
@@ -218,12 +215,16 @@ where
         } else {
             panic!(
                 "Attempt to borrow object using out-of-bounds handle {:?}!, Record count is {}",
-                handle, records_len
+                handle,
+                self.records.len()
             );
         }
     }
 
     pub fn borrow_mut(&mut self, handle: Handle<T>) -> &mut T {
+        // store length into stack to avoid borrowing conflict with self.records_get_mut
+        // since it will return a reference to its value. The mutable reference lifetime 
+        // will be the same as the mut self
         let records_len = self.records.len();
 
         if let Some(record) = self.records_get_mut(handle.index) {

@@ -15,7 +15,6 @@ use crate::allocator::{INVALID_GENERATION, INVALID_INDEX};
 /// so we need the PhantomData to somehow tell compiler somehow we have the data to mark the type of Handle
 ///
 /// when we impl copy, clone will be the same as copy to bitwise copy. Instead of move semantic
-#[derive(Hash)]
 pub struct Handle<T> {
     pub index: u32,
     pub generation: u32,
@@ -48,7 +47,7 @@ impl<T> Copy for Handle<T> {}
 impl<T> PartialOrd for Handle<T> {
     #[inline]
     fn partial_cmp(&self, other: &Self) -> Option<Ordering> {
-        Some(self.index.cmp(&other.index))
+        Some(self.cmp(other))
     }
 }
 
@@ -138,7 +137,7 @@ impl<T> Handle<T> {
         Handle {
             index: self.index,
             generation: self.generation,
-            type_marker: PhantomData::default(),
+            type_marker: PhantomData,
         }
     }
 
@@ -147,7 +146,7 @@ impl<T> Handle<T> {
         Self {
             index: num as u32,
             generation: (num >> 32) as u32,
-            type_marker: PhantomData::default(),
+            type_marker: PhantomData,
         }
     }
 
