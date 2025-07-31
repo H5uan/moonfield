@@ -1,0 +1,12 @@
+[package]
+name = "moonfield"
+version = "0.1.0"
+edition = "2024"
+
+[features]
+default = ["moonfield-impl"]
+
+[dependencies]
+moonfield-impl = {path = "../moonfield-impl", optional = true}
+
+

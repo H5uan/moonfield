@@ -1,10 +1,10 @@
 [package]
-name = "moonfield"
+name = "examples"
 version = "0.1.0"
 edition = "2024"
 
 [dependencies]
-moonfield-app = { path = "../moonfield/moonfield-app" }
+moonfield-impl = { path = "../moonfield-impl" }
 winit = { workspace = true }
 
 [features]

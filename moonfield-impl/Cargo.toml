@@ -1,0 +1,13 @@
+[package]
+name = "moonfield-impl"
+version = "0.1.0"
+edition = "2024"
+
+
+[dependencies]
+moonfield-core ={ path = "../moonfield-core"}
+moonfield-graphics = {path = "../moonfield-graphics"}
+winit = { workspace = true }
+
+[features]
+default = []
