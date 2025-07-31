@@ -5,6 +5,8 @@ use winit::window::{Window, WindowAttributes};
 
 use crate::renderer::Renderer;
 
+pub mod error;
+
 pub struct InitilizedGraphicsContext {
     pub window: Window,
     pub renderer: Renderer,
@@ -13,9 +15,11 @@ pub struct InitilizedGraphicsContext {
 
 pub type GraphicsBackendConstructorResult = Result<(Window, SharedGraphicsBackend), GraphicsError>;
 
-pub type GraphicsBackendConstructorCallback = dyn Fn();
+pub type GraphicsBackendConstructorCallback = dyn Fn(&GraphicsContextParams, bool) -> GraphicsBackendConstructorResult;
 
 pub struct GraphicsBackendConstructor(Rc<GraphicsBackendConstructorCallback>);
+
+
 
 pub struct GraphicsContextParams {
     pub window_attributes: WindowAttributes,
