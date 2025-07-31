@@ -181,8 +181,10 @@ impl Debug for AtomicHandle {
 }
 
 impl AtomicHandle {
-    pub const NONE: AtomicHandle = AtomicHandle(AtomicUsize::new(0));
-
+    pub fn none() -> Self {
+        Self(AtomicUsize::new(0))
+    }
+    
     #[inline(always)]
     pub fn new(index: u32, generation: u32) -> Self {
         let handle = Self(AtomicUsize::new(0));
