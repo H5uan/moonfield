@@ -49,10 +49,15 @@ impl Default for LoggingConfig {
 ///
 /// init_logging(config).expect("Failed to initialize logging");
 /// ```
-pub fn init_logging(config: LoggingConfig) -> Result<(), Box<dyn std::error::Error>> {
-    use tracing_subscriber::{EnvFilter, fmt, layer::SubscriberExt, util::SubscriberInitExt};
+pub fn init_logging(
+    config: LoggingConfig,
+) -> Result<(), Box<dyn std::error::Error>> {
+    use tracing_subscriber::{
+        EnvFilter, fmt, layer::SubscriberExt, util::SubscriberInitExt,
+    };
 
-    let env_filter = EnvFilter::try_from_default_env().unwrap_or_else(|_| EnvFilter::new(config.level.to_string()));
+    let env_filter = EnvFilter::try_from_default_env()
+        .unwrap_or_else(|_| EnvFilter::new(config.level.to_string()));
 
     if config.console_output {
         tracing_subscriber::registry()

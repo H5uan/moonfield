@@ -1,0 +1,17 @@
+[package]
+name = "moonfield-window-example"
+version = "0.1.0"
+edition = "2024"
+
+# Empty workspace to avoid conflicts with main workspace
+[workspace]
+
+[[bin]]
+name = "moonfield_window"
+path = "../../examples/moonfield_window.rs"
+
+[dependencies]
+moonfield = { path = "../../moonfield" }
+winit = "0.30.12"
+tracing = "0.1.41"
+tracing-subscriber = "0.3.19"

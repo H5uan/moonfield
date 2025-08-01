@@ -1,0 +1,28 @@
+[alias]
+# Platform-specific example builds
+run-native = [
+    "run",
+    "--example",
+    "moonfield_window",
+    "--target-dir",
+    "platform/target/native",
+]
+build-native = [
+    "build",
+    "--example",
+    "moonfield_window",
+    "--target-dir",
+    "platform/target/native",
+]
+check-native = ["check", "--target-dir", "platform/target/native"]
+clean-native = ["clean", "--target-dir", "platform/target/native"]
+
+# Xcode项目生成命令
+build-xcode = ["xcode", "--manifest-path", "platform/xcode/Cargo.toml", "--output-dir", "platform/xcode"]
+run-xcode = ["xcode", "--manifest-path", "platform/xcode/Cargo.toml", "--output-dir", "platform/xcode"]
+check-xcode = ["xcode", "--manifest-path", "platform/xcode/Cargo.toml", "--output-dir", "platform/xcode"]
+clean-xcode = ["clean", "--manifest-path", "platform/xcode/Cargo.toml"]
+
+[build]
+# Default target directory for workspace builds
+target-dir = "platform/target/workspace"

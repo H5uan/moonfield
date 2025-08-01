@@ -1,12 +1,13 @@
 [package]
 name = "moonfield"
 version = "0.1.0"
-edition = "2024"
+edition = "2021"
 
-[features]
-default = ["moonfield-impl"]
+[lib]
+crate-type = ["staticlib", "rlib"]
 
+# Library dependencies
 [dependencies]
-moonfield-impl = {path = "../moonfield-impl", optional = true}
-
-
+moonfield-impl = { path = "../moonfield-impl" }
+moonfield-core = { path = "../moonfield-core" }
+moonfield-graphics = { path = "../moonfield-graphics" }

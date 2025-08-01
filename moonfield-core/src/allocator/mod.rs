@@ -66,7 +66,8 @@ where
 
     #[inline]
     pub fn with_capacity(capacity: u32) -> Self {
-        let capacity = usize::try_from(capacity).expect("capacity overflowed usize");
+        let capacity =
+            usize::try_from(capacity).expect("capacity overflowed usize");
         Self {
             records: Vec::with_capacity(capacity),
             free_stack: Vec::new(),
@@ -74,7 +75,8 @@ where
     }
 
     fn records_len(&self) -> u32 {
-        u32::try_from(self.records.len()).expect("Number of recors overflowed u32")
+        u32::try_from(self.records.len())
+            .expect("Number of recors overflowed u32")
     }
 
     fn records_get(&self, index: u32) -> Option<&PoolRecord<T, S>> {
@@ -97,16 +99,26 @@ where
     ///
     /// instead of seperately create object and handle, we use callback to create
     /// handle when we create object
-    pub fn spawn_with<F: FnOnce(Handle<T>) -> T>(&mut self, callback: F) -> Handle<T> {
+    pub fn spawn_with<F: FnOnce(Handle<T>) -> T>(
+        &mut self, callback: F,
+    ) -> Handle<T> {
         if let Some(free_index) = self.free_stack.pop() {
-            let record = self.records_get_mut(free_index).expect("free stack contained invalid index");
+            let record = self
+                .records_get_mut(free_index)
+                .expect("free stack contained invalid index");
 
             if record.slot.is_some() {
-                std::panic!("Attempt to spawn an object to pool record with slot! Record index is {free_index}");
+                std::panic!(
+                    "Attempt to spawn an object to pool record with slot! Record index is {free_index}"
+                );
             }
 
             let generation = record.generation + 1;
-            let handle = Handle { index: free_index, generation, type_marker: PhantomData };
+            let handle = Handle {
+                index: free_index,
+                generation,
+                type_marker: PhantomData,
+            };
             let slot = callback(handle);
 
             record.generation = generation;
@@ -140,7 +152,8 @@ where
     ///
     /// Panics if the given handle is invalid.
     pub fn free(&mut self, handle: Handle<T>) -> T {
-        let index = usize::try_from(handle.index).expect("index overflowed usize");
+        let index =
+            usize::try_from(handle.index).expect("index overflowed usize");
 
         if index >= self.records.len() {
             panic!(
@@ -169,7 +182,8 @@ where
     }
 
     pub fn try_free(&mut self, handle: Handle<T>) -> Option<T> {
-        let index = usize::try_from(handle.index).expect("index overflowed usize");
+        let index =
+            usize::try_from(handle.index).expect("index overflowed usize");
 
         self.records.get_mut(index).and_then(|record| {
             if record.generation == handle.generation {
@@ -193,10 +207,15 @@ where
                 if let Some(slot) = record.slot.as_ref() {
                     slot
                 } else {
-                    panic!("Attempt to borrow destroyed object at {handle:?} handle.")
+                    panic!(
+                        "Attempt to borrow destroyed object at {handle:?} handle."
+                    )
                 }
             } else {
-                panic!("Attempt to use dangling handle {:?}. Record has generation {}!", handle, record.generation);
+                panic!(
+                    "Attempt to use dangling handle {:?}. Record has generation {}!",
+                    handle, record.generation
+                );
             }
         } else {
             panic!(
@@ -218,10 +237,15 @@ where
                 if let Some(slot) = record.slot.as_mut() {
                     slot
                 } else {
-                    panic!("Attempt to borrow destroyed object at {handle:?} handle.")
+                    panic!(
+                        "Attempt to borrow destroyed object at {handle:?} handle."
+                    )
                 }
             } else {
-                panic!("Attempt to use dangling handle {:?}. Record has generation {}!", handle, record.generation);
+                panic!(
+                    "Attempt to use dangling handle {:?}. Record has generation {}!",
+                    handle, record.generation
+                );
             }
         } else {
             panic!(
@@ -336,7 +360,8 @@ where
 {
     #[inline(always)]
     fn eq(&self, other: &Self) -> bool {
-        self.generation == other.generation && self.slot.get() == other.slot.get()
+        self.generation == other.generation
+            && self.slot.get() == other.slot.get()
     }
 }
 
@@ -492,13 +517,19 @@ mod tests {
         let mut pool: Pool<TestData> = Pool::new();
 
         // Callback is the TestData creation
-        let handle =
-            pool.spawn_with(|handle| TestData::new(handle.index() as i32, &format!("handle-{}", handle.generation())));
+        let handle = pool.spawn_with(|handle| {
+            TestData::new(
+                handle.index() as i32,
+                &format!("handle-{}", handle.generation()),
+            )
+        });
         let data = pool.borrow(handle);
         assert_eq!(data.value, 0);
         assert_eq!(data.name, "handle-1");
 
-        let handle2 = pool.spawn_with(|h| TestData::new(h.index() as i32 * 10, &format!("obj-{}", h.index())));
+        let handle2 = pool.spawn_with(|h| {
+            TestData::new(h.index() as i32 * 10, &format!("obj-{}", h.index()))
+        });
 
         let data2 = pool.borrow(handle2);
         assert_eq!(data2.value, 10);
@@ -509,7 +540,8 @@ mod tests {
     fn test_self_referencing_node() {
         let mut pool: Pool<SelfAwareNode> = Pool::new();
 
-        let handle = pool.spawn_with(|h| SelfAwareNode { value: 100, my_handle: h });
+        let handle =
+            pool.spawn_with(|h| SelfAwareNode { value: 100, my_handle: h });
 
         let node = pool.borrow(handle);
         assert_eq!(node.my_handle, handle);
@@ -536,7 +568,11 @@ mod tests {
     fn test_graph_connections() {
         let mut pool: Pool<GraphNode> = Pool::new();
 
-        let node_a = pool.spawn_with(|handle| GraphNode { data: "A".to_string(), self_ref: handle, neighbors: vec![] });
+        let node_a = pool.spawn_with(|handle| GraphNode {
+            data: "A".to_string(),
+            self_ref: handle,
+            neighbors: vec![],
+        });
 
         let node_b = pool.spawn_with(|handle| GraphNode {
             data: "B".to_string(),
@@ -562,11 +598,23 @@ mod tests {
 
         // A-B-C-A
         // current test is a simple version, neighbors ordering depends on adding time
-        let node_a = pool.spawn_with(|h| GraphNode { data: "A".to_string(), self_ref: h, neighbors: vec![] });
+        let node_a = pool.spawn_with(|h| GraphNode {
+            data: "A".to_string(),
+            self_ref: h,
+            neighbors: vec![],
+        });
 
-        let node_b = pool.spawn_with(|h| GraphNode { data: "B".to_string(), self_ref: h, neighbors: vec![node_a] });
+        let node_b = pool.spawn_with(|h| GraphNode {
+            data: "B".to_string(),
+            self_ref: h,
+            neighbors: vec![node_a],
+        });
 
-        let node_c = pool.spawn_with(|h| GraphNode { data: "C".to_string(), self_ref: h, neighbors: vec![node_b] });
+        let node_c = pool.spawn_with(|h| GraphNode {
+            data: "C".to_string(),
+            self_ref: h,
+            neighbors: vec![node_b],
+        });
 
         pool.borrow_mut(node_a).neighbors.extend([node_b, node_c]);
         pool.borrow_mut(node_b).neighbors.push(node_c);
@@ -577,7 +625,9 @@ mod tests {
     }
 
     #[test]
-    #[should_panic(expected = "Attempt to borrow object using out-of-bounds handle")]
+    #[should_panic(
+        expected = "Attempt to borrow object using out-of-bounds handle"
+    )]
     fn test_pool_panic_invalid_handle_borrow() {
         let pool: Pool<TestData> = Pool::new();
         let invalid_handle = Handle::NONE;
@@ -585,7 +635,9 @@ mod tests {
     }
 
     #[test]
-    #[should_panic(expected = "Attempt to borrow object using out-of-bounds handle")]
+    #[should_panic(
+        expected = "Attempt to borrow object using out-of-bounds handle"
+    )]
     fn test_pool_panic_out_of_bounds_handle() {
         let mut pool: Pool<TestData> = Pool::new();
         pool.spawn(TestData::new(1, "test"));

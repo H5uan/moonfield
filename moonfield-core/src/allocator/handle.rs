@@ -243,7 +243,8 @@ impl<T> From<Handle<T>> for ErasedHandle {
 }
 
 impl ErasedHandle {
-    pub const NONE: ErasedHandle = ErasedHandle { index: INVALID_INDEX, generation: INVALID_GENERATION };
+    pub const NONE: ErasedHandle =
+        ErasedHandle { index: INVALID_INDEX, generation: INVALID_GENERATION };
 
     #[inline(always)]
     pub fn new(index: u32, generation: u32) -> Self {

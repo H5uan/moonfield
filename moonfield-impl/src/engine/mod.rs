@@ -1,6 +1,9 @@
 use std::rc::Rc;
 
-use moonfield_graphics::{backend::SharedGraphicsBackend, error::GraphicsError, metal_backend::MetalGraphicsBackend};
+use moonfield_graphics::{
+    backend::SharedGraphicsBackend, error::GraphicsError,
+    metal_backend::MetalGraphicsBackend,
+};
 use tracing::{debug, error, info, instrument, warn};
 use winit::{
     event_loop::ActiveEventLoop,
@@ -17,10 +20,16 @@ pub struct InitilizedGraphicsContext {
     params: GraphicsContextParams,
 }
 
-pub type GraphicsBackendConstructorResult = Result<(Window, SharedGraphicsBackend), GraphicsError>;
+pub type GraphicsBackendConstructorResult =
+    Result<(Window, SharedGraphicsBackend), GraphicsError>;
 
 pub type GraphicsBackendConstructorCallback =
-    dyn Fn(&GraphicsContextParams, &ActiveEventLoop, WindowAttributes, bool) -> GraphicsBackendConstructorResult;
+    dyn Fn(
+        &GraphicsContextParams,
+        &ActiveEventLoop,
+        WindowAttributes,
+        bool,
+    ) -> GraphicsBackendConstructorResult;
 
 #[derive(Clone)]
 pub struct GraphicsBackendConstructor(Rc<GraphicsBackendConstructorCallback>);
@@ -91,13 +100,17 @@ impl Engine {
 
         debug!("Engine created with graphics context parameters");
         Ok(Self {
-            graphics_context: GraphicsContext::UnInitialized(graphics_context_params),
+            graphics_context: GraphicsContext::UnInitialized(
+                graphics_context_params,
+            ),
             elapsed_time: 0.0,
         })
     }
 
     #[instrument(skip(self, active_event_loop))]
-    pub fn initialize_graphics_context(&mut self, active_event_loop: &ActiveEventLoop) -> Result<(), EngineError> {
+    pub fn initialize_graphics_context(
+        &mut self, active_event_loop: &ActiveEventLoop,
+    ) -> Result<(), EngineError> {
         info!("Initializing graphics context");
 
         if let GraphicsContext::UnInitialized(params) = &self.graphics_context {
@@ -109,20 +122,32 @@ impl Engine {
                 params.named_objects,
             )?;
 
-            let frame_size = (window.inner_size().width, window.inner_size().height);
-            info!("Window created with size: {}x{}", frame_size.0, frame_size.1);
+            let frame_size =
+                (window.inner_size().width, window.inner_size().height);
+            info!(
+                "Window created with size: {}x{}",
+                frame_size.0, frame_size.1
+            );
 
             debug!("Creating renderer");
             let renderer = Renderer::new(backend, frame_size)?;
 
             self.graphics_context =
-                GraphicsContext::Initilized(InitilizedGraphicsContext { window, renderer, params: params.clone() });
+                GraphicsContext::Initilized(InitilizedGraphicsContext {
+                    window,
+                    renderer,
+                    params: params.clone(),
+                });
 
             info!("Graphics context initialized successfully");
             Ok(())
         } else {
-            warn!("Attempted to initialize graphics context when already initialized");
-            Err(EngineError::Custom("Graphics context is already initialized".to_string()))
+            warn!(
+                "Attempted to initialize graphics context when already initialized"
+            );
+            Err(EngineError::Custom(
+                "Graphics context is already initialized".to_string(),
+            ))
         }
     }
 
@@ -130,9 +155,10 @@ impl Engine {
     pub fn render(&mut self) -> Result<(), GraphicsError> {
         debug!("Starting render frame");
 
-        if let GraphicsContext::Initilized(ref mut ctx) = self.graphics_context {
+        if let GraphicsContext::Initilized(ref mut ctx) = self.graphics_context
+        {
             ctx.renderer.render_frame()?;
-        } 
+        }
 
         Ok(())
     }

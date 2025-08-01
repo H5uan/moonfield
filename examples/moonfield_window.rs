@@ -1,4 +1,4 @@
-use moonfield_impl::engine::{
+use moonfield::engine::{
     Engine, EngineInitParams, GraphicsBackendConstructor, GraphicsContext,
     GraphicsContextParams,
 };
@@ -46,7 +46,9 @@ impl ApplicationHandler for MoonfieldApp {
                     Ok(()) => {
                         info!("Moonfield engine initialized successfully!");
                         // Request initial redraw to start the rendering loop
-                        if let GraphicsContext::Initilized(ref ctx) = engine.graphics_context {
+                        if let GraphicsContext::Initilized(ref ctx) =
+                            engine.graphics_context
+                        {
                             ctx.window.request_redraw();
                         }
                         self.engine = Some(engine);
@@ -99,7 +101,7 @@ impl ApplicationHandler for MoonfieldApp {
 
 fn main() {
     // Initialize tracing logging system with optimized configuration
-    if let Err(e) = moonfield_core::logging::init_optimized_logging() {
+    if let Err(e) = moonfield::core::logging::init_optimized_logging() {
         eprintln!("Failed to initialize logging: {}", e);
         return;
     }

@@ -47,14 +47,15 @@ impl Drop for MetalFrameBuffer {
     fn drop(&mut self) {
         // If no render encoder was explicitly created, create one to execute any pending operations (like clear)
         if self.render_encoder.is_none() {
-            let encoder = self
-                .command_buffer
-                .renderCommandEncoderWithDescriptor(&self.render_pass_descriptor);
+            let encoder =
+                self.command_buffer.renderCommandEncoderWithDescriptor(
+                    &self.render_pass_descriptor,
+                );
             if let Some(encoder) = encoder {
                 encoder.endEncoding();
             }
         }
-        
+
         self.command_buffer
             .presentDrawable(ProtocolObject::from_ref(&*self.drawable));
         self.command_buffer.commit();

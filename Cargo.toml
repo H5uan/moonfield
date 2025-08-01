@@ -1,12 +1,27 @@
+[package]
+name = "moonfield-examples"
+version = "0.1.0"
+edition = "2021"
+
 [workspace]
 members = [
-    "examples",
     "moonfield",
     "moonfield-core",
-    "moonfield-graphics",
+    "moonfield-graphics", 
     "moonfield-impl",
 ]
 resolver = "3"
+
+# Examples configuration
+[[example]]
+name = "moonfield_window"
+path = "examples/moonfield_window.rs"
+
+[dependencies]
+moonfield = { path = "moonfield" }
+winit = { workspace = true }
+tracing = { workspace = true }
+tracing-subscriber = { workspace = true }
 
 [workspace.dependencies]
 winit = "0.30.12"
