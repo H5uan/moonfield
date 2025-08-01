@@ -92,3 +92,37 @@ pub fn init_dev_logging() -> Result<(), Box<dyn std::error::Error>> {
         colored_output: true,
     })
 }
+
+/// Automatically select logging configuration based on build type
+/// Debug builds use DEBUG level, Release builds use INFO level
+pub fn init_auto_logging() -> Result<(), Box<dyn std::error::Error>> {
+    #[cfg(debug_assertions)]
+    {
+        init_dev_logging()  // Debug build: DEBUG level
+    }
+    #[cfg(not(debug_assertions))]
+    {
+        init_default_logging()  // Release build: INFO level
+    }
+}
+
+/// Optimized logging configuration for different build types
+pub fn init_optimized_logging() -> Result<(), Box<dyn std::error::Error>> {
+    let config = LoggingConfig {
+        #[cfg(debug_assertions)]
+        level: Level::DEBUG,
+        #[cfg(not(debug_assertions))]
+        level: Level::INFO,
+        
+        console_output: true,
+        
+        #[cfg(debug_assertions)]
+        colored_output: true,  // Debug build: enable colors
+        #[cfg(not(debug_assertions))]
+        colored_output: false, // Release build: disable colors for performance
+        
+        file_output: None,
+    };
+    
+    init_logging(config)
+}

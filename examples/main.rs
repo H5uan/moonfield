@@ -42,6 +42,12 @@ impl ApplicationHandler for App {
 }
 
 fn main() {
+    // Initialize tracing logging system with automatic build-type selection
+    if let Err(e) = moonfield_core::logging::init_auto_logging() {
+        eprintln!("Failed to initialize logging: {}", e);
+        return;
+    }
+
     let event_loop = EventLoop::new().unwrap();
 
     // ControlFlow::Poll continuously runs the event loop, even if the OS hasn't
