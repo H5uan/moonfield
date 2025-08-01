@@ -6,6 +6,7 @@ edition = "2024"
 [dependencies]
 moonfield-impl = { path = "../moonfield-impl" }
 winit = { workspace = true }
+env_logger = "0.10"
 
 [features]
 default = []
@@ -14,3 +15,7 @@ default = []
 [[bin]]
 name = "moonfield"
 path = "main.rs"
+
+[[bin]]
+name = "moonfield_window"
+path = "moonfield_window.rs"

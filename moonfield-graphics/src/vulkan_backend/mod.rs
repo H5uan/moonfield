@@ -1,9 +1,11 @@
-use std::{cell::RefCell, rc::Weak, ffi::CString};
+use std::{cell::RefCell, ffi::CString, rc::Weak};
 
-use ash::{Entry, Instance, khr, vk};
-use winit::window;
+use ash::{Entry, Instance, vk};
 
-use crate::{backend::SharedGraphicsBackend, error::GraphicsError};
+use crate::{
+    backend::GraphicsBackend,
+    error::{GraphicsError, VulkanError},
+};
 
 pub struct VulkanGraphicsBackend {
     entry: Entry,
@@ -12,12 +14,16 @@ pub struct VulkanGraphicsBackend {
 }
 
 impl VulkanGraphicsBackend {
-    pub fn new() -> Result<Self, GraphicsError> {
+    pub fn new(
+        #[allow(unused_variables)] vsync: bool,
+        #[allow(unused_variables)] msaa_sample_count: Option<u8>,
+    ) -> Result<Self, GraphicsError> {
         unsafe {
-            let entry =
-                Entry::load().map_err(|e| GraphicsError::VulkanLoadError(format!("{}", e)))?;
+            let entry = Entry::load().map_err(|e| {
+                GraphicsError::VulkanError(VulkanError::LoadError(format!("{}", e)))
+            })?;
 
-            let instance = Self::create_instance(&entry)?;
+            let instance = Self::create_instance(&entry).map_err(GraphicsError::VulkanError)?;
 
             Ok(Self {
                 entry,
@@ -27,7 +33,7 @@ impl VulkanGraphicsBackend {
         }
     }
 
-    fn create_instance(entry: &Entry) -> Result<Instance, GraphicsError> {
+    fn create_instance(entry: &Entry) -> Result<Instance, VulkanError> {
         unsafe {
             let app_name = CString::new("Moonfield").unwrap();
             let engine_name = CString::new("Moonfield Engine").unwrap();
@@ -37,14 +43,15 @@ impl VulkanGraphicsBackend {
                 .application_version(vk::make_api_version(0, 0, 1, 0))
                 .engine_name(engine_name.as_c_str())
                 .engine_version(vk::make_api_version(0, 0, 1, 0))
-                .api_version(vk::make_api_version(0, 1, 0, 0));
+                .api_version(vk::make_api_version(0, 1, 3, 0));
 
-            let create_info = vk::InstanceCreateInfo::default()
-                .application_info(&app_info);
+            let create_info = vk::InstanceCreateInfo::default().application_info(&app_info);
 
             entry
                 .create_instance(&create_info, None)
-                .map_err(|e| GraphicsError::VulkanInstanceCreationError(format!("{}", e)))
+                .map_err(|e| VulkanError::InstanceCreationError(format!("{}", e)))
         }
     }
 }
+
+impl GraphicsBackend for VulkanGraphicsBackend {}
