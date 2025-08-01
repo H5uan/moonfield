@@ -8,6 +8,7 @@ edition = "2024"
 moonfield-core ={ path = "../moonfield-core"}
 moonfield-graphics = {path = "../moonfield-graphics"}
 winit = { workspace = true }
+tracing = { workspace = true }
 
 [features]
 default = []

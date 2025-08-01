@@ -7,6 +7,7 @@ use winit::{
     event_loop::ActiveEventLoop,
     window::{Window, WindowAttributes},
 };
+use tracing::{info, debug, warn, error, instrument};
 
 use crate::{engine::error::EngineError, renderer::Renderer};
 
@@ -90,22 +91,30 @@ pub struct Engine {
 }
 
 impl Engine {
+    #[instrument(skip(params))]
     pub fn new(params: EngineInitParams) -> Result<Self, EngineError> {
+        info!("Creating new Moonfield engine");
+        
         let EngineInitParams {
             graphics_context_params,
         } = params;
 
+        debug!("Engine created with graphics context parameters");
         Ok(Self {
             graphics_context: GraphicsContext::UnInitialized(graphics_context_params),
             elapsed_time: 0.0,
         })
     }
 
+    #[instrument(skip(self, active_event_loop))]
     pub fn initialize_graphics_context(
         &mut self,
         active_event_loop: &ActiveEventLoop,
     ) -> Result<(), EngineError> {
+        info!("Initializing graphics context");
+        
         if let GraphicsContext::UnInitialized(params) = &self.graphics_context {
+            debug!("Creating graphics backend and window");
             let (window, backend) = params.graphics_backend_constructor.0(
                 params,
                 active_event_loop,
@@ -114,7 +123,9 @@ impl Engine {
             )?;
 
             let frame_size = (window.inner_size().width, window.inner_size().height);
+            info!("Window created with size: {}x{}", frame_size.0, frame_size.1);
 
+            debug!("Creating renderer");
             let renderer = Renderer::new(backend, frame_size)?;
 
             self.graphics_context = GraphicsContext::Initilized(InitilizedGraphicsContext {
@@ -122,18 +133,26 @@ impl Engine {
                 renderer,
                 params: params.clone(),
             });
+            
+            info!("Graphics context initialized successfully");
             Ok(())
         } else {
+            warn!("Attempted to initialize graphics context when already initialized");
             Err(EngineError::Custom(
                 "Graphics context is already initialized".to_string(),
             ))
         }
     }
 
-    pub fn render(&mut self)-> Result<(), GraphicsError>{
+    #[instrument(skip(self))]
+    pub fn render(&mut self) -> Result<(), GraphicsError> {
+        debug!("Starting render frame");
 
         if let GraphicsContext::Initilized(ref mut ctx) = self.graphics_context {
-            
+            // TODO: Actual rendering logic
+            debug!("Rendering frame");
+        } else {
+            warn!("Attempted to render without initialized graphics context");
         }
 
         Ok(())

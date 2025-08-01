@@ -1,4 +1,5 @@
 use std::fmt::{Display, Formatter};
+use tracing::error;
 
 #[derive(Debug)]
 pub enum GraphicsError {
@@ -87,12 +88,61 @@ impl Display for MetalError {
 
 impl From<VulkanError> for GraphicsError {
     fn from(err: VulkanError) -> Self {
+        error!("Vulkan error occurred: {}", err);
         GraphicsError::VulkanError(err)
     }
 }
 
 impl From<MetalError> for GraphicsError {
     fn from(err: MetalError) -> Self {
+        error!("Metal error occurred: {}", err);
         GraphicsError::MetalError(err)
+    }
+}
+
+impl GraphicsError {
+    /// Create a custom error and log it
+    pub fn custom(msg: impl Into<String>) -> Self {
+        let msg = msg.into();
+        error!("Graphics custom error: {}", msg);
+        GraphicsError::Custom(msg)
+    }
+
+    /// Create a window creation error and log it
+    pub fn window_creation_error(msg: impl Into<String>) -> Self {
+        let msg = msg.into();
+        error!("Window creation error: {}", msg);
+        GraphicsError::WindowCreationError(msg)
+    }
+
+    /// Log the error and return self
+    pub fn log_error(self) -> Self {
+        error!("Graphics error: {}", self);
+        self
+    }
+}
+
+impl VulkanError {
+    /// Create a load error and log it
+    pub fn load_error(msg: impl Into<String>) -> Self {
+        let msg = msg.into();
+        error!("Vulkan load error: {}", msg);
+        VulkanError::LoadError(msg)
+    }
+
+    /// Create an instance creation error and log it
+    pub fn instance_creation_error(msg: impl Into<String>) -> Self {
+        let msg = msg.into();
+        error!("Vulkan instance creation error: {}", msg);
+        VulkanError::InstanceCreationError(msg)
+    }
+}
+
+impl MetalError {
+    /// Create a device creation error and log it
+    pub fn device_creation_error(msg: impl Into<String>) -> Self {
+        let msg = msg.into();
+        error!("Metal device creation error: {}", msg);
+        MetalError::DeviceCreationError(msg)
     }
 }

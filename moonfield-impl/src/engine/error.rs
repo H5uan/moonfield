@@ -1,4 +1,5 @@
 use std::fmt::{Display, Formatter};
+use tracing::error;
 
 use moonfield_graphics::error::GraphicsError;
 
@@ -23,6 +24,22 @@ impl Display for EngineError {
 
 impl From<GraphicsError> for EngineError {
     fn from(graphics_error: GraphicsError) -> Self {
+        error!("Graphics error converted to engine error: {}", graphics_error);
         Self::Graphics(graphics_error)
+    }
+}
+
+impl EngineError {
+    /// Create a custom error and log it
+    pub fn custom(msg: impl Into<String>) -> Self {
+        let msg = msg.into();
+        error!("Engine custom error: {}", msg);
+        EngineError::Custom(msg)
+    }
+
+    /// Log the error and return self
+    pub fn log_error(self) -> Self {
+        error!("Engine error: {}", self);
+        self
     }
 }

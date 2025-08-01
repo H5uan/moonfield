@@ -5,6 +5,7 @@ use winit::application::ApplicationHandler;
 use winit::event::WindowEvent;
 use winit::event_loop::{ActiveEventLoop, ControlFlow, EventLoop};
 use winit::window::{WindowAttributes, WindowId};
+use tracing::{info, error, debug};
 
 struct MoonfieldApp {
     engine: Option<Engine>,
@@ -38,16 +39,16 @@ impl ApplicationHandler for MoonfieldApp {
             match Engine::new(engine_init_params) {
                 Ok(mut engine) => match engine.initialize_graphics_context(event_loop) {
                     Ok(()) => {
-                        println!("Moonfield engine initialized successfully!");
+                        info!("Moonfield engine initialized successfully!");
                         self.engine = Some(engine);
                     }
                     Err(e) => {
-                        eprintln!("Failed to initialize graphics context: {}", e);
+                        error!("Failed to initialize graphics context: {}", e);
                         event_loop.exit();
                     }
                 },
                 Err(e) => {
-                    eprintln!("Failed to create engine: {}", e);
+                    error!("Failed to create engine: {}", e);
                     event_loop.exit();
                 }
             }
@@ -57,7 +58,7 @@ impl ApplicationHandler for MoonfieldApp {
     fn window_event(&mut self, event_loop: &ActiveEventLoop, _id: WindowId, event: WindowEvent) {
         match event {
             WindowEvent::CloseRequested => {
-                println!("The close button was pressed; stopping");
+                info!("The close button was pressed; stopping");
                 event_loop.exit();
             }
             WindowEvent::RedrawRequested => {
@@ -73,7 +74,7 @@ impl ApplicationHandler for MoonfieldApp {
                 }
             }
             WindowEvent::Resized(physical_size) => {
-                println!("Window resized to: {:?}", physical_size);
+                debug!("Window resized to: {:?}", physical_size);
             }
             _ => (),
         }
@@ -81,7 +82,13 @@ impl ApplicationHandler for MoonfieldApp {
 }
 
 fn main() {
-    env_logger::init();
+    // Initialize tracing logging system
+    if let Err(e) = moonfield_core::logging::init_dev_logging() {
+        eprintln!("Failed to initialize logging: {}", e);
+        return;
+    }
+
+    info!("Starting Moonfield Engine Demo");
 
     let event_loop = EventLoop::new().unwrap();
     event_loop.set_control_flow(ControlFlow::Wait);
@@ -89,6 +96,6 @@ fn main() {
     let mut app = MoonfieldApp::new();
 
     if let Err(e) = event_loop.run_app(&mut app) {
-        eprintln!("Event loop error: {}", e);
+        error!("Event loop error: {}", e);
     }
 }
