@@ -15,8 +15,7 @@ const INVALID_GENERATION: u32 = 0;
 pub struct Pool<T, S = Option<T>>
 where
     T: Sized,
-    S: Slot<Element = T>,
-{
+    S: Slot<Element = T>, {
     records: Vec<PoolRecord<T, S>>,
     free_stack: Vec<u32>,
 }
@@ -62,10 +61,7 @@ where
 {
     #[inline]
     pub fn new() -> Self {
-        Pool {
-            records: Vec::new(),
-            free_stack: Vec::new(),
-        }
+        Pool { records: Vec::new(), free_stack: Vec::new() }
     }
 
     #[inline]
@@ -103,22 +99,14 @@ where
     /// handle when we create object
     pub fn spawn_with<F: FnOnce(Handle<T>) -> T>(&mut self, callback: F) -> Handle<T> {
         if let Some(free_index) = self.free_stack.pop() {
-            let record = self
-                .records_get_mut(free_index)
-                .expect("free stack contained invalid index");
+            let record = self.records_get_mut(free_index).expect("free stack contained invalid index");
 
             if record.slot.is_some() {
-                std::panic!(
-                    "Attempt to spawn an object to pool record with slot! Record index is {free_index}"
-                );
+                std::panic!("Attempt to spawn an object to pool record with slot! Record index is {free_index}");
             }
 
             let generation = record.generation + 1;
-            let handle = Handle {
-                index: free_index,
-                generation,
-                type_marker: PhantomData,
-            };
+            let handle = Handle { index: free_index, generation, type_marker: PhantomData };
             let slot = callback(handle);
 
             record.generation = generation;
@@ -130,11 +118,7 @@ where
             let generation = 1;
             let index = self.records_len();
 
-            let handle = Handle {
-                index,
-                generation,
-                type_marker: PhantomData,
-            };
+            let handle = Handle { index, generation, type_marker: PhantomData };
 
             let slot = callback(handle);
 
@@ -212,10 +196,7 @@ where
                     panic!("Attempt to borrow destroyed object at {handle:?} handle.")
                 }
             } else {
-                panic!(
-                    "Attempt to use dangling handle {:?}. Record has generation {}!",
-                    handle, record.generation
-                );
+                panic!("Attempt to use dangling handle {:?}. Record has generation {}!", handle, record.generation);
             }
         } else {
             panic!(
@@ -240,10 +221,7 @@ where
                     panic!("Attempt to borrow destroyed object at {handle:?} handle.")
                 }
             } else {
-                panic!(
-                    "Attempt to use dangling handle {:?}. Record has generation {}!",
-                    handle, record.generation
-                );
+                panic!("Attempt to use dangling handle {:?}. Record has generation {}!", handle, record.generation);
             }
         } else {
             panic!(
@@ -326,8 +304,7 @@ impl RefCounter {
 struct PoolRecord<T, S = Option<T>>
 where
     T: Sized,
-    S: Slot<Element = T>,
-{
+    S: Slot<Element = T>, {
     ref_counter: RefCounter,
     // The handle is valid only if record it points to is of the same generation at the pool record.
     // Zero is for unknon generation used for None handles
@@ -378,9 +355,10 @@ where
 
 #[cfg(test)]
 mod tests {
-    use super::*;
     use std::sync::{Arc, Mutex};
     use std::thread;
+
+    use super::*;
 
     #[derive(Debug, PartialEq, Clone)]
     struct TestData {
@@ -390,10 +368,7 @@ mod tests {
 
     impl TestData {
         fn new(value: i32, name: &str) -> Self {
-            Self {
-                value,
-                name: name.to_string(),
-            }
+            Self { value, name: name.to_string() }
         }
     }
 
@@ -517,18 +492,13 @@ mod tests {
         let mut pool: Pool<TestData> = Pool::new();
 
         // Callback is the TestData creation
-        let handle = pool.spawn_with(|handle| {
-            TestData::new(
-                handle.index() as i32,
-                &format!("handle-{}", handle.generation()),
-            )
-        });
+        let handle =
+            pool.spawn_with(|handle| TestData::new(handle.index() as i32, &format!("handle-{}", handle.generation())));
         let data = pool.borrow(handle);
         assert_eq!(data.value, 0);
         assert_eq!(data.name, "handle-1");
 
-        let handle2 = pool
-            .spawn_with(|h| TestData::new(h.index() as i32 * 10, &format!("obj-{}", h.index())));
+        let handle2 = pool.spawn_with(|h| TestData::new(h.index() as i32 * 10, &format!("obj-{}", h.index())));
 
         let data2 = pool.borrow(handle2);
         assert_eq!(data2.value, 10);
@@ -539,10 +509,7 @@ mod tests {
     fn test_self_referencing_node() {
         let mut pool: Pool<SelfAwareNode> = Pool::new();
 
-        let handle = pool.spawn_with(|h| SelfAwareNode {
-            value: 100,
-            my_handle: h,
-        });
+        let handle = pool.spawn_with(|h| SelfAwareNode { value: 100, my_handle: h });
 
         let node = pool.borrow(handle);
         assert_eq!(node.my_handle, handle);
@@ -569,11 +536,7 @@ mod tests {
     fn test_graph_connections() {
         let mut pool: Pool<GraphNode> = Pool::new();
 
-        let node_a = pool.spawn_with(|handle| GraphNode {
-            data: "A".to_string(),
-            self_ref: handle,
-            neighbors: vec![],
-        });
+        let node_a = pool.spawn_with(|handle| GraphNode { data: "A".to_string(), self_ref: handle, neighbors: vec![] });
 
         let node_b = pool.spawn_with(|handle| GraphNode {
             data: "B".to_string(),
@@ -599,23 +562,11 @@ mod tests {
 
         // A-B-C-A
         // current test is a simple version, neighbors ordering depends on adding time
-        let node_a = pool.spawn_with(|h| GraphNode {
-            data: "A".to_string(),
-            self_ref: h,
-            neighbors: vec![],
-        });
+        let node_a = pool.spawn_with(|h| GraphNode { data: "A".to_string(), self_ref: h, neighbors: vec![] });
 
-        let node_b = pool.spawn_with(|h| GraphNode {
-            data: "B".to_string(),
-            self_ref: h,
-            neighbors: vec![node_a],
-        });
+        let node_b = pool.spawn_with(|h| GraphNode { data: "B".to_string(), self_ref: h, neighbors: vec![node_a] });
 
-        let node_c = pool.spawn_with(|h| GraphNode {
-            data: "C".to_string(),
-            self_ref: h,
-            neighbors: vec![node_b],
-        });
+        let node_c = pool.spawn_with(|h| GraphNode { data: "C".to_string(), self_ref: h, neighbors: vec![node_b] });
 
         pool.borrow_mut(node_a).neighbors.extend([node_b, node_c]);
         pool.borrow_mut(node_b).neighbors.push(node_c);

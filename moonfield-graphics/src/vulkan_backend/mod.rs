@@ -7,6 +7,8 @@ use crate::{
     error::{GraphicsError, VulkanError},
 };
 
+// TODO: Vulkan implementation will be continued after metal backend finished
+#[allow(unused)]
 pub struct VulkanGraphicsBackend {
     entry: Entry,
     vk_instance: Instance,
@@ -20,16 +22,16 @@ impl VulkanGraphicsBackend {
     ) -> Result<Self, GraphicsError> {
         unsafe {
             let entry = Entry::load().map_err(|e| {
-                GraphicsError::VulkanError(VulkanError::LoadError(format!("{}", e)))
+                GraphicsError::VulkanError(VulkanError::LoadError(format!(
+                    "{}",
+                    e
+                )))
             })?;
 
-            let instance = Self::create_instance(&entry).map_err(GraphicsError::VulkanError)?;
+            let instance = Self::create_instance(&entry)
+                .map_err(GraphicsError::VulkanError)?;
 
-            Ok(Self {
-                entry,
-                vk_instance: instance,
-                this: RefCell::new(None),
-            })
+            Ok(Self { entry, vk_instance: instance, this: RefCell::new(None) })
         }
     }
 
@@ -45,13 +47,12 @@ impl VulkanGraphicsBackend {
                 .engine_version(vk::make_api_version(0, 0, 1, 0))
                 .api_version(vk::make_api_version(0, 1, 3, 0));
 
-            let create_info = vk::InstanceCreateInfo::default().application_info(&app_info);
+            let create_info =
+                vk::InstanceCreateInfo::default().application_info(&app_info);
 
-            entry
-                .create_instance(&create_info, None)
-                .map_err(|e| VulkanError::InstanceCreationError(format!("{}", e)))
+            entry.create_instance(&create_info, None).map_err(|e| {
+                VulkanError::InstanceCreationError(format!("{}", e))
+            })
         }
     }
 }
-
-impl GraphicsBackend for VulkanGraphicsBackend {}

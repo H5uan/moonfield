@@ -7,6 +7,7 @@ edition = "2024"
 ash = { workspace = true }
 objc2 = { workspace = true }
 objc2-app-kit = { workspace = true }
+objc2-core-foundation = { workspace = true }
 objc2-metal = { workspace = true }
 objc2-quartz-core = { workspace = true }
 winit = { workspace = true }

@@ -1,0 +1,8 @@
+reorder_imports = true
+group_imports = "StdExternalCrate"
+use_small_heuristics = "Off"
+max_width = 80
+fn_params_layout = "Compressed"
+brace_style = "PreferSameLine"
+control_brace_style = "AlwaysSameLine"
+struct_lit_width = 60

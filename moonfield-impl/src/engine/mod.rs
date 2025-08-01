@@ -1,13 +1,11 @@
 use std::rc::Rc;
 
-use moonfield_graphics::{
-    backend::SharedGraphicsBackend, error::GraphicsError, metal_backend::MetalGraphicsBackend,
-};
+use moonfield_graphics::{backend::SharedGraphicsBackend, error::GraphicsError, metal_backend::MetalGraphicsBackend};
+use tracing::{debug, error, info, instrument, warn};
 use winit::{
     event_loop::ActiveEventLoop,
     window::{Window, WindowAttributes},
 };
-use tracing::{info, debug, warn, error, instrument};
 
 use crate::{engine::error::EngineError, renderer::Renderer};
 
@@ -21,12 +19,8 @@ pub struct InitilizedGraphicsContext {
 
 pub type GraphicsBackendConstructorResult = Result<(Window, SharedGraphicsBackend), GraphicsError>;
 
-pub type GraphicsBackendConstructorCallback = dyn Fn(
-    &GraphicsContextParams,
-    &ActiveEventLoop,
-    WindowAttributes,
-    bool,
-) -> GraphicsBackendConstructorResult;
+pub type GraphicsBackendConstructorCallback =
+    dyn Fn(&GraphicsContextParams, &ActiveEventLoop, WindowAttributes, bool) -> GraphicsBackendConstructorResult;
 
 #[derive(Clone)]
 pub struct GraphicsBackendConstructor(Rc<GraphicsBackendConstructorCallback>);
@@ -35,19 +29,17 @@ impl Default for GraphicsBackendConstructor {
     fn default() -> Self {
         #[cfg(target_os = "macos")]
         {
-            Self(Rc::new(
-                |params, event_loop, window_attrs, named_objects| {
-                    // TODO: Implement macOS Metal backend constructor, possibly use MoltenVK as backup
+            Self(Rc::new(|params, event_loop, window_attrs, named_objects| {
+                // TODO: Implement macOS Metal backend constructor, possibly use MoltenVK as backup
 
-                    MetalGraphicsBackend::new(
-                        params.vsync,
-                        params.msaa_sample_count,
-                        event_loop,
-                        window_attrs,
-                        named_objects,
-                    )
-                },
-            ))
+                MetalGraphicsBackend::new(
+                    params.vsync,
+                    params.msaa_sample_count,
+                    event_loop,
+                    window_attrs,
+                    named_objects,
+                )
+            }))
         }
         #[cfg(not(target_os = "macos"))]
         {
@@ -94,10 +86,8 @@ impl Engine {
     #[instrument(skip(params))]
     pub fn new(params: EngineInitParams) -> Result<Self, EngineError> {
         info!("Creating new Moonfield engine");
-        
-        let EngineInitParams {
-            graphics_context_params,
-        } = params;
+
+        let EngineInitParams { graphics_context_params } = params;
 
         debug!("Engine created with graphics context parameters");
         Ok(Self {
@@ -107,12 +97,9 @@ impl Engine {
     }
 
     #[instrument(skip(self, active_event_loop))]
-    pub fn initialize_graphics_context(
-        &mut self,
-        active_event_loop: &ActiveEventLoop,
-    ) -> Result<(), EngineError> {
+    pub fn initialize_graphics_context(&mut self, active_event_loop: &ActiveEventLoop) -> Result<(), EngineError> {
         info!("Initializing graphics context");
-        
+
         if let GraphicsContext::UnInitialized(params) = &self.graphics_context {
             debug!("Creating graphics backend and window");
             let (window, backend) = params.graphics_backend_constructor.0(
@@ -128,19 +115,14 @@ impl Engine {
             debug!("Creating renderer");
             let renderer = Renderer::new(backend, frame_size)?;
 
-            self.graphics_context = GraphicsContext::Initilized(InitilizedGraphicsContext {
-                window,
-                renderer,
-                params: params.clone(),
-            });
-            
+            self.graphics_context =
+                GraphicsContext::Initilized(InitilizedGraphicsContext { window, renderer, params: params.clone() });
+
             info!("Graphics context initialized successfully");
             Ok(())
         } else {
             warn!("Attempted to initialize graphics context when already initialized");
-            Err(EngineError::Custom(
-                "Graphics context is already initialized".to_string(),
-            ))
+            Err(EngineError::Custom("Graphics context is already initialized".to_string()))
         }
     }
 
@@ -149,11 +131,8 @@ impl Engine {
         debug!("Starting render frame");
 
         if let GraphicsContext::Initilized(ref mut ctx) = self.graphics_context {
-            // TODO: Actual rendering logic
-            debug!("Rendering frame");
-        } else {
-            warn!("Attempted to render without initialized graphics context");
-        }
+            ctx.renderer.render_frame()?;
+        } 
 
         Ok(())
     }

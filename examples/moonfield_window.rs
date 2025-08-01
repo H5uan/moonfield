@@ -1,11 +1,14 @@
 use moonfield_impl::engine::{
-    Engine, EngineInitParams, GraphicsBackendConstructor, GraphicsContextParams,
+    Engine, EngineInitParams, GraphicsBackendConstructor, GraphicsContext,
+    GraphicsContextParams,
 };
-use winit::application::ApplicationHandler;
-use winit::event::WindowEvent;
-use winit::event_loop::{ActiveEventLoop, ControlFlow, EventLoop};
-use winit::window::{WindowAttributes, WindowId};
-use tracing::{info, error, debug};
+use tracing::{debug, error, info};
+use winit::{
+    application::ApplicationHandler,
+    event::WindowEvent,
+    event_loop::{ActiveEventLoop, ControlFlow, EventLoop},
+    window::{WindowAttributes, WindowId},
+};
 
 struct MoonfieldApp {
     engine: Option<Engine>,
@@ -28,18 +31,24 @@ impl ApplicationHandler for MoonfieldApp {
                 window_attributes,
                 vsync: true,
                 msaa_sample_count: Some(4),
-                graphics_backend_constructor: GraphicsBackendConstructor::default(),
+                graphics_backend_constructor:
+                    GraphicsBackendConstructor::default(),
                 named_objects: true,
             };
 
-            let engine_init_params = EngineInitParams {
-                graphics_context_params,
-            };
+            let engine_init_params =
+                EngineInitParams { graphics_context_params };
 
             match Engine::new(engine_init_params) {
-                Ok(mut engine) => match engine.initialize_graphics_context(event_loop) {
+                Ok(mut engine) => match engine
+                    .initialize_graphics_context(event_loop)
+                {
                     Ok(()) => {
                         info!("Moonfield engine initialized successfully!");
+                        // Request initial redraw to start the rendering loop
+                        if let GraphicsContext::Initilized(ref ctx) = engine.graphics_context {
+                            ctx.window.request_redraw();
+                        }
                         self.engine = Some(engine);
                     }
                     Err(e) => {
@@ -55,21 +64,28 @@ impl ApplicationHandler for MoonfieldApp {
         }
     }
 
-    fn window_event(&mut self, event_loop: &ActiveEventLoop, _id: WindowId, event: WindowEvent) {
+    fn window_event(
+        &mut self, event_loop: &ActiveEventLoop, _id: WindowId,
+        event: WindowEvent,
+    ) {
         match event {
             WindowEvent::CloseRequested => {
                 info!("The close button was pressed; stopping");
                 event_loop.exit();
             }
             WindowEvent::RedrawRequested => {
-                if let Some(_engine) = &self.engine {
-                }
-
-                if let Some(engine) = &self.engine {
-                    if let moonfield_impl::engine::GraphicsContext::Initilized(ctx) =
-                        &engine.graphics_context
-                    {
-                        ctx.window.request_redraw();
+                if let Some(engine) = &mut self.engine {
+                    match engine.render() {
+                        Ok(()) => {
+                            if let GraphicsContext::Initilized(ctx) =
+                                &engine.graphics_context
+                            {
+                                ctx.window.request_redraw();
+                            }
+                        }
+                        Err(e) => {
+                            error!("Render error: {}", e);
+                        }
                     }
                 }
             }

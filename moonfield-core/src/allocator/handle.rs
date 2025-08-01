@@ -124,11 +124,7 @@ impl<T> Handle<T> {
 
     #[inline(always)]
     pub fn new(index: u32, generation: u32) -> Self {
-        Handle {
-            index,
-            generation,
-            type_marker: PhantomData,
-        }
+        Handle { index, generation, type_marker: PhantomData }
     }
 
     /// change the type and keep the index and generation
@@ -184,7 +180,7 @@ impl AtomicHandle {
     pub fn none() -> Self {
         Self(AtomicUsize::new(0))
     }
-    
+
     #[inline(always)]
     pub fn new(index: u32, generation: u32) -> Self {
         let handle = Self(AtomicUsize::new(0));
@@ -242,18 +238,12 @@ impl Default for ErasedHandle {
 
 impl<T> From<Handle<T>> for ErasedHandle {
     fn from(handle: Handle<T>) -> Self {
-        Self {
-            index: handle.index,
-            generation: handle.generation,
-        }
+        Self { index: handle.index, generation: handle.generation }
     }
 }
 
 impl ErasedHandle {
-    pub const NONE: ErasedHandle = ErasedHandle {
-        index: INVALID_INDEX,
-        generation: INVALID_GENERATION,
-    };
+    pub const NONE: ErasedHandle = ErasedHandle { index: INVALID_INDEX, generation: INVALID_GENERATION };
 
     #[inline(always)]
     pub fn new(index: u32, generation: u32) -> Self {

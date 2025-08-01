@@ -1,7 +1,7 @@
 use std::fmt::{Display, Formatter};
-use tracing::error;
 
 use moonfield_graphics::error::GraphicsError;
+use tracing::error;
 
 #[derive(Debug)]
 pub enum EngineError {

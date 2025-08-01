@@ -1,8 +1,8 @@
 use std::cell::UnsafeCell;
 
-/// Slot is a more flexible Option. 
+/// Slot is a more flexible Option.
 /// It means you can extend a lot "Slots" with different features with Option type
-/// It avoids to modify the pool records when you wanna add new feature like stats 
+/// It avoids to modify the pool records when you wanna add new feature like stats
 pub trait Slot: Sized {
     type Element;
 

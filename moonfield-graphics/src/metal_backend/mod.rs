@@ -5,8 +5,13 @@ use std::{
 
 use objc2::{rc::Retained, runtime::ProtocolObject};
 use objc2_app_kit::NSView;
-use objc2_metal::{MTLCommandQueue, MTLCreateSystemDefaultDevice, MTLDevice, MTLPixelFormat};
-use objc2_quartz_core::CAMetalLayer;
+use objc2_core_foundation::CGSize;
+use objc2_metal::{
+    MTLClearColor, MTLCommandQueue, MTLCreateSystemDefaultDevice, MTLDevice,
+    MTLLoadAction, MTLPixelFormat, MTLRenderPassDescriptor, MTLStoreAction,
+    MTLTexture,
+};
+use objc2_quartz_core::{CAMetalDrawable, CAMetalLayer};
 use winit::{
     event_loop::ActiveEventLoop,
     raw_window_handle::{HasWindowHandle, RawWindowHandle},
@@ -14,9 +19,12 @@ use winit::{
 };
 
 use crate::{
-    backend::{GraphicsBackend, SharedGraphicsBackend},
+    backend::{BackendCapabilities, GraphicsBackend, SharedGraphicsBackend},
     error::{GraphicsError, MetalError},
+    metal_backend::frame_buffer::MetalFrameBuffer,
 };
+
+pub mod frame_buffer;
 
 pub struct MetalGraphicsBackend {
     device: Retained<ProtocolObject<dyn MTLDevice>>,
@@ -30,8 +38,7 @@ impl MetalGraphicsBackend {
     pub fn new(
         #[allow(unused_variables)] vsync: bool,
         #[allow(unused_variables)] msaa_sample_count: Option<u8>,
-        event_loop: &ActiveEventLoop,
-        window_attrs: WindowAttributes,
+        event_loop: &ActiveEventLoop, window_attrs: WindowAttributes,
         named_objects: bool,
     ) -> Result<(Window, SharedGraphicsBackend), GraphicsError> {
         // Create the window
@@ -74,9 +81,11 @@ impl MetalGraphicsBackend {
                 }
             },
             _ => {
-                return Err(GraphicsError::MetalError(MetalError::DeviceCreationError(
-                    "Unsupported window handle type for Metal".to_string(),
-                )));
+                return Err(GraphicsError::MetalError(
+                    MetalError::DeviceCreationError(
+                        "Unsupported window handle type for Metal".to_string(),
+                    ),
+                ));
             }
         }
 
@@ -95,4 +104,71 @@ impl MetalGraphicsBackend {
     }
 }
 
-impl GraphicsBackend for MetalGraphicsBackend {}
+impl GraphicsBackend for MetalGraphicsBackend {
+    fn back_buffer(
+        &self,
+    ) -> Result<crate::frame_buffer::SharedFrameBuffer, GraphicsError> {
+        let drawable = unsafe {
+            self.layer.nextDrawable().ok_or_else(|| {
+                MetalError::RenderPassError(
+                    "Failed to get drawable (surface and swapchain)"
+                        .to_string(),
+                )
+            })
+        }?;
+
+        let texture = unsafe { drawable.texture() };
+        let width = texture.width() as u32;
+        let height = texture.height() as u32;
+
+        let render_pass_descriptor = unsafe { MTLRenderPassDescriptor::new() };
+        let color_attachment = unsafe {
+            render_pass_descriptor
+                .colorAttachments()
+                .objectAtIndexedSubscript(0)
+        };
+        color_attachment.setTexture(Some(&texture));
+        // Don't set LoadAction and ClearColor here - let the clear() method handle it
+        color_attachment.setStoreAction(MTLStoreAction::Store);
+
+        let command_buffer =
+            self.command_queue.commandBuffer().ok_or_else(|| {
+                MetalError::CommandQueueError(
+                    "Failed to create command buffer".to_string(),
+                )
+            })?;
+
+        let frame_buffer = MetalFrameBuffer {
+            drawable,
+            render_pass_descriptor,
+            command_buffer,
+            render_encoder: None,
+            width,
+            height,
+        };
+
+        Ok(Box::new(frame_buffer))
+    }
+
+    fn swap_buffers(&self) -> Result<(), GraphicsError> {
+        Ok(())
+    }
+
+    fn set_frame_size(&self, new_size: (u32, u32)) {
+        let (width, height) = new_size;
+        unsafe {
+            self.layer.setDrawableSize(CGSize {
+                width: width as f64,
+                height: height as f64,
+            })
+        };
+    }
+
+    fn capabilities(&self) -> BackendCapabilities {
+        let device = &self.device;
+
+        let max_buffer_length = device.maxBufferLength();
+
+        BackendCapabilities { max_buffer_length }
+    }
+}
