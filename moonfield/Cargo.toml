@@ -11,3 +11,9 @@ crate-type = ["staticlib", "rlib"]
 moonfield-impl = { path = "../moonfield-impl" }
 moonfield-core = { path = "../moonfield-core" }
 moonfield-graphics = { path = "../moonfield-graphics" }
+
+[features]
+default = []
+# Backend features
+metal = ["moonfield-graphics/metal", "moonfield-impl/metal"]
+vulkan = ["moonfield-graphics/vulkan", "moonfield-impl/vulkan"]

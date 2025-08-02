@@ -2,8 +2,12 @@ use std::rc::Rc;
 
 use moonfield_graphics::{
     backend::SharedGraphicsBackend, error::GraphicsError,
-    metal_backend::MetalGraphicsBackend,
 };
+
+#[cfg(feature = "metal")]
+use moonfield_graphics::metal_backend::MetalGraphicsBackend;
+#[cfg(feature = "vulkan")]
+use moonfield_graphics::vulkan_backend::VulkanGraphicsBackend;
 use tracing::{debug, error, info, instrument, warn};
 use winit::{
     event_loop::ActiveEventLoop,
@@ -36,11 +40,10 @@ pub struct GraphicsBackendConstructor(Rc<GraphicsBackendConstructorCallback>);
 
 impl Default for GraphicsBackendConstructor {
     fn default() -> Self {
-        #[cfg(target_os = "macos")]
+        // Try Metal backend first if available (typically on macOS)
+        #[cfg(all(feature = "metal", target_os = "macos"))]
         {
             Self(Rc::new(|params, event_loop, window_attrs, named_objects| {
-                // TODO: Implement macOS Metal backend constructor, possibly use MoltenVK as backup
-
                 MetalGraphicsBackend::new(
                     params.vsync,
                     params.msaa_sample_count,
@@ -50,10 +53,26 @@ impl Default for GraphicsBackendConstructor {
                 )
             }))
         }
-        #[cfg(not(target_os = "macos"))]
+        // Use Vulkan backend if Metal is not available but Vulkan is enabled
+        #[cfg(all(feature = "vulkan", not(all(feature = "metal", target_os = "macos"))))]
         {
-            Self(Rc::new(|_params, _event_loop, _window_attrs, _vsync| {
-                // TODO: Implement Vulkan backend constructor for other platforms
+            Self(Rc::new(|params, event_loop, window_attrs, named_objects| {
+                VulkanGraphicsBackend::new(
+                    params.vsync,
+                    params.msaa_sample_count,
+                    event_loop,
+                    window_attrs,
+                    named_objects,
+                )
+            }))
+        }
+        // Fall back to unavailable if no backend is enabled
+        #[cfg(not(any(
+            all(feature = "metal", target_os = "macos"),
+            feature = "vulkan"
+        )))]
+        {
+            Self(Rc::new(|_params, _event_loop, _window_attrs, _named_objects| {
                 Err(GraphicsError::BackendUnavailable)
             }))
         }
@@ -151,10 +170,7 @@ impl Engine {
         }
     }
 
-    #[instrument(skip(self))]
     pub fn render(&mut self) -> Result<(), GraphicsError> {
-        debug!("Starting render frame");
-
         if let GraphicsContext::Initilized(ref mut ctx) = self.graphics_context
         {
             ctx.renderer.render_frame()?;

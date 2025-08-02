@@ -12,3 +12,6 @@ tracing = { workspace = true }
 
 [features]
 default = []
+# Backend features
+metal = ["moonfield-graphics/metal"]
+vulkan = ["moonfield-graphics/vulkan"]

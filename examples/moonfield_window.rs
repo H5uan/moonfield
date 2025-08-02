@@ -102,6 +102,7 @@ impl ApplicationHandler for MoonfieldApp {
 fn main() {
     // Initialize tracing logging system with optimized configuration
     if let Err(e) = moonfield::core::logging::init_optimized_logging() {
+        // Use eprintln! here since tracing is not yet initialized
         eprintln!("Failed to initialize logging: {}", e);
         return;
     }
