@@ -2,7 +2,10 @@ use std::rc::Rc;
 
 #[cfg(all(feature = "metal", target_os = "macos"))]
 use moonfield_graphics::metal_backend::MetalGraphicsBackend;
-#[cfg(all(feature = "vulkan", not(all(feature = "metal", target_os = "macos"))))]
+#[cfg(all(
+    feature = "vulkan",
+    not(all(feature = "metal", target_os = "macos"))
+))]
 use moonfield_graphics::vulkan_backend::VulkanGraphicsBackend;
 use moonfield_graphics::{
     backend::SharedGraphicsBackend, error::GraphicsError,

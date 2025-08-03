@@ -9,6 +9,7 @@ ash = { workspace = true }
 ash-window = { workspace = true }
 winit = { workspace = true }
 tracing = { workspace = true }
+bytemuck = { workspace = true }
 
 # macOS/iOS specific dependencies - only included when metal feature is enabled
 objc2 = { workspace = true, optional = true }
@@ -20,5 +21,11 @@ objc2-quartz-core = { workspace = true, optional = true }
 [features]
 default = []
 # Backend features
-metal = ["dep:objc2", "dep:objc2-app-kit", "dep:objc2-core-foundation", "dep:objc2-metal", "dep:objc2-quartz-core"]
+metal = [
+    "dep:objc2",
+    "dep:objc2-app-kit",
+    "dep:objc2-core-foundation",
+    "dep:objc2-metal",
+    "dep:objc2-quartz-core",
+]
 vulkan = []

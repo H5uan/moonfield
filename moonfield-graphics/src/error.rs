@@ -25,6 +25,10 @@ pub enum MetalError {
     DeviceCreationError(String),
     CommandQueueError(String),
     RenderPassError(String),
+    BufferCreationError(String),
+    BufferMappingError(String),
+    BufferWriteError(String),
+    BufferReadError(String),
 }
 
 impl Display for GraphicsError {
@@ -82,6 +86,18 @@ impl Display for MetalError {
             }
             MetalError::RenderPassError(msg) => {
                 write!(f, "Metal render pass error: {}", msg)
+            }
+            MetalError::BufferCreationError(msg) => {
+                write!(f, "Metal buffer creation error: {}", msg)
+            }
+            MetalError::BufferMappingError(msg) => {
+                write!(f, "Metal buffer mapping error: {}", msg)
+            }
+            MetalError::BufferWriteError(msg) => {
+                write!(f, "Metal buffer write error: {}", msg)
+            }
+            MetalError::BufferReadError(msg) => {
+                write!(f, "Metal buffer read error: {}", msg)
             }
         }
     }

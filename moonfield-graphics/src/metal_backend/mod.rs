@@ -24,17 +24,30 @@ use crate::{
     metal_backend::frame_buffer::MetalFrameBuffer,
 };
 
+pub mod buffer;
 pub mod frame_buffer;
+pub mod geometry_buffer;
 
 pub struct MetalGraphicsBackend {
+    /// device: abstraction of the GPU, providing methods for creating objects managed by GPU
+    /// like command queues, render states and shader liberaries
+    /// for apple device, ususally call `MTLCreateSystemDefaultDevice()` is suffient
+    /// since most apple device only have a single GPU
     device: Retained<ProtocolObject<dyn MTLDevice>>,
+    /// layer: the combination of surface and swapchain in vulkan
     layer: Retained<CAMetalLayer>,
+    /// command_queue: A list of render command buffers to executed.
     command_queue: Retained<ProtocolObject<dyn MTLCommandQueue>>,
     pub named_objects: Cell<bool>,
     this: RefCell<Option<Weak<MetalGraphicsBackend>>>,
 }
 
 impl MetalGraphicsBackend {
+    /// Get access to the Metal device
+    pub fn device(&self) -> &Retained<ProtocolObject<dyn MTLDevice>> {
+        &self.device
+    }
+
     pub fn new(
         #[allow(unused_variables)] vsync: bool,
         #[allow(unused_variables)] msaa_sample_count: Option<u8>,
@@ -59,6 +72,15 @@ impl MetalGraphicsBackend {
             ))
         })?;
 
+        // Create the Metal layer. Layer(suface & swapchain) must know which device will draw on layer
+        // and the pixel format for the rendering image
+        let layer = unsafe { CAMetalLayer::new() };
+        unsafe {
+            layer.setDevice(Some(&device));
+            // At apple platform, BGRA is a default order. RGBA will do a extra copy or swizzle
+            layer.setPixelFormat(MTLPixelFormat::BGRA8Unorm);
+        }
+
         // Create the Metal command queue
         let command_queue = device.newCommandQueue().ok_or_else(|| {
             GraphicsError::MetalError(MetalError::CommandQueueError(
@@ -66,11 +88,6 @@ impl MetalGraphicsBackend {
             ))
         })?;
 
-        let layer = unsafe { CAMetalLayer::new() };
-        unsafe {
-            layer.setDevice(Some(&device));
-            layer.setPixelFormat(MTLPixelFormat::BGRA8Unorm);
-        }
         match raw_window_handle {
             RawWindowHandle::AppKit(handle) => unsafe {
                 let ns_view = handle.ns_view.as_ptr();
@@ -105,9 +122,11 @@ impl MetalGraphicsBackend {
 }
 
 impl GraphicsBackend for MetalGraphicsBackend {
+    /// Get the images in swapchain that havent been rendereds
     fn back_buffer(
         &self,
     ) -> Result<crate::frame_buffer::SharedFrameBuffer, GraphicsError> {
+        // Get the swapchain+surface
         let drawable = unsafe {
             self.layer.nextDrawable().ok_or_else(|| {
                 MetalError::RenderPassError(
@@ -121,6 +140,8 @@ impl GraphicsBackend for MetalGraphicsBackend {
         let width = texture.width() as u32;
         let height = texture.height() as u32;
 
+        // Descriptor is like a guide that tell GPU how to handle old data(load)
+        // and new data(store)
         let render_pass_descriptor = unsafe { MTLRenderPassDescriptor::new() };
         let color_attachment = unsafe {
             render_pass_descriptor
@@ -151,6 +172,7 @@ impl GraphicsBackend for MetalGraphicsBackend {
     }
 
     fn swap_buffers(&self) -> Result<(), GraphicsError> {
+        // At apple platform, we do not need to swap buffers manually
         Ok(())
     }
 

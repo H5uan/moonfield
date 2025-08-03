@@ -45,9 +45,11 @@ impl ApplicationHandler for MoonfieldApp {
                 {
                     Ok(()) => {
                         info!("Moonfield engine initialized successfully!");
-                        
+
                         // Set a blue clear color to show that Metal rendering is working
-                        if let GraphicsContext::Initilized(ref mut ctx) = engine.graphics_context {
+                        if let GraphicsContext::Initilized(ref mut ctx) =
+                            engine.graphics_context
+                        {
                             use moonfield::core::math::color;
                             ctx.renderer.set_clear_color(color::BLUE);
                             ctx.window.request_redraw();
