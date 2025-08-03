@@ -17,3 +17,5 @@ default = []
 # Backend features
 metal = ["moonfield-graphics/metal", "moonfield-impl/metal"]
 vulkan = ["moonfield-graphics/vulkan", "moonfield-impl/vulkan"]
+# Auto feature enables both backends and selects at runtime
+auto = ["metal", "vulkan"]

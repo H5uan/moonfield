@@ -39,6 +39,14 @@ impl FrameBuffer for MetalFrameBuffer {
         // Set load action to clear the buffer with the specified color
         color_attachment.setLoadAction(MTLLoadAction::Clear);
 
+        // Create and immediately end a render encoder to execute the clear operation
+        let encoder = self.command_buffer.renderCommandEncoderWithDescriptor(
+            &self.render_pass_descriptor,
+        );
+        if let Some(encoder) = encoder {
+            encoder.endEncoding();
+        }
+
         Ok(())
     }
 }

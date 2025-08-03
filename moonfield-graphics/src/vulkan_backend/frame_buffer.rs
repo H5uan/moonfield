@@ -1,12 +1,10 @@
-use ash::{vk, Device};
 use std::rc::Rc;
+
+use ash::khr::swapchain;
+use ash::{Device, vk};
 use tracing::error;
 
-use crate::{
-    error::GraphicsError,
-    frame_buffer::FrameBuffer,
-};
-use ash::khr::swapchain;
+use crate::{error::GraphicsError, frame_buffer::FrameBuffer};
 
 pub struct VulkanFrameBuffer {
     pub device: Rc<Device>,
@@ -41,7 +39,8 @@ impl Drop for VulkanFrameBuffer {
             }
 
             // End command buffer recording
-            if let Err(e) = self.device.end_command_buffer(self.command_buffer) {
+            if let Err(e) = self.device.end_command_buffer(self.command_buffer)
+            {
                 error!("Failed to end command buffer: {}", e);
                 return;
             }
@@ -76,7 +75,10 @@ impl Drop for VulkanFrameBuffer {
                 .swapchains(&swapchains)
                 .image_indices(&image_indices);
 
-            if let Err(e) = self.swapchain_loader.queue_present(self.graphics_queue, &present_info) {
+            if let Err(e) = self
+                .swapchain_loader
+                .queue_present(self.graphics_queue, &present_info)
+            {
                 error!("Failed to present swapchain image: {}", e);
             }
 

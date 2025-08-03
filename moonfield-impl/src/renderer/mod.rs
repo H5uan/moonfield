@@ -20,11 +20,7 @@ impl Renderer {
     pub fn new(
         backend: Rc<dyn GraphicsBackend>, frame_size: (u32, u32),
     ) -> Result<Self, EngineError> {
-        Ok(Self {
-            frame_size,
-            backend,
-            clear_color: color::BLACK,
-        })
+        Ok(Self { frame_size, backend, clear_color: color::BLACK })
     }
 
     pub(crate) fn render_frame(&mut self) -> Result<(), GraphicsError> {

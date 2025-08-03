@@ -104,7 +104,9 @@ pub mod utils {
     }
 
     /// Create an orthographic projection matrix
-    pub fn orthographic(left: f32, right: f32, bottom: f32, top: f32, near: f32, far: f32) -> Mat4 {
+    pub fn orthographic(
+        left: f32, right: f32, bottom: f32, top: f32, near: f32, far: f32,
+    ) -> Mat4 {
         Mat4::new_orthographic(left, right, bottom, top, near, far)
     }
 }
@@ -132,12 +134,7 @@ pub mod color {
 
     /// Create a color from RGB values (0-255)
     pub fn rgb(r: u8, g: u8, b: u8) -> Color {
-        Vec4::new(
-            r as f32 / 255.0,
-            g as f32 / 255.0,
-            b as f32 / 255.0,
-            1.0,
-        )
+        Vec4::new(r as f32 / 255.0, g as f32 / 255.0, b as f32 / 255.0, 1.0)
     }
 
     /// Create a color from RGBA values (0-255)
@@ -188,10 +185,7 @@ pub mod geometry {
     impl Ray {
         /// Create a new ray
         pub fn new(origin: Point3, direction: Vec3) -> Self {
-            Self {
-                origin,
-                direction: direction.normalize(),
-            }
+            Self { origin, direction: direction.normalize() }
         }
 
         /// Get a point along the ray at parameter t
@@ -210,10 +204,7 @@ pub mod geometry {
     impl Plane {
         /// Create a new plane from a normal and distance from origin
         pub fn new(normal: Vec3, distance: f32) -> Self {
-            Self {
-                normal: normal.normalize(),
-                distance,
-            }
+            Self { normal: normal.normalize(), distance }
         }
 
         /// Create a plane from three points
@@ -256,9 +247,12 @@ pub mod geometry {
 
         /// Check if a point is inside the AABB
         pub fn contains_point(&self, point: Point3) -> bool {
-            point.x >= self.min.x && point.x <= self.max.x &&
-            point.y >= self.min.y && point.y <= self.max.y &&
-            point.z >= self.min.z && point.z <= self.max.z
+            point.x >= self.min.x
+                && point.x <= self.max.x
+                && point.y >= self.min.y
+                && point.y <= self.max.y
+                && point.z >= self.min.z
+                && point.z <= self.max.z
         }
 
         /// Expand the AABB to include a point

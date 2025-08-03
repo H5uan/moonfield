@@ -1,14 +1,13 @@
 use std::rc::Rc;
 
+#[cfg(all(feature = "metal", target_os = "macos"))]
+use moonfield_graphics::metal_backend::MetalGraphicsBackend;
+#[cfg(all(feature = "vulkan", not(all(feature = "metal", target_os = "macos"))))]
+use moonfield_graphics::vulkan_backend::VulkanGraphicsBackend;
 use moonfield_graphics::{
     backend::SharedGraphicsBackend, error::GraphicsError,
 };
-
-#[cfg(feature = "metal")]
-use moonfield_graphics::metal_backend::MetalGraphicsBackend;
-#[cfg(feature = "vulkan")]
-use moonfield_graphics::vulkan_backend::VulkanGraphicsBackend;
-use tracing::{debug, error, info, instrument, warn};
+use tracing::{debug, info, warn};
 use winit::{
     event_loop::ActiveEventLoop,
     window::{Window, WindowAttributes},
@@ -40,7 +39,7 @@ pub struct GraphicsBackendConstructor(Rc<GraphicsBackendConstructorCallback>);
 
 impl Default for GraphicsBackendConstructor {
     fn default() -> Self {
-        // Try Metal backend first if available (typically on macOS)
+        // Prefer Metal on macOS when available
         #[cfg(all(feature = "metal", target_os = "macos"))]
         {
             Self(Rc::new(|params, event_loop, window_attrs, named_objects| {
@@ -53,8 +52,11 @@ impl Default for GraphicsBackendConstructor {
                 )
             }))
         }
-        // Use Vulkan backend if Metal is not available but Vulkan is enabled
-        #[cfg(all(feature = "vulkan", not(all(feature = "metal", target_os = "macos"))))]
+        // Use Vulkan on non-macOS platforms or when Metal is not available
+        #[cfg(all(
+            feature = "vulkan",
+            not(all(feature = "metal", target_os = "macos"))
+        ))]
         {
             Self(Rc::new(|params, event_loop, window_attrs, named_objects| {
                 VulkanGraphicsBackend::new(
@@ -72,9 +74,11 @@ impl Default for GraphicsBackendConstructor {
             feature = "vulkan"
         )))]
         {
-            Self(Rc::new(|_params, _event_loop, _window_attrs, _named_objects| {
-                Err(GraphicsError::BackendUnavailable)
-            }))
+            Self(Rc::new(
+                |_params, _event_loop, _window_attrs, _named_objects| {
+                    Err(GraphicsError::BackendUnavailable)
+                },
+            ))
         }
     }
 }
@@ -111,7 +115,6 @@ pub struct Engine {
 }
 
 impl Engine {
-    #[instrument(skip(params))]
     pub fn new(params: EngineInitParams) -> Result<Self, EngineError> {
         info!("Creating new Moonfield engine");
 
@@ -126,7 +129,6 @@ impl Engine {
         })
     }
 
-    #[instrument(skip(self, active_event_loop))]
     pub fn initialize_graphics_context(
         &mut self, active_event_loop: &ActiveEventLoop,
     ) -> Result<(), EngineError> {

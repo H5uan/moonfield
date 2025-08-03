@@ -4,8 +4,8 @@ use std::{
     rc::{Rc, Weak},
 };
 
-use ash::{vk, Device, Entry, Instance};
 use ash::khr::{surface, swapchain};
+use ash::{Device, Entry, Instance, vk};
 use winit::{
     event_loop::ActiveEventLoop,
     raw_window_handle::{HasDisplayHandle, HasWindowHandle},
@@ -44,10 +44,8 @@ pub struct VulkanGraphicsBackend {
 
 impl VulkanGraphicsBackend {
     pub fn new(
-        vsync: bool,
-        _msaa_sample_count: Option<u8>,
-        event_loop: &ActiveEventLoop,
-        window_attrs: WindowAttributes,
+        vsync: bool, _msaa_sample_count: Option<u8>,
+        event_loop: &ActiveEventLoop, window_attrs: WindowAttributes,
         named_objects: bool,
     ) -> Result<(Window, SharedGraphicsBackend), GraphicsError> {
         // Create the window
@@ -71,39 +69,56 @@ impl VulkanGraphicsBackend {
                 None,
             )
             .map_err(|e| {
-                VulkanError::DeviceError(format!("Failed to create surface: {}", e))
+                VulkanError::DeviceError(format!(
+                    "Failed to create surface: {}",
+                    e
+                ))
             })?;
 
             let surface_loader = surface::Instance::new(&entry, &instance);
 
             // Pick physical device
-            let physical_device = Self::pick_physical_device(&instance, &surface_loader, surface)?;
+            let physical_device = Self::pick_physical_device(
+                &instance,
+                &surface_loader,
+                surface,
+            )?;
 
             // Find queue families
             let (graphics_queue_family, present_queue_family) =
-                Self::find_queue_families(&instance, physical_device, &surface_loader, surface)?;
+                Self::find_queue_families(
+                    &instance,
+                    physical_device,
+                    &surface_loader,
+                    surface,
+                )?;
 
             // Create logical device
-            let (device, graphics_queue, present_queue) = Self::create_logical_device(
-                &instance,
-                physical_device,
-                graphics_queue_family,
-                present_queue_family,
-            )?;
+            let (device, graphics_queue, present_queue) =
+                Self::create_logical_device(
+                    &instance,
+                    physical_device,
+                    graphics_queue_family,
+                    present_queue_family,
+                )?;
 
             // Create swapchain
             let swapchain_loader = swapchain::Device::new(&instance, &device);
-            let (swapchain, swapchain_format, swapchain_extent, swapchain_images) =
-                Self::create_swapchain(
-                    &surface_loader,
-                    surface,
-                    physical_device,
-                    &swapchain_loader,
-                    &window,
-                    graphics_queue_family,
-                    present_queue_family,
-                    vsync,
-                )?;
+            let (
+                swapchain,
+                swapchain_format,
+                swapchain_extent,
+                swapchain_images,
+            ) = Self::create_swapchain(
+                &surface_loader,
+                surface,
+                physical_device,
+                &swapchain_loader,
+                &window,
+                graphics_queue_family,
+                present_queue_family,
+                vsync,
+            )?;
 
             // Create image views
             let swapchain_image_views = Self::create_image_views(
@@ -113,7 +128,8 @@ impl VulkanGraphicsBackend {
             )?;
 
             // Create command pool
-            let command_pool = Self::create_command_pool(&device, graphics_queue_family)?;
+            let command_pool =
+                Self::create_command_pool(&device, graphics_queue_family)?;
 
             let backend = Self {
                 entry,
@@ -142,7 +158,9 @@ impl VulkanGraphicsBackend {
         }
     }
 
-    fn create_instance(entry: &Entry, window: &Window) -> Result<Instance, VulkanError> {
+    fn create_instance(
+        entry: &Entry, window: &Window,
+    ) -> Result<Instance, VulkanError> {
         unsafe {
             let app_name = CString::new("Moonfield").unwrap();
             let engine_name = CString::new("Moonfield Engine").unwrap();
@@ -156,9 +174,13 @@ impl VulkanGraphicsBackend {
 
             // Get required extensions from ash-window
             let extension_names = ash_window::enumerate_required_extensions(
-                window.display_handle().unwrap().as_raw()
-            ).map_err(|e| {
-                VulkanError::InstanceCreationError(format!("Failed to get required extensions: {}", e))
+                window.display_handle().unwrap().as_raw(),
+            )
+            .map_err(|e| {
+                VulkanError::InstanceCreationError(format!(
+                    "Failed to get required extensions: {}",
+                    e
+                ))
             })?;
 
             let create_info = vk::InstanceCreateInfo::default()
@@ -166,40 +188,56 @@ impl VulkanGraphicsBackend {
                 .enabled_extension_names(&extension_names);
 
             entry.create_instance(&create_info, None).map_err(|e| {
-                VulkanError::InstanceCreationError(format!("Failed to create instance: {}", e))
+                VulkanError::InstanceCreationError(format!(
+                    "Failed to create instance: {}",
+                    e
+                ))
             })
         }
     }
 
     fn pick_physical_device(
-        instance: &Instance,
-        surface_loader: &surface::Instance,
+        instance: &Instance, surface_loader: &surface::Instance,
         surface: vk::SurfaceKHR,
     ) -> Result<vk::PhysicalDevice, VulkanError> {
         unsafe {
-            let physical_devices = instance
-                .enumerate_physical_devices()
-                .map_err(|e| VulkanError::DeviceError(format!("Failed to enumerate physical devices: {}", e)))?;
+            let physical_devices =
+                instance.enumerate_physical_devices().map_err(|e| {
+                    VulkanError::DeviceError(format!(
+                        "Failed to enumerate physical devices: {}",
+                        e
+                    ))
+                })?;
 
             for device in physical_devices {
-                if Self::is_device_suitable(instance, device, surface_loader, surface)? {
+                if Self::is_device_suitable(
+                    instance,
+                    device,
+                    surface_loader,
+                    surface,
+                )? {
                     return Ok(device);
                 }
             }
 
-            Err(VulkanError::DeviceError("No suitable physical device found".to_string()))
+            Err(VulkanError::DeviceError(
+                "No suitable physical device found".to_string(),
+            ))
         }
     }
 
     fn is_device_suitable(
-        instance: &Instance,
-        device: vk::PhysicalDevice,
-        surface_loader: &surface::Instance,
-        surface: vk::SurfaceKHR,
+        instance: &Instance, device: vk::PhysicalDevice,
+        surface_loader: &surface::Instance, surface: vk::SurfaceKHR,
     ) -> Result<bool, VulkanError> {
         unsafe {
             // Check queue families
-            let queue_families = Self::find_queue_families(instance, device, surface_loader, surface);
+            let queue_families = Self::find_queue_families(
+                instance,
+                device,
+                surface_loader,
+                surface,
+            );
             if queue_families.is_err() {
                 return Ok(false);
             }
@@ -207,12 +245,18 @@ impl VulkanGraphicsBackend {
             // Check device extensions
             let available_extensions = instance
                 .enumerate_device_extension_properties(device)
-                .map_err(|e| VulkanError::DeviceError(format!("Failed to enumerate device extensions: {}", e)))?;
+                .map_err(|e| {
+                    VulkanError::DeviceError(format!(
+                        "Failed to enumerate device extensions: {}",
+                        e
+                    ))
+                })?;
 
             let required_extensions = [swapchain::NAME];
             for required in &required_extensions {
                 let found = available_extensions.iter().any(|ext| {
-                    let name = std::ffi::CStr::from_ptr(ext.extension_name.as_ptr());
+                    let name =
+                        std::ffi::CStr::from_ptr(ext.extension_name.as_ptr());
                     name == *required
                 });
                 if !found {
@@ -223,23 +267,32 @@ impl VulkanGraphicsBackend {
             // Check swapchain support
             let formats = surface_loader
                 .get_physical_device_surface_formats(device, surface)
-                .map_err(|e| VulkanError::SwapchainError(format!("Failed to get surface formats: {}", e)))?;
+                .map_err(|e| {
+                    VulkanError::SwapchainError(format!(
+                        "Failed to get surface formats: {}",
+                        e
+                    ))
+                })?;
             let present_modes = surface_loader
                 .get_physical_device_surface_present_modes(device, surface)
-                .map_err(|e| VulkanError::SwapchainError(format!("Failed to get present modes: {}", e)))?;
+                .map_err(|e| {
+                    VulkanError::SwapchainError(format!(
+                        "Failed to get present modes: {}",
+                        e
+                    ))
+                })?;
 
             Ok(!formats.is_empty() && !present_modes.is_empty())
         }
     }
 
     fn find_queue_families(
-        instance: &Instance,
-        device: vk::PhysicalDevice,
-        surface_loader: &surface::Instance,
-        surface: vk::SurfaceKHR,
+        instance: &Instance, device: vk::PhysicalDevice,
+        surface_loader: &surface::Instance, surface: vk::SurfaceKHR,
     ) -> Result<(u32, u32), VulkanError> {
         unsafe {
-            let queue_families = instance.get_physical_device_queue_family_properties(device);
+            let queue_families =
+                instance.get_physical_device_queue_family_properties(device);
 
             let mut graphics_family = None;
             let mut present_family = None;
@@ -253,7 +306,12 @@ impl VulkanGraphicsBackend {
 
                 let present_support = surface_loader
                     .get_physical_device_surface_support(device, index, surface)
-                    .map_err(|e| VulkanError::DeviceError(format!("Failed to check present support: {}", e)))?;
+                    .map_err(|e| {
+                        VulkanError::DeviceError(format!(
+                            "Failed to check present support: {}",
+                            e
+                        ))
+                    })?;
 
                 if present_support {
                     present_family = Some(index);
@@ -266,16 +324,16 @@ impl VulkanGraphicsBackend {
 
             match (graphics_family, present_family) {
                 (Some(graphics), Some(present)) => Ok((graphics, present)),
-                _ => Err(VulkanError::DeviceError("Failed to find suitable queue families".to_string())),
+                _ => Err(VulkanError::DeviceError(
+                    "Failed to find suitable queue families".to_string(),
+                )),
             }
         }
     }
 
     fn create_logical_device(
-        instance: &Instance,
-        physical_device: vk::PhysicalDevice,
-        graphics_queue_family: u32,
-        present_queue_family: u32,
+        instance: &Instance, physical_device: vk::PhysicalDevice,
+        graphics_queue_family: u32, present_queue_family: u32,
     ) -> Result<(Device, vk::Queue, vk::Queue), VulkanError> {
         unsafe {
             let queue_priorities = [1.0f32];
@@ -305,44 +363,72 @@ impl VulkanGraphicsBackend {
 
             let device = instance
                 .create_device(physical_device, &device_create_info, None)
-                .map_err(|e| VulkanError::DeviceError(format!("Failed to create logical device: {}", e)))?;
+                .map_err(|e| {
+                    VulkanError::DeviceError(format!(
+                        "Failed to create logical device: {}",
+                        e
+                    ))
+                })?;
 
-            let graphics_queue = device.get_device_queue(graphics_queue_family, 0);
-            let present_queue = device.get_device_queue(present_queue_family, 0);
+            let graphics_queue =
+                device.get_device_queue(graphics_queue_family, 0);
+            let present_queue =
+                device.get_device_queue(present_queue_family, 0);
 
             Ok((device, graphics_queue, present_queue))
         }
     }
 
     fn create_swapchain(
-        surface_loader: &surface::Instance,
-        surface: vk::SurfaceKHR,
+        surface_loader: &surface::Instance, surface: vk::SurfaceKHR,
         physical_device: vk::PhysicalDevice,
-        swapchain_loader: &swapchain::Device,
-        window: &Window,
-        graphics_queue_family: u32,
-        present_queue_family: u32,
-        vsync: bool,
-    ) -> Result<(vk::SwapchainKHR, vk::Format, vk::Extent2D, Vec<vk::Image>), VulkanError> {
+        swapchain_loader: &swapchain::Device, window: &Window,
+        graphics_queue_family: u32, present_queue_family: u32, vsync: bool,
+    ) -> Result<
+        (vk::SwapchainKHR, vk::Format, vk::Extent2D, Vec<vk::Image>),
+        VulkanError,
+    > {
         unsafe {
             let surface_capabilities = surface_loader
-                .get_physical_device_surface_capabilities(physical_device, surface)
-                .map_err(|e| VulkanError::SwapchainError(format!("Failed to get surface capabilities: {}", e)))?;
+                .get_physical_device_surface_capabilities(
+                    physical_device,
+                    surface,
+                )
+                .map_err(|e| {
+                    VulkanError::SwapchainError(format!(
+                        "Failed to get surface capabilities: {}",
+                        e
+                    ))
+                })?;
 
             let surface_formats = surface_loader
                 .get_physical_device_surface_formats(physical_device, surface)
-                .map_err(|e| VulkanError::SwapchainError(format!("Failed to get surface formats: {}", e)))?;
+                .map_err(|e| {
+                    VulkanError::SwapchainError(format!(
+                        "Failed to get surface formats: {}",
+                        e
+                    ))
+                })?;
 
             let present_modes = surface_loader
-                .get_physical_device_surface_present_modes(physical_device, surface)
-                .map_err(|e| VulkanError::SwapchainError(format!("Failed to get present modes: {}", e)))?;
+                .get_physical_device_surface_present_modes(
+                    physical_device,
+                    surface,
+                )
+                .map_err(|e| {
+                    VulkanError::SwapchainError(format!(
+                        "Failed to get present modes: {}",
+                        e
+                    ))
+                })?;
 
             // Choose surface format
             let surface_format = surface_formats
                 .iter()
                 .find(|format| {
                     format.format == vk::Format::B8G8R8A8_SRGB
-                        && format.color_space == vk::ColorSpaceKHR::SRGB_NONLINEAR
+                        && format.color_space
+                            == vk::ColorSpaceKHR::SRGB_NONLINEAR
                 })
                 .unwrap_or(&surface_formats[0]);
 
@@ -358,21 +444,22 @@ impl VulkanGraphicsBackend {
             };
 
             // Choose extent
-            let extent = if surface_capabilities.current_extent.width != u32::MAX {
-                surface_capabilities.current_extent
-            } else {
-                let window_size = window.inner_size();
-                vk::Extent2D {
-                    width: window_size.width.clamp(
-                        surface_capabilities.min_image_extent.width,
-                        surface_capabilities.max_image_extent.width,
-                    ),
-                    height: window_size.height.clamp(
-                        surface_capabilities.min_image_extent.height,
-                        surface_capabilities.max_image_extent.height,
-                    ),
-                }
-            };
+            let extent =
+                if surface_capabilities.current_extent.width != u32::MAX {
+                    surface_capabilities.current_extent
+                } else {
+                    let window_size = window.inner_size();
+                    vk::Extent2D {
+                        width: window_size.width.clamp(
+                            surface_capabilities.min_image_extent.width,
+                            surface_capabilities.max_image_extent.width,
+                        ),
+                        height: window_size.height.clamp(
+                            surface_capabilities.min_image_extent.height,
+                            surface_capabilities.max_image_extent.height,
+                        ),
+                    }
+                };
 
             let image_count = (surface_capabilities.min_image_count + 1).min(
                 if surface_capabilities.max_image_count > 0 {
@@ -382,17 +469,22 @@ impl VulkanGraphicsBackend {
                 },
             );
 
-            let queue_family_indices = if graphics_queue_family != present_queue_family {
-                vec![graphics_queue_family, present_queue_family]
-            } else {
-                vec![graphics_queue_family]
-            };
+            let queue_family_indices =
+                if graphics_queue_family != present_queue_family {
+                    vec![graphics_queue_family, present_queue_family]
+                } else {
+                    vec![graphics_queue_family]
+                };
 
-            let (sharing_mode, queue_family_indices_slice) = if graphics_queue_family != present_queue_family {
-                (vk::SharingMode::CONCURRENT, queue_family_indices.as_slice())
-            } else {
-                (vk::SharingMode::EXCLUSIVE, [].as_slice())
-            };
+            let (sharing_mode, queue_family_indices_slice) =
+                if graphics_queue_family != present_queue_family {
+                    (
+                        vk::SharingMode::CONCURRENT,
+                        queue_family_indices.as_slice(),
+                    )
+                } else {
+                    (vk::SharingMode::EXCLUSIVE, [].as_slice())
+                };
 
             let swapchain_create_info = vk::SwapchainCreateInfoKHR::default()
                 .surface(surface)
@@ -411,19 +503,28 @@ impl VulkanGraphicsBackend {
 
             let swapchain = swapchain_loader
                 .create_swapchain(&swapchain_create_info, None)
-                .map_err(|e| VulkanError::SwapchainError(format!("Failed to create swapchain: {}", e)))?;
+                .map_err(|e| {
+                    VulkanError::SwapchainError(format!(
+                        "Failed to create swapchain: {}",
+                        e
+                    ))
+                })?;
 
             let swapchain_images = swapchain_loader
                 .get_swapchain_images(swapchain)
-                .map_err(|e| VulkanError::SwapchainError(format!("Failed to get swapchain images: {}", e)))?;
+                .map_err(|e| {
+                    VulkanError::SwapchainError(format!(
+                        "Failed to get swapchain images: {}",
+                        e
+                    ))
+                })?;
 
             Ok((swapchain, surface_format.format, extent, swapchain_images))
         }
     }
 
     fn create_image_views(
-        device: &Device,
-        swapchain_images: &[vk::Image],
+        device: &Device, swapchain_images: &[vk::Image],
         swapchain_format: vk::Format,
     ) -> Result<Vec<vk::ImageView>, VulkanError> {
         unsafe {
@@ -449,7 +550,10 @@ impl VulkanGraphicsBackend {
                         });
 
                     device.create_image_view(&create_info, None).map_err(|e| {
-                        VulkanError::DeviceError(format!("Failed to create image view: {}", e))
+                        VulkanError::DeviceError(format!(
+                            "Failed to create image view: {}",
+                            e
+                        ))
                     })
                 })
                 .collect()
@@ -457,8 +561,7 @@ impl VulkanGraphicsBackend {
     }
 
     fn create_command_pool(
-        device: &Device,
-        graphics_queue_family: u32,
+        device: &Device, graphics_queue_family: u32,
     ) -> Result<vk::CommandPool, VulkanError> {
         unsafe {
             let create_info = vk::CommandPoolCreateInfo::default()
@@ -466,60 +569,104 @@ impl VulkanGraphicsBackend {
                 .queue_family_index(graphics_queue_family);
 
             device.create_command_pool(&create_info, None).map_err(|e| {
-                VulkanError::CommandError(format!("Failed to create command pool: {}", e))
+                VulkanError::CommandError(format!(
+                    "Failed to create command pool: {}",
+                    e
+                ))
             })
         }
     }
 }
 
 impl GraphicsBackend for VulkanGraphicsBackend {
-    fn back_buffer(&self) -> Result<crate::frame_buffer::SharedFrameBuffer, GraphicsError> {
+    fn back_buffer(
+        &self,
+    ) -> Result<crate::frame_buffer::SharedFrameBuffer, GraphicsError> {
         unsafe {
             // Create synchronization objects
             let semaphore_create_info = vk::SemaphoreCreateInfo::default();
             let fence_create_info = vk::FenceCreateInfo::default()
                 .flags(vk::FenceCreateFlags::SIGNALED);
 
-            let image_available_semaphore = self.device
+            let image_available_semaphore = self
+                .device
                 .create_semaphore(&semaphore_create_info, None)
-                .map_err(|e| VulkanError::CommandError(format!("Failed to create semaphore: {}", e)))?;
+                .map_err(|e| {
+                    VulkanError::CommandError(format!(
+                        "Failed to create semaphore: {}",
+                        e
+                    ))
+                })?;
 
-            let render_finished_semaphore = self.device
+            let render_finished_semaphore = self
+                .device
                 .create_semaphore(&semaphore_create_info, None)
-                .map_err(|e| VulkanError::CommandError(format!("Failed to create semaphore: {}", e)))?;
+                .map_err(|e| {
+                    VulkanError::CommandError(format!(
+                        "Failed to create semaphore: {}",
+                        e
+                    ))
+                })?;
 
-            let in_flight_fence = self.device
+            let in_flight_fence = self
+                .device
                 .create_fence(&fence_create_info, None)
-                .map_err(|e| VulkanError::CommandError(format!("Failed to create fence: {}", e)))?;
+                .map_err(|e| {
+                    VulkanError::CommandError(format!(
+                        "Failed to create fence: {}",
+                        e
+                    ))
+                })?;
 
             // Wait for fence and reset it
             self.device
                 .wait_for_fences(&[in_flight_fence], true, u64::MAX)
-                .map_err(|e| VulkanError::CommandError(format!("Failed to wait for fence: {}", e)))?;
+                .map_err(|e| {
+                    VulkanError::CommandError(format!(
+                        "Failed to wait for fence: {}",
+                        e
+                    ))
+                })?;
 
-            self.device
-                .reset_fences(&[in_flight_fence])
-                .map_err(|e| VulkanError::CommandError(format!("Failed to reset fence: {}", e)))?;
+            self.device.reset_fences(&[in_flight_fence]).map_err(|e| {
+                VulkanError::CommandError(format!(
+                    "Failed to reset fence: {}",
+                    e
+                ))
+            })?;
 
             // Acquire next image
-            let (image_index, _) = self.swapchain_loader
+            let (image_index, _) = self
+                .swapchain_loader
                 .acquire_next_image(
                     self.swapchain,
                     u64::MAX,
                     image_available_semaphore,
                     vk::Fence::null(),
                 )
-                .map_err(|e| VulkanError::SwapchainError(format!("Failed to acquire next image: {}", e)))?;
+                .map_err(|e| {
+                    VulkanError::SwapchainError(format!(
+                        "Failed to acquire next image: {}",
+                        e
+                    ))
+                })?;
 
             // Allocate command buffer
-            let command_buffer_allocate_info = vk::CommandBufferAllocateInfo::default()
-                .command_pool(self.command_pool)
-                .level(vk::CommandBufferLevel::PRIMARY)
-                .command_buffer_count(1);
+            let command_buffer_allocate_info =
+                vk::CommandBufferAllocateInfo::default()
+                    .command_pool(self.command_pool)
+                    .level(vk::CommandBufferLevel::PRIMARY)
+                    .command_buffer_count(1);
 
-            let command_buffers = self.device
+            let command_buffers = self
+                .device
                 .allocate_command_buffers(&command_buffer_allocate_info)
-                .map_err(|e| VulkanError::CommandError(format!("Failed to allocate command buffer: {}", e)))?;
+                .map_err(|e| {
+                    VulkanError::CommandError(format!(
+                        "Failed to allocate command buffer: {}",
+                        e
+                    ))
+                })?;
 
             let command_buffer = command_buffers[0];
 
@@ -529,7 +676,12 @@ impl GraphicsBackend for VulkanGraphicsBackend {
 
             self.device
                 .begin_command_buffer(command_buffer, &begin_info)
-                .map_err(|e| VulkanError::CommandError(format!("Failed to begin command buffer: {}", e)))?;
+                .map_err(|e| {
+                    VulkanError::CommandError(format!(
+                        "Failed to begin command buffer: {}",
+                        e
+                    ))
+                })?;
 
             // Get the swapchain image for this frame
             let swapchain_image = self.swapchain_images[image_index as usize];
@@ -632,13 +784,20 @@ impl GraphicsBackend for VulkanGraphicsBackend {
     fn set_frame_size(&self, new_size: (u32, u32)) {
         // In a full implementation, this would recreate the swapchain
         // For now, we'll just log the resize request
-        tracing::debug!("Vulkan backend resize requested: {}x{}", new_size.0, new_size.1);
+        tracing::debug!(
+            "Vulkan backend resize requested: {}x{}",
+            new_size.0,
+            new_size.1
+        );
     }
 
     fn capabilities(&self) -> BackendCapabilities {
         unsafe {
-            let device_properties = self.instance.get_physical_device_properties(self.physical_device);
-            let max_buffer_length = device_properties.limits.max_storage_buffer_range as usize;
+            let device_properties = self
+                .instance
+                .get_physical_device_properties(self.physical_device);
+            let max_buffer_length =
+                device_properties.limits.max_storage_buffer_range as usize;
 
             BackendCapabilities { max_buffer_length }
         }
