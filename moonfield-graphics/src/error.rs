@@ -8,6 +8,8 @@ pub enum GraphicsError {
     VulkanError(VulkanError),
     MetalError(MetalError),
     WindowCreationError(String),
+    InvalidOperation(String),
+    BufferOverflow,
     Custom(String),
 }
 
@@ -45,6 +47,12 @@ impl Display for GraphicsError {
             }
             GraphicsError::WindowCreationError(msg) => {
                 write!(f, "Window creation error: {}", msg)
+            }
+            GraphicsError::InvalidOperation(msg) => {
+                write!(f, "Invalid operation: {}", msg)
+            }
+            GraphicsError::BufferOverflow => {
+                write!(f, "Buffer Overflow")
             }
             GraphicsError::Custom(v) => {
                 write!(f, "Custom error: {v}")

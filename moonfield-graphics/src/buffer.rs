@@ -1,11 +1,15 @@
+use bytemuck::Pod;
+use moonfield_core::{any_ext_for, array_as_u8_slice, array_as_u8_slice_mut};
+
 use crate::error::GraphicsError;
 
-/// Buffer usage pattern for modern GPU memory management.
-/// Designed specifically for Vulkan and Metal memory models.
 #[derive(Copy, Clone, Eq, PartialEq, Hash, Debug)]
-pub enum BufferPlacement {
-    GpuOnly,
-    Shared,
+pub enum BufferAccessPattern {
+    Stream,
+    Dynamic,
+    GpuReadOnly, // static
+    GpuWriteCpuRead,
+    GpuInternal,
 }
 
 /// Buffer type definition for modern graphics APIs.
@@ -13,68 +17,54 @@ pub enum BufferPlacement {
 #[derive(Copy, Clone, Eq, PartialEq, Hash, Debug)]
 pub enum BufferKind {
     Vertex,
-
     Index,
-
     Uniform,
-
     Storage,
-
     Indirect,
-}
-
-/// Memory access pattern hints for optimization
-#[derive(Copy, Clone, Eq, PartialEq, Hash, Debug)]
-pub enum AccessPattern {
-    /// Data written once, read many times (static geometry)
-    WriteOnceReadMany,
-    /// Data updated every frame (dynamic uniforms)
-    WriteEveryFrameReadMany,
-    /// Data updated occasionally, read many times (animated models)
-    WriteOccasionallyReadMany,
-    /// Data written by GPU, read by CPU (query results, screenshots)
-    WriteGpuReadCpu,
-    /// Data written by CPU, processed by GPU compute (simulation input)
-    WriteCpuProcessGpu,
 }
 
 /// Buffer creation descriptor for Vulkan and Metal backends
 #[derive(Copy, Clone, Debug)]
-pub struct BufferDescriptor {
+pub struct GPUBufferDescriptor<'a> {
+    pub name: &'a str,
     /// Size of the buffer in bytes
     pub size: usize,
-    /// Buffer kind
-    pub buffer_kind: BufferKind,
-    /// Memory usage pattern
-    pub placement: BufferPlacement,
-    /// Access pattern hint for optimization
-    pub access_pattern: AccessPattern,
+    /// Buffer kind like vertex, index, uniform
+    pub kind: BufferKind,
+    /// Buffer access pattern
+    pub access_pattern: BufferAccessPattern,
 }
 
-impl Default for BufferDescriptor {
-    fn default() -> Self {
-        Self {
-            size: 0,
-            buffer_kind: BufferKind::Storage,
-            placement: BufferPlacement::GpuOnly,
-            access_pattern: AccessPattern::WriteEveryFrameReadMany,
-        }
-    }
-}
+any_ext_for!(GPUBuffer => GPUBufferAsAny);
 
 /// Modern GPU buffer trait optimized for Vulkan and Metal
 pub trait GPUBuffer {
     /// Returns the actual allocated size (may be larger than requested due to alignment)
     fn allocated_size(&self) -> usize;
 
-    /// Writes data to the buffer with optional offset
-    /// For non-mappable buffers, this may use a staging buffer internally
-    fn write_data(
-        &self, data: &[u8], offset: usize,
-    ) -> Result<(), GraphicsError>;
+    fn kind(&self) -> BufferKind;
+
+    fn access_pattern(&self) -> BufferAccessPattern;
+
+    /// Writes data to the buffer
+    fn write_data(&self, data: &[u8]) -> Result<(), GraphicsError>;
 
     /// Reads data from buffer (only for CPU-accessible buffers)
-    fn read_data(
-        &self, data: &mut [u8], offset: usize,
-    ) -> Result<(), GraphicsError>;
+    fn read_data(&self, data: &mut [u8]) -> Result<(), GraphicsError>;
+}
+
+impl dyn GPUBuffer {
+    pub fn write_typed_data<T: Pod>(
+        &self, data: &[T],
+    ) -> Result<(), GraphicsError> {
+        let untyped_data = array_as_u8_slice(data);
+        GPUBuffer::write_data(self, untyped_data)
+    }
+
+    pub fn read_typed_data<T: Pod>(
+        &self, data: &mut [T],
+    ) -> Result<(), GraphicsError> {
+        let untyped_data = array_as_u8_slice_mut(data);
+        GPUBuffer::read_data(self, untyped_data)
+    }
 }

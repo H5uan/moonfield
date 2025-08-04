@@ -8,8 +8,8 @@ use objc2_app_kit::NSView;
 use objc2_core_foundation::CGSize;
 use objc2_metal::{
     MTLClearColor, MTLCommandQueue, MTLCreateSystemDefaultDevice, MTLDevice,
-    MTLLoadAction, MTLPixelFormat, MTLRenderPassDescriptor, MTLStoreAction,
-    MTLTexture,
+    MTLLoadAction, MTLPixelFormat, MTLRenderPassDescriptor,
+    MTLRenderPipelineState, MTLStoreAction, MTLTexture,
 };
 use objc2_quartz_core::{CAMetalDrawable, CAMetalLayer};
 use winit::{
@@ -38,7 +38,13 @@ pub struct MetalGraphicsBackend {
     layer: Retained<CAMetalLayer>,
     /// command_queue: A list of render command buffers to executed.
     command_queue: Retained<ProtocolObject<dyn MTLCommandQueue>>,
-    pub named_objects: Cell<bool>,
+    /// pipeline_state: We store the pipeline setting into an object,
+    /// so that we donot need to do run-time check before draw call
+    // pipeline_state: Retained<ProtocolObject<dyn MTLRenderPipelineState>>,
+    pub(crate) named_objects: Cell<bool>,
+    /// self reference: mostly is for other objects like buffer, texture to use
+    /// since backend might manage buffer, it cannot be a strong reference
+    /// the safe way is to tranfer its own weak reference
     this: RefCell<Option<Weak<MetalGraphicsBackend>>>,
 }
 
@@ -88,6 +94,8 @@ impl MetalGraphicsBackend {
             ))
         })?;
 
+        // Create the Metal pipeline state
+
         match raw_window_handle {
             RawWindowHandle::AppKit(handle) => unsafe {
                 let ns_view = handle.ns_view.as_ptr();
@@ -115,9 +123,16 @@ impl MetalGraphicsBackend {
         };
 
         // Wrap the backend in Rc<dyn GraphicsBackend>
-        let shared_backend: SharedGraphicsBackend = Rc::new(backend);
+        let shared_backend = Rc::new(backend);
+
+        *shared_backend.this.borrow_mut() =
+            Some(Rc::downgrade(&shared_backend));
 
         Ok((window, shared_backend))
+    }
+
+    pub fn weak(&self) -> Weak<Self> {
+        self.this.borrow().as_ref().unwrap().clone()
     }
 }
 

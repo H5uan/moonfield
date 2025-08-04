@@ -1,182 +1,164 @@
-use std::{ffi::c_void, rc::Weak};
+use std::{
+    cell::Cell,
+    ffi::c_void,
+    fmt::format,
+    rc::{Rc, Weak},
+};
 
 use bytemuck::{Pod, Zeroable};
 use objc2::{rc::Retained, runtime::ProtocolObject};
 use objc2_metal::{MTLBuffer, MTLDevice, MTLResourceOptions, MTLStorageMode};
 
 use crate::{
+    backend,
     buffer::{
-        AccessPattern, BufferDescriptor, BufferKind, BufferPlacement, GPUBuffer,
+        self, BufferAccessPattern, BufferKind, GPUBuffer, GPUBufferDescriptor,
     },
     error::{GraphicsError, MetalError},
     metal_backend::MetalGraphicsBackend,
 };
 
 pub struct MetalBuffer {
-    buffer: Retained<ProtocolObject<dyn MTLBuffer>>,
-    backend: Weak<MetalGraphicsBackend>,
-    desc: BufferDescriptor,
+    pub backend: Weak<MetalGraphicsBackend>,
+    pub buffer: Retained<ProtocolObject<dyn MTLBuffer>>,
+    pub size: Cell<usize>,
+    pub kind: BufferKind,
+    pub access_pattern: BufferAccessPattern,
 }
 
 impl MetalBuffer {
-    /// Write typed data to the buffer using bytemuck for safe byte conversion
-    pub fn write_typed_data<T: Pod>(
-        &self, data: &[T], offset: usize,
-    ) -> Result<(), GraphicsError> {
-        let bytes = bytemuck::cast_slice(data);
-        self.write_data(bytes, offset)
-    }
-
-    /// Read typed data from the buffer using bytemuck for safe byte conversion
-    pub fn read_typed_data<T: Pod + Zeroable>(
-        &self, data: &mut [T], offset: usize,
-    ) -> Result<(), GraphicsError> {
-        let bytes = bytemuck::cast_slice_mut(data);
-        self.read_data(bytes, offset)
-    }
-
-    /// Write a single typed value to the buffer
-    pub fn write_value<T: Pod>(
-        &self, value: &T, offset: usize,
-    ) -> Result<(), GraphicsError> {
-        let bytes = bytemuck::bytes_of(value);
-        self.write_data(bytes, offset)
-    }
-
-    /// Read a single typed value from the buffer
-    pub fn read_value<T: Pod + Zeroable>(
-        &self, offset: usize,
-    ) -> Result<T, GraphicsError> {
-        let mut value = T::zeroed();
-        let bytes = bytemuck::bytes_of_mut(&mut value);
-        self.read_data(bytes, offset)?;
-        Ok(value)
-    }
-
-    fn descriptor_to_metal_options(
-        desc: &BufferDescriptor,
+    fn access_pattern_to_resource_options(
+        access_pattern: BufferAccessPattern,
     ) -> MTLResourceOptions {
-        let base_options = match desc.placement {
-            // Apple silicon have unified memory arch, so StorageModeManaged will fallback to StorageModeShared
-            BufferPlacement::GpuOnly => MTLResourceOptions::StorageModePrivate,
-            BufferPlacement::Shared => MTLResourceOptions::StorageModeShared,
-        };
-
-        let mut options = base_options;
-
-        match desc.access_pattern {
-            AccessPattern::WriteEveryFrameReadMany => {
-                options |= MTLResourceOptions::CPUCacheModeWriteCombined;
+        match access_pattern {
+            BufferAccessPattern::Stream => {
+                MTLResourceOptions::StorageModeShared
+                    | MTLResourceOptions::CPUCacheModeWriteCombined
             }
-            _ => {}
+            BufferAccessPattern::Dynamic => {
+                MTLResourceOptions::StorageModeShared
+                    | MTLResourceOptions::CPUCacheModeWriteCombined
+            }
+            BufferAccessPattern::GpuReadOnly => {
+                MTLResourceOptions::StorageModePrivate
+            }
+            BufferAccessPattern::GpuWriteCpuRead => {
+                MTLResourceOptions::StorageModeShared
+                    | MTLResourceOptions::CPUCacheModeDefaultCache
+            }
+            BufferAccessPattern::GpuInternal => {
+                MTLResourceOptions::StorageModePrivate
+            }
         }
-
-        options
     }
 
     pub fn new(
-        backend: &MetalGraphicsBackend, desc: BufferDescriptor,
+        backend: &MetalGraphicsBackend, desc: GPUBufferDescriptor,
     ) -> Result<Self, GraphicsError> {
-        // Convert BufferPlacement and AccessPattern to MTLResourceOptions
-        let resource_options = Self::descriptor_to_metal_options(&desc);
+        let GPUBufferDescriptor {
+            #[allow(unused_variables)]
+            name,
+            size,
+            kind,
+            access_pattern,
+        } = desc;
 
-        // Create the Metal buffer
-        let device = backend.device();
-        let buffer = device
-            .newBufferWithLength_options(desc.size, resource_options)
+        let resource_options =
+            Self::access_pattern_to_resource_options(access_pattern);
+        let buffer = backend
+            .device()
+            .newBufferWithLength_options(size, resource_options)
             .ok_or_else(|| {
                 GraphicsError::MetalError(MetalError::BufferCreationError(
-                    format!(
-                        "Failed to create Metal buffer of size {} bytes with placement {:?}",
-                        desc.size, desc.placement
-                    ),
+                    format!("Failed to create buffer with size {}", size),
                 ))
             })?;
 
-        // Create weak reference to backend
-        let backend_weak = Weak::new(); // This should be properly set by the caller
-
         Ok(Self {
+            backend: backend.weak(),
             buffer,
-            backend: backend_weak,
-            desc,
+            size: Cell::new(size),
+            kind,
+            access_pattern,
         })
     }
 }
 
 impl GPUBuffer for MetalBuffer {
     fn allocated_size(&self) -> usize {
-        // Metal buffer returns the actual allocated size
-        self.buffer.length()
+        self.size.get()
     }
 
-    fn write_data(
-        &self, data: &[u8], offset: usize,
-    ) -> Result<(), GraphicsError> {
-        // Check bounds
-        if offset + data.len() > self.allocated_size() {
-            return Err(GraphicsError::MetalError(MetalError::BufferCreationError(
-                format!(
-                    "Write data exceeds buffer bounds: offset {} + size {} > buffer size {}",
-                    offset,
-                    data.len(),
-                    self.allocated_size()
-                ),
-            )));
+    fn access_pattern(&self) -> BufferAccessPattern {
+        self.access_pattern
+    }
+
+    fn kind(&self) -> BufferKind {
+        self.kind
+    }
+
+    fn read_data(&self, data: &mut [u8]) -> Result<(), GraphicsError> {
+        let Some(_backend) = self.backend.upgrade() else {
+            return Err(GraphicsError::BackendUnavailable);
+        };
+        match self.access_pattern {
+            BufferAccessPattern::GpuReadOnly
+            | BufferAccessPattern::GpuInternal => {
+                return Err(GraphicsError::InvalidOperation(
+                    "Buffer not readable by CPU".to_string(),
+                ));
+            }
+            _ => {}
         }
 
-        // For shared memory buffers, we can directly write to the buffer
-        if self.desc.placement == BufferPlacement::Shared {
-            unsafe {
-                let buffer_ptr = self.buffer.contents().as_ptr().cast::<u8>();
-                
-                std::ptr::copy_nonoverlapping(
-                    data.as_ptr(),
-                    buffer_ptr.add(offset),
-                    data.len(),
-                );
-            }
-        } else {
-            // For GPU-only buffers, we would need a staging buffer or command buffer
-            // For now, return an error as this requires more complex implementation
-            return Err(GraphicsError::MetalError(MetalError::BufferCreationError(
-                "Writing to GPU-only buffers not yet implemented".to_string(),
-            )));
+        let read_size = data.len().min(self.size.get());
+        if read_size == 0 {
+            return Ok(());
+        }
+
+        unsafe {
+            let buffer_ptr = self.buffer.contents().as_ptr() as *const u8;
+
+            std::ptr::copy_nonoverlapping(
+                buffer_ptr,
+                data.as_mut_ptr(),
+                read_size,
+            );
         }
 
         Ok(())
     }
 
-    fn read_data(
-        &self, data: &mut [u8], offset: usize,
-    ) -> Result<(), GraphicsError> {
-        // Check bounds
-        if offset + data.len() > self.allocated_size() {
-            return Err(GraphicsError::MetalError(MetalError::BufferCreationError(
-                format!(
-                    "Read data exceeds buffer bounds: offset {} + size {} > buffer size {}",
-                    offset,
-                    data.len(),
-                    self.allocated_size()
-                ),
-            )));
+    fn write_data(&self, data: &[u8]) -> Result<(), GraphicsError> {
+        let Some(_backend) = self.backend.upgrade() else {
+            return Err(GraphicsError::BackendUnavailable);
+        };
+        match self.access_pattern {
+            BufferAccessPattern::GpuReadOnly
+            | BufferAccessPattern::GpuInternal => {
+                return Err(GraphicsError::InvalidOperation(
+                    "Buffer not readable by CPU".to_string(),
+                ));
+            }
+            _ => {}
         }
 
-        // Only shared memory buffers can be read directly
-        if self.desc.placement == BufferPlacement::Shared {
-            unsafe {
-                let buffer_ptr = self.buffer.contents().as_ptr().cast::<u8>();
-                
-                std::ptr::copy_nonoverlapping(
-                    buffer_ptr.add(offset),
-                    data.as_mut_ptr(),
-                    data.len(),
-                );
-            }
-        } else {
-            return Err(GraphicsError::MetalError(MetalError::BufferCreationError(
-                "Cannot read from GPU-only buffers".to_string(),
-            )));
+        if data.len() > self.size.get() {
+            return Err(GraphicsError::BufferOverflow);
+        }
+
+        if data.is_empty() {
+            return Ok(());
+        }
+
+        unsafe {
+            let buffer_ptr = self.buffer.contents().as_ptr() as *mut u8;
+
+            std::ptr::copy_nonoverlapping(
+                data.as_ptr(),
+                buffer_ptr,
+                data.len(),
+            );
         }
 
         Ok(())

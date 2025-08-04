@@ -4,6 +4,8 @@ version = "0.1.0"
 edition = "2024"
 
 [dependencies]
+moonfield-core = {path = "../moonfield-core"}
+
 # Cross-platform dependencies
 ash = { workspace = true }
 ash-window = { workspace = true }
