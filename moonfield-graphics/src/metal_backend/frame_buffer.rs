@@ -1,16 +1,24 @@
+use std::rc::Weak;
+
 use objc2::{rc::Retained, runtime::ProtocolObject};
 use objc2_metal::{
-    MTLClearColor, MTLCommandBuffer, MTLCommandEncoder, MTLLoadAction,
-    MTLRenderCommandEncoder, MTLRenderPassDescriptor,
+    MTLClearColor, MTLCommandBuffer, MTLCommandEncoder, MTLIndexType,
+    MTLLoadAction, MTLPrimitiveType, MTLRenderCommandEncoder,
+    MTLRenderPassDescriptor,
 };
 use objc2_quartz_core::CAMetalDrawable;
 
 use crate::{
     error::{GraphicsError, MetalError},
     frame_buffer::FrameBuffer,
+    geometry_buffer::{GeometryBufferAsAny, GeometryBufferWarpper},
+    metal_backend::{
+        MetalGraphicsBackend, geometry_buffer::MetalGeometryBuffer,
+    },
 };
 
 pub struct MetalFrameBuffer {
+    pub backend: Weak<MetalGraphicsBackend>,
     pub drawable: Retained<ProtocolObject<dyn CAMetalDrawable>>,
     pub render_pass_descriptor: Retained<MTLRenderPassDescriptor>,
     /// command_buffer: represents a collection of render commands to be executed as a unit
@@ -24,6 +32,29 @@ pub struct MetalFrameBuffer {
     // Framebuffer size
     pub width: u32,
     pub height: u32,
+}
+
+impl MetalFrameBuffer {
+    fn get_or_create_render_encoder(
+        &mut self,
+    ) -> Result<&ProtocolObject<dyn MTLRenderCommandEncoder>, GraphicsError>
+    {
+        if self.render_encoder.is_none() {
+            let encoder = self
+                .command_buffer
+                .renderCommandEncoderWithDescriptor(
+                    &self.render_pass_descriptor,
+                )
+                .ok_or_else(|| {
+                    GraphicsError::MetalError(MetalError::RenderPassError(
+                        "Failed to create render command encoder".to_string(),
+                    ))
+                })?;
+            self.render_encoder = Some(encoder);
+        }
+
+        Ok(self.render_encoder.as_ref().unwrap())
+    }
 }
 
 impl FrameBuffer for MetalFrameBuffer {
@@ -44,6 +75,60 @@ impl FrameBuffer for MetalFrameBuffer {
 
         // Set load action to clear the buffer with the specified color
         color_attachment.setLoadAction(MTLLoadAction::Clear);
+
+        Ok(())
+    }
+
+    fn draw(
+        &mut self, geometry_buffer: &GeometryBufferWarpper,
+    ) -> Result<(), GraphicsError> {
+        let backend =
+            self.backend.upgrade().ok_or(GraphicsError::BackendUnavailable)?;
+
+        let metal_geometry = geometry_buffer
+            .0
+            .as_ref()
+            .as_any()
+            .downcast_ref::<MetalGeometryBuffer>()
+            .ok_or(GraphicsError::BackendUnavailable)?;
+
+        let encoder = self.get_or_create_render_encoder()?;
+
+        encoder.setRenderPipelineState(&backend.pipeline_state);
+
+        for (index, vertex_buffer_option) in
+            metal_geometry.vertex_buffers().iter().enumerate()
+        {
+            if let Some(vertex_buffer) = vertex_buffer_option {
+                unsafe {
+                    encoder.setVertexBuffer_offset_atIndex(
+                        Some(&vertex_buffer.buffer),
+                        0,
+                        index,
+                    )
+                };
+            }
+        }
+
+        if let Some(index_buffer) = &metal_geometry.index_buffer() {
+            unsafe {
+                encoder.drawIndexedPrimitives_indexCount_indexType_indexBuffer_indexBufferOffset(
+        MTLPrimitiveType::Triangle,
+        metal_geometry.index_count() as usize,
+        MTLIndexType::UInt32,
+        &index_buffer.buffer,
+        0
+    )
+            };
+        } else {
+            unsafe {
+                encoder.drawPrimitives_vertexStart_vertexCount(
+                    MTLPrimitiveType::Triangle,
+                    0,
+                    metal_geometry.vertex_count() as usize,
+                )
+            };
+        }
 
         Ok(())
     }

@@ -4,7 +4,7 @@ use ash::khr::swapchain;
 use ash::{Device, vk};
 use tracing::error;
 
-use crate::{error::GraphicsError, frame_buffer::FrameBuffer};
+use crate::{error::GraphicsError, frame_buffer::FrameBuffer, geometry_buffer::GeometryBufferWarpper};
 
 pub struct VulkanFrameBuffer {
     pub device: Rc<Device>,
@@ -27,6 +27,12 @@ impl FrameBuffer for VulkanFrameBuffer {
         // In Vulkan, we need to modify the struct to store the clear color
         // For now, we'll just validate the operation
         // The actual clearing will happen in the Drop implementation
+        Ok(())
+    }
+
+    fn draw(&mut self, _geometry: &GeometryBufferWarpper) -> Result<(), GraphicsError> {
+        // TODO: Implement Vulkan draw functionality
+        // For now, this is a stub implementation
         Ok(())
     }
 }

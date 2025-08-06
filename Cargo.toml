@@ -38,10 +38,12 @@ raw-window-handle = "0.6.2"
 ash = "0.38.0"
 ash-window = "0.13.0"
 
+
 # macOS/iOS specific dependencies - only available on Apple platforms
 objc2 = "0.6.1"
 objc2-app-kit = "0.3.1"
 objc2-core-foundation = "0.3.1"
+objc2-foundation = "0.3.1"
 objc2-metal = "0.3.1"
 objc2-quartz-core = "0.3.1"
 

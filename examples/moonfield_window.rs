@@ -2,6 +2,14 @@ use moonfield::engine::{
     Engine, EngineInitParams, GraphicsBackendConstructor, GraphicsContext,
     GraphicsContextParams,
 };
+use moonfield::graphics::{
+    geometry_buffer::{
+        GeometryBufferDescriptor, ElementsDescriptor, VertexBufferData, 
+        VertexBufferDescriptor, GeometryBufferWarpper, VertexAttributeDefinition, 
+        VertexAttributeKind
+    },
+    buffer::BufferKind,
+};
 use tracing::{debug, error, info};
 use winit::{
     application::ApplicationHandler,
@@ -12,11 +20,62 @@ use winit::{
 
 struct MoonfieldApp {
     engine: Option<Engine>,
+    triangle_geometry: Option<GeometryBufferWarpper>,
 }
 
 impl MoonfieldApp {
     fn new() -> Self {
-        Self { engine: None }
+        Self { 
+            engine: None,
+            triangle_geometry: None,
+        }
+    }
+
+    fn create_triangle_geometry(&mut self) -> Result<(), Box<dyn std::error::Error>> {
+        if let Some(engine) = &self.engine {
+            if let GraphicsContext::Initilized(ctx) = &engine.graphics_context {
+                // Create a simple triangle
+                let vertices: Vec<f32> = vec![
+                    // x, y, z
+                    0.0,  0.5, 0.0,  // Top vertex
+                   -0.5, -0.5, 0.0,  // Bottom left
+                    0.5, -0.5, 0.0,  // Bottom right
+                ];
+
+                let vertex_data = vertices.as_ptr() as *const u8;
+                let vertex_bytes = unsafe {
+                    std::slice::from_raw_parts(vertex_data, vertices.len() * std::mem::size_of::<f32>())
+                };
+
+                // Define vertex attributes for position (x, y, z)
+                let position_attribute = VertexAttributeDefinition {
+                    location: 0,
+                    kind: VertexAttributeKind::Float32x3,
+                    component_count: 3,
+                    normalized: false,
+                    divisor: 0,
+                };
+
+                let geometry_desc = GeometryBufferDescriptor {
+                    name: "triangle",
+                    kind: BufferKind::Vertex,
+                    buffers: &[
+                        VertexBufferDescriptor {
+                            kind: BufferKind::Vertex,
+                            attributes: &[position_attribute],
+                            data: VertexBufferData {
+                                bytes: Some(vertex_bytes),
+                                element_size: 3 * std::mem::size_of::<f32>(),
+                            },
+                        }
+                    ],
+                    element: ElementsDescriptor::Triangles(&[]),
+                };
+
+                self.triangle_geometry = Some(ctx.renderer.graphics_backend().create_geometry_buffer(geometry_desc)?);
+            }
+        }
+        Ok(())
     }
 }
 
@@ -55,6 +114,11 @@ impl ApplicationHandler for MoonfieldApp {
                             ctx.window.request_redraw();
                         }
                         self.engine = Some(engine);
+
+                        // Create triangle geometry after engine is initialized
+                        if let Err(e) = self.create_triangle_geometry() {
+                            error!("Failed to create triangle geometry: {}", e);
+                        }
                     }
                     Err(e) => {
                         error!("Failed to initialize graphics context: {}", e);
@@ -80,11 +144,18 @@ impl ApplicationHandler for MoonfieldApp {
             }
             WindowEvent::RedrawRequested => {
                 if let Some(engine) = &mut self.engine {
+                    // Add triangle to renderer if we have one
+                    if let Some(triangle_geometry) = &self.triangle_geometry {
+                        if let GraphicsContext::Initilized(ctx) = &mut engine.graphics_context {
+                            ctx.renderer.draw_geometry(triangle_geometry.clone());
+                        }
+                    }
+
                     match engine.render() {
                         Ok(()) => {
-                            if let GraphicsContext::Initilized(ctx) =
-                                &engine.graphics_context
-                            {
+                            // Clear geometry buffers for next frame
+                            if let GraphicsContext::Initilized(ctx) = &mut engine.graphics_context {
+                                ctx.renderer.clear_geometry();
                                 ctx.window.request_redraw();
                             }
                         }

@@ -4,6 +4,7 @@ use moonfield_core::math::{color, color::Color};
 use moonfield_graphics::{
     backend::{GraphicsBackend, SharedGraphicsBackend},
     error::GraphicsError,
+    geometry_buffer::GeometryBufferWarpper,
 };
 
 use crate::engine::error::EngineError;
@@ -14,17 +15,25 @@ pub struct Renderer {
 
     // Clear color
     clear_color: Color,
+    
+    // Geometry buffers to render this frame
+    geometry_buffers: Vec<GeometryBufferWarpper>,
 }
 
 impl Renderer {
     pub fn new(
         backend: Rc<dyn GraphicsBackend>, frame_size: (u32, u32),
     ) -> Result<Self, EngineError> {
-        Ok(Self { frame_size, backend, clear_color: color::BLACK })
+        Ok(Self { 
+            frame_size, 
+            backend, 
+            clear_color: color::BLACK,
+            geometry_buffers: Vec::new(),
+        })
     }
 
     pub(crate) fn render_frame(&mut self) -> Result<(), GraphicsError> {
-        let back_buffer = self.backend.back_buffer()?;
+        let mut back_buffer = self.backend.back_buffer()?;
 
         // Use the renderer's clear color
         back_buffer.clear([
@@ -33,6 +42,11 @@ impl Renderer {
             self.clear_color.z,
             self.clear_color.w,
         ])?;
+
+        // Draw all geometry buffers
+        for geometry_buffer in &self.geometry_buffers {
+            back_buffer.draw(geometry_buffer)?;
+        }
 
         drop(back_buffer);
 
@@ -68,5 +82,15 @@ impl Renderer {
     /// Get the current frame size
     pub fn frame_size(&self) -> (u32, u32) {
         self.frame_size
+    }
+
+    /// Add a geometry buffer to be rendered this frame
+    pub fn draw_geometry(&mut self, geometry_buffer: GeometryBufferWarpper) {
+        self.geometry_buffers.push(geometry_buffer);
+    }
+
+    /// Clear all geometry buffers (usually called at the end of each frame)
+    pub fn clear_geometry(&mut self) {
+        self.geometry_buffers.clear();
     }
 }

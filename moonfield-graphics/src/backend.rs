@@ -1,6 +1,12 @@
 use std::rc::Rc;
 
-use crate::{error::GraphicsError, frame_buffer::SharedFrameBuffer};
+use crate::{
+    error::GraphicsError,
+    frame_buffer::SharedFrameBuffer,
+    geometry_buffer::{
+        self, GeometryBuffer, GeometryBufferDescriptor, GeometryBufferWarpper,
+    },
+};
 
 pub type SharedGraphicsBackend = Rc<dyn GraphicsBackend>;
 
@@ -17,6 +23,10 @@ pub trait GraphicsBackend {
     fn swap_buffers(&self) -> Result<(), GraphicsError>;
 
     fn set_frame_size(&self, new_size: (u32, u32));
+
+    fn create_geometry_buffer(
+        &self, desc: GeometryBufferDescriptor,
+    ) -> Result<GeometryBufferWarpper, GraphicsError>;
 
     fn capabilities(&self) -> BackendCapabilities;
 }

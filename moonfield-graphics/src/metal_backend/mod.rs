@@ -6,10 +6,12 @@ use std::{
 use objc2::{rc::Retained, runtime::ProtocolObject};
 use objc2_app_kit::NSView;
 use objc2_core_foundation::CGSize;
+use objc2_foundation::NSString;
 use objc2_metal::{
     MTLClearColor, MTLCommandQueue, MTLCreateSystemDefaultDevice, MTLDevice,
-    MTLLoadAction, MTLPixelFormat, MTLRenderPassDescriptor,
-    MTLRenderPipelineState, MTLStoreAction, MTLTexture,
+    MTLLibrary, MTLLoadAction, MTLPixelFormat, MTLRenderPassDescriptor,
+    MTLRenderPipelineDescriptor, MTLRenderPipelineState, MTLStoreAction,
+    MTLTexture, MTLVertexDescriptor, MTLVertexFormat, MTLVertexStepFunction,
 };
 use objc2_quartz_core::{CAMetalDrawable, CAMetalLayer};
 use winit::{
@@ -19,9 +21,14 @@ use winit::{
 };
 
 use crate::{
-    backend::{BackendCapabilities, GraphicsBackend, SharedGraphicsBackend},
+    backend::{
+        self, BackendCapabilities, GraphicsBackend, SharedGraphicsBackend,
+    },
     error::{GraphicsError, MetalError},
-    metal_backend::frame_buffer::MetalFrameBuffer,
+    geometry_buffer::GeometryBufferWarpper,
+    metal_backend::{
+        frame_buffer::MetalFrameBuffer, geometry_buffer::MetalGeometryBuffer,
+    },
 };
 
 pub mod buffer;
@@ -40,7 +47,7 @@ pub struct MetalGraphicsBackend {
     command_queue: Retained<ProtocolObject<dyn MTLCommandQueue>>,
     /// pipeline_state: We store the pipeline setting into an object,
     /// so that we donot need to do run-time check before draw call
-    // pipeline_state: Retained<ProtocolObject<dyn MTLRenderPipelineState>>,
+    pipeline_state: Retained<ProtocolObject<dyn MTLRenderPipelineState>>,
     pub(crate) named_objects: Cell<bool>,
     /// self reference: mostly is for other objects like buffer, texture to use
     /// since backend might manage buffer, it cannot be a strong reference
@@ -94,7 +101,70 @@ impl MetalGraphicsBackend {
             ))
         })?;
 
+        let shader_source = NSString::from_str(include_str!(
+            "../../../assets/shaders/out/metal/basic_triangle.metal"
+        ));
+
+        let library = device
+            .newLibraryWithSource_options_error(&shader_source, None)
+            .map_err(|e| {
+                GraphicsError::MetalError(MetalError::ShaderCompilationError(
+                    "Failed to create shader library".to_string(),
+                ))
+            })?;
+
+        let vertex_function = library
+            .newFunctionWithName(&NSString::from_str("vertex_main"))
+            .ok_or_else(|| {
+                GraphicsError::MetalError(MetalError::ShaderCompilationError(
+                    "Failed to find vertex_main function".to_string(),
+                ))
+            })?;
+
+        let fragment_function = library
+            .newFunctionWithName(&NSString::from_str("fragment_main"))
+            .ok_or_else(|| {
+                GraphicsError::MetalError(MetalError::ShaderCompilationError(
+                    "Failed to find fragment_main function".to_string(),
+                ))
+            })?;
+
+        let vertex_descriptor = unsafe { MTLVertexDescriptor::new() };
+        unsafe {
+            let attributes = vertex_descriptor.attributes();
+            let attribute0 = attributes.objectAtIndexedSubscript(0);
+            attribute0.setFormat(MTLVertexFormat::Float3); // float3
+            attribute0.setOffset(0);
+            attribute0.setBufferIndex(0);
+
+            let layouts = vertex_descriptor.layouts();
+            let layout0 = layouts.objectAtIndexedSubscript(0);
+            layout0.setStride(12); // 3 * sizeof(f32) = 12 bytes
+            layout0.setStepFunction(MTLVertexStepFunction::PerVertex);
+        }
+
         // Create the Metal pipeline state
+        let pipeline_descriptor = unsafe { MTLRenderPipelineDescriptor::new() };
+
+        unsafe {
+            pipeline_descriptor.setVertexFunction(Some(&vertex_function));
+            pipeline_descriptor.setFragmentFunction(Some(&fragment_function));
+            pipeline_descriptor.setVertexDescriptor(Some(&vertex_descriptor));
+
+            let color_attachments = pipeline_descriptor.colorAttachments();
+
+            let color_attachment =
+                color_attachments.objectAtIndexedSubscript(0);
+            color_attachment.setPixelFormat(MTLPixelFormat::BGRA8Unorm);
+        }
+
+        let pipeline_state = device
+            .newRenderPipelineStateWithDescriptor_error(&pipeline_descriptor)
+            .map_err(|e| {
+                GraphicsError::MetalError(MetalError::PipelineCreationError(
+                    format!("Failed to create render pipeline state: {:?}", e),
+                ))
+            })?;
 
         match raw_window_handle {
             RawWindowHandle::AppKit(handle) => unsafe {
@@ -118,6 +188,7 @@ impl MetalGraphicsBackend {
             device,
             command_queue,
             layer,
+            pipeline_state,
             named_objects: Cell::new(named_objects),
             this: Default::default(),
         };
@@ -175,6 +246,7 @@ impl GraphicsBackend for MetalGraphicsBackend {
             })?;
 
         let frame_buffer = MetalFrameBuffer {
+            backend: self.weak(),
             drawable,
             render_pass_descriptor,
             command_buffer,
@@ -207,5 +279,13 @@ impl GraphicsBackend for MetalGraphicsBackend {
         let max_buffer_length = device.maxBufferLength();
 
         BackendCapabilities { max_buffer_length }
+    }
+
+    fn create_geometry_buffer(
+        &self, desc: crate::geometry_buffer::GeometryBufferDescriptor,
+    ) -> Result<crate::geometry_buffer::GeometryBufferWarpper, GraphicsError>
+    {
+        let geometry_buffer = MetalGeometryBuffer::new(self, desc)?;
+        Ok(GeometryBufferWarpper(Rc::new(geometry_buffer)))
     }
 }

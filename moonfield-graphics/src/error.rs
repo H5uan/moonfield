@@ -31,6 +31,8 @@ pub enum MetalError {
     BufferMappingError(String),
     BufferWriteError(String),
     BufferReadError(String),
+    ShaderCompilationError(String),
+    PipelineCreationError(String),
 }
 
 impl Display for GraphicsError {
@@ -107,6 +109,12 @@ impl Display for MetalError {
             MetalError::BufferReadError(msg) => {
                 write!(f, "Metal buffer read error: {}", msg)
             }
+            MetalError::ShaderCompilationError(msg) => {
+                write!(f, "Failed to create shader library: {}", msg)
+            }
+            MetalError::PipelineCreationError(msg) => {
+                write!(f, "Failed to create pipeline: {}", msg)
+            }
         }
     }
 }
@@ -171,3 +179,18 @@ impl MetalError {
         MetalError::DeviceCreationError(msg)
     }
 }
+
+// Implement std::error::Error for all error types
+impl std::error::Error for GraphicsError {
+    fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
+        match self {
+            GraphicsError::VulkanError(err) => Some(err),
+            GraphicsError::MetalError(err) => Some(err),
+            _ => None,
+        }
+    }
+}
+
+impl std::error::Error for VulkanError {}
+
+impl std::error::Error for MetalError {}

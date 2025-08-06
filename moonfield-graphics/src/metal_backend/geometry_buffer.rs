@@ -1,8 +1,11 @@
 use std::collections::HashMap;
 use std::rc::{Rc, Weak};
 
+use moonfield_core::array_as_u8_slice;
+
 use crate::backend;
 use crate::buffer::{BufferAccessPattern, BufferKind, GPUBufferDescriptor};
+use crate::geometry_buffer::TriangleDefinition;
 use crate::metal_backend::buffer::MetalBuffer;
 use crate::{
     buffer::GPUBuffer,
@@ -24,6 +27,22 @@ pub struct MetalGeometryBuffer {
 }
 
 impl MetalGeometryBuffer {
+    pub fn vertex_buffers(&self) -> &Vec<Option<MetalBuffer>> {
+        &self.vertex_buffers
+    }
+
+    pub fn index_buffer(&self) -> &Option<MetalBuffer> {
+        &self.index_buffer
+    }
+
+    pub fn vertex_count(&self) -> u32 {
+        self.vertex_count
+    }
+
+    pub fn index_count(&self) -> u32 {
+        self.index_count
+    }
+
     pub fn new(
         backend: &MetalGraphicsBackend, desc: GeometryBufferDescriptor,
     ) -> Result<Self, GraphicsError> {
@@ -44,12 +63,21 @@ impl MetalGeometryBuffer {
                         name: &format!("{}_vertex_{}", name, index),
                         size: buffer_size,
                         kind: BufferKind::Vertex,
-                        access_pattern: BufferAccessPattern::GpuReadOnly,
+                        access_pattern: BufferAccessPattern::Stream,
                     },
                 )?)
             } else {
                 None
             };
+            // Write data to the buffer if available
+            if let Some(buffer) = &metal_buffer {
+                if let Some(data) = buffer_desc.data.bytes {
+                    if let Err(e) = buffer.write_data(data) {
+                        eprintln!("Failed to write vertex buffer data: {}", e);
+                    }
+                }
+            }
+            
             vertex_buffers.push(metal_buffer);
         }
 
@@ -61,15 +89,27 @@ impl MetalGeometryBuffer {
                 let buffer_size = index_count * 4;
 
                 let index_buffer = if !triangles.is_empty() {
-                    Some(MetalBuffer::new(
+                    let buffer = MetalBuffer::new(
                         backend,
                         GPUBufferDescriptor {
                             name: &format!("{}_index", name),
                             size: buffer_size,
                             kind: BufferKind::Index,
-                            access_pattern: BufferAccessPattern::GpuReadOnly,
+                            access_pattern: BufferAccessPattern::Stream,
                         },
-                    )?)
+                    )?;
+                    
+                    // Write triangle indices to the buffer
+                    let indices: Vec<u32> = triangles
+                        .iter()
+                        .flat_map(|tri| tri.indices().iter().copied())
+                        .collect();
+                    let index_data = array_as_u8_slice(&indices);
+                    if let Err(e) = buffer.write_data(index_data) {
+                        eprintln!("Failed to write triangle index data: {}", e);
+                    }
+                    
+                    Some(buffer)
                 } else {
                     None
                 };
@@ -91,7 +131,7 @@ impl MetalGeometryBuffer {
                             name: &format!("{}_index", name),
                             size: buffer_size,
                             kind: BufferKind::Index,
-                            access_pattern: BufferAccessPattern::GpuReadOnly,
+                            access_pattern: BufferAccessPattern::Stream,
                         },
                     )?)
                 } else {
@@ -115,7 +155,7 @@ impl MetalGeometryBuffer {
                             name: &format!("{}_index", name),
                             size: buffer_size,
                             kind: BufferKind::Index,
-                            access_pattern: BufferAccessPattern::GpuReadOnly,
+                            access_pattern: BufferAccessPattern::Stream,
                         },
                     )?)
                 } else {
@@ -151,5 +191,37 @@ impl MetalGeometryBuffer {
             vertex_count,
             index_count,
         })
+    }
+}
+
+impl GeometryBuffer for MetalGeometryBuffer {
+    fn set_buffer_data(&self, buffer: usize, data: &[u8]) {
+        if let Some(Some(vertex_buffer)) = self.vertex_buffers.get(buffer) {
+            if let Err(e) = vertex_buffer.write_data(data) {
+                eprintln!("Failed to write buffer data: {}", e);
+            }
+        }
+    }
+
+    fn element_count(&self) -> usize {
+        if self.index_count > 0 {
+            self.index_count as usize
+        } else {
+            self.vertex_count as usize
+        }
+    }
+
+    fn set_triangles(&self, triangles: &[TriangleDefinition]) {
+        if let Some(index_buffer) = &self.index_buffer {
+            let indices: Vec<u32> = triangles
+                .iter()
+                .flat_map(|tri| tri.indices().iter().copied())
+                .collect();
+
+            let index_data = array_as_u8_slice(&indices);
+            if let Err(e) = index_buffer.write_data(index_data) {
+                eprintln!("Failed to write triangle data: {}", e);
+            }
+        }
     }
 }

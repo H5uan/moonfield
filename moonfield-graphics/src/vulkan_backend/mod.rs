@@ -15,6 +15,7 @@ use winit::{
 use crate::{
     backend::{BackendCapabilities, GraphicsBackend, SharedGraphicsBackend},
     error::{GraphicsError, VulkanError},
+    geometry_buffer::{GeometryBufferDescriptor, GeometryBufferWarpper},
     vulkan_backend::frame_buffer::VulkanFrameBuffer,
 };
 
@@ -801,6 +802,14 @@ impl GraphicsBackend for VulkanGraphicsBackend {
 
             BackendCapabilities { max_buffer_length }
         }
+    }
+
+    fn create_geometry_buffer(
+        &self, _desc: GeometryBufferDescriptor,
+    ) -> Result<GeometryBufferWarpper, GraphicsError> {
+        // TODO: Implement Vulkan geometry buffer creation
+        // For now, this is a stub implementation
+        Err(GraphicsError::BackendUnavailable)
     }
 }
 

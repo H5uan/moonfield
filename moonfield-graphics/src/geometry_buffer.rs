@@ -7,7 +7,7 @@ use std::{
 use bytemuck::{Pod, Zeroable};
 use moonfield_core::{any_ext_for, array_as_u8_slice};
 
-use crate::buffer::BufferKind;
+use crate::{buffer::BufferKind, define_shared_wrapper};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum VertexAttributeKind {
@@ -213,6 +213,8 @@ pub struct GeometryBufferDescriptor<'a> {
 }
 
 any_ext_for!(GeometryBuffer => GeometryBufferAsAny);
+define_shared_wrapper!(GeometryBufferWarpper<dyn GeometryBufferAsAny>);
+/// A specialized gpu buffer wrapper for geometry
 pub trait GeometryBuffer {
     fn set_buffer_data(&self, buffer: usize, data: &[u8]);
 
