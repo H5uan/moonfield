@@ -2,6 +2,7 @@ use std::collections::HashMap;
 use std::rc::{Rc, Weak};
 
 use moonfield_core::array_as_u8_slice;
+use tracing::error;
 
 use crate::backend;
 use crate::buffer::{BufferAccessPattern, BufferKind, GPUBufferDescriptor};
@@ -73,7 +74,7 @@ impl MetalGeometryBuffer {
             if let Some(buffer) = &metal_buffer {
                 if let Some(data) = buffer_desc.data.bytes {
                     if let Err(e) = buffer.write_data(data) {
-                        eprintln!("Failed to write vertex buffer data: {}", e);
+                        error!("Failed to write vertex buffer data: {}", e);
                     }
                 }
             }
@@ -106,7 +107,7 @@ impl MetalGeometryBuffer {
                         .collect();
                     let index_data = array_as_u8_slice(&indices);
                     if let Err(e) = buffer.write_data(index_data) {
-                        eprintln!("Failed to write triangle index data: {}", e);
+                        error!("Failed to write triangle index data: {}", e);
                     }
                     
                     Some(buffer)
@@ -198,7 +199,7 @@ impl GeometryBuffer for MetalGeometryBuffer {
     fn set_buffer_data(&self, buffer: usize, data: &[u8]) {
         if let Some(Some(vertex_buffer)) = self.vertex_buffers.get(buffer) {
             if let Err(e) = vertex_buffer.write_data(data) {
-                eprintln!("Failed to write buffer data: {}", e);
+                error!("Failed to write buffer data: {}", e);
             }
         }
     }
@@ -220,7 +221,7 @@ impl GeometryBuffer for MetalGeometryBuffer {
 
             let index_data = array_as_u8_slice(&indices);
             if let Err(e) = index_buffer.write_data(index_data) {
-                eprintln!("Failed to write triangle data: {}", e);
+                error!("Failed to write triangle data: {}", e);
             }
         }
     }
