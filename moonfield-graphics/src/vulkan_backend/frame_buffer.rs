@@ -4,7 +4,10 @@ use ash::khr::swapchain;
 use ash::{Device, vk};
 use tracing::error;
 
-use crate::{error::GraphicsError, frame_buffer::FrameBuffer, geometry_buffer::GeometryBufferWarpper};
+use crate::{
+    error::GraphicsError, frame_buffer::FrameBuffer,
+    geometry_buffer::GeometryBufferWarpper,
+};
 
 pub struct VulkanFrameBuffer {
     pub device: Rc<Device>,
@@ -30,7 +33,9 @@ impl FrameBuffer for VulkanFrameBuffer {
         Ok(())
     }
 
-    fn draw(&mut self, _geometry: &GeometryBufferWarpper) -> Result<(), GraphicsError> {
+    fn draw(
+        &mut self, _geometry: &GeometryBufferWarpper,
+    ) -> Result<(), GraphicsError> {
         // TODO: Implement Vulkan draw functionality
         // For now, this is a stub implementation
         Ok(())

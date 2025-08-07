@@ -21,9 +21,7 @@ use winit::{
 };
 
 use crate::{
-    backend::{
-        self, BackendCapabilities, GraphicsBackend, SharedGraphicsBackend,
-    },
+    backend::{self, BackendCapabilities, Device, SharedGraphicsBackend},
     error::{GraphicsError, MetalError},
     geometry_buffer::GeometryBufferWarpper,
     metal_backend::{
@@ -207,7 +205,7 @@ impl MetalGraphicsBackend {
     }
 }
 
-impl GraphicsBackend for MetalGraphicsBackend {
+impl Device for MetalGraphicsBackend {
     /// Get the images in swapchain that havent been rendereds
     fn back_buffer(
         &self,

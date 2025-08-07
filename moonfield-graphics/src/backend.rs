@@ -8,7 +8,7 @@ use crate::{
     },
 };
 
-pub type SharedGraphicsBackend = Rc<dyn GraphicsBackend>;
+pub type SharedGraphicsBackend = Rc<dyn Device>;
 
 #[derive(Debug)]
 pub struct BackendCapabilities {
@@ -17,7 +17,7 @@ pub struct BackendCapabilities {
 
 // all graphics backend has some equal operation
 // like buffer and texture management
-pub trait GraphicsBackend {
+pub trait Device {
     fn back_buffer(&self) -> Result<SharedFrameBuffer, GraphicsError>;
 
     fn swap_buffers(&self) -> Result<(), GraphicsError>;

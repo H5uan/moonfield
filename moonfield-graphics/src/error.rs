@@ -1,138 +1,79 @@
-use std::fmt::{Display, Formatter};
-
+use thiserror::Error;
 use tracing::error;
 
-#[derive(Debug)]
+#[derive(Debug, Error)]
 pub enum GraphicsError {
+    #[error("Graphics backend unavailable/disconnected")]
     BackendUnavailable,
-    VulkanError(VulkanError),
-    MetalError(MetalError),
+
+    #[error("Vulkan error: {0}")]
+    VulkanError(#[from] VulkanError),
+
+    #[error("Metal error: {0}")]
+    MetalError(#[from] MetalError),
+
+    #[error("Window creation error: {0}")]
     WindowCreationError(String),
+
+    #[error("Invalid operation: {0}")]
     InvalidOperation(String),
+
+    #[error("Buffer Overflow")]
     BufferOverflow,
+
+    #[error("Custom error: {0}")]
     Custom(String),
 }
 
-#[derive(Debug)]
+#[derive(Debug, Error)]
 pub enum VulkanError {
+    #[error("Failed to load Vulkan: {0}")]
     LoadError(String),
+
+    #[error("Failed to create Vulkan instance: {0}")]
     InstanceCreationError(String),
+
+    #[error("Vulkan device error: {0}")]
     DeviceError(String),
+
+    #[error("Vulkan swapchain error: {0}")]
     SwapchainError(String),
+
+    #[error("Vulkan command error: {0}")]
     CommandError(String),
 }
 
-#[derive(Debug)]
+#[derive(Debug, Error)]
 pub enum MetalError {
+    #[error("Failed to create Metal device: {0}")]
     DeviceCreationError(String),
+
+    #[error("Metal command queue error: {0}")]
     CommandQueueError(String),
+
+    #[error("Metal render pass error: {0}")]
     RenderPassError(String),
+
+    #[error("Metal buffer creation error: {0}")]
     BufferCreationError(String),
+
+    #[error("Metal buffer mapping error: {0}")]
     BufferMappingError(String),
+
+    #[error("Metal buffer write error: {0}")]
     BufferWriteError(String),
+
+    #[error("Metal buffer read error: {0}")]
     BufferReadError(String),
+
+    #[error("Failed to create shader library: {0}")]
     ShaderCompilationError(String),
+
+    #[error("Failed to create pipeline: {0}")]
     PipelineCreationError(String),
 }
 
-impl Display for GraphicsError {
-    fn fmt(&self, f: &mut Formatter<'_>) -> std::fmt::Result {
-        match self {
-            GraphicsError::BackendUnavailable => {
-                write!(f, "Graphics backend unavailable/disconnected")
-            }
-            GraphicsError::VulkanError(err) => {
-                write!(f, "Vulkan error: {}", err)
-            }
-            GraphicsError::MetalError(err) => {
-                write!(f, "Metal error: {}", err)
-            }
-            GraphicsError::WindowCreationError(msg) => {
-                write!(f, "Window creation error: {}", msg)
-            }
-            GraphicsError::InvalidOperation(msg) => {
-                write!(f, "Invalid operation: {}", msg)
-            }
-            GraphicsError::BufferOverflow => {
-                write!(f, "Buffer Overflow")
-            }
-            GraphicsError::Custom(v) => {
-                write!(f, "Custom error: {v}")
-            }
-        }
-    }
-}
-
-impl Display for VulkanError {
-    fn fmt(&self, f: &mut Formatter<'_>) -> std::fmt::Result {
-        match self {
-            VulkanError::LoadError(msg) => {
-                write!(f, "Failed to load Vulkan: {}", msg)
-            }
-            VulkanError::InstanceCreationError(msg) => {
-                write!(f, "Failed to create Vulkan instance: {}", msg)
-            }
-            VulkanError::DeviceError(msg) => {
-                write!(f, "Vulkan device error: {}", msg)
-            }
-            VulkanError::SwapchainError(msg) => {
-                write!(f, "Vulkan swapchain error: {}", msg)
-            }
-            VulkanError::CommandError(msg) => {
-                write!(f, "Vulkan command error: {}", msg)
-            }
-        }
-    }
-}
-
-impl Display for MetalError {
-    fn fmt(&self, f: &mut Formatter<'_>) -> std::fmt::Result {
-        match self {
-            MetalError::DeviceCreationError(msg) => {
-                write!(f, "Failed to create Metal device: {}", msg)
-            }
-            MetalError::CommandQueueError(msg) => {
-                write!(f, "Metal command queue error: {}", msg)
-            }
-            MetalError::RenderPassError(msg) => {
-                write!(f, "Metal render pass error: {}", msg)
-            }
-            MetalError::BufferCreationError(msg) => {
-                write!(f, "Metal buffer creation error: {}", msg)
-            }
-            MetalError::BufferMappingError(msg) => {
-                write!(f, "Metal buffer mapping error: {}", msg)
-            }
-            MetalError::BufferWriteError(msg) => {
-                write!(f, "Metal buffer write error: {}", msg)
-            }
-            MetalError::BufferReadError(msg) => {
-                write!(f, "Metal buffer read error: {}", msg)
-            }
-            MetalError::ShaderCompilationError(msg) => {
-                write!(f, "Failed to create shader library: {}", msg)
-            }
-            MetalError::PipelineCreationError(msg) => {
-                write!(f, "Failed to create pipeline: {}", msg)
-            }
-        }
-    }
-}
-
-impl From<VulkanError> for GraphicsError {
-    fn from(err: VulkanError) -> Self {
-        error!("Vulkan error occurred: {}", err);
-        GraphicsError::VulkanError(err)
-    }
-}
-
-impl From<MetalError> for GraphicsError {
-    fn from(err: MetalError) -> Self {
-        error!("Metal error occurred: {}", err);
-        GraphicsError::MetalError(err)
-    }
-}
-
+// Helper methods
 impl GraphicsError {
     /// Create a custom error and log it
     pub fn custom(msg: impl Into<String>) -> Self {
@@ -149,7 +90,7 @@ impl GraphicsError {
     }
 
     /// Log the error and return self
-    pub fn log_error(self) -> Self {
+    pub fn log_and_return(self) -> Self {
         error!("Graphics error: {}", self);
         self
     }
@@ -179,18 +120,3 @@ impl MetalError {
         MetalError::DeviceCreationError(msg)
     }
 }
-
-// Implement std::error::Error for all error types
-impl std::error::Error for GraphicsError {
-    fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
-        match self {
-            GraphicsError::VulkanError(err) => Some(err),
-            GraphicsError::MetalError(err) => Some(err),
-            _ => None,
-        }
-    }
-}
-
-impl std::error::Error for VulkanError {}
-
-impl std::error::Error for MetalError {}
