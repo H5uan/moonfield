@@ -121,14 +121,12 @@ impl Display for MetalError {
 
 impl From<VulkanError> for GraphicsError {
     fn from(err: VulkanError) -> Self {
-        error!("Vulkan error occurred: {}", err);
         GraphicsError::VulkanError(err)
     }
 }
 
 impl From<MetalError> for GraphicsError {
     fn from(err: MetalError) -> Self {
-        error!("Metal error occurred: {}", err);
         GraphicsError::MetalError(err)
     }
 }
@@ -149,7 +147,7 @@ impl GraphicsError {
     }
 
     /// Log the error and return self
-    pub fn log_error(self) -> Self {
+    pub fn log_and_return(self) -> Self {
         error!("Graphics error: {}", self);
         self
     }
