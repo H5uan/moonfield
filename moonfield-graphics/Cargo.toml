@@ -11,10 +11,11 @@ winit = { workspace = true }
 tracing = { workspace = true }
 bytemuck = { workspace = true }
 thiserror = { workspace = true }
+shader-slang = { workspace = true }
 
 # Vulkan dependencies - only included when vulkan feature is enabled
-ash = { version = "0.38.0", optional = true }
-ash-window = { version = "0.13.0", optional = true }
+ash = { workspace = true, optional = true }
+ash-window = { workspace = true, optional = true }
 
 # macOS/iOS specific dependencies - only included when metal feature is enabled
 objc2 = { workspace = true, optional = true }
