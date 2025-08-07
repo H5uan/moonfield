@@ -20,5 +20,4 @@ default = ["auto"]
 metal = ["moonfield/metal"]
 vulkan = ["moonfield/vulkan"]
 # Automatically enable appropriate backend based on target platform
-# On macOS: enables Metal, on other platforms: enables Vulkan
 auto = ["moonfield/auto"]

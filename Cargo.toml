@@ -11,8 +11,6 @@ resolver = "3"
 [workspace.dependencies]
 winit = "0.30.12"
 raw-window-handle = "0.6.2"
-ash = "0.38.0"
-ash-window = "0.13.0"
 
 # macOS/iOS specific dependencies - only available on Apple platforms
 objc2 = "0.6.1"
