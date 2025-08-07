@@ -1,43 +1,18 @@
-[package]
-name = "moonfield-examples"
-version = "0.1.0"
-edition = "2024"
-
 [workspace]
 members = [
     "moonfield",
     "moonfield-core",
     "moonfield-graphics",
     "moonfield-impl",
+    "moonfield-examples",
 ]
 resolver = "3"
-
-# Examples configuration
-[[example]]
-name = "moonfield_window"
-path = "examples/moonfield_window.rs"
-
-[dependencies]
-moonfield = { path = "moonfield" }
-winit = { workspace = true }
-tracing = { workspace = true }
-tracing-subscriber = { workspace = true }
-
-[features]
-default = ["auto"]
-# Platform-specific features
-metal = ["moonfield/metal"]
-vulkan = ["moonfield/vulkan"]
-# Automatically enable appropriate backend based on target platform
-# On macOS: enables Metal, on other platforms: enables Vulkan
-auto = ["moonfield/auto"]
 
 [workspace.dependencies]
 winit = "0.30.12"
 raw-window-handle = "0.6.2"
 ash = "0.38.0"
 ash-window = "0.13.0"
-
 
 # macOS/iOS specific dependencies - only available on Apple platforms
 objc2 = "0.6.1"

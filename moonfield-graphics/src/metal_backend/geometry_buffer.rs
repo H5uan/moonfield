@@ -1,9 +1,7 @@
-use std::collections::HashMap;
-use std::rc::{Rc, Weak};
+use std::rc::Weak;
 
 use moonfield_core::array_as_u8_slice;
 
-use crate::backend;
 use crate::buffer::{BufferAccessPattern, BufferKind, GPUBufferDescriptor};
 use crate::geometry_buffer::TriangleDefinition;
 use crate::metal_backend::buffer::MetalBuffer;
@@ -77,7 +75,7 @@ impl MetalGeometryBuffer {
                     }
                 }
             }
-            
+
             vertex_buffers.push(metal_buffer);
         }
 
@@ -98,7 +96,7 @@ impl MetalGeometryBuffer {
                             access_pattern: BufferAccessPattern::Stream,
                         },
                     )?;
-                    
+
                     // Write triangle indices to the buffer
                     let indices: Vec<u32> = triangles
                         .iter()
@@ -108,7 +106,7 @@ impl MetalGeometryBuffer {
                     if let Err(e) = buffer.write_data(index_data) {
                         eprintln!("Failed to write triangle index data: {}", e);
                     }
-                    
+
                     Some(buffer)
                 } else {
                     None
