@@ -303,20 +303,24 @@ where
 
 /// Negative values - amount of mutable borrows, positive - amount of immutable borrows
 #[derive(Default, Debug)]
+#[allow(dead_code)]
 struct RefCounter(pub UnsafeCell<isize>);
 
 unsafe impl Sync for RefCounter {}
 unsafe impl Send for RefCounter {}
 
 impl RefCounter {
+    #[allow(dead_code)]
     unsafe fn get(&self) -> isize {
         unsafe { *self.0.get() }
     }
 
+    #[allow(dead_code)]
     unsafe fn increment(&self) {
         unsafe { *self.0.get() += 1 }
     }
 
+    #[allow(dead_code)]
     unsafe fn decrement(&self) {
         unsafe { *self.0.get() -= 1 }
     }
@@ -325,6 +329,7 @@ impl RefCounter {
 /// Pool Record is the core container of the pool.
 /// It is a warpper for slot.
 #[derive(Debug)]
+#[allow(dead_code)]
 struct PoolRecord<T, S = Option<T>>
 where
     T: Sized,

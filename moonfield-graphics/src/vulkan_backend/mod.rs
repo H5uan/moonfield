@@ -5,7 +5,7 @@ use std::{
 };
 
 use ash::khr::{surface, swapchain};
-use ash::{Device, Entry, Instance, vk};
+use ash::{Device as AshDevice, Entry, Instance, vk};
 use winit::{
     event_loop::ActiveEventLoop,
     raw_window_handle::{HasDisplayHandle, HasWindowHandle},
@@ -24,7 +24,7 @@ pub mod frame_buffer;
 pub struct VulkanGraphicsBackend {
     entry: Entry,
     instance: Instance,
-    device: Device,
+    device: AshDevice,
     physical_device: vk::PhysicalDevice,
     graphics_queue: vk::Queue,
     present_queue: vk::Queue,
@@ -335,7 +335,7 @@ impl VulkanGraphicsBackend {
     fn create_logical_device(
         instance: &Instance, physical_device: vk::PhysicalDevice,
         graphics_queue_family: u32, present_queue_family: u32,
-    ) -> Result<(Device, vk::Queue, vk::Queue), VulkanError> {
+    ) -> Result<(AshDevice, vk::Queue, vk::Queue), VulkanError> {
         unsafe {
             let queue_priorities = [1.0f32];
             let mut queue_create_infos = Vec::new();
@@ -525,7 +525,7 @@ impl VulkanGraphicsBackend {
     }
 
     fn create_image_views(
-        device: &Device, swapchain_images: &[vk::Image],
+        device: &AshDevice, swapchain_images: &[vk::Image],
         swapchain_format: vk::Format,
     ) -> Result<Vec<vk::ImageView>, VulkanError> {
         unsafe {
@@ -562,7 +562,7 @@ impl VulkanGraphicsBackend {
     }
 
     fn create_command_pool(
-        device: &Device, graphics_queue_family: u32,
+        device: &AshDevice, graphics_queue_family: u32,
     ) -> Result<vk::CommandPool, VulkanError> {
         unsafe {
             let create_info = vk::CommandPoolCreateInfo::default()

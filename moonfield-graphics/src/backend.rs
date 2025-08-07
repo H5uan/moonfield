@@ -4,7 +4,7 @@ use crate::{
     error::GraphicsError,
     frame_buffer::SharedFrameBuffer,
     geometry_buffer::{
-        self, GeometryBuffer, GeometryBufferDescriptor, GeometryBufferWarpper,
+        GeometryBufferDescriptor, GeometryBufferWarpper,
     },
 };
 
