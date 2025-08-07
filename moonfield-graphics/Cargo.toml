@@ -10,6 +10,7 @@ moonfield-core = { path = "../moonfield-core" }
 winit = { workspace = true }
 tracing = { workspace = true }
 bytemuck = { workspace = true }
+thiserror = { workspace = true }
 
 # Vulkan dependencies - only included when vulkan feature is enabled
 ash = { version = "0.38.0", optional = true }
@@ -34,7 +35,4 @@ metal = [
     "dep:objc2-metal",
     "dep:objc2-quartz-core",
 ]
-vulkan = [
-    "dep:ash",
-    "dep:ash-window",
-]
+vulkan = ["dep:ash", "dep:ash-window"]

@@ -1,2 +1,2 @@
-pub mod vertex;
 pub mod buffer;
+pub mod vertex;

@@ -1,39 +1,25 @@
-use std::fmt::{Display, Formatter};
+use thiserror::Error;
 use tracing::error;
 
-#[derive(Debug)]
+#[derive(Debug, Error)]
 pub enum RendererError {
+    #[error("Invalid frame size: {0}")]
     InvalidFrameSize(String),
+
+    #[error("Back buffer unavailable")]
     BackBufferUnavailable,
+
+    #[error("Geometry buffer overflow")]
     GeometryBufferOverflow,
+
+    #[error("Render pass failed: {0}")]
     RenderPassFailed(String),
+
+    #[error("Clear operation failed: {0}")]
     ClearFailed(String),
 }
 
-impl Display for RendererError {
-    fn fmt(&self, f: &mut Formatter<'_>) -> std::fmt::Result {
-        match self {
-            RendererError::InvalidFrameSize(msg) => {
-                write!(f, "Invalid frame size: {}", msg)
-            }
-            RendererError::BackBufferUnavailable => {
-                write!(f, "Back buffer unavailable")
-            }
-            RendererError::GeometryBufferOverflow => {
-                write!(f, "Geometry buffer overflow")
-            }
-            RendererError::RenderPassFailed(msg) => {
-                write!(f, "Render pass failed: {}", msg)
-            }
-            RendererError::ClearFailed(msg) => {
-                write!(f, "Clear operation failed: {}", msg)
-            }
-        }
-    }
-}
-
-impl std::error::Error for RendererError {}
-
+// Helper methods
 impl RendererError {
     /// Create an invalid frame size error and log it
     pub fn invalid_frame_size(msg: impl Into<String>) -> Self {

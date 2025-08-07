@@ -1,55 +1,22 @@
-use std::fmt::{Display, Formatter};
-
 use moonfield_graphics::error::GraphicsError;
+use thiserror::Error;
 use tracing::error;
 
 use crate::renderer::error::RendererError;
 
-#[derive(Debug)]
+#[derive(Debug, Error)]
 pub enum EngineError {
     /// Graphics system error
-    Graphics(GraphicsError),
+    #[error("Graphics error: {0}")]
+    Graphics(#[from] GraphicsError),
 
     /// Renderer system error
-    Renderer(RendererError),
+    #[error("Renderer error: {0}")]
+    Renderer(#[from] RendererError),
 
     /// Internal error
+    #[error("Custom error: {0}")]
     Custom(String),
-}
-
-impl Display for EngineError {
-    fn fmt(&self, f: &mut Formatter<'_>) -> std::fmt::Result {
-        match self {
-            EngineError::Graphics(v) => Display::fmt(v, f),
-            EngineError::Renderer(v) => Display::fmt(v, f),
-
-            EngineError::Custom(v) => {
-                write!(f, "Custom error: {v}")
-            }
-        }
-    }
-}
-
-impl std::error::Error for EngineError {
-    fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
-        match self {
-            EngineError::Graphics(err) => Some(err),
-            EngineError::Renderer(err) => Some(err),
-            EngineError::Custom(_) => None,
-        }
-    }
-}
-
-impl From<GraphicsError> for EngineError {
-    fn from(graphics_error: GraphicsError) -> Self {
-        Self::Graphics(graphics_error)
-    }
-}
-
-impl From<RendererError> for EngineError {
-    fn from(renderer_error: RendererError) -> Self {
-        Self::Renderer(renderer_error)
-    }
 }
 
 impl EngineError {

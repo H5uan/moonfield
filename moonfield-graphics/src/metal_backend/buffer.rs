@@ -1,7 +1,5 @@
 use std::{
     cell::Cell,
-    ffi::c_void,
-    fmt::format,
     rc::{Rc, Weak},
 };
 

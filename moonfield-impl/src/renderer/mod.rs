@@ -2,7 +2,7 @@ use std::rc::Rc;
 
 use moonfield_core::math::{color, color::Color};
 use moonfield_graphics::{
-    backend::{GraphicsBackend, SharedGraphicsBackend},
+    backend::{Device, SharedGraphicsBackend},
     error::GraphicsError,
     geometry_buffer::GeometryBufferWarpper,
 };
@@ -25,7 +25,7 @@ pub struct Renderer {
 
 impl Renderer {
     pub fn new(
-        backend: Rc<dyn GraphicsBackend>, frame_size: (u32, u32),
+        backend: Rc<dyn Device>, frame_size: (u32, u32),
     ) -> Result<Self, EngineError> {
         Ok(Self {
             frame_size,
@@ -65,15 +65,19 @@ impl Renderer {
         &mut self, new_size: (u32, u32),
     ) -> Result<(), EngineError> {
         if new_size.0 == 0 || new_size.1 == 0 {
-            return Err(RendererError::invalid_frame_size(
-                format!("Frame size cannot be zero: {}x{}", new_size.0, new_size.1)
-            ).into());
+            return Err(RendererError::invalid_frame_size(format!(
+                "Frame size cannot be zero: {}x{}",
+                new_size.0, new_size.1
+            ))
+            .into());
         }
 
         if new_size.0 > 16384 || new_size.1 > 16384 {
-            return Err(RendererError::invalid_frame_size(
-                format!("Frame size too large: {}x{}", new_size.0, new_size.1)
-            ).into());
+            return Err(RendererError::invalid_frame_size(format!(
+                "Frame size too large: {}x{}",
+                new_size.0, new_size.1
+            ))
+            .into());
         }
 
         self.frame_size.0 = new_size.0;
@@ -100,13 +104,15 @@ impl Renderer {
     }
 
     /// Add a geometry buffer to be rendered this frame
-    pub fn draw_geometry(&mut self, geometry_buffer: GeometryBufferWarpper) -> Result<(), EngineError> {
+    pub fn draw_geometry(
+        &mut self, geometry_buffer: GeometryBufferWarpper,
+    ) -> Result<(), EngineError> {
         const MAX_GEOMETRY_BUFFERS: usize = 1000;
-        
+
         if self.geometry_buffers.len() >= MAX_GEOMETRY_BUFFERS {
             return Err(RendererError::GeometryBufferOverflow.into());
         }
-        
+
         self.geometry_buffers.push(geometry_buffer);
         Ok(())
     }

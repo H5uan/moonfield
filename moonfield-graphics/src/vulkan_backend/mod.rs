@@ -13,7 +13,7 @@ use winit::{
 };
 
 use crate::{
-    backend::{BackendCapabilities, GraphicsBackend, SharedGraphicsBackend},
+    backend::{BackendCapabilities, Device, SharedGraphicsBackend},
     error::{GraphicsError, VulkanError},
     geometry_buffer::{GeometryBufferDescriptor, GeometryBufferWarpper},
     vulkan_backend::frame_buffer::VulkanFrameBuffer,
@@ -579,7 +579,7 @@ impl VulkanGraphicsBackend {
     }
 }
 
-impl GraphicsBackend for VulkanGraphicsBackend {
+impl Device for VulkanGraphicsBackend {
     fn back_buffer(
         &self,
     ) -> Result<crate::frame_buffer::SharedFrameBuffer, GraphicsError> {

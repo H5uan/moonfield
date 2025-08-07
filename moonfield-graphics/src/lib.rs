@@ -1,3 +1,5 @@
+use core::error::Error;
+
 pub mod backend;
 pub mod buffer;
 pub mod error;
@@ -25,4 +27,28 @@ macro_rules! define_shared_wrapper {
             }
         }
     };
+}
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum PipelineError {}
+
+pub trait Device {
+    fn create_buffer(&self);
+    fn destroy_buffer(&self);
+    /// map gpu buffer to cpu
+    fn map_buffer(&self);
+    fn unmap_buffer(&self);
+
+    fn create_shader_module(&self);
+    fn destroy_shader_module(&self);
+
+    fn create_pipeline_layout(&self);
+    fn destroy_pipeline_layout(&self);
+
+    fn create_render_pipeline(&self);
+    fn destroy_render_pipeline(&self);
+
+    fn create_pipeline_cache(&self);
+    fn destroy_pipeline_cache(&self);
+
+    fn create_surface(&self);
 }
