@@ -5,14 +5,14 @@ use tracing::error;
 
 use crate::buffer::{BufferAccessPattern, BufferKind, GPUBufferDescriptor};
 use crate::geometry_buffer::TriangleDefinition;
-use crate::metal_backend::buffer::MetalBuffer;
+use crate::metal::buffer::MetalBuffer;
 use crate::{
     buffer::GPUBuffer,
     error::GraphicsError,
     geometry_buffer::{
         GeometryBuffer, GeometryBufferDescriptor, IndexAttributeKind,
     },
-    metal_backend::MetalGraphicsBackend,
+    metal::MetalGraphicsBackend,
 };
 
 pub struct MetalGeometryBuffer {

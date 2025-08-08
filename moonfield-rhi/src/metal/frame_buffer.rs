@@ -9,10 +9,10 @@ use objc2_metal::{
 use objc2_quartz_core::CAMetalDrawable;
 
 use crate::{
-    error::{GraphicsError, MetalError},
+    error::GraphicsError,
     frame_buffer::FrameBuffer,
     geometry_buffer::{GeometryBufferAsAny, GeometryBufferWarpper},
-    metal_backend::{
+    metal::{
         MetalGraphicsBackend, geometry_buffer::MetalGeometryBuffer,
     },
 };
@@ -46,9 +46,9 @@ impl MetalFrameBuffer {
                     &self.render_pass_descriptor,
                 )
                 .ok_or_else(|| {
-                    GraphicsError::MetalError(MetalError::RenderPassError(
+                    GraphicsError::CommandError(
                         "Failed to create render command encoder".to_string(),
-                    ))
+                    )
                 })?;
             self.render_encoder = Some(encoder);
         }

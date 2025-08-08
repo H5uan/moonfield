@@ -1,13 +1,13 @@
 use std::rc::Rc;
 
 #[cfg(all(feature = "metal", target_os = "macos"))]
-use moonfield_graphics::metal_backend::MetalGraphicsBackend;
+use moonfield_rhi::metal::MetalGraphicsBackend;
 #[cfg(all(
     feature = "vulkan",
     not(all(feature = "metal", target_os = "macos"))
 ))]
-use moonfield_graphics::vulkan_backend::VulkanGraphicsBackend;
-use moonfield_graphics::{
+use moonfield_rhi::vulkan::VulkanGraphicsBackend;
+use moonfield_rhi::{
     backend::SharedGraphicsBackend, error::GraphicsError,
 };
 use tracing::{debug, info, warn};

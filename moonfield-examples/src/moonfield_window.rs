@@ -2,7 +2,7 @@ use moonfield::engine::{
     Engine, EngineInitParams, GraphicsBackendConstructor, GraphicsContext,
     GraphicsContextParams,
 };
-use moonfield::graphics::{
+use moonfield::rhi::{
     buffer::BufferKind,
     geometry_buffer::{
         ElementsDescriptor, GeometryBufferDescriptor, GeometryBufferWarpper,

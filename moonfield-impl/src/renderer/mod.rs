@@ -1,7 +1,7 @@
 use std::rc::Rc;
 
 use moonfield_core::math::{color, color::Color};
-use moonfield_graphics::{
+use moonfield_rhi::{
     backend::{Device, SharedGraphicsBackend},
     error::GraphicsError,
     geometry_buffer::GeometryBufferWarpper,
@@ -65,7 +65,7 @@ impl Renderer {
         &mut self, new_size: (u32, u32),
     ) -> Result<(), EngineError> {
         if new_size.0 == 0 || new_size.1 == 0 {
-            return Err(RendererError::invalid_frame_size(format!(
+            return Err(RendererError::InvalidFrameSize(format!(
                 "Frame size cannot be zero: {}x{}",
                 new_size.0, new_size.1
             ))
@@ -73,7 +73,7 @@ impl Renderer {
         }
 
         if new_size.0 > 16384 || new_size.1 > 16384 {
-            return Err(RendererError::invalid_frame_size(format!(
+            return Err(RendererError::InvalidFrameSize(format!(
                 "Frame size too large: {}x{}",
                 new_size.0, new_size.1
             ))

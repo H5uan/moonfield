@@ -12,8 +12,8 @@ use crate::{
     buffer::{
         self, BufferAccessPattern, BufferKind, GPUBuffer, GPUBufferDescriptor,
     },
-    error::{GraphicsError, MetalError},
-    metal_backend::MetalGraphicsBackend,
+    error::GraphicsError,
+    metal::MetalGraphicsBackend,
 };
 
 pub struct MetalBuffer {
@@ -67,9 +67,10 @@ impl MetalBuffer {
             .device()
             .newBufferWithLength_options(size, resource_options)
             .ok_or_else(|| {
-                GraphicsError::MetalError(MetalError::BufferCreationError(
-                    format!("Failed to create buffer with size {}", size),
-                ))
+                GraphicsError::resource_creation_failed(
+                    "Metal buffer",
+                    &format!("Failed to create buffer with size {}", size),
+                )
             })?;
 
         Ok(Self {

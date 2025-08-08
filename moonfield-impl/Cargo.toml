@@ -6,7 +6,7 @@ edition = "2024"
 
 [dependencies]
 moonfield-core ={ path = "../moonfield-core"}
-moonfield-graphics = {path = "../moonfield-graphics"}
+moonfield-rhi = {path = "../moonfield-rhi"}
 winit = { workspace = true }
 tracing = { workspace = true }
 thiserror = { workspace = true }
@@ -14,5 +14,5 @@ thiserror = { workspace = true }
 [features]
 default = []
 # Backend features
-metal = ["moonfield-graphics/metal"]
-vulkan = ["moonfield-graphics/vulkan"]
+metal = ["moonfield-rhi/metal"]
+vulkan = ["moonfield-rhi/vulkan"]

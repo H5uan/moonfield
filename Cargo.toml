@@ -2,7 +2,7 @@
 members = [
     "moonfield",
     "moonfield-core",
-    "moonfield-graphics",
+    "moonfield-rhi",
     "moonfield-impl",
     "moonfield-examples",
 ]

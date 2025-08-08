@@ -13,16 +13,16 @@ moonfield-core = { path = "../moonfield-core" }
 [features]
 default = []
 # Backend features
-metal = ["moonfield-graphics/metal", "moonfield-impl/metal"]
-vulkan = ["moonfield-graphics/vulkan", "moonfield-impl/vulkan"]
+metal = ["moonfield-rhi/metal", "moonfield-impl/metal"]
+vulkan = ["moonfield-rhi/vulkan", "moonfield-impl/vulkan"]
 # Auto feature selects appropriate backend based on platform
 auto = []
 
 # Platform-specific dependencies
 [target.'cfg(target_os = "macos")'.dependencies]
 moonfield-impl = { path = "../moonfield-impl", features = ["metal"] }
-moonfield-graphics = { path = "../moonfield-graphics", features = ["metal"] }
+moonfield-rhi = { path = "../moonfield-rhi", features = ["metal"] }
 
 [target.'cfg(not(target_os = "macos"))'.dependencies]
 moonfield-impl = { path = "../moonfield-impl", features = ["vulkan"] }
-moonfield-graphics = { path = "../moonfield-graphics", features = ["vulkan"] }
+moonfield-rhi = { path = "../moonfield-rhi", features = ["vulkan"] }
