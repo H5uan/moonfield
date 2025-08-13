@@ -3,9 +3,7 @@ use std::rc::Rc;
 use crate::{
     error::GraphicsError,
     frame_buffer::SharedFrameBuffer,
-    geometry_buffer::{
-        GeometryBufferDescriptor, GeometryBufferWarpper,
-    },
+    geometry_buffer::{GeometryBufferDescriptor, GeometryBufferWarpper},
 };
 
 pub type SharedGraphicsBackend = Rc<dyn Device>;

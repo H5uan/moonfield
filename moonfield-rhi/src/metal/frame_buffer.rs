@@ -12,9 +12,7 @@ use crate::{
     error::GraphicsError,
     frame_buffer::FrameBuffer,
     geometry_buffer::{GeometryBufferAsAny, GeometryBufferWarpper},
-    metal::{
-        MetalGraphicsBackend, geometry_buffer::MetalGeometryBuffer,
-    },
+    metal::{MetalGraphicsBackend, geometry_buffer::MetalGeometryBuffer},
 };
 
 pub struct MetalFrameBuffer {

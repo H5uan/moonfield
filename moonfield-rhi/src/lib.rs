@@ -1,12 +1,12 @@
 pub mod backend;
 pub mod buffer;
 
+mod descriptors;
 pub mod error;
 pub mod frame_buffer;
 pub mod geometry_buffer;
 mod traits;
 mod types;
-mod descriptors;
 
 #[cfg(feature = "metal")]
 pub mod metal;
@@ -14,9 +14,9 @@ pub mod metal;
 #[cfg(feature = "vulkan")]
 pub mod vulkan;
 
+pub use crate::descriptors::*;
 pub use crate::traits::*;
 pub use crate::types::*;
-pub use crate::descriptors::*;
 
 #[macro_export]
 macro_rules! define_shared_wrapper {

@@ -1,3 +1,3 @@
-pub struct InstanceDescriptor<'a>{
-    pub name : &'a str,
+pub struct InstanceDescriptor<'a> {
+    pub name: &'a str,
 }

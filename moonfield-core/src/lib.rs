@@ -3,6 +3,7 @@ use bytemuck::Pod;
 pub mod allocator;
 pub mod logging;
 pub mod math;
+pub mod type_traits;
 
 // to avoid dangling pointer, the returned slice must have the same lifetime
 // as the original array. Since the slice references the same memory address

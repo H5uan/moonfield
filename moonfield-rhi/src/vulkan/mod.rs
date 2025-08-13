@@ -56,7 +56,10 @@ impl VulkanGraphicsBackend {
 
         unsafe {
             let entry = Entry::load().map_err(|e| {
-                GraphicsError::initialization_failed("Vulkan", &format!("Failed to load Vulkan: {}", e))
+                GraphicsError::initialization_failed(
+                    "Vulkan",
+                    &format!("Failed to load Vulkan: {}", e),
+                )
             })?;
 
             let instance = Self::create_instance(&entry, &window)?;
@@ -70,7 +73,10 @@ impl VulkanGraphicsBackend {
                 None,
             )
             .map_err(|e| {
-                GraphicsError::device_error("Vulkan", &format!("Failed to create surface: {}", e))
+                GraphicsError::device_error(
+                    "Vulkan",
+                    &format!("Failed to create surface: {}", e),
+                )
             })?;
 
             let surface_loader = surface::Instance::new(&entry, &instance);
@@ -175,7 +181,10 @@ impl VulkanGraphicsBackend {
                 window.display_handle().unwrap().as_raw(),
             )
             .map_err(|e| {
-                GraphicsError::initialization_failed("Vulkan", &format!("Failed to get required extensions: {}", e))
+                GraphicsError::initialization_failed(
+                    "Vulkan",
+                    &format!("Failed to get required extensions: {}", e),
+                )
             })?;
 
             let create_info = vk::InstanceCreateInfo::default()
@@ -183,7 +192,10 @@ impl VulkanGraphicsBackend {
                 .enabled_extension_names(&extension_names);
 
             entry.create_instance(&create_info, None).map_err(|e| {
-                GraphicsError::initialization_failed("Vulkan", &format!("Failed to create instance: {}", e))
+                GraphicsError::initialization_failed(
+                    "Vulkan",
+                    &format!("Failed to create instance: {}", e),
+                )
             })
         }
     }
@@ -195,7 +207,10 @@ impl VulkanGraphicsBackend {
         unsafe {
             let physical_devices =
                 instance.enumerate_physical_devices().map_err(|e| {
-                    GraphicsError::device_error("Vulkan", &format!("Failed to enumerate physical devices: {}", e))
+                    GraphicsError::device_error(
+                        "Vulkan",
+                        &format!("Failed to enumerate physical devices: {}", e),
+                    )
                 })?;
 
             for device in physical_devices {
@@ -209,7 +224,10 @@ impl VulkanGraphicsBackend {
                 }
             }
 
-            Err(GraphicsError::device_error("Vulkan", "No suitable physical device found"))
+            Err(GraphicsError::device_error(
+                "Vulkan",
+                "No suitable physical device found",
+            ))
         }
     }
 
@@ -233,7 +251,13 @@ impl VulkanGraphicsBackend {
             let available_extensions = instance
                 .enumerate_device_extension_properties(device)
                 .map_err(|e| {
-                    GraphicsError::device_error("Vulkan", &format!("Failed to enumerate device extensions: {}", e))
+                    GraphicsError::device_error(
+                        "Vulkan",
+                        &format!(
+                            "Failed to enumerate device extensions: {}",
+                            e
+                        ),
+                    )
                 })?;
 
             let required_extensions = [swapchain::NAME];
@@ -252,12 +276,18 @@ impl VulkanGraphicsBackend {
             let formats = surface_loader
                 .get_physical_device_surface_formats(device, surface)
                 .map_err(|e| {
-                    GraphicsError::swapchain_error("Vulkan", &format!("Failed to get surface formats: {}", e))
+                    GraphicsError::swapchain_error(
+                        "Vulkan",
+                        &format!("Failed to get surface formats: {}", e),
+                    )
                 })?;
             let present_modes = surface_loader
                 .get_physical_device_surface_present_modes(device, surface)
                 .map_err(|e| {
-                    GraphicsError::swapchain_error("Vulkan", &format!("Failed to get present modes: {}", e))
+                    GraphicsError::swapchain_error(
+                        "Vulkan",
+                        &format!("Failed to get present modes: {}", e),
+                    )
                 })?;
 
             Ok(!formats.is_empty() && !present_modes.is_empty())
@@ -285,7 +315,10 @@ impl VulkanGraphicsBackend {
                 let present_support = surface_loader
                     .get_physical_device_surface_support(device, index, surface)
                     .map_err(|e| {
-                        GraphicsError::device_error("Vulkan", &format!("Failed to check present support: {}", e))
+                        GraphicsError::device_error(
+                            "Vulkan",
+                            &format!("Failed to check present support: {}", e),
+                        )
                     })?;
 
                 if present_support {
@@ -299,7 +332,10 @@ impl VulkanGraphicsBackend {
 
             match (graphics_family, present_family) {
                 (Some(graphics), Some(present)) => Ok((graphics, present)),
-                _ => Err(GraphicsError::device_error("Vulkan", "Failed to find suitable queue families")),
+                _ => Err(GraphicsError::device_error(
+                    "Vulkan",
+                    "Failed to find suitable queue families",
+                )),
             }
         }
     }
@@ -337,7 +373,10 @@ impl VulkanGraphicsBackend {
             let device = instance
                 .create_device(physical_device, &device_create_info, None)
                 .map_err(|e| {
-                    GraphicsError::device_error("Vulkan", &format!("Failed to create logical device: {}", e))
+                    GraphicsError::device_error(
+                        "Vulkan",
+                        &format!("Failed to create logical device: {}", e),
+                    )
                 })?;
 
             let graphics_queue =
@@ -365,13 +404,19 @@ impl VulkanGraphicsBackend {
                     surface,
                 )
                 .map_err(|e| {
-                    GraphicsError::swapchain_error("Vulkan", &format!("Failed to get surface capabilities: {}", e))
+                    GraphicsError::swapchain_error(
+                        "Vulkan",
+                        &format!("Failed to get surface capabilities: {}", e),
+                    )
                 })?;
 
             let surface_formats = surface_loader
                 .get_physical_device_surface_formats(physical_device, surface)
                 .map_err(|e| {
-                    GraphicsError::swapchain_error("Vulkan", &format!("Failed to get surface formats: {}", e))
+                    GraphicsError::swapchain_error(
+                        "Vulkan",
+                        &format!("Failed to get surface formats: {}", e),
+                    )
                 })?;
 
             let present_modes = surface_loader
@@ -380,7 +425,10 @@ impl VulkanGraphicsBackend {
                     surface,
                 )
                 .map_err(|e| {
-                    GraphicsError::swapchain_error("Vulkan", &format!("Failed to get present modes: {}", e))
+                    GraphicsError::swapchain_error(
+                        "Vulkan",
+                        &format!("Failed to get present modes: {}", e),
+                    )
                 })?;
 
             // Choose surface format
@@ -465,13 +513,19 @@ impl VulkanGraphicsBackend {
             let swapchain = swapchain_loader
                 .create_swapchain(&swapchain_create_info, None)
                 .map_err(|e| {
-                    GraphicsError::swapchain_error("Vulkan", &format!("Failed to create swapchain: {}", e))
+                    GraphicsError::swapchain_error(
+                        "Vulkan",
+                        &format!("Failed to create swapchain: {}", e),
+                    )
                 })?;
 
             let swapchain_images = swapchain_loader
                 .get_swapchain_images(swapchain)
                 .map_err(|e| {
-                    GraphicsError::swapchain_error("Vulkan", &format!("Failed to get swapchain images: {}", e))
+                    GraphicsError::swapchain_error(
+                        "Vulkan",
+                        &format!("Failed to get swapchain images: {}", e),
+                    )
                 })?;
 
             Ok((swapchain, surface_format.format, extent, swapchain_images))
@@ -505,7 +559,10 @@ impl VulkanGraphicsBackend {
                         });
 
                     device.create_image_view(&create_info, None).map_err(|e| {
-                        GraphicsError::device_error("Vulkan", &format!("Failed to create image view: {}", e))
+                        GraphicsError::device_error(
+                            "Vulkan",
+                            &format!("Failed to create image view: {}", e),
+                        )
                     })
                 })
                 .collect()
@@ -521,7 +578,10 @@ impl VulkanGraphicsBackend {
                 .queue_family_index(graphics_queue_family);
 
             device.create_command_pool(&create_info, None).map_err(|e| {
-                GraphicsError::command_error("Vulkan", &format!("Failed to create command pool: {}", e))
+                GraphicsError::command_error(
+                    "Vulkan",
+                    &format!("Failed to create command pool: {}", e),
+                )
             })
         }
     }
@@ -541,32 +601,47 @@ impl Device for VulkanGraphicsBackend {
                 .device
                 .create_semaphore(&semaphore_create_info, None)
                 .map_err(|e| {
-                    GraphicsError::command_error("Vulkan", &format!("Failed to create semaphore: {}", e))
+                    GraphicsError::command_error(
+                        "Vulkan",
+                        &format!("Failed to create semaphore: {}", e),
+                    )
                 })?;
 
             let render_finished_semaphore = self
                 .device
                 .create_semaphore(&semaphore_create_info, None)
                 .map_err(|e| {
-                    GraphicsError::command_error("Vulkan", &format!("Failed to create semaphore: {}", e))
+                    GraphicsError::command_error(
+                        "Vulkan",
+                        &format!("Failed to create semaphore: {}", e),
+                    )
                 })?;
 
             let in_flight_fence = self
                 .device
                 .create_fence(&fence_create_info, None)
                 .map_err(|e| {
-                    GraphicsError::command_error("Vulkan", &format!("Failed to create fence: {}", e))
+                    GraphicsError::command_error(
+                        "Vulkan",
+                        &format!("Failed to create fence: {}", e),
+                    )
                 })?;
 
             // Wait for fence and reset it
             self.device
                 .wait_for_fences(&[in_flight_fence], true, u64::MAX)
                 .map_err(|e| {
-                    GraphicsError::command_error("Vulkan", &format!("Failed to wait for fence: {}", e))
+                    GraphicsError::command_error(
+                        "Vulkan",
+                        &format!("Failed to wait for fence: {}", e),
+                    )
                 })?;
 
             self.device.reset_fences(&[in_flight_fence]).map_err(|e| {
-                GraphicsError::command_error("Vulkan", &format!("Failed to reset fence: {}", e))
+                GraphicsError::command_error(
+                    "Vulkan",
+                    &format!("Failed to reset fence: {}", e),
+                )
             })?;
 
             // Acquire next image
@@ -579,7 +654,10 @@ impl Device for VulkanGraphicsBackend {
                     vk::Fence::null(),
                 )
                 .map_err(|e| {
-                    GraphicsError::swapchain_error("Vulkan", &format!("Failed to acquire next image: {}", e))
+                    GraphicsError::swapchain_error(
+                        "Vulkan",
+                        &format!("Failed to acquire next image: {}", e),
+                    )
                 })?;
 
             // Allocate command buffer
@@ -593,7 +671,10 @@ impl Device for VulkanGraphicsBackend {
                 .device
                 .allocate_command_buffers(&command_buffer_allocate_info)
                 .map_err(|e| {
-                    GraphicsError::command_error("Vulkan", &format!("Failed to allocate command buffer: {}", e))
+                    GraphicsError::command_error(
+                        "Vulkan",
+                        &format!("Failed to allocate command buffer: {}", e),
+                    )
                 })?;
 
             let command_buffer = command_buffers[0];
@@ -605,7 +686,10 @@ impl Device for VulkanGraphicsBackend {
             self.device
                 .begin_command_buffer(command_buffer, &begin_info)
                 .map_err(|e| {
-                    GraphicsError::command_error("Vulkan", &format!("Failed to begin command buffer: {}", e))
+                    GraphicsError::command_error(
+                        "Vulkan",
+                        &format!("Failed to begin command buffer: {}", e),
+                    )
                 })?;
 
             // Get the swapchain image for this frame

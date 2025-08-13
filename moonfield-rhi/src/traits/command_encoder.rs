@@ -1,6 +1,6 @@
 use crate::Api;
 
-pub trait CommandEncoder{
+pub trait CommandEncoder {
     type A: Api;
 
     fn begin_encoding();

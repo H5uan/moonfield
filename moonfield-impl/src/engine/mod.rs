@@ -7,9 +7,7 @@ use moonfield_rhi::metal::MetalGraphicsBackend;
     not(all(feature = "metal", target_os = "macos"))
 ))]
 use moonfield_rhi::vulkan::VulkanGraphicsBackend;
-use moonfield_rhi::{
-    backend::SharedGraphicsBackend, error::GraphicsError,
-};
+use moonfield_rhi::{backend::SharedGraphicsBackend, error::GraphicsError};
 use tracing::{debug, info, warn};
 use winit::{
     event_loop::ActiveEventLoop,

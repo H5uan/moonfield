@@ -78,7 +78,10 @@ impl MetalGraphicsBackend {
 
         // Create the Metal device
         let device = MTLCreateSystemDefaultDevice().ok_or_else(|| {
-            GraphicsError::device_error("Metal", "Failed to create default Metal device")
+            GraphicsError::device_error(
+                "Metal",
+                "Failed to create default Metal device",
+            )
         })?;
 
         // Create the Metal layer. Layer(suface & swapchain) must know which device will draw on layer
@@ -92,7 +95,10 @@ impl MetalGraphicsBackend {
 
         // Create the Metal command queue
         let command_queue = device.newCommandQueue().ok_or_else(|| {
-            GraphicsError::command_error("Metal", "Failed to create command queue")
+            GraphicsError::command_error(
+                "Metal",
+                "Failed to create command queue",
+            )
         })?;
 
         let shader_source = NSString::from_str(include_str!(
@@ -102,19 +108,28 @@ impl MetalGraphicsBackend {
         let library = device
             .newLibraryWithSource_options_error(&shader_source, None)
             .map_err(|e| {
-                GraphicsError::shader_error("Metal", &format!("Failed to create shader library: {:?}", e))
+                GraphicsError::shader_error(
+                    "Metal",
+                    &format!("Failed to create shader library: {:?}", e),
+                )
             })?;
 
         let vertex_function = library
             .newFunctionWithName(&NSString::from_str("vertex_main"))
             .ok_or_else(|| {
-                GraphicsError::shader_error("Metal", "Failed to find vertex_main function")
+                GraphicsError::shader_error(
+                    "Metal",
+                    "Failed to find vertex_main function",
+                )
             })?;
 
         let fragment_function = library
             .newFunctionWithName(&NSString::from_str("fragment_main"))
             .ok_or_else(|| {
-                GraphicsError::shader_error("Metal", "Failed to find fragment_main function")
+                GraphicsError::shader_error(
+                    "Metal",
+                    "Failed to find fragment_main function",
+                )
             })?;
 
         let vertex_descriptor = unsafe { MTLVertexDescriptor::new() };
@@ -149,7 +164,10 @@ impl MetalGraphicsBackend {
         let pipeline_state = device
             .newRenderPipelineStateWithDescriptor_error(&pipeline_descriptor)
             .map_err(|e| {
-                GraphicsError::pipeline_error("Metal", &format!("Failed to create render pipeline state: {:?}", e))
+                GraphicsError::pipeline_error(
+                    "Metal",
+                    &format!("Failed to create render pipeline state: {:?}", e),
+                )
             })?;
 
         match raw_window_handle {
@@ -201,7 +219,8 @@ impl Device for MetalGraphicsBackend {
         let drawable = unsafe {
             self.layer.nextDrawable().ok_or_else(|| {
                 GraphicsError::SwapchainError(
-                    "Failed to get drawable (surface and swapchain)".to_string(),
+                    "Failed to get drawable (surface and swapchain)"
+                        .to_string(),
                 )
             })
         }?;
@@ -224,7 +243,10 @@ impl Device for MetalGraphicsBackend {
 
         let command_buffer =
             self.command_queue.commandBuffer().ok_or_else(|| {
-                GraphicsError::command_error("Metal", "Failed to create command buffer")
+                GraphicsError::command_error(
+                    "Metal",
+                    "Failed to create command buffer",
+                )
             })?;
 
         let frame_buffer = MetalFrameBuffer {
