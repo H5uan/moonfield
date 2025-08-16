@@ -14,10 +14,3 @@ winit = { workspace = true }
 tracing = { workspace = true }
 tracing-subscriber = { workspace = true }
 
-[features]
-default = ["auto"]
-# Platform-specific features
-metal = ["moonfield/metal"]
-vulkan = ["moonfield/vulkan"]
-# Automatically enable appropriate backend based on target platform
-auto = ["moonfield/auto"]

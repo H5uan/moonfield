@@ -12,7 +12,6 @@ tracing = { workspace = true }
 thiserror = { workspace = true }
 
 [features]
-default = []
 # Backend features
 metal = ["moonfield-rhi/metal"]
 vulkan = ["moonfield-rhi/vulkan"]

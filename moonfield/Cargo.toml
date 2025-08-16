@@ -1,7 +1,7 @@
 [package]
 name = "moonfield"
 version = "0.1.0"
-edition = "2021"
+edition = "2024"
 
 [lib]
 crate-type = ["rlib"]
@@ -9,14 +9,6 @@ crate-type = ["rlib"]
 # Library dependencies
 [dependencies]
 moonfield-core = { path = "../moonfield-core" }
-
-[features]
-default = []
-# Backend features
-metal = ["moonfield-rhi/metal", "moonfield-impl/metal"]
-vulkan = ["moonfield-rhi/vulkan", "moonfield-impl/vulkan"]
-# Auto feature selects appropriate backend based on platform
-auto = []
 
 # Platform-specific dependencies
 [target.'cfg(target_os = "macos")'.dependencies]
