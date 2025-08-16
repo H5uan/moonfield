@@ -16,6 +16,7 @@ ash = "0.38.0"
 ash-window =  "0.13.0"
 gltf = "1.4.1"
 shader-slang = "0.1.0"
+gpu-allocator = "0.27.0"
 
 # macOS/iOS specific dependencies - only available on Apple platforms
 objc2 = "0.6.1"
