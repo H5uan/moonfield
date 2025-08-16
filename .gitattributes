@@ -1,5 +1,14 @@
-# Set default behavior for all text files
 * text=auto
 
-# Force LF line endings for shell scripts to avoid issues on Windows
-*.sh text eol=lf
+*.sh eol=lf
+*.js eol=lf
+*.py eol=lf
+*.json eol=lf
+*.yml eol=lf
+*.md eol=lf
+
+*.sln eol=crlf
+*.csproj eol=crlf
+
+*.png binary
+*.jpg binary
