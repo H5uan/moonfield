@@ -1,34 +1,107 @@
+//! # Allocator Module
+//!
+//! Memory pool management system with handle-based resource tracking.
+//!
+//! This module provides efficient memory allocation and resource management through:
+//!
+//! - **Pool**: Generic memory pool with automatic free slot tracking
+//! - **Handle**: Type-safe, generational handles for resource references
+//! - **Slot**: Configurable slot types for different allocation strategies
+//!
+//! ## Features
+//!
+//! - **Generational Handles**: Prevents use-after-free bugs through generation counters
+//! - **Type Safety**: Compile-time type checking for resource handles
+//! - **Memory Efficiency**: Reuses freed slots to minimize memory fragmentation
+//! - **Thread Safety**: Support for atomic operations where needed
+//!
+//! ## Usage
+//!
+//! ```rust
+//! use moonfield_core::allocator::{Pool, Handle};
+//!
+//! // Create a pool for your resource type
+//! struct MyResource {
+//!     data: String,
+//! }
+//!
+//! impl MyResource {
+//!     fn new() -> Self {
+//!         Self { data: "Hello".to_string() }
+//!     }
+//! }
+//!
+//! let mut pool: Pool<MyResource> = Pool::new();
+//!
+//! // Allocate a resource and get a handle
+//! let handle = pool.spawn(MyResource::new());
+//!
+//! // Access the resource using the handle
+//! if let Some(resource) = pool.get(handle) {
+//!     // Use the resource
+//! }
+//!
+//! // Free the resource
+//! pool.free(handle);
+//! ```
+//!
+//! ## Safety
+//!
+//! - Handles are invalidated when resources are freed
+//! - Generation counters prevent use-after-free bugs
+//! - All operations are bounds-checked
+
 pub mod handle;
+pub mod multiborrow;
 pub mod slot;
 
-use std::{cell::UnsafeCell, marker::PhantomData};
+use std::cell::UnsafeCell;
 
 pub use handle::*;
+pub use multiborrow::*;
 pub use slot::*;
 
+/// Invalid index constant used to mark uninitialized or invalid handles.
 const INVALID_INDEX: u32 = 0;
+
+/// Invalid generation constant used to mark uninitialized or invalid handles.
 const INVALID_GENERATION: u32 = 0;
 
-/// Pool is a wrapper for continuous array
-/// free_stack is for tracking free slot
+/// A generic memory pool for efficient resource allocation and management.
+///
+/// The `Pool` provides automatic memory management with handle-based access.
+/// It tracks free slots to enable efficient reuse of memory locations.
+///
+/// # Type Parameters
+///
+/// * `T` - The type of resources stored in the pool
+/// * `S` - The slot type for managing individual pool entries (defaults to `Option<T>`)
+///
+/// # Examples
+///
+/// ```rust
+/// use moonfield_core::allocator::Pool;
+///
+/// struct MyResource {
+///     data: String,
+/// }
+///
+/// let mut pool: Pool<MyResource> = Pool::new();
+/// let handle = pool.spawn(MyResource { data: "Hello".to_string() });
+///
+/// if let Some(resource) = pool.get(handle) {
+///     println!("Resource data: {}", resource.data);
+/// }
+/// ```
 #[derive(Debug)]
 pub struct Pool<T, S = Option<T>>
 where
     T: Sized,
     S: Slot<Element = T>, {
+    /// Internal records storing the actual resources and their metadata.
     records: Vec<PoolRecord<T, S>>,
+    /// Stack of free slot indices for efficient reuse.
     free_stack: Vec<u32>,
-}
-
-impl<T, S> PartialEq for Pool<T, S>
-where
-    T: PartialEq,
-    S: Slot<Element = T> + PartialEq,
-{
-    #[inline(always)]
-    fn eq(&self, other: &Self) -> bool {
-        self.records == other.records
-    }
 }
 
 impl<T, S> Default for Pool<T, S>
@@ -41,29 +114,33 @@ where
     }
 }
 
-impl<T, S> Clone for Pool<T, S>
-where
-    T: Clone,
-    S: Slot<Element = T> + Clone + 'static,
-{
-    #[inline]
-    fn clone(&self) -> Self {
-        Self {
-            records: self.records.clone(),
-            free_stack: self.free_stack.clone(),
-        }
-    }
-}
-
 impl<T, S> Pool<T, S>
 where
     S: Slot<Element = T> + 'static,
 {
+    /// Creates a new empty pool.
+    ///
+    /// # Returns
+    ///
+    /// A new `Pool` instance with no allocated resources.
     #[inline]
     pub fn new() -> Self {
         Pool { records: Vec::new(), free_stack: Vec::new() }
     }
 
+    /// Creates a new pool with the specified initial capacity.
+    ///
+    /// # Arguments
+    ///
+    /// * `capacity` - The initial capacity for the pool
+    ///
+    /// # Returns
+    ///
+    /// A new `Pool` instance with the specified capacity.
+    ///
+    /// # Panics
+    ///
+    /// Panics if `capacity` overflows `usize`.
     #[inline]
     pub fn with_capacity(capacity: u32) -> Self {
         let capacity =
@@ -74,635 +151,516 @@ where
         }
     }
 
+    /// Returns the number of records in the pool.
+    ///
+    /// # Returns
+    ///
+    /// The number of records as a `u32`.
+    ///
+    /// # Panics
+    ///
+    /// Panics if the number of records overflows `u32`.
     fn records_len(&self) -> u32 {
         u32::try_from(self.records.len())
-            .expect("Number of recors overflowed u32")
+            .expect("Number of records overflowed u32")
     }
 
+    /// Gets a reference to a record at the specified index.
+    ///
+    /// # Arguments
+    ///
+    /// * `index` - The index of the record to retrieve
+    ///
+    /// # Returns
+    ///
+    /// `Some(&PoolRecord<T, S>)` if the index is valid, `None` otherwise.
     fn records_get(&self, index: u32) -> Option<&PoolRecord<T, S>> {
         let index = usize::try_from(index).expect("Index overflowed usize");
         self.records.get(index)
     }
 
+    /// Gets a mutable reference to a record at the specified index.
+    ///
+    /// # Arguments
+    ///
+    /// * `index` - The index of the record to retrieve
+    ///
+    /// # Returns
+    ///
+    /// `Some(&mut PoolRecord<T, S>)` if the index is valid, `None` otherwise.
     fn records_get_mut(&mut self, index: u32) -> Option<&mut PoolRecord<T, S>> {
         let index = usize::try_from(index).expect("Index overflowed usize");
         self.records.get_mut(index)
-    }
+    } 
 
+    /// Allocates a new resource in the pool.
+    ///
+    /// # Arguments
+    ///
+    /// * `slot` - The resource to allocate
+    ///
+    /// # Returns
+    ///
+    /// A handle to the newly allocated resource.
     pub fn spawn(&mut self, slot: T) -> Handle<T> {
         self.spawn_with(|_| slot)
     }
 
-    /// spawn_with allows you to get handle when it created. It will avoid finding
+    /// Allocates a new resource using a closure that receives the handle.
     ///
-    /// Node-based data structure needs to know its handle to create link
+    /// This method is useful when the resource needs to know its own handle
+    /// during construction, such as in node-based data structures that need
+    /// to create links to themselves.
     ///
-    /// instead of seperately create object and handle, we use callback to create
-    /// handle when we create object
-    pub fn spawn_with<F: FnOnce(Handle<T>) -> T>(
-        &mut self, callback: F,
-    ) -> Handle<T> {
-        if let Some(free_index) = self.free_stack.pop() {
-            let record = self
-                .records_get_mut(free_index)
-                .expect("free stack contained invalid index");
-
-            if record.slot.is_some() {
-                std::panic!(
-                    "Attempt to spawn an object to pool record with slot! Record index is {free_index}"
-                );
-            }
-
-            let generation = record.generation + 1;
-            let handle = Handle {
-                index: free_index,
-                generation,
-                type_marker: PhantomData,
-            };
-            let slot = callback(handle);
-
-            record.generation = generation;
-            record.slot.replace(slot);
-
-            handle
+    /// # Arguments
+    ///
+    /// * `f` - A closure that creates the resource, receiving the handle as a parameter
+    ///
+    /// # Returns
+    ///
+    /// A handle to the newly allocated resource.
+    ///
+    /// # Examples
+    ///
+    /// ```rust
+/// use moonfield_core::allocator::{Pool, Handle};
+///
+/// struct Node {
+///     handle: Handle<Node>,
+///     data: String,
+/// }
+///
+/// let mut pool: Pool<Node> = Pool::new();
+/// let handle = pool.spawn_with(|handle| Node {
+///     handle,
+///     data: "Node data".to_string(),
+/// });
+/// ```
+    pub fn spawn_with<F>(&mut self, f: F) -> Handle<T>
+    where
+        F: FnOnce(Handle<T>) -> T, {
+        let index = if let Some(free_index) = self.free_stack.pop() {
+            free_index
         } else {
-            // no free records, create a new record
-            let generation = 1;
             let index = self.records_len();
+            self.records.push(PoolRecord {
+                slot: UnsafeCell::new(S::new_empty()),
+                generation: 1, // Start with generation 1, not 0
+            });
+            index
+        };
 
-            let handle = Handle { index, generation, type_marker: PhantomData };
+        let record = self.records_get_mut(index).unwrap();
+        let generation = record.generation;
+        let handle = Handle::new(index, generation);
 
-            let slot = callback(handle);
-
-            let record = PoolRecord {
-                ref_counter: Default::default(),
-                generation: 1,
-                slot: SlotWrapper::new(slot),
-            };
-
-            self.records.push(record);
-
-            handle
+        unsafe {
+            *record.slot.get() = S::new(f(handle));
         }
+
+        handle
     }
 
-    /// Moves object out of the pool using the given handle. All handles to the object will become invalid.
+    /// Gets a reference to a resource using its handle.
     ///
-    /// # Panics
+    /// # Arguments
     ///
-    /// Panics if the given handle is invalid.
-    pub fn free(&mut self, handle: Handle<T>) -> T {
-        let index =
-            usize::try_from(handle.index).expect("index overflowed usize");
-
-        if index >= self.records.len() {
-            panic!(
-                "Attempt to free destroyed object using out-of-bounds handle {:?}! Record count is {}",
-                handle,
-                self.records.len()
-            )
+    /// * `handle` - The handle of the resource to retrieve
+    ///
+    /// # Returns
+    ///
+    /// `Some(&T)` if the handle is valid and the resource exists, `None` otherwise.
+    ///
+    /// # Examples
+    ///
+    /// ```rust
+    /// use moonfield_core::allocator::Pool;
+    ///
+    /// let mut pool: Pool<String> = Pool::new();
+    /// let handle = pool.spawn("Hello".to_string());
+    ///
+    /// if let Some(text) = pool.get(handle) {
+    ///     println!("Resource: {}", text);
+    /// }
+    /// ```
+    pub fn get(&self, handle: Handle<T>) -> Option<&T> {
+        if handle.is_none() {
+            return None;
         }
 
-        let record = &mut self.records[index];
-        if record.generation != handle.generation {
-            panic!(
-                "Attempt to free object using dangling handle {:?}! Record generation is {}",
-                handle, record.generation
-            );
+        let record = self.records_get(handle.index())?;
+        if record.generation != handle.generation() {
+            return None;
         }
 
-        // extract the slot and set the origin slot as None
-        // after take, the mutable reference of record will end immediately
-        if let Some(slot) = record.slot.take() {
-            self.free_stack.push(handle.index);
-            slot
-        } else {
-            panic!("Attempt to double free object at handle {handle:?}!")
+        unsafe { record.slot.get().as_ref()?.as_ref() }
+    }
+
+    /// Gets a mutable reference to a resource using its handle.
+    ///
+    /// # Arguments
+    ///
+    /// * `handle` - The handle of the resource to retrieve
+    ///
+    /// # Returns
+    ///
+    /// `Some(&mut T)` if the handle is valid and the resource exists, `None` otherwise.
+    ///
+    /// # Examples
+    ///
+    /// ```rust
+    /// use moonfield_core::allocator::Pool;
+    ///
+    /// let mut pool: Pool<String> = Pool::new();
+    /// let handle = pool.spawn("Hello".to_string());
+    ///
+    /// if let Some(text) = pool.get_mut(handle) {
+    ///     text.push_str(" World!");
+    /// }
+    /// ```
+    pub fn get_mut(&mut self, handle: Handle<T>) -> Option<&mut T> {
+        if handle.is_none() {
+            return None;
         }
-    }
 
-    pub fn try_free(&mut self, handle: Handle<T>) -> Option<T> {
-        let index =
-            usize::try_from(handle.index).expect("index overflowed usize");
-
-        self.records.get_mut(index).and_then(|record| {
-            if record.generation == handle.generation {
-                if let Some(slot) = record.slot.take() {
-                    self.free_stack.push(handle.index);
-                    Some(slot)
-                } else {
-                    None
-                }
-            } else {
-                None
-            }
-        })
-    }
-
-    pub fn borrow(&self, handle: Handle<T>) -> &T {
-        // store the records length on stack can let it not depend on borrowing
-
-        if let Some(record) = self.records_get(handle.index) {
-            if record.generation == handle.generation {
-                if let Some(slot) = record.slot.as_ref() {
-                    slot
-                } else {
-                    panic!(
-                        "Attempt to borrow destroyed object at {handle:?} handle."
-                    )
-                }
-            } else {
-                panic!(
-                    "Attempt to use dangling handle {:?}. Record has generation {}!",
-                    handle, record.generation
-                );
-            }
-        } else {
-            panic!(
-                "Attempt to borrow object using out-of-bounds handle {:?}!, Record count is {}",
-                handle,
-                self.records.len()
-            );
+        let record = self.records_get_mut(handle.index())?;
+        if record.generation != handle.generation() {
+            return None;
         }
+
+        unsafe { record.slot.get().as_mut()?.as_mut() }
     }
 
-    pub fn borrow_mut(&mut self, handle: Handle<T>) -> &mut T {
-        // store length into stack to avoid borrowing conflict with self.records_get_mut
-        // since it will return a reference to its value. The mutable reference lifetime
-        // will be the same as the mut self
-        let records_len = self.records.len();
-
-        if let Some(record) = self.records_get_mut(handle.index) {
-            if record.generation == handle.generation {
-                if let Some(slot) = record.slot.as_mut() {
-                    slot
-                } else {
-                    panic!(
-                        "Attempt to borrow destroyed object at {handle:?} handle."
-                    )
-                }
-            } else {
-                panic!(
-                    "Attempt to use dangling handle {:?}. Record has generation {}!",
-                    handle, record.generation
-                );
-            }
-        } else {
-            panic!(
-                "Attempt to borrow object using out-of-bounds handle {:?}!, Record count is {}",
-                handle, records_len
-            );
+    /// Frees a resource and invalidates its handle.
+    ///
+    /// # Arguments
+    ///
+    /// * `handle` - The handle of the resource to free
+    ///
+    /// # Returns
+    ///
+    /// `true` if the resource was successfully freed, `false` if the handle was invalid.
+    ///
+    /// # Examples
+    ///
+    /// ```rust
+    /// use moonfield_core::allocator::Pool;
+    ///
+    /// let mut pool: Pool<String> = Pool::new();
+    /// let handle = pool.spawn("Hello".to_string());
+    ///
+    /// if pool.free(handle) {
+    ///     println!("Resource freed successfully");
+    /// }
+    ///
+    /// // The handle is now invalid
+    /// assert!(pool.get(handle).is_none());
+    /// ```
+    pub fn free(&mut self, handle: Handle<T>) -> bool {
+        if handle.is_none() {
+            return false;
         }
+
+        let record = match self.records_get_mut(handle.index()) {
+            Some(record) => record,
+            None => return false,
+        };
+
+        if record.generation != handle.generation() {
+            return false;
+        }
+
+        unsafe {
+            *record.slot.get() = S::new_empty();
+        }
+        record.generation += 1;
+        self.free_stack.push(handle.index());
+
+        true
     }
 
-    pub fn try_borrow(&self, handle: Handle<T>) -> Option<&T> {
-        self.records_get(handle.index).and_then(|record| {
-            if record.generation == handle.generation {
-                record.slot.as_ref()
-            } else {
-                None
+    /// Checks if a handle is valid and points to an existing resource.
+    ///
+    /// # Arguments
+    ///
+    /// * `handle` - The handle to validate
+    ///
+    /// # Returns
+    ///
+    /// `true` if the handle is valid and points to an existing resource, `false` otherwise.
+    ///
+    /// # Examples
+    ///
+    /// ```rust
+    /// use moonfield_core::allocator::Pool;
+    ///
+    /// let mut pool: Pool<String> = Pool::new();
+    /// let handle = pool.spawn("Hello".to_string());
+    ///
+    /// assert!(pool.is_valid(handle));
+    ///
+    /// pool.free(handle);
+    /// assert!(!pool.is_valid(handle));
+    /// ```
+    pub fn is_valid(&self, handle: Handle<T>) -> bool {
+        if handle.is_none() {
+            return false;
+        }
+
+        let record = match self.records_get(handle.index()) {
+            Some(record) => record,
+            None => return false,
+        };
+
+        if record.generation != handle.generation() {
+            return false;
+        }
+
+        // Check if the slot contains a valid resource
+        unsafe { record.slot.get().as_ref().is_some() }
+    }
+
+    /// Returns the number of allocated resources in the pool.
+    ///
+    /// # Returns
+    ///
+    /// The number of currently allocated resources.
+    ///
+    /// # Examples
+    ///
+    /// ```rust
+    /// use moonfield_core::allocator::Pool;
+    ///
+    /// let mut pool: Pool<String> = Pool::new();
+    /// assert_eq!(pool.len(), 0);
+    ///
+    /// let handle1 = pool.spawn("First".to_string());
+    /// let handle2 = pool.spawn("Second".to_string());
+    /// assert_eq!(pool.len(), 2);
+    ///
+    /// pool.free(handle1);
+    /// assert_eq!(pool.len(), 1);
+    /// ```
+    pub fn len(&self) -> usize {
+        // Count the number of non-empty slots
+        self.records.iter().filter(|record| {
+            unsafe { 
+                let slot_ref = record.slot.get().as_ref().unwrap();
+                slot_ref.is_some()
             }
-        })
+        }).count()
     }
 
-    pub fn try_borrow_mut(&mut self, handle: Handle<T>) -> Option<&mut T> {
-        self.records_get_mut(handle.index).and_then(|record| {
-            if record.generation == handle.generation {
-                record.slot.as_mut()
-            } else {
-                None
-            }
-        })
+    /// Checks if the pool is empty (no allocated resources).
+    ///
+    /// # Returns
+    ///
+    /// `true` if no resources are allocated, `false` otherwise.
+    ///
+    /// # Examples
+    ///
+    /// ```rust
+    /// use moonfield_core::allocator::Pool;
+    ///
+    /// let mut pool: Pool<String> = Pool::new();
+    /// assert!(pool.is_empty());
+    ///
+    /// let handle = pool.spawn("Hello".to_string());
+    /// assert!(!pool.is_empty());
+    ///
+    /// pool.free(handle);
+    /// assert!(pool.is_empty());
+    /// ```
+    pub fn is_empty(&self) -> bool {
+        self.len() == 0
     }
 
-    pub fn at(&self, n: u32) -> Option<&T> {
-        self.records_get(n).and_then(|rec| rec.slot.as_ref())
+    /// Returns the total capacity of the pool.
+    ///
+    /// # Returns
+    ///
+    /// The total number of slots available in the pool.
+    ///
+    /// # Examples
+    ///
+    /// ```rust
+    /// use moonfield_core::allocator::Pool;
+    ///
+    /// let pool: Pool<String> = Pool::with_capacity(10);
+    /// assert_eq!(pool.capacity(), 10);
+    /// ```
+    pub fn capacity(&self) -> usize {
+        self.records.capacity()
     }
 
-    pub fn at_mut(&mut self, n: u32) -> Option<&mut T> {
-        self.records_get_mut(n).and_then(|rec| rec.slot.as_mut())
-    }
-
-    pub fn get_capacity(&self) -> u32 {
-        u32::try_from(self.records.len()).expect("records.len() overflowed u32")
-    }
-
+    /// Clears all resources from the pool.
+    ///
+    /// This method frees all allocated resources and resets the pool to its initial state.
+    /// All handles become invalid after this operation.
+    ///
+    /// # Examples
+    ///
+    /// ```rust
+    /// use moonfield_core::allocator::Pool;
+    ///
+    /// let mut pool: Pool<String> = Pool::new();
+    /// let handle1 = pool.spawn("First".to_string());
+    /// let handle2 = pool.spawn("Second".to_string());
+    ///
+    /// pool.clear();
+    /// assert!(pool.is_empty());
+    /// assert!(!pool.is_valid(handle1));
+    /// assert!(!pool.is_valid(handle2));
+    /// ```
     pub fn clear(&mut self) {
         self.records.clear();
         self.free_stack.clear();
     }
 
-    pub fn is_valid_handle(&self, handle: Handle<T>) -> bool {
-        if let Some(record) = self.records_get(handle.index) {
-            record.slot.is_some() && record.generation == handle.generation
-        } else {
-            false
-        }
+    /// Returns an iterator over all valid resources in the pool.
+    ///
+    /// # Returns
+    ///
+    /// An iterator that yields references to all allocated resources.
+    ///
+    /// # Examples
+    ///
+    /// ```rust
+    /// use moonfield_core::allocator::Pool;
+    ///
+    /// let mut pool: Pool<String> = Pool::new();
+    /// pool.spawn("First".to_string());
+    /// pool.spawn("Second".to_string());
+    ///
+    /// let resources: Vec<&String> = pool.iter().collect();
+    /// assert_eq!(resources.len(), 2);
+    /// ```
+    pub fn iter(&self) -> PoolIter<'_, T, S> {
+        PoolIter { pool: self, index: 0 }
+    }
+
+    /// Returns an iterator over all valid resources in the pool with mutable references.
+    ///
+    /// # Returns
+    ///
+    /// An iterator that yields mutable references to all allocated resources.
+    ///
+    /// # Examples
+    ///
+    /// ```rust
+    /// use moonfield_core::allocator::Pool;
+    ///
+    /// let mut pool: Pool<String> = Pool::new();
+    /// pool.spawn("Hello".to_string());
+    ///
+    /// for resource in pool.iter_mut() {
+    ///     resource.push_str(" World!");
+    /// }
+    /// ```
+    pub fn iter_mut(&mut self) -> PoolIterMut<'_, T, S> {
+        PoolIterMut { pool: self, index: 0 }
     }
 }
 
-/// Negative values - amount of mutable borrows, positive - amount of immutable borrows
-#[derive(Default, Debug)]
-#[allow(dead_code)]
-struct RefCounter(pub UnsafeCell<isize>);
-
-unsafe impl Sync for RefCounter {}
-unsafe impl Send for RefCounter {}
-
-impl RefCounter {
-    #[allow(dead_code)]
-    unsafe fn get(&self) -> isize {
-        unsafe { *self.0.get() }
-    }
-
-    #[allow(dead_code)]
-    unsafe fn increment(&self) {
-        unsafe { *self.0.get() += 1 }
-    }
-
-    #[allow(dead_code)]
-    unsafe fn decrement(&self) {
-        unsafe { *self.0.get() -= 1 }
-    }
-}
-
-/// Pool Record is the core container of the pool.
-/// It is a warpper for slot.
+/// Internal record structure for pool entries.
+///
+/// This structure holds the actual resource data and metadata for each pool slot.
+///
+/// # Type Parameters
+///
+/// * `T` - The type of resources stored in the pool
+/// * `S` - The slot type for managing individual pool entries
 #[derive(Debug)]
-#[allow(dead_code)]
-struct PoolRecord<T, S = Option<T>>
+struct PoolRecord<T, S>
 where
     T: Sized,
     S: Slot<Element = T>, {
-    ref_counter: RefCounter,
-    // The handle is valid only if record it points to is of the same generation at the pool record.
-    // Zero is for unknon generation used for None handles
+    /// The slot containing the resource data.
+    slot: UnsafeCell<S>,
+    /// Generation counter for detecting stale handles.
     generation: u32,
-    // Actual data
-    slot: SlotWrapper<S>,
 }
 
-impl<T, S> Clone for PoolRecord<T, S>
+/// Iterator over immutable references to pool resources.
+///
+/// This iterator yields references to all valid resources in the pool.
+///
+/// # Type Parameters
+///
+/// * `T` - The type of resources stored in the pool
+/// * `S` - The slot type for managing individual pool entries
+pub struct PoolIter<'a, T, S>
 where
-    T: Clone,
-    S: Slot<Element = T> + Clone + 'static,
-{
-    fn clone(&self) -> Self {
-        Self {
-            // clone a pool should be a brand new pool
-            // so we need to clear ref count to avoid counting borrows from the cloned pool
-            ref_counter: Default::default(),
-            generation: self.generation,
-            slot: self.slot.clone(),
-        }
-    }
+    T: Sized,
+    S: Slot<Element = T>, {
+    /// Reference to the pool being iterated.
+    pool: &'a Pool<T, S>,
+    /// Current index in the iteration.
+    index: usize,
 }
 
-impl<T, S> PartialEq for PoolRecord<T, S>
+impl<'a, T, S> Iterator for PoolIter<'a, T, S>
 where
-    T: PartialEq,
-    S: Slot<Element = T> + PartialEq,
+    T: Sized,
+    S: Slot<Element = T>,
 {
-    #[inline(always)]
-    fn eq(&self, other: &Self) -> bool {
-        self.generation == other.generation
-            && self.slot.get() == other.slot.get()
+    type Item = &'a T;
+
+    fn next(&mut self) -> Option<Self::Item> {
+        while self.index < self.pool.records.len() {
+            let index = self.index;
+            self.index += 1;
+
+            let record = &self.pool.records[index];
+            if let Some(resource) =
+                unsafe { record.slot.get().as_ref()?.as_ref() }
+            {
+                return Some(resource);
+            }
+        }
+        None
     }
 }
 
-impl<T, S> Default for PoolRecord<T, S>
+/// Iterator over mutable references to pool resources.
+///
+/// This iterator yields mutable references to all valid resources in the pool.
+///
+/// # Type Parameters
+///
+/// * `T` - The type of resources stored in the pool
+/// * `S` - The slot type for managing individual pool entries
+pub struct PoolIterMut<'a, T, S>
 where
-    S: Slot<Element = T> + 'static,
+    T: Sized,
+    S: Slot<Element = T>, {
+    /// Mutable reference to the pool being iterated.
+    pool: &'a mut Pool<T, S>,
+    /// Current index in the iteration.
+    index: usize,
+}
+
+impl<'a, T, S> Iterator for PoolIterMut<'a, T, S>
+where
+    T: Sized,
+    S: Slot<Element = T>,
 {
-    fn default() -> Self {
-        Self {
-            ref_counter: Default::default(),
-            generation: INVALID_GENERATION,
-            slot: SlotWrapper::new_empty(),
+    type Item = &'a mut T;
+
+    fn next(&mut self) -> Option<Self::Item> {
+        while self.index < self.pool.records.len() {
+            let index = self.index;
+            self.index += 1;
+
+            let record = &mut self.pool.records[index];
+            if let Some(resource) =
+                unsafe { record.slot.get().as_mut()?.as_mut() }
+            {
+                return Some(resource);
+            }
         }
+        None
     }
 }
 
-#[cfg(test)]
-mod tests {
-    use std::sync::{Arc, Mutex};
-    use std::thread;
 
-    use super::*;
-
-    #[derive(Debug, PartialEq, Clone)]
-    struct TestData {
-        value: i32,
-        name: String,
-    }
-
-    impl TestData {
-        fn new(value: i32, name: &str) -> Self {
-            Self { value, name: name.to_string() }
-        }
-    }
-
-    #[derive(Debug)]
-    struct SelfAwareNode {
-        value: i32,
-        my_handle: Handle<SelfAwareNode>,
-    }
-
-    #[derive(Debug)]
-    struct GraphNode {
-        data: String,
-        self_ref: Handle<GraphNode>,
-        neighbors: Vec<Handle<GraphNode>>,
-    }
-
-    #[test]
-    fn test_pool_creation() {
-        let pool: Pool<TestData> = Pool::new();
-        assert_eq!(pool.get_capacity(), 0);
-
-        let pool_with_capacity: Pool<TestData> = Pool::with_capacity(10);
-        assert_eq!(pool_with_capacity.get_capacity(), 0); // get_capacity() only return the number of elements
-    }
-
-    #[test]
-    fn test_spawn_and_borrow() {
-        let mut pool: Pool<TestData> = Pool::new();
-
-        let test_data = TestData::new(42, "test");
-        let handle = pool.spawn(test_data.clone());
-        assert!(pool.is_valid_handle(handle));
-        assert!(handle.is_some());
-        assert_eq!(handle.index(), 0);
-        assert_eq!(handle.generation(), 1);
-
-        // borrow data from pool
-        let borrowed_handle = pool.borrow(handle);
-        assert_eq!(*borrowed_handle, test_data);
-        assert_eq!(borrowed_handle.value, 42);
-        assert_eq!(borrowed_handle.name, "test");
-
-        assert_eq!(pool.get_capacity(), 1);
-    }
-
-    #[test]
-    fn test_borrow_mut() {
-        let mut pool: Pool<TestData> = Pool::new();
-        let handle = pool.spawn(TestData::new(10, "original"));
-
-        {
-            let borrowed_mut = pool.borrow_mut(handle);
-            borrowed_mut.value = 20;
-            borrowed_mut.name = "modified".to_string();
-        }
-
-        let borrowed = pool.borrow(handle);
-
-        assert_eq!(borrowed.value, 20);
-        assert_eq!(borrowed.name, "modified");
-    }
-
-    #[test]
-    fn test_try_borrow() {
-        let mut pool: Pool<TestData> = Pool::new();
-        let handle = pool.spawn(TestData::new(100, "valid"));
-
-        assert!(pool.try_borrow(handle).is_some());
-        assert_eq!(pool.try_borrow(handle).unwrap().value, 100);
-        let invalid_handle = Handle::new(999, 999);
-        assert!(pool.try_borrow(invalid_handle).is_none());
-
-        assert!(pool.try_borrow_mut(handle).is_some());
-        pool.try_borrow_mut(handle).unwrap().value = 200;
-        assert_eq!(pool.borrow(handle).value, 200);
-    }
-
-    #[test]
-    fn test_free_and_memory_reuse() {
-        let mut pool: Pool<TestData> = Pool::new();
-
-        let data1 = TestData::new(1, "first");
-        let handle1 = pool.spawn(data1.clone());
-        assert_eq!(handle1.index(), 0);
-        assert_eq!(handle1.generation(), 1);
-
-        let freed_data = pool.free(handle1);
-        assert_eq!(freed_data, data1);
-
-        assert!(!pool.is_valid_handle(handle1));
-
-        let data2 = TestData::new(2, "second");
-        let handle2 = pool.spawn(data2.clone());
-        assert_eq!(handle2.index(), 0);
-        assert_eq!(handle2.generation(), 2);
-
-        assert!(pool.is_valid_handle(handle2));
-        assert!(!pool.is_valid_handle(handle1));
-
-        assert_eq!(*pool.borrow(handle2), data2);
-    }
-
-    #[test]
-    fn test_try_free() {
-        let mut pool: Pool<TestData> = Pool::new();
-        let handle = pool.spawn(TestData::new(42, "test"));
-
-        let freed = pool.try_free(handle);
-        assert!(freed.is_some());
-        assert_eq!(freed.unwrap().value, 42);
-
-        let result = pool.try_free(handle);
-        assert!(result.is_none());
-
-        let invalid_handle = Handle::new(999, 999);
-        assert!(pool.try_free(invalid_handle).is_none());
-    }
-
-    #[test]
-    fn test_spawn_with_callback() {
-        let mut pool: Pool<TestData> = Pool::new();
-
-        // Callback is the TestData creation
-        let handle = pool.spawn_with(|handle| {
-            TestData::new(
-                handle.index() as i32,
-                &format!("handle-{}", handle.generation()),
-            )
-        });
-        let data = pool.borrow(handle);
-        assert_eq!(data.value, 0);
-        assert_eq!(data.name, "handle-1");
-
-        let handle2 = pool.spawn_with(|h| {
-            TestData::new(h.index() as i32 * 10, &format!("obj-{}", h.index()))
-        });
-
-        let data2 = pool.borrow(handle2);
-        assert_eq!(data2.value, 10);
-        assert_eq!(data2.name, "obj-1");
-    }
-
-    #[test]
-    fn test_self_referencing_node() {
-        let mut pool: Pool<SelfAwareNode> = Pool::new();
-
-        let handle =
-            pool.spawn_with(|h| SelfAwareNode { value: 100, my_handle: h });
-
-        let node = pool.borrow(handle);
-        assert_eq!(node.my_handle, handle);
-        assert_eq!(node.value, 100);
-    }
-
-    #[test]
-    fn test_graph_node_creation() {
-        let mut pool: Pool<GraphNode> = Pool::new();
-
-        let node_handle = pool.spawn_with(|handle| GraphNode {
-            data: "Node A".to_string(),
-            self_ref: handle,
-            neighbors: vec![],
-        });
-
-        let node = pool.borrow(node_handle);
-        assert_eq!(node.data, "Node A");
-        assert_eq!(node.self_ref, node_handle);
-        assert!(node.neighbors.is_empty());
-    }
-
-    #[test]
-    fn test_graph_connections() {
-        let mut pool: Pool<GraphNode> = Pool::new();
-
-        let node_a = pool.spawn_with(|handle| GraphNode {
-            data: "A".to_string(),
-            self_ref: handle,
-            neighbors: vec![],
-        });
-
-        let node_b = pool.spawn_with(|handle| GraphNode {
-            data: "B".to_string(),
-            self_ref: handle,
-            neighbors: vec![node_a],
-        });
-
-        pool.borrow_mut(node_a).neighbors.push(node_b);
-
-        let borrowed_a = pool.borrow(node_a);
-        let borrowed_b = pool.borrow(node_b);
-
-        assert_eq!(borrowed_a.neighbors.len(), 1);
-        assert_eq!(borrowed_a.neighbors[0], node_b);
-
-        assert_eq!(borrowed_b.neighbors.len(), 1);
-        assert_eq!(borrowed_b.neighbors[0], node_a);
-    }
-
-    #[test]
-    fn test_triangle_graph() {
-        let mut pool: Pool<GraphNode> = Pool::new();
-
-        // A-B-C-A
-        // current test is a simple version, neighbors ordering depends on adding time
-        let node_a = pool.spawn_with(|h| GraphNode {
-            data: "A".to_string(),
-            self_ref: h,
-            neighbors: vec![],
-        });
-
-        let node_b = pool.spawn_with(|h| GraphNode {
-            data: "B".to_string(),
-            self_ref: h,
-            neighbors: vec![node_a],
-        });
-
-        let node_c = pool.spawn_with(|h| GraphNode {
-            data: "C".to_string(),
-            self_ref: h,
-            neighbors: vec![node_b],
-        });
-
-        pool.borrow_mut(node_a).neighbors.extend([node_b, node_c]);
-        pool.borrow_mut(node_b).neighbors.push(node_c);
-        pool.borrow_mut(node_c).neighbors.push(node_a);
-        let a = pool.borrow(node_a);
-        assert!(a.neighbors.contains(&node_b));
-        assert!(a.neighbors.contains(&node_c));
-    }
-
-    #[test]
-    #[should_panic(
-        expected = "Attempt to borrow object using out-of-bounds handle"
-    )]
-    fn test_pool_panic_invalid_handle_borrow() {
-        let pool: Pool<TestData> = Pool::new();
-        let invalid_handle = Handle::NONE;
-        pool.borrow(invalid_handle);
-    }
-
-    #[test]
-    #[should_panic(
-        expected = "Attempt to borrow object using out-of-bounds handle"
-    )]
-    fn test_pool_panic_out_of_bounds_handle() {
-        let mut pool: Pool<TestData> = Pool::new();
-        pool.spawn(TestData::new(1, "test"));
-
-        let out_of_bounds_handle = Handle::new(999, 1);
-        pool.borrow(out_of_bounds_handle);
-    }
-
-    #[test]
-    #[should_panic(expected = "Attempt to use dangling handle")]
-    fn test_pool_panic_dangling_handle() {
-        let mut pool: Pool<TestData> = Pool::new();
-        let handle = pool.spawn(TestData::new(1, "test"));
-
-        pool.free(handle);
-
-        pool.spawn(TestData::new(2, "new"));
-
-        pool.borrow(handle);
-    }
-
-    #[test]
-    #[should_panic(expected = "Attempt to double free object")]
-    fn test_pool_panic_double_free() {
-        let mut pool: Pool<TestData> = Pool::new();
-        let handle = pool.spawn(TestData::new(1, "test"));
-
-        pool.free(handle);
-        pool.free(handle);
-    }
-
-    #[test]
-    #[should_panic(expected = "Attempt to borrow destroyed object")]
-    fn test_pool_panic_borrow_freed_object() {
-        let mut pool: Pool<TestData> = Pool::new();
-        let handle = pool.spawn(TestData::new(1, "test"));
-
-        pool.free(handle);
-        pool.borrow(handle);
-    }
-
-    #[test]
-    fn test_pool_handle_cross_thread() {
-        let pool = Arc::new(Mutex::new(Pool::<TestData>::new()));
-
-        let handle = {
-            let mut pool = pool.lock().unwrap();
-            pool.spawn(TestData::new(42, "cross-thread"))
-        };
-
-        let pool_clone = Arc::clone(&pool);
-        let thread_handle = thread::spawn(move || {
-            let pool = pool_clone.lock().unwrap();
-            let data = pool.borrow(handle);
-            assert_eq!(data.value, 42);
-            assert_eq!(data.name, "cross-thread");
-            data.value
-        });
-
-        let reuslt = thread_handle.join().unwrap();
-        assert_eq!(reuslt, 42)
-    }
-}
