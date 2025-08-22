@@ -5,8 +5,8 @@ A modern graphics rendering engine written in Rust, serving as an exploration gr
 
 ## ✨ Planned Features
 
-- **Multi-Backend Support**: Primarily Metal and Vulkan backends
-- **Clean Architecture Design**: Simple yet sufficient architecture  
+- **Data-Oriented Design**: Find a good way to combine scene graph and ECS design since OOP design lacks a lot of flexibility in Rust.
+- **Multi-Backend Support**: Primarily Metal and Vulkan backends.
 - **Modern Graphics Pipeline**: GPU-driven pipeline, bindless rendering, mesh shading, variable rate shading etc.
 - **Advanced Rendering**: Real-time ray tracing, real-time global illumination and ML-based techniques setc.
 
