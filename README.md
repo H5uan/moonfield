@@ -12,8 +12,19 @@ A modern graphics rendering engine written in Rust, serving as an exploration gr
 
 ## 💻 Hardware Environment
 
-This is a personal project optimized for my development setup:
-- **Primary GPU**: Apple M4, AMD RX 9070XT
-- **Graphics Backend**: Metal (Current focus), Vulkan
+This personal project is optimized for my primary development hardware:
 
-Portability is not a priority.
+### Primary Development Hardware
+- **Apple Silicon**: M4 Mac (Primary development machine)
+- **Windows Desktop**: AMD RX 9070XT GPU
+
+### Supported Graphics APIs
+- **Metal**: Primary focus and development backend
+- **Vulkan**: Secondary backend support
+
+### Target Platforms
+- **macOS Sequoia 15.6.1**: Primary target platform
+- **Windows 11 24H2**: Native support
+- **Ubuntu 24.04 LTS**: Via WSL (Windows Subsystem for Linux)
+
+> **Note**: Portability across different hardware configurations is not a priority for this project.
