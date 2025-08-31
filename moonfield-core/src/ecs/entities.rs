@@ -1,7 +1,7 @@
 use std::{
     fmt, mem,
     num::{NonZero, NonZeroU32, NonZeroU64},
-    sync::atomic::AtomicIsize,
+    sync::atomic::{AtomicIsize, Ordering},
 };
 
 #[derive(Clone, Copy, Hash, PartialEq, Eq, PartialOrd, Ord)]
@@ -80,6 +80,7 @@ pub struct Entities {
     /// Entities that have been reserved but not yet inserted into the world
     pending: Vec<u32>,
     /// Index of the first free entity
+    /// free_cursor refers the index in pending
     free_cursor: AtomicIsize,
     /// Current active entity count
     len: u32,
@@ -143,6 +144,49 @@ impl Entities {
         self.len -= 1;
 
         Ok(loc)
+    }
+
+    pub fn reserve_entity(&self) -> Entity {
+        // we store the value before atomic subtraction to avoid extra synchronization
+        let n = self.free_cursor.fetch_sub(1, Ordering::Relaxed);
+
+        if n > 0 {
+            let id = self.pending[(n - 1) as usize];
+            Entity { generation: self.meta[id as usize].generation, id }
+        } else {
+            Entity {
+                generation: NonZeroU32::new(1).unwrap(),
+                id: u32::try_from(self.meta.len() as isize - n)
+                    .expect("too many entities"),
+            }
+        }
+    }
+
+    pub fn reserve_entities(&self, count: u32) -> ReserveEntitiesIterator<'_> {
+        let range_end =
+            self.free_cursor.fetch_sub(count as isize, Ordering::Relaxed);
+        let range_start = range_end - count as isize;
+
+        let freelist_range = range_start.max(0) as usize..range_end as usize;
+
+        let (new_id_start, new_id_end) = if range_start >= 0 {
+            // If we can use entities in freelist, then we don't need to allocate new entities
+            // so we return empty range, then the ReserveEntitiesIterator will use the first element of freelist
+            (0, 0)
+        } else {
+            let base = self.meta.len() as isize;
+            // here range_start < 0, so it acutally means that we are calculating the upper bound
+            let new_id_end =
+                u32::try_from(base - range_start).expect("too many entities");
+            let new_id_start = (base - range_end.min(0)) as u32;
+            (new_id_start, new_id_end)
+        };
+
+        ReserveEntitiesIterator {
+            meta: &self.meta[..],
+            id_iter: self.pending[freelist_range].iter(),
+            id_range: new_id_start..new_id_end,
+        }
     }
 }
 
