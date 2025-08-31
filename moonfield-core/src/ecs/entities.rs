@@ -11,7 +11,7 @@ pub struct Entity {
 }
 
 impl Entity {
-    pub const Invalid: Entity = Entity {
+    pub const INVALID: Entity = Entity {
         generation: match NonZeroU32::new(u32::MAX) {
             Some(x) => x,
             None => unreachable!(),
@@ -37,26 +37,26 @@ impl Entity {
         })
     }
 
-    pub const fn id(self) -> u32 {
+    pub const fn index(self) -> u32 {
         self.id
     }
 }
 
 impl fmt::Debug for Entity {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        write!(f, "id: {}, generation: {}", self.id, self.generation)
+        write!(f, "{}v{}", self.id, self.generation)
     }
 }
 
-pub struct ReserveEntitiesIterator<'a> {
-    meta: &'a [EntityMeta],
+pub struct ReservedEntitiesIter<'a> {
+    meta: &'a [EntityMetadata],
 
     id_iter: core::slice::Iter<'a, u32>,
 
     id_range: core::ops::Range<u32>,
 }
 
-impl Iterator for ReserveEntitiesIterator<'_> {
+impl Iterator for ReservedEntitiesIter<'_> {
     type Item = Entity;
 
     fn next(&mut self) -> Option<Self::Item> {
@@ -76,12 +76,12 @@ impl Iterator for ReserveEntitiesIterator<'_> {
 }
 
 pub struct Entities {
-    pub meta: Vec<EntityMeta>,
+    pub meta: Vec<EntityMetadata>,
     /// Entities that have been reserved but not yet inserted into the world
     pending: Vec<u32>,
     /// Index of the first free entity
     /// free_cursor refers the index in pending
-    free_cursor: AtomicIsize,
+    reservation_cursor: AtomicIsize,
     /// Current active entity count
     len: u32,
 }
@@ -91,39 +91,39 @@ impl Entities {
         Self {
             meta: Vec::new(),
             pending: Vec::new(),
-            free_cursor: AtomicIsize::new(0),
+            reservation_cursor: AtomicIsize::new(0),
             len: 0,
         }
     }
 
-    fn vertify_flushed(&mut self) {
+    fn verify_flushed(&mut self) {
         debug_assert!(
-            !self.needs_flush(),
-            "flush() needs to be called before this operation is legal"
+            !self.has_reserved_entities(),
+            "initialize_reserved_entities() needs to be called before this operation is legal"
         )
     }
 
-    fn needs_flush(&mut self) -> bool {
-        *self.free_cursor.get_mut() != self.pending.len() as isize
+    fn has_reserved_entities(&mut self) -> bool {
+        *self.reservation_cursor.get_mut() != self.pending.len() as isize
     }
 
     pub fn alloc(&mut self) -> Entity {
-        self.vertify_flushed();
+        self.verify_flushed();
         self.len += 1;
 
         if let Some(id) = self.pending.pop() {
             let new_free_cursor = self.pending.len() as isize;
-            *self.free_cursor.get_mut() = new_free_cursor;
+            *self.reservation_cursor.get_mut() = new_free_cursor;
             Entity { generation: self.meta[id as usize].generation, id }
         } else {
             let id = u32::try_from(self.meta.len()).expect("too many entities");
-            self.meta.push(EntityMeta::EMPTY);
+            self.meta.push(EntityMetadata::EMPTY);
             Entity { generation: NonZeroU32::new(1).unwrap(), id }
         }
     }
 
     pub fn free(&mut self, entity: Entity) -> Result<Location, NoSuchEntity> {
-        self.vertify_flushed();
+        self.verify_flushed();
 
         let meta = self.meta.get_mut(entity.id as usize).ok_or(NoSuchEntity)?;
         if meta.generation != entity.generation
@@ -136,11 +136,11 @@ impl Entities {
             NonZeroU32::new(u32::from(meta.generation).wrapping_add(1))
                 .unwrap_or_else(|| NonZeroU32::new(1).unwrap());
 
-        let loc = mem::replace(&mut meta.location, EntityMeta::EMPTY.location);
+        let loc = mem::replace(&mut meta.location, EntityMetadata::EMPTY.location);
         self.pending.push(entity.id);
 
         let new_free_cursor = self.pending.len() as isize;
-        *self.free_cursor.get_mut() = new_free_cursor;
+        *self.reservation_cursor.get_mut() = new_free_cursor;
         self.len -= 1;
 
         Ok(loc)
@@ -148,7 +148,7 @@ impl Entities {
 
     pub fn reserve_entity(&self) -> Entity {
         // we store the value before atomic subtraction to avoid extra synchronization
-        let n = self.free_cursor.fetch_sub(1, Ordering::Relaxed);
+        let n = self.reservation_cursor.fetch_sub(1, Ordering::Relaxed);
 
         if n > 0 {
             let id = self.pending[(n - 1) as usize];
@@ -162,9 +162,9 @@ impl Entities {
         }
     }
 
-    pub fn reserve_entities(&self, count: u32) -> ReserveEntitiesIterator<'_> {
+    pub fn reserve_entities(&self, count: u32) -> ReservedEntitiesIter<'_> {
         let range_end =
-            self.free_cursor.fetch_sub(count as isize, Ordering::Relaxed);
+            self.reservation_cursor.fetch_sub(count as isize, Ordering::Relaxed);
         let range_start = range_end - count as isize;
 
         let freelist_range = range_start.max(0) as usize..range_end as usize;
@@ -182,7 +182,7 @@ impl Entities {
             (new_id_start, new_id_end)
         };
 
-        ReserveEntitiesIterator {
+        ReservedEntitiesIter {
             meta: &self.meta[..],
             id_iter: self.pending[freelist_range].iter(),
             id_range: new_id_start..new_id_end,
@@ -190,8 +190,8 @@ impl Entities {
     }
 
     /// Batch initialize entities
-    pub fn flush(&mut self, mut init: impl FnMut(u32, &mut Location)) {
-        let free_cursor = *self.free_cursor.get_mut();
+    pub fn initialize_reserved_entities(&mut self, mut init: impl FnMut(u32, &mut Location)) {
+        let free_cursor = *self.reservation_cursor.get_mut();
 
         let new_free_cursor = if free_cursor >= 0 {
             free_cursor as usize
@@ -199,7 +199,7 @@ impl Entities {
             // meaning we have more entities than freelist
             let old_meta_len = self.meta.len();
             let new_meta_len = old_meta_len + -free_cursor as usize;
-            self.meta.resize(new_meta_len, EntityMeta::EMPTY);
+            self.meta.resize(new_meta_len, EntityMetadata::EMPTY);
             self.len += -free_cursor as u32;
 
             // init new entities
@@ -209,7 +209,7 @@ impl Entities {
                 init(id as u32, &mut meta.location);
             }
 
-            *self.free_cursor.get_mut() = 0;
+            *self.reservation_cursor.get_mut() = 0;
             0
         };
 
@@ -219,6 +219,11 @@ impl Entities {
         for id in self.pending.drain(new_free_cursor..) {
             init(id, &mut self.meta[id as usize].location);
         }
+    }
+
+    #[deprecated(since = "0.1.0", note = "Renamed to `initialize_reserved_entities` for clarity")]
+    pub fn flush(&mut self, init: impl FnMut(u32, &mut Location)) {
+        self.initialize_reserved_entities(init)
     }
 
     pub fn len(&self) -> u32 {
@@ -232,7 +237,7 @@ impl Entities {
                 && meta.location.index != u32::MAX
         } else {
             // check if the entity is reserved but not yet allocated
-            let free = self.free_cursor.load(Ordering::Relaxed);
+            let free = self.reservation_cursor.load(Ordering::Relaxed);
             entity.generation.get() == 1
                 && free < 0
                 && (entity.id as isize)
@@ -257,13 +262,13 @@ pub(crate) struct Location {
 }
 
 #[derive(Debug, Clone, Copy)]
-pub(crate) struct EntityMeta {
+pub(crate) struct EntityMetadata {
     pub generation: NonZeroU32,
     pub location: Location,
 }
 
-impl EntityMeta {
-    const EMPTY: EntityMeta = EntityMeta {
+impl EntityMetadata {
+    const EMPTY: EntityMetadata = EntityMetadata {
         generation: match NonZeroU32::new(1) {
             Some(x) => x,
             None => unreachable!(),
