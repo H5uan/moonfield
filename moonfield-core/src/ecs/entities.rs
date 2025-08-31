@@ -188,6 +188,66 @@ impl Entities {
             id_range: new_id_start..new_id_end,
         }
     }
+
+    /// Batch initialize entities
+    pub fn flush(&mut self, mut init: impl FnMut(u32, &mut Location)) {
+        let free_cursor = *self.free_cursor.get_mut();
+
+        let new_free_cursor = if free_cursor >= 0 {
+            free_cursor as usize
+        } else {
+            // meaning we have more entities than freelist
+            let old_meta_len = self.meta.len();
+            let new_meta_len = old_meta_len + -free_cursor as usize;
+            self.meta.resize(new_meta_len, EntityMeta::EMPTY);
+            self.len += -free_cursor as u32;
+
+            // init new entities
+            for (id, meta) in
+                self.meta.iter_mut().enumerate().skip(old_meta_len)
+            {
+                init(id as u32, &mut meta.location);
+            }
+
+            *self.free_cursor.get_mut() = 0;
+            0
+        };
+
+        self.len += (self.pending.len() - new_free_cursor) as u32;
+
+        // extract pending entities and init them
+        for id in self.pending.drain(new_free_cursor..) {
+            init(id, &mut self.meta[id as usize].location);
+        }
+    }
+
+    pub fn len(&self) -> u32 {
+        self.len
+    }
+
+    pub fn contains(&self, entity: Entity) -> bool {
+        // Check if the entity is alive
+        if let Some(meta) = self.meta.get(entity.id as usize) {
+            meta.generation == entity.generation
+                && meta.location.index != u32::MAX
+        } else {
+            // check if the entity is reserved but not yet allocated
+            let free = self.free_cursor.load(Ordering::Relaxed);
+            entity.generation.get() == 1
+                && free < 0
+                && (entity.id as isize)
+                    < (free.abs() + self.meta.len() as isize)
+        }
+    }
+
+    pub fn get(&self, entity: Entity) -> Result<Location, NoSuchEntity> {
+        let meta = self.meta.get(entity.id as usize).ok_or(NoSuchEntity)?;
+        if meta.generation == entity.generation {
+            Ok(meta.location)
+        } else {
+            Err(NoSuchEntity)
+        }
+    }
 }
 
 #[derive(Debug, Clone, Copy)]
