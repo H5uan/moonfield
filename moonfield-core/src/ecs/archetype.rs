@@ -1,14 +1,70 @@
+//-！ Archetype
+//-!
+//-! Archetype is a storage block for a collection of entities with same components
+//-! In archetype, entities are stored as structure of arrays
 use std::{alloc::Layout, any::TypeId, ptr::NonNull};
 
-use crate::ecs::borrow::SharedRuntimeBorrow;
+use crate::ecs::{borrow::SharedRuntimeBorrow, world::Component};
 
 pub struct Archetype {
+    /// meta data for all components
     types: Vec<TypeInfo>,
     type_ids: Box<[TypeId]>,
     index: OrderedTypeIdMap<usize>,
     len: u32,
     entities: Box<[u32]>,
     data: Box<[ArchetypeData]>,
+}
+
+impl Archetype {
+    pub(crate) fn new(types: Vec<TypeInfo>) -> Self {
+        let max_align =
+            types.first().map_or(1, |type_info| type_info.layout.align());
+
+        let component_count = types.len();
+        Self {
+            index: OrderedTypeIdMap::new(
+                types
+                    .iter()
+                    .enumerate()
+                    .map(|(i, type_info)| (type_info.id, i)),
+            ),
+            type_ids: types.iter().map(|type_info| type_info.id).collect(),
+            types,
+            entities: Box::new([]),
+            len: 0,
+            data: (0..component_count)
+                .map(|_| ArchetypeData {
+                    state: SharedRuntimeBorrow::new(),
+                    storage: NonNull::new(max_align as *mut u8).unwrap(),
+                })
+                .collect(),
+        }
+    }
+
+    pub(crate) fn clear(&mut self) {
+        for (type_info, data) in self.types.iter().zip(&*self.data) {
+            for index in 0..self.len{
+                unsafe {
+                    let removed = data.storage.as_ptr().add(index as usize * type_info.layout.size());
+                    type_info.drop(removed);
+                }
+            }
+        }
+        self.len = 0;
+    }
+
+    pub fn has<T: Component>(&self) -> bool {
+        self.has_dynamic(TypeId::of::<T>())
+    }
+
+    pub fn has_dynamic(&self, id: TypeId) -> bool {
+        self.index.contains_key(&id)
+    }
+
+    
+
+    
 }
 
 struct ArchetypeData {
@@ -81,46 +137,24 @@ impl Ord for TypeInfo {
 }
 
 /// A map from TypeId to values that preserves insertion order
-pub struct OrderedTypeIdMap<V>(Vec<(TypeId, V)>);
+pub struct OrderedTypeIdMap<V>(Box<[(TypeId, V)]>);
 
 impl<V> OrderedTypeIdMap<V> {
-    pub fn new() -> Self {
-        OrderedTypeIdMap(Vec::new())
+    fn new(iter: impl Iterator<Item = (TypeId, V)>) -> Self {
+        let mut vals = iter.collect::<Box<[_]>>();
+        vals.sort_unstable_by_key(|(id, _)| *id);
+        Self(vals)
     }
 
-    pub fn with_capacity(capacity: usize) -> Self {
-        OrderedTypeIdMap(Vec::with_capacity(capacity))
+    fn search(&self, id: &TypeId) -> Option<usize> {
+        self.0.binary_search_by_key(id, |(id, _)| *id).ok()
     }
 
-    pub fn insert(&mut self, id: TypeId, value: V) {
-        // Check if already exists
-        if let Some(pos) =
-            self.0.iter().position(|(existing_id, _)| *existing_id == id)
-        {
-            self.0[pos] = (id, value);
-        } else {
-            self.0.push((id, value));
-            // Sort by TypeId for binary search
-            self.0.sort_unstable_by_key(|(id, _)| *id);
-        }
+    fn contains_key(&self, id: &TypeId) -> bool {
+        self.search(id).is_some()
     }
 
-    pub fn get(&self, id: &TypeId) -> Option<&V> {
-        self.0
-            .binary_search_by_key(id, |(id, _)| *id)
-            .ok()
-            .map(|idx| &self.0[idx].1)
-    }
-
-    pub fn get_mut(&mut self, id: &TypeId) -> Option<&mut V> {
-        if let Ok(idx) = self.0.binary_search_by_key(id, |(id, _)| *id) {
-            Some(&mut self.0[idx].1)
-        } else {
-            None
-        }
-    }
-
-    pub fn contains_key(&self, id: &TypeId) -> bool {
-        self.get(id).is_some()
+    fn get(&self, id: &TypeId) -> Option<&V> {
+        self.search(id).map(move |idx| &self.0[idx].1)
     }
 }

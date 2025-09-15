@@ -181,4 +181,26 @@ impl Engine {
 
         Ok(())
     }
+
+    pub fn handle_window_resize(
+        &mut self, new_size: winit::dpi::PhysicalSize<u32>,
+    ) -> Result<(), EngineError> {
+        if let GraphicsContext::Initilized(ref mut ctx) = self.graphics_context
+        {
+            let frame_size = (new_size.width, new_size.height);
+
+            if frame_size.0 == 0 || frame_size.1 == 0 {
+                return Ok(()); // ignore minimized case
+            }
+
+            ctx.renderer.set_frame_size(frame_size)?;
+
+            ctx.window.request_redraw();
+            Ok(())
+        } else {
+            Err(EngineError::Custom(
+                "Graphics context not initialized".to_string(),
+            ))
+        }
+    }
 }

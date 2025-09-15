@@ -228,6 +228,11 @@ impl Device for MetalGraphicsBackend {
         let texture = unsafe { drawable.texture() };
         let width = texture.width() as u32;
         let height = texture.height() as u32;
+        
+        tracing::debug!(
+            "Metal backend: Creating framebuffer with drawable texture size: {}x{}",
+            width, height
+        );
 
         // Descriptor is like a guide that tell GPU how to handle old data(load)
         // and new data(store)
@@ -269,11 +274,30 @@ impl Device for MetalGraphicsBackend {
 
     fn set_frame_size(&self, new_size: (u32, u32)) {
         let (width, height) = new_size;
+        tracing::info!(
+            "Metal backend: Setting frame size to {}x{}",
+            width, height
+        );
+        
         unsafe {
+            // Get current drawable size for comparison
+            let current_size = self.layer.drawableSize();
+            tracing::debug!(
+                "Metal backend: Current drawable size: {}x{}, setting to: {}x{}",
+                current_size.width, current_size.height, width, height
+            );
+            
             self.layer.setDrawableSize(CGSize {
                 width: width as f64,
                 height: height as f64,
-            })
+            });
+            
+            // Verify the size was set
+            let new_drawable_size = self.layer.drawableSize();
+            tracing::info!(
+                "Metal backend: Drawable size after setting: {}x{}",
+                new_drawable_size.width, new_drawable_size.height
+            );
         };
     }
 

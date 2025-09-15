@@ -176,6 +176,11 @@ impl ApplicationHandler for MoonfieldApp {
             }
             WindowEvent::Resized(physical_size) => {
                 debug!("Window resized to: {:?}", physical_size);
+                if let Some(engine) = &mut self.engine {
+                    if let Err(e) = engine.handle_window_resize(physical_size) {
+                        error!("Failed to handle window resize: {}", e);
+                    }
+                }
             }
             _ => (),
         }

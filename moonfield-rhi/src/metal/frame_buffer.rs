@@ -4,7 +4,7 @@ use objc2::{rc::Retained, runtime::ProtocolObject};
 use objc2_metal::{
     MTLClearColor, MTLCommandBuffer, MTLCommandEncoder, MTLIndexType,
     MTLLoadAction, MTLPrimitiveType, MTLRenderCommandEncoder,
-    MTLRenderPassDescriptor,
+    MTLRenderPassDescriptor, MTLViewport,
 };
 use objc2_quartz_core::CAMetalDrawable;
 
@@ -90,7 +90,28 @@ impl FrameBuffer for MetalFrameBuffer {
             .downcast_ref::<MetalGeometryBuffer>()
             .ok_or(GraphicsError::BackendUnavailable)?;
 
+        // Capture dimensions before getting mutable reference
+        let width = self.width;
+        let height = self.height;
+
         let encoder = self.get_or_create_render_encoder()?;
+
+        // Set viewport to match framebuffer size
+        let viewport = MTLViewport {
+            originX: 0.0,
+            originY: 0.0,
+            width: width as f64,
+            height: height as f64,
+            znear: 0.0,
+            zfar: 1.0,
+        };
+        tracing::debug!(
+            "Metal framebuffer: Setting viewport to {}x{}",
+            width, height
+        );
+        unsafe {
+            encoder.setViewport(viewport);
+        }
 
         encoder.setRenderPipelineState(&backend.pipeline_state);
 
