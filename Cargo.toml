@@ -39,6 +39,7 @@ tracing-appender = "0.2.3"
 tracing-log = "0.2.0"
 
 thiserror = "2.0.12"
+bitflags = "2.9.3"
 
 [profile.dev]
 opt-level = 1

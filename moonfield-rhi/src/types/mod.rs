@@ -1,18 +1,16 @@
-use crate::Api;
+mod enums;
+mod errors;
 
-#[repr(u8)]
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
-pub enum Backend {
-    Noop = 0,
-    Vulkan = 1,
-    Metal = 2,
-}
+pub use enums::*;
+pub use errors::*;
 
-#[derive(Debug, Clone)]
-pub struct Capabilities {}
+pub type DeviceAddress = u64;
+pub type Size = usize;
+pub type Offset = usize;
 
-#[derive(Debug)]
-pub struct ExposedAdapter<A: Api> {
-    pub adapter: A::Adapter,
-    pub capabilities: Capabilities,
-}
+#[allow(unused)]
+pub const TIMEOUT_INFINITE: u64 = u64::MAX;
+
+
+
+

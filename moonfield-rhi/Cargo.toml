@@ -12,6 +12,7 @@ tracing = { workspace = true }
 bytemuck = { workspace = true }
 thiserror = { workspace = true }
 shader-slang = { workspace = true }
+bitflags = { workspace = true }
 
 # Vulkan dependencies - only included when vulkan feature is enabled
 ash = { workspace = true, optional = true }

@@ -1,11 +1,9 @@
 pub mod backend;
 pub mod buffer;
 
-mod descriptors;
 pub mod error;
 pub mod frame_buffer;
 pub mod geometry_buffer;
-mod traits;
 mod types;
 
 #[cfg(feature = "metal")]
@@ -14,8 +12,7 @@ pub mod metal;
 #[cfg(feature = "vulkan")]
 pub mod vulkan;
 
-pub use crate::descriptors::*;
-pub use crate::traits::*;
+
 pub use crate::types::*;
 
 #[macro_export]
