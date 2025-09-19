@@ -67,7 +67,7 @@ pub mod type_traits;
 /// let bytes = array_as_u8_slice(&vertices);
 /// // bytes can now be safely sent to GPU
 /// ```
-pub fn array_as_u8_slice<'a, T: Sized + Pod>(v: &'a [T]) -> &'a [u8] {
+pub fn array_as_u8_slice<T: Sized + Pod>(v: &[T]) -> &[u8] {
     unsafe {
         std::slice::from_raw_parts(
             v.as_ptr() as *const u8,
@@ -104,9 +104,9 @@ pub fn array_as_u8_slice<'a, T: Sized + Pod>(v: &'a [T]) -> &'a [u8] {
 /// let bytes = array_as_u8_slice_mut(&mut vertices);
 /// // bytes can now be safely sent to GPU
 /// ```
-pub fn array_as_u8_slice_mut<'a, T: Sized + Pod>(
-    v: &'a mut [T],
-) -> &'a mut [u8] {
+pub fn array_as_u8_slice_mut<T: Sized + Pod>(
+    v: &mut [T],
+) -> &mut [u8] {
     unsafe {
         std::slice::from_raw_parts_mut(
             v.as_ptr() as *mut u8,

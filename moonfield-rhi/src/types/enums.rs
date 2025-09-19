@@ -29,6 +29,7 @@ pub enum StructType {
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum DeviceType {
+    Default,
     Vulkan,
     Metal,
     D3D12,
@@ -331,9 +332,10 @@ pub enum MemoryType {
     ReadBack,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default)]
 #[repr(u32)]
 pub enum NativeHandleType {
+    #[default]
     Undefined = 0x00000000,
 
     Win32 = 0x00000001,
@@ -385,8 +387,9 @@ pub enum NativeHandleType {
     WGPUCommandEncoder = 0x0007000a,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default)]
 pub enum DescriptorHandleType {
+    #[default]
     Undefined,
     Buffer,
     RWBuffer,
@@ -685,8 +688,9 @@ bitflags! {
     }
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default)]
 pub enum WindowHandleType {
+    #[default]
     Undefined,
     HWND,
     NSWindow,
@@ -752,11 +756,6 @@ pub enum CooperativeVectorMatrixLayout {
     TrainingOptimal = 3,
 }
 
-/// Types of command queues available in the graphics system.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
-pub enum QueueType {
-    Graphics,
-}
 
 bitflags! {
     /// Usage flags for memory heaps.
