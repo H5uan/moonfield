@@ -409,3 +409,93 @@ pub struct CompilationReport {
 pub struct CompilationReportList {
     pub reports: Vec<CompilationReport>,
 }
+
+
+pub trait RHI{
+    fn get_format_info(format: Format) -> &'static FormatInfo;
+    fn get_device_type_name(device_type: DeviceType) -> &'static str;
+    fn is_device_type_supported(device_type: DeviceType) -> bool;
+    fn get_feature_name(feature: Feature) -> &'static str;
+    fn get_capability_name() -> &'static str;
+    fn get_adapters();
+    fn enable_debug_layers();
+    fn create_device();
+    fn create_blob();
+    /// needed for d3d
+    fn report_live_objects();
+    fn set_task_pool();
+}
+
+pub trait Device{
+    fn get_info() -> DeviceInfo;
+    fn get_device_type() -> DeviceType;
+    fn get_native_device_handles(handles: DeviceNativeHandles);
+    fn get_features();
+    fn has_features();
+    fn get_capabilities();
+    fn has_capabilities();
+
+    fn get_format_support(format: Format) -> FormatSupport;
+    fn get_slang_session();
+
+    fn create_texture();
+    fn create_texture_from_native_handle();
+    fn create_texture_from_shared_handle();
+
+    fn create_buffer();
+    fn create_buffer_from_native_handle();
+    fn create_buffer_from_shared_handle();
+
+    fn map_buffer();
+    fn unmap_buffer();
+
+    fn create_sampler();
+    fn create_texture_view();
+
+    fn create_surface();
+    fn create_input_layout();
+    
+    fn get_queue();
+    fn create_shader_object();
+
+    fn create_shader_object_from_type_layout();
+    fn create_root_shader_object();
+
+    fn create_shader_table();
+    fn create_shader_program();
+
+    fn create_render_pipeline();
+
+    fn create_compute_pipeline();
+
+    fn create_ray_tracing_pipeline();
+
+    fn get_compilation_report_list();
+
+    fn read_texture();
+
+    fn read_buffer();
+
+    fn create_query_pool();
+
+    fn create_acceleration_structure();
+
+    fn create_fence();
+
+    fn wait_for_fences();
+
+    fn create_heap();
+
+    fn get_texture_row_alignment();
+
+    fn get_cooperative_vector_properties(){
+        
+    }
+
+    fn convert_cooperative_vector_matrix(){
+
+    }
+
+    fn report_heaps();
+
+}

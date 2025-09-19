@@ -1,5 +1,7 @@
 //! Basic types and structures used throughout the RHI
 
+use crate::{Format, FormatKind};
+
 /// 3D offset coordinates
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default)]
 pub struct Offset3D {
@@ -43,6 +45,30 @@ impl Extent3D {
         height: crate::REMAINING_TEXTURE_SIZE,
         depth: crate::REMAINING_TEXTURE_SIZE,
     };
+}
+
+pub struct FormatInfo{
+    format: Format,
+    name: &'static str,
+    slang_name: Option<&'static str>,
+    kind: FormatKind,
+    channel_count: u8,
+    channel_type: u8,
+    block_size_in_bytes: u8,
+    pixel_per_block: u8,
+    block_width: u8,
+    block_height: u8,
+
+    has_read: bool,
+    has_green: bool,
+    has_blue: bool,
+    has_alpha: bool,
+    has_depth: bool,
+    has_stencil: bool,
+    is_signed: bool,
+    is_srgb: bool,
+    is_compressed: bool,
+    supports_non_power_of_two: bool,
 }
 
 
