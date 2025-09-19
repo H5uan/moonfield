@@ -3,8 +3,6 @@ mod errors;
 mod basic_types;
 mod basic_descriptors;
 mod pipeline_descriptors;
-mod traits;
-mod device_traits;
 
 pub use enums::*;
 pub use errors::*;
