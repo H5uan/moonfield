@@ -1,40 +1,250 @@
-use bitflags::bitflags;
 use std::str::FromStr;
+
+use bitflags::bitflags;
 
 use super::errors::FeatureParseError;
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
-pub enum StructType {
-    ShaderProgramDesc,
-    InputLayoutDesc,
-    BufferDesc,
-    TextureDesc,
-    TextureViewDesc,
-    SamplerDesc,
-    AccelerationStructureDesc,
-    FenceDesc,
-    RenderPipelineDesc,
-    ComputePipelineDesc,
-    RayTracingPipelineDesc,
-    ShaderTableDesc,
-    QueryPoolDesc,
-    DeviceDesc,
-    HeapDesc,
 
-    D3D12DeviceExtendedDesc,
-    D3D12ExperimentalFeaturesDesc,
-
-    VulkanDeviceExtendedDesc,
+/// Graphics API backend types supported by the RHI.
+#[repr(u8)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, Default)]
+pub enum Backend {
+    /// No-operation backend for testing and fallback scenarios
+    Noop = 0,
+    /// Vulkan API (Windows, Linux, Android, MacOS via `vulkan-portability`/MoltenVK)
+    #[default]
+    Vulkan = 1,
+    /// Metal API (Apple platforms)
+    Metal = 2,
+    /// Direct3D-12 (Windows)
+    D3D12 = 3,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
-pub enum DeviceType {
-    Default,
-    Vulkan,
-    Metal,
-    D3D12,
-    WGPU,
+impl Backend {
+    /// Array containing all available backend variants.
+    /// 
+    /// This is useful for iterating over all possible backends or
+    /// for validation purposes.
+    pub const ALL: [Backend; 4] = [Self::Noop, Self::Vulkan, Self::Metal, Self::D3D12];
+
+    /// The total number of backend variants.
+    pub const COUNT: usize = Self::ALL.len();
+
+    /// Returns the string name of the backend.
+    /// 
+    /// # Examples
+    /// 
+    /// ```
+    /// # use moonfield_rhi::Backend;
+    /// assert_eq!(Backend::Vulkan.to_str(), "vulkan");
+    /// assert_eq!(Backend::Metal.to_str(), "metal");
+    /// ```
+    #[must_use]
+    pub const fn to_str(self) -> &'static str {
+        match self {
+            Backend::Noop => "noop",
+            Backend::Vulkan => "vulkan",
+            Backend::Metal => "metal",
+            Backend::D3D12 => "d3d12",
+        }
+    }
+
+    /// Returns whether this backend is available on the current platform.
+    /// 
+    /// # Examples
+    /// 
+    /// ```
+    /// # use moonfield_rhi::Backend;
+    /// // On Windows, both D3D12 and Vulkan should be available
+    /// # #[cfg(target_os = "windows")]
+    /// # {
+    /// #     assert!(Backend::D3D12.is_available_on_platform());
+    /// #     assert!(Backend::Vulkan.is_available_on_platform());
+    /// # }
+    /// ```
+    #[must_use]
+    pub const fn is_available_on_platform(self) -> bool {
+        match self {
+            Backend::Noop => true, // Always available for testing
+            Backend::Vulkan => true, // Available on all platforms via portability layers
+            #[cfg(any(target_os = "macos", target_os = "ios"))]
+            Backend::Metal => true,
+            #[cfg(not(any(target_os = "macos", target_os = "ios")))]
+            Backend::Metal => false,
+            #[cfg(target_os = "windows")]
+            Backend::D3D12 => true,
+            #[cfg(not(target_os = "windows"))]
+            Backend::D3D12 => false,
+        }
+    }
+
+    /// Returns an iterator over all backend variants.
+    /// 
+    /// # Examples
+    /// 
+    /// ```
+    /// # use moonfield_rhi::Backend;
+    /// let available_backends: Vec<Backend> = Backend::all_variants()
+    ///     .filter(|backend| backend.is_available_on_platform())
+    ///     .collect();
+    /// ```
+    pub fn all_variants() -> impl Iterator<Item = Backend> {
+        Self::ALL.iter().copied()
+    }
 }
+
+impl core::fmt::Display for Backend {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        f.write_str(self.to_str())
+    }
+}
+
+bitflags::bitflags! {
+    /// Bitflags representing a set of graphics API backends.
+    /// 
+    /// This allows for efficient storage and manipulation of backend combinations,
+    /// useful for specifying supported backends or preferences.
+    #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+    pub struct Backends: u32 {
+        /// No-operation backend flag
+        const NOOP = 1 << Backend::Noop as u32;
+        /// Vulkan API backend flag
+        const VULKAN = 1 << Backend::Vulkan as u32;
+        /// Metal API backend flag
+        const METAL = 1 << Backend::Metal as u32;
+        /// Direct3D-12 backend flag
+        const D3D12 = 1 << Backend::D3D12 as u32;
+    }
+}
+
+impl Default for Backends {
+    /// Returns all available backends by default.
+    fn default() -> Self {
+        Self::all()
+    }
+}
+
+impl From<Backend> for Backends {
+    /// Converts a single backend into a backend set containing only that backend.
+    /// 
+    /// # Examples
+    /// 
+    /// ```
+    /// # use moonfield_rhi::{Backend, Backends};
+    /// let backend_set: Backends = Backend::Vulkan.into();
+    /// assert!(backend_set.contains(Backends::VULKAN));
+    /// assert!(!backend_set.contains(Backends::METAL));
+    /// ```
+    fn from(backend: Backend) -> Self {
+        // This is safe because Backend enum values are designed to work with bit shifts
+        Self::from_bits_truncate(1 << backend as u32)
+    }
+}
+
+impl Backends {
+    /// Returns the platform-specific default backend set.
+    /// 
+    /// This method returns the most appropriate backends for the current platform,
+    /// ordered by preference (most preferred first).
+    /// 
+    /// # Platform defaults
+    /// 
+    /// - **Windows**: D3D12 and Vulkan
+    /// - **macOS/iOS**: Metal and Vulkan (via MoltenVK)
+    /// - **Linux**: Vulkan
+    /// - **Android**: Vulkan
+    /// - **Other platforms**: Vulkan (fallback)
+    /// 
+    /// # Examples
+    /// 
+    /// ```
+    /// # use moonfield_rhi::Backends;
+    /// let defaults = Backends::platform_default();
+    /// // On Windows, this would include both D3D12 and Vulkan
+    /// ```
+    pub fn platform_default() -> Self {
+        #[cfg(target_os = "windows")]
+        {
+            Self::D3D12 | Self::VULKAN
+        }
+        #[cfg(any(target_os = "macos", target_os = "ios"))]
+        {
+            Self::METAL | Self::VULKAN
+        }
+        #[cfg(target_os = "linux")]
+        {
+            Self::VULKAN
+        }
+        #[cfg(target_os = "android")]
+        {
+            Self::VULKAN
+        }
+        #[cfg(not(any(
+            target_os = "windows",
+            target_os = "macos",
+            target_os = "ios",
+            target_os = "linux",
+            target_os = "android"
+        )))]
+        {
+            Self::VULKAN
+        }
+    }
+
+    /// Returns an iterator over the individual backends contained in this set.
+    /// 
+    /// # Examples
+    /// 
+    /// ```
+    /// # use moonfield_rhi::{Backend, Backends};
+    /// let backends = Backends::VULKAN | Backends::METAL;
+    /// let backend_vec: Vec<Backend> = backends.backends_iter().collect();
+    /// assert_eq!(backend_vec.len(), 2);
+    /// ```
+    pub fn backends_iter(self) -> impl Iterator<Item = Backend> {
+        Backend::all_variants().filter(move |&backend| self.contains(backend.into()))
+    }
+
+    /// Returns the most preferred backend from this set for the current platform.
+    /// 
+    /// Returns `None` if the set is empty or contains no backends available
+    /// on the current platform.
+    /// 
+    /// # Examples
+    /// 
+    /// ```
+    /// # use moonfield_rhi::{Backend, Backends};
+    /// let backends = Backends::platform_default();
+    /// if let Some(preferred) = backends.preferred() {
+    ///     println!("Using preferred backend: {}", preferred);
+    /// }
+    /// ```
+    pub fn preferred(self) -> Option<Backend> {
+        let platform_defaults = Self::platform_default();
+        
+        // Find the first platform default that's also in our set
+        for backend in platform_defaults.backends_iter() {
+            if self.contains(backend.into()) {
+                return Some(backend);
+            }
+        }
+        
+        // Fallback to any available backend
+        self.backends_iter().next()
+    }
+}
+
+// Compile-time assertions to ensure consistency between Backend enum and Backends bitflags
+const _: () = {
+    // Ensure that Backend::ALL has the correct number of elements
+    assert!(Backend::ALL.len() == 4);
+    
+    // Ensure that each backend maps to the correct bit position
+    assert!((1 << Backend::Noop as u32) == Backends::NOOP.bits());
+    assert!((1 << Backend::Vulkan as u32) == Backends::VULKAN.bits());
+    assert!((1 << Backend::Metal as u32) == Backends::METAL.bits());
+    assert!((1 << Backend::D3D12 as u32) == Backends::D3D12.bits());
+};
 
 macro_rules! rhi_features {
     ($(($name:ident, $string:literal)),* $(,)?) => {
@@ -374,17 +584,6 @@ pub enum NativeHandleType {
     MTLSharedEvent = 0x00040008,
     MTLSamplerState = 0x00040009,
     MTLAccelerationStructure = 0x0004000a,
-
-    WGPUDevice = 0x00070001,
-    WGPUBuffer = 0x00070002,
-    WGPUTexture = 0x00070003,
-    WGPUSampler = 0x00070004,
-    WGPURenderPipeline = 0x00070005,
-    WGPUComputePipeline = 0x00070006,
-    WGPUQueue = 0x00070007,
-    WGPUCommandBuffer = 0x00070008,
-    WGPUTextureView = 0x00070009,
-    WGPUCommandEncoder = 0x0007000a,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default)]
@@ -755,7 +954,6 @@ pub enum CooperativeVectorMatrixLayout {
     InferencingOptimal = 2,
     TrainingOptimal = 3,
 }
-
 
 bitflags! {
     /// Usage flags for memory heaps.

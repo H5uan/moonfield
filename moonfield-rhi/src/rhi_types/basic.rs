@@ -2,6 +2,7 @@
 
 use crate::{Format, FormatKind};
 
+
 /// 3D offset coordinates
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default)]
 pub struct Offset3D {
@@ -153,42 +154,39 @@ impl Default for DescriptorHandle {
     }
 }
 
-/// Window handle for different platforms
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+/// Window handle for different platforms using raw-window-handle
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub struct WindowHandle {
-    pub handle_type: crate::WindowHandleType,
-    pub handle_values: [u64; 2],
+    handle: raw_window_handle::RawWindowHandle,
 }
 
 impl WindowHandle {
-    pub fn from_hwnd(hwnd: *mut std::ffi::c_void) -> Self {
-        Self {
-            handle_type: crate::WindowHandleType::HWND,
-            handle_values: [hwnd as u64, 0],
-        }
+    /// Create a new WindowHandle from any object that implements HasRawWindowHandle
+    pub fn new<W: raw_window_handle::HasRawWindowHandle>(window: &W) -> Result<Self, raw_window_handle::HandleError> {
+        Ok(Self {
+            handle: window.raw_window_handle()?,
+        })
     }
 
-    pub fn from_ns_window(ns_window: *mut std::ffi::c_void) -> Self {
-        Self {
-            handle_type: crate::WindowHandleType::NSWindow,
-            handle_values: [ns_window as u64, 0],
-        }
-    }
-
-    pub fn from_xlib_window(x_display: *mut std::ffi::c_void, x_window: u32) -> Self {
-        Self {
-            handle_type: crate::WindowHandleType::XlibWindow,
-            handle_values: [x_display as u64, x_window as u64],
-        }
+    /// Get the raw window handle
+    pub fn get_handle(&self) -> raw_window_handle::RawWindowHandle {
+        self.handle
     }
 }
 
 impl Default for WindowHandle {
     fn default() -> Self {
         Self {
-            handle_type: crate::WindowHandleType::Undefined,
-            handle_values: [0, 0],
+            handle: raw_window_handle::RawWindowHandle::Web(
+                raw_window_handle::WebWindowHandle::new(0)
+            ),
         }
+    }
+}
+
+unsafe impl raw_window_handle::HasRawWindowHandle for WindowHandle {
+    fn raw_window_handle(&self) -> Result<raw_window_handle::RawWindowHandle, raw_window_handle::HandleError> {
+        Ok(self.handle)
     }
 }
 
@@ -241,4 +239,54 @@ impl SamplePosition {
     pub fn new(x: i8, y: i8) -> Self {
         Self { x, y }
     }
+}
+
+/// Clear value for depth/stencil attachments
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct DepthStencilClearValue {
+    pub depth: f32,
+    pub stencil: u32,
+}
+
+impl Default for DepthStencilClearValue {
+    fn default() -> Self {
+        Self { depth: 1.0, stencil: 0 }
+    }
+}
+
+/// Clear value for color attachments
+#[derive(Clone, Copy)]
+pub union ColorClearValue {
+    pub float_values: [f32; 4],
+    pub uint_values: [u32; 4],
+    pub int_values: [i32; 4],
+}
+
+impl Default for ColorClearValue {
+    fn default() -> Self {
+        Self { float_values: [0.0, 0.0, 0.0, 0.0] }
+    }
+}
+
+impl std::fmt::Debug for ColorClearValue {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        unsafe {
+            f.debug_struct("ColorClearValue")
+                .field("float_values", &self.float_values)
+                .finish()
+        }
+    }
+}
+
+impl PartialEq for ColorClearValue {
+    fn eq(&self, other: &Self) -> bool {
+        unsafe { self.float_values == other.float_values }
+    }
+}
+
+/// Combined clear value for any attachment type
+#[derive(Debug, Clone, Copy, PartialEq, Default)]
+pub struct ClearValue {
+    pub color: ColorClearValue,
+    pub depth_stencil: DepthStencilClearValue,
 }

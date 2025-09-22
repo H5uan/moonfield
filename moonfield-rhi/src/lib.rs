@@ -4,7 +4,9 @@ pub mod buffer;
 pub mod error;
 pub mod frame_buffer;
 pub mod geometry_buffer;
-mod types;
+pub mod dynamic;
+
+mod rhi_types;
 
 #[cfg(feature = "metal")]
 pub mod metal;
@@ -13,7 +15,7 @@ pub mod metal;
 pub mod vulkan;
 
 
-pub use crate::types::*;
+pub use crate::rhi_types::*;
 
 #[macro_export]
 macro_rules! define_shared_wrapper {
