@@ -3,7 +3,7 @@
 use super::*;
 use crate::dynamic::{
     DynAccelerationStructure, DynBuffer, DynInputLayout, DynResource,
-    DynSampler, DynShaderModule, DynTextureView,
+    DynSampler, DynTextureView,
 };
 
 /// Buffer descriptor
@@ -630,7 +630,7 @@ impl Default for MultisampleDesc {
 /// Render pipeline descriptor
 #[derive(Debug)]
 pub struct RenderPipelineDesc<'a> {
-    pub program: Option<Box<dyn DynShaderModule>>, // IShaderProgram*
+    pub program: Option<Box<dyn DynShaderProgram>>, // IShaderProgram*
     pub input_layout: Option<Box<dyn DynInputLayout>>, // IInputLayout*
     pub primitive_topology: PrimitiveTopology,
     pub targets: Vec<ColorTargetDesc>,
@@ -661,24 +661,14 @@ impl Default for RenderPipelineDesc<'_> {
 }
 
 /// Compute pipeline descriptor
-#[derive(Debug)]
+#[derive(Debug, Default)]
 pub struct ComputePipelineDesc<'a> {
-    pub program: Option<Box<dyn DynShaderModule>>, 
+    pub program: Option<Box<dyn DynShaderProgram>>,
 
     /// Defer target code compilation of program to dispatch time.
     pub defer_target_compilation: bool,
 
     pub label: Label<'a>,
-}
-
-impl Default for ComputePipelineDesc<'_> {
-    fn default() -> Self {
-        Self {
-            program: None,
-            defer_target_compilation: false,
-            label: None,
-        }
-    }
 }
 
 /// Hit group descriptor for ray tracing
@@ -693,7 +683,7 @@ pub struct HitGroupDesc {
 /// Ray tracing pipeline descriptor
 #[derive(Debug)]
 pub struct RayTracingPipelineDesc<'a> {
-    pub program: Option<Box<dyn DynShaderModule>>, // IShaderProgram*
+    pub program: Option<Box<dyn DynShaderProgram>>, // IShaderProgram*
     pub hit_groups: Vec<HitGroupDesc>,
     pub max_recursion: u32,
     pub max_ray_payload_size: u32,
@@ -747,7 +737,7 @@ pub struct ShaderTableDesc {
     pub callable_shader_entry_point_names: Vec<String>,
     pub callable_shader_record_overwrites: Vec<ShaderRecordOverwrite>,
 
-    pub program: Option<Box<dyn DynShaderModule>>, // IShaderProgram*
+    pub program: Option<Box<dyn DynShaderProgram>>, // IShaderProgram*
 }
 
 #[derive(Debug, Clone, Default)]
