@@ -4,8 +4,8 @@ pub mod buffer;
 pub mod error;
 pub mod frame_buffer;
 pub mod geometry_buffer;
-pub mod dynamic;
 
+mod dynamic;
 mod rhi_types;
 
 #[cfg(feature = "metal")]
@@ -14,7 +14,7 @@ pub mod metal;
 #[cfg(feature = "vulkan")]
 pub mod vulkan;
 
-
+pub use crate::dynamic::*;
 pub use crate::rhi_types::*;
 
 #[macro_export]

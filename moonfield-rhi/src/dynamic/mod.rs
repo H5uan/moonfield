@@ -5,7 +5,10 @@ use std::any::Any;
 ///
 /// This trait provides a common interface for all graphics API objects
 /// including devices, resources, pipelines, encoders, and other RHI constructs.
-pub trait DynObject: Any + Debug + 'static {}
+pub trait DynObject: Any + Debug + 'static {
+    fn as_any(&self) -> &dyn Any;
+    fn as_any_mut(&mut self) -> &mut dyn Any;
+}
 
 macro_rules! impl_dyn_object {
     ($($type:ty),*) => {

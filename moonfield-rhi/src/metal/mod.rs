@@ -21,12 +21,23 @@ use winit::{
 };
 
 use crate::{
-    backend::{self, BackendCapabilities, Device, SharedGraphicsBackend},
-    error::GraphicsError,
-    geometry_buffer::GeometryBufferWarpper,
+    backend::{self, BackendCapabilities, Device as LegacyDevice, SharedGraphicsBackend}, 
+    dynamic::{
+        impl_dyn_object, DynObject, DynInstance, DynSurface, DynAdapter, DynDevice,
+        DynResource, DynBuffer, DynTexture, DynTextureView, DynSurfaceTexture,
+        DynSampler, DynAccelerationStructure, DynShaderProgram, DynShaderObject,
+        DynShaderTable, DynPipeline, DynRenderPipeline, DynComputePipeline,
+        DynRayTracingPipeline, DynCommandBuffer, DynCommandEncoder, DynPassEncoder,
+        RenderPassEncoder as DynRenderPassEncoder, ComputePassEncoder as DynComputePassEncoder,
+        DynRayTracingPassEncoder, DynCommandQueue, DynInputLayout, DynFence,
+        DynQueryPool, DynPersistentCache, DynHeap
+    },
+    error::GraphicsError, 
+    geometry_buffer::GeometryBufferWarpper, 
     metal::{
         frame_buffer::MetalFrameBuffer, geometry_buffer::MetalGeometryBuffer,
-    },
+    }, 
+    Backend
 };
 
 pub mod buffer;
@@ -210,7 +221,7 @@ impl MetalGraphicsBackend {
     }
 }
 
-impl Device for MetalGraphicsBackend {
+impl LegacyDevice for MetalGraphicsBackend {
     /// Get the images in swapchain that havent been rendereds
     fn back_buffer(
         &self,
@@ -317,3 +328,239 @@ impl Device for MetalGraphicsBackend {
         Ok(GeometryBufferWarpper(Rc::new(geometry_buffer)))
     }
 }
+
+
+#[derive(Debug)]
+pub struct Instance {
+
+}
+
+impl DynInstance for Instance {}
+
+#[derive(Debug)]
+pub struct Surface {}
+impl DynSurface for Surface {}
+
+#[derive(Debug)]
+pub struct Adapter {}
+impl DynAdapter for Adapter {}
+
+#[derive(Debug)]
+pub struct Device {}
+impl DynDevice for Device {}
+
+#[derive(Debug)]
+pub struct Queue {}
+impl DynResource for Queue {}
+impl DynCommandQueue for Queue {}
+
+#[derive(Debug)]
+pub struct CommandEncoder {}
+impl DynCommandEncoder for CommandEncoder {}
+
+#[derive(Debug)]
+pub struct CommandBuffer {}
+impl DynCommandBuffer for CommandBuffer {}
+
+#[derive(Debug)]
+pub struct Buffer {}
+impl DynResource for Buffer {}
+impl DynBuffer for Buffer {}
+
+#[derive(Debug)]
+pub struct Texture {}
+impl DynResource for Texture {}
+impl DynTexture for Texture {}
+
+#[derive(Debug)]
+pub struct TextureView {}
+impl DynResource for TextureView {}
+impl DynTextureView for TextureView {}
+
+pub struct SurfaceTexture {
+    texture: Texture,
+    drawable: Retained<dyn CAMetalDrawable>,
+    present_with_transaction: bool,
+}
+
+impl std::fmt::Debug for SurfaceTexture {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("SurfaceTexture")
+            .field("texture", &self.texture)
+            .field("drawable", &"<CAMetalDrawable>")
+            .field("present_with_transaction", &self.present_with_transaction)
+            .finish()
+    }
+}
+
+impl DynResource for SurfaceTexture {}
+impl DynSurfaceTexture for SurfaceTexture {}
+
+impl std::borrow::Borrow<Texture> for SurfaceTexture {
+    fn borrow(&self) -> &Texture {
+        &self.texture
+    }
+}
+
+impl core::borrow::Borrow<dyn DynTexture> for SurfaceTexture {
+    fn borrow(&self) -> &dyn DynTexture {
+        &self.texture
+    }
+}
+
+unsafe impl Send for SurfaceTexture {}
+unsafe impl Sync for SurfaceTexture {}
+
+
+
+#[derive(Debug)]
+pub struct Sampler {}
+impl DynResource for Sampler {}
+impl DynSampler for Sampler {}
+
+#[derive(Debug)]
+pub struct AccelerationStructure {}
+impl DynResource for AccelerationStructure {}
+impl DynAccelerationStructure for AccelerationStructure {}
+
+
+#[derive(Debug)]
+pub struct ShaderProgram {}
+impl DynShaderProgram for ShaderProgram {}
+#[derive(Debug)]
+pub struct ShaderObject {}
+impl DynShaderObject for ShaderObject {}
+#[derive(Debug)]
+pub struct ShaderTable {}
+impl DynShaderTable for ShaderTable {}
+#[derive(Debug)]
+pub struct RenderPipeline {}
+impl DynPipeline for RenderPipeline {}
+impl DynRenderPipeline for RenderPipeline {}
+#[derive(Debug)]
+pub struct ComputePipeline {}
+impl DynPipeline for ComputePipeline {}
+impl DynComputePipeline for ComputePipeline {}
+#[derive(Debug)]
+pub struct RayTracingPipeline {}
+impl DynPipeline for RayTracingPipeline {}  
+impl DynRayTracingPipeline for RayTracingPipeline {}
+
+#[derive(Debug)]
+pub struct PassEncoder {}
+impl DynPassEncoder for PassEncoder {}
+#[derive(Debug)]
+pub struct RenderPassEncoder {}
+impl DynPassEncoder for RenderPassEncoder {}
+impl DynRenderPassEncoder for RenderPassEncoder {}
+#[derive(Debug)]
+pub struct ComputePassEncoder {}    
+impl DynPassEncoder for ComputePassEncoder {}
+impl DynComputePassEncoder for ComputePassEncoder {}
+#[derive(Debug)]
+pub struct RayTracingPassEncoder {}
+impl DynPassEncoder for RayTracingPassEncoder {}
+impl DynRayTracingPassEncoder for RayTracingPassEncoder {}
+
+
+#[derive(Debug)]
+pub struct InputLayout {}
+impl DynInputLayout for InputLayout {}
+
+#[derive(Debug)]
+pub struct Fence {}
+impl DynFence for Fence {}
+
+#[derive(Debug)]
+pub struct QueryPool {}
+impl DynQueryPool for QueryPool {}
+
+#[derive(Debug)]
+pub struct PersistentCache {}
+impl DynPersistentCache for PersistentCache {}
+
+#[derive(Debug)]
+pub struct Heap {}
+impl DynHeap for Heap {}
+
+
+
+
+
+
+#[derive(Clone, Debug)]
+pub struct Api;
+
+impl crate::Api for Api {
+    const VARIANT: Backend = Backend::Metal;
+
+    type Instance = Instance;
+    type Surface = Surface;
+    type Adapter = Adapter;
+    type Device = Device;
+
+    type Queue = Queue;
+    type CommandEncoder = CommandEncoder;
+    type CommandBuffer = CommandBuffer;
+
+    // Resource types
+    type Resource = Buffer; // Use concrete type instead of trait
+    type Buffer = Buffer;
+    type Texture = Texture;
+    type SurfaceTexture = SurfaceTexture; // Use concrete type
+    type TextureView = TextureView;
+    type Sampler = Sampler;
+    type AccelerationStructure = AccelerationStructure;
+
+    // Shader and pipeline types
+    type ShaderProgram = ShaderProgram;
+    type ShaderObject = ShaderObject;
+    type ShaderTable = ShaderTable;
+    type RenderPipeline = RenderPipeline;
+    type ComputePipeline = ComputePipeline;
+    type RayTracingPipeline = RayTracingPipeline;
+
+    // Pass encoder types
+    type PassEncoder = PassEncoder;
+    type RenderPassEncoder = RenderPassEncoder;
+    type ComputePassEncoder = ComputePassEncoder;
+    type RayTracingPassEncoder = RayTracingPassEncoder;
+
+    // Other resource types
+    type InputLayout = InputLayout;
+    type Fence = Fence;
+    type QueryPool = QueryPool;
+    type PersistentCache = PersistentCache;
+    type Heap = Heap;
+}
+
+impl_dyn_object!(
+    Instance,
+    Surface,
+    Adapter,
+    Device,
+    Queue,
+    CommandEncoder,
+    CommandBuffer,
+    Buffer,
+    Texture,
+    TextureView,
+    SurfaceTexture,
+    Sampler,
+    AccelerationStructure,
+    ShaderProgram,
+    ShaderObject,
+    ShaderTable,
+    RenderPipeline,
+    ComputePipeline,
+    RayTracingPipeline,
+    PassEncoder,
+    RenderPassEncoder,
+    ComputePassEncoder,
+    RayTracingPassEncoder,
+    InputLayout,
+    Fence,
+    QueryPool,
+    PersistentCache,
+    Heap
+);
