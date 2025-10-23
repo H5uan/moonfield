@@ -49,6 +49,10 @@ pub mod buffer;
 pub mod frame_buffer;
 pub mod geometry_buffer;
 
+mod adapter;
+mod device;
+mod surface;
+
 pub struct MetalGraphicsBackend {
     /// device: abstraction of the GPU, providing methods for creating objects managed by GPU
     /// like command queues, render states and shader liberaries

@@ -2,6 +2,22 @@ use std::sync::Arc;
 
 use thiserror::Error;
 
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum ErrorType{
+    /// Internal error indicates that an operation failed for a system / platform-specific reason.
+    Internal,
+    /// Out of memory error indicates that there was not enough memory to complete the operation.
+    OutOfMemory,
+    /// Validation error indicates that an operation did not meet all validation requirements.
+    Validation,
+    /// Device lost error indicates that the device has been lost and cannot be used.
+    DeviceLost,
+}
+
+pub trait RHIError: core::error::Error + 'static {
+    fn rhi_error_type(&self) -> ErrorType;
+}
+
 /// Error type for parsing Feature from string
 #[derive(Error, Debug, Clone, PartialEq, Eq)]
 #[error("invalid feature string")]

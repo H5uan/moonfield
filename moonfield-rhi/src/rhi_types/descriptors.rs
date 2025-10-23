@@ -740,7 +740,32 @@ pub struct ShaderTableDesc {
     pub program: Option<Box<dyn DynShaderProgram>>, // IShaderProgram*
 }
 
+
+bitflags::bitflags! {
+    #[repr(transparent)]
+    #[derive(Debug, Copy, Clone, PartialEq, Eq, Hash)]
+    pub struct InstanceFlags: u32 {
+        /// Generate debug information in shaders and objects.
+        const DEBUG = 1 << 0;
+        /// Enable validation layer in the backend API.
+        const VALIDATION = 1 << 1;
+    }
+}
+
+impl Default for InstanceFlags {
+    fn default() -> Self {
+        InstanceFlags::DEBUG
+    }
+}
+
+impl InstanceFlags {
+    pub fn debugging() -> Self {
+        InstanceFlags::DEBUG | InstanceFlags::VALIDATION
+    }
+}
+
 #[derive(Debug, Clone, Default)]
 pub struct InstanceDesc {
     pub backend: Backend,
+    pub flags: InstanceFlags,
 }
