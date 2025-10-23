@@ -21,23 +21,28 @@ use winit::{
 };
 
 use crate::{
-    backend::{self, BackendCapabilities, Device as LegacyDevice, SharedGraphicsBackend}, 
-    dynamic::{
-        impl_dyn_object, DynObject, DynInstance, DynSurface, DynAdapter, DynDevice,
-        DynResource, DynBuffer, DynTexture, DynTextureView, DynSurfaceTexture,
-        DynSampler, DynAccelerationStructure, DynShaderProgram, DynShaderObject,
-        DynShaderTable, DynPipeline, DynRenderPipeline, DynComputePipeline,
-        DynRayTracingPipeline, DynCommandBuffer, DynCommandEncoder, DynPassEncoder,
-        RenderPassEncoder as DynRenderPassEncoder, ComputePassEncoder as DynComputePassEncoder,
-        DynRayTracingPassEncoder, DynCommandQueue, DynInputLayout, DynFence,
-        DynQueryPool, DynPersistentCache, DynHeap
+    Backend, InstanceError,
+    backend::{
+        self, BackendCapabilities, Device as LegacyDevice,
+        SharedGraphicsBackend,
     },
-    error::GraphicsError, 
-    geometry_buffer::GeometryBufferWarpper, 
+    dynamic::{
+        ComputePassEncoder as DynComputePassEncoder, DynAccelerationStructure,
+        DynAdapter, DynBuffer, DynCommandBuffer, DynCommandEncoder,
+        DynCommandQueue, DynComputePipeline, DynDevice, DynFence, DynHeap,
+        DynInputLayout, DynInstance, DynObject, DynPassEncoder,
+        DynPersistentCache, DynPipeline, DynQueryPool,
+        DynRayTracingPassEncoder, DynRayTracingPipeline, DynRenderPipeline,
+        DynResource, DynSampler, DynShaderObject, DynShaderProgram,
+        DynShaderTable, DynSurface, DynSurfaceTexture, DynTexture,
+        DynTextureView, RenderPassEncoder as DynRenderPassEncoder,
+        impl_dyn_object,
+    },
+    error::GraphicsError,
+    geometry_buffer::GeometryBufferWarpper,
     metal::{
         frame_buffer::MetalFrameBuffer, geometry_buffer::MetalGeometryBuffer,
-    }, 
-    Backend
+    },
 };
 
 pub mod buffer;
@@ -239,10 +244,11 @@ impl LegacyDevice for MetalGraphicsBackend {
         let texture = unsafe { drawable.texture() };
         let width = texture.width() as u32;
         let height = texture.height() as u32;
-        
+
         tracing::debug!(
             "Metal backend: Creating framebuffer with drawable texture size: {}x{}",
-            width, height
+            width,
+            height
         );
 
         // Descriptor is like a guide that tell GPU how to handle old data(load)
@@ -287,27 +293,32 @@ impl LegacyDevice for MetalGraphicsBackend {
         let (width, height) = new_size;
         tracing::info!(
             "Metal backend: Setting frame size to {}x{}",
-            width, height
+            width,
+            height
         );
-        
+
         unsafe {
             // Get current drawable size for comparison
             let current_size = self.layer.drawableSize();
             tracing::debug!(
                 "Metal backend: Current drawable size: {}x{}, setting to: {}x{}",
-                current_size.width, current_size.height, width, height
+                current_size.width,
+                current_size.height,
+                width,
+                height
             );
-            
+
             self.layer.setDrawableSize(CGSize {
                 width: width as f64,
                 height: height as f64,
             });
-            
+
             // Verify the size was set
             let new_drawable_size = self.layer.drawableSize();
             tracing::info!(
                 "Metal backend: Drawable size after setting: {}x{}",
-                new_drawable_size.width, new_drawable_size.height
+                new_drawable_size.width,
+                new_drawable_size.height
             );
         };
     }
@@ -329,13 +340,21 @@ impl LegacyDevice for MetalGraphicsBackend {
     }
 }
 
-
 #[derive(Debug)]
-pub struct Instance {
+pub struct Instance {}
 
+impl DynInstance for Instance {
+    unsafe fn create_surface(
+        &self, display_handle: raw_window_handle::DisplayHandle,
+        window_handle: raw_window_handle::WindowHandle,
+    ) -> Result<Box<dyn DynSurface>, InstanceError> {
+        unimplemented!("create_surface")
+    }
+
+    unsafe fn enumerate_adapters(&self, surface_hint: Option<&dyn DynSurface>) {
+        unimplemented!("enumerate_adapters")
+    }
 }
-
-impl DynInstance for Instance {}
 
 #[derive(Debug)]
 pub struct Surface {}
@@ -411,8 +430,6 @@ impl core::borrow::Borrow<dyn DynTexture> for SurfaceTexture {
 unsafe impl Send for SurfaceTexture {}
 unsafe impl Sync for SurfaceTexture {}
 
-
-
 #[derive(Debug)]
 pub struct Sampler {}
 impl DynResource for Sampler {}
@@ -422,7 +439,6 @@ impl DynSampler for Sampler {}
 pub struct AccelerationStructure {}
 impl DynResource for AccelerationStructure {}
 impl DynAccelerationStructure for AccelerationStructure {}
-
 
 #[derive(Debug)]
 pub struct ShaderProgram {}
@@ -443,7 +459,7 @@ impl DynPipeline for ComputePipeline {}
 impl DynComputePipeline for ComputePipeline {}
 #[derive(Debug)]
 pub struct RayTracingPipeline {}
-impl DynPipeline for RayTracingPipeline {}  
+impl DynPipeline for RayTracingPipeline {}
 impl DynRayTracingPipeline for RayTracingPipeline {}
 
 #[derive(Debug)]
@@ -454,14 +470,13 @@ pub struct RenderPassEncoder {}
 impl DynPassEncoder for RenderPassEncoder {}
 impl DynRenderPassEncoder for RenderPassEncoder {}
 #[derive(Debug)]
-pub struct ComputePassEncoder {}    
+pub struct ComputePassEncoder {}
 impl DynPassEncoder for ComputePassEncoder {}
 impl DynComputePassEncoder for ComputePassEncoder {}
 #[derive(Debug)]
 pub struct RayTracingPassEncoder {}
 impl DynPassEncoder for RayTracingPassEncoder {}
 impl DynRayTracingPassEncoder for RayTracingPassEncoder {}
-
 
 #[derive(Debug)]
 pub struct InputLayout {}
@@ -482,11 +497,6 @@ impl DynPersistentCache for PersistentCache {}
 #[derive(Debug)]
 pub struct Heap {}
 impl DynHeap for Heap {}
-
-
-
-
-
 
 #[derive(Clone, Debug)]
 pub struct Api;

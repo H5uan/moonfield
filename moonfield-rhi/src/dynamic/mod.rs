@@ -1,5 +1,12 @@
+mod instance; 
+mod surface;
+mod adapter;
+
 use core::fmt::Debug;
 use std::any::Any;
+
+pub use instance::*;
+pub use surface::*;
 
 /// Base trait for all RHI objects, allows downcasting via [`Any`].
 ///
@@ -27,7 +34,6 @@ macro_rules! impl_dyn_object {
 }
 pub(crate) use impl_dyn_object;
 
-pub trait DynInstance: DynObject + Debug {}
 pub trait DynSurface: DynObject + Debug {}
 pub trait DynAdapter: DynObject + Debug {}
 pub trait DynDevice: DynObject + Debug {}
