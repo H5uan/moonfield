@@ -1,17 +1,21 @@
 use alloc::boxed::Box;
 
 use super::{DynAdapter, DynObject};
-use crate::{Api, Backend, DynSurface, InstanceError};
+use crate::{AdapterInfo, Api, Backend, DynSurface, Features, Capabilities,InstanceError};
 
 pub struct DynExposedAdapter {
     pub adapter: Box<dyn DynAdapter>,
+    pub info: AdapterInfo,
+    pub features: Features,
+    pub capabilities: Capabilities,
 }
 
 impl DynExposedAdapter {
     pub fn backend(&self) -> Backend {
-        self.adapter.backend()
+        self.info.backend()
     }
 }
+
 
 pub trait DynInstance: DynObject {
     unsafe fn create_surface(

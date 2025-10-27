@@ -1,7 +1,14 @@
 //! Basic types and structures used throughout the RHI
 
-use crate::{Format, FormatKind};
+use crate::{Backend, Format, FormatKind};
 
+pub type BufferAddress = u64;
+
+pub type BufferSize = core::num::NonZeroU64;
+
+pub type ShaderLocation = u32;
+
+pub type DynamicOffset = u32;
 
 /// 3D offset coordinates
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default)]
@@ -48,7 +55,7 @@ impl Extent3D {
     };
 }
 
-pub struct FormatInfo{
+pub struct FormatInfo {
     format: Format,
     name: &'static str,
     slang_name: Option<&'static str>,
@@ -71,7 +78,6 @@ pub struct FormatInfo{
     is_compressed: bool,
     supports_non_power_of_two: bool,
 }
-
 
 /// Buffer range specification
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default)]
@@ -162,10 +168,10 @@ pub struct WindowHandle {
 
 impl WindowHandle {
     /// Create a new WindowHandle from any object that implements HasRawWindowHandle
-    pub fn new<W: raw_window_handle::HasRawWindowHandle>(window: &W) -> Result<Self, raw_window_handle::HandleError> {
-        Ok(Self {
-            handle: window.raw_window_handle()?,
-        })
+    pub fn new<W: raw_window_handle::HasRawWindowHandle>(
+        window: &W,
+    ) -> Result<Self, raw_window_handle::HandleError> {
+        Ok(Self { handle: window.raw_window_handle()? })
     }
 
     /// Get the raw window handle
@@ -178,14 +184,19 @@ impl Default for WindowHandle {
     fn default() -> Self {
         Self {
             handle: raw_window_handle::RawWindowHandle::Web(
-                raw_window_handle::WebWindowHandle::new(0)
+                raw_window_handle::WebWindowHandle::new(0),
             ),
         }
     }
 }
 
 unsafe impl raw_window_handle::HasRawWindowHandle for WindowHandle {
-    fn raw_window_handle(&self) -> Result<raw_window_handle::RawWindowHandle, raw_window_handle::HandleError> {
+    fn raw_window_handle(
+        &self,
+    ) -> Result<
+        raw_window_handle::RawWindowHandle,
+        raw_window_handle::HandleError,
+    > {
         Ok(self.handle)
     }
 }
@@ -289,4 +300,57 @@ impl PartialEq for ColorClearValue {
 pub struct ClearValue {
     pub color: ColorClearValue,
     pub depth_stencil: DepthStencilClearValue,
+}
+
+/// Supported physical device types.
+#[repr(u8)]
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Hash)]
+pub enum DeviceType {
+    /// Other or Unknown.
+    Other,
+    /// Integrated GPU with shared CPU/GPU memory.
+    IntegratedGpu,
+    /// Discrete GPU with separate CPU/GPU memory.
+    DiscreteGpu,
+    /// Cpu / Software Rendering.
+    Cpu,
+}
+
+/// Information about an adapter (GPU/CPU).
+#[derive(Clone, Debug, Eq, PartialEq, Hash)]
+pub struct AdapterInfo {
+    pub name: String,
+    pub vendor: u32,
+    pub device: u32,
+    pub device_type: DeviceType,
+    pub driver: String,
+    pub driver_info: String,
+    pub backend: Backend,
+    pub transient_saves_memory: bool,
+}
+
+bitflags_array! {
+    #[repr(C)]
+    #[derive(Default, Debug, Copy, Clone, PartialEq, Eq, Hash)]
+    pub struct Features: [u64; 2];
+}
+
+/// Represents the sets of limits an adapter/device supports.
+#[repr(C)]
+#[derive(Clone, Debug, PartialEq, Eq, Hash)]
+pub struct Limits {}
+
+#[derive(Clone, Debug,)]
+pub struct Alignments {
+    pub buffer_copy_offset: BufferSize,
+    pub buffer_copy_pitch: BufferSize,
+    pub uniform_bounds_check_alignment: BufferSize,
+    pub raw_tlas_instance_size: usize,
+    pub ray_tracing_scratch_buffer_alignment: u32,
+}
+
+#[derive(Clone, Debug)]
+pub struct Capabilities {
+    pub limits: Limits,
+    pub alignments: Alignments,
 }

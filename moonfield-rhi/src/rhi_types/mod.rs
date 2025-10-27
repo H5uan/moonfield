@@ -89,3 +89,17 @@ pub trait Api: Clone + Debug + Sized + 'static {
     type PersistentCache: DynPersistentCache;
     type Heap: DynHeap;
 }
+
+pub trait Instance: Sized {
+    type A: Api;
+
+    unsafe fn init(desc: &InstanceDesc) -> Result<Self, InstanceError>;
+    unsafe fn create_surface(
+        &self, display_handle: raw_window_handle::RawDisplayHandle,
+        window_handle: raw_window_handle::RawWindowHandle,
+    ) -> Result<<Self::A as Api>::Surface, InstanceError>;
+    /// `surface_hint` is only used by the GLES backend targeting WebGL2
+    unsafe fn enumerate_adapters(
+        &self, surface_hint: Option<&<Self::A as Api>::Surface>,
+    );
+}
