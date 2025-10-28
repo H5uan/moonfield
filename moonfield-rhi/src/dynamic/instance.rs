@@ -1,12 +1,12 @@
-use alloc::boxed::Box;
+use std::boxed::Box;
 
 use super::{DynAdapter, DynObject};
-use crate::{AdapterInfo, Api, Backend, DynSurface, Features, Capabilities,InstanceError};
+use crate::{AdapterInfo, Api, Backend, DynSurface, Feature, Capabilities,InstanceError};
 
 pub struct DynExposedAdapter {
     pub adapter: Box<dyn DynAdapter>,
     pub info: AdapterInfo,
-    pub features: Features,
+    pub features: Feature,
     pub capabilities: Capabilities,
 }
 

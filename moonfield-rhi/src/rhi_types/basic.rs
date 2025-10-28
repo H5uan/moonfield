@@ -1,5 +1,7 @@
 //! Basic types and structures used throughout the RHI
 
+use bitflags::bitflags;
+
 use crate::{Backend, Format, FormatKind};
 
 pub type BufferAddress = u64;
@@ -327,12 +329,6 @@ pub struct AdapterInfo {
     pub driver_info: String,
     pub backend: Backend,
     pub transient_saves_memory: bool,
-}
-
-bitflags_array! {
-    #[repr(C)]
-    #[derive(Default, Debug, Copy, Clone, PartialEq, Eq, Hash)]
-    pub struct Features: [u64; 2];
 }
 
 /// Represents the sets of limits an adapter/device supports.

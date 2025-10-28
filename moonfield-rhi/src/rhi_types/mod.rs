@@ -47,6 +47,20 @@ pub const ALL_SUBRESOURCES: SubresourceRange = SubresourceRange {
 
 pub type Label<'a> = Option<&'a str>;
 
+#[derive(Debug)]
+pub struct ExposedAdapter<A: Api> {
+    pub adapter: A::Adapter,
+    pub info: AdapterInfo,
+    pub features: Feature,
+    pub capabilities: Capabilities,
+}
+
+#[derive(Debug, Clone)]
+pub struct SurfaceConfiguration {
+    /// Maximum number of queued frames. Must be in
+    pub maximum_frame_latency: u32,
+}
+
 pub trait Api: Clone + Debug + Sized + 'static {
     const VARIANT: Backend;
 
@@ -99,7 +113,38 @@ pub trait Instance: Sized {
         window_handle: raw_window_handle::RawWindowHandle,
     ) -> Result<<Self::A as Api>::Surface, InstanceError>;
     /// `surface_hint` is only used by the GLES backend targeting WebGL2
-    unsafe fn enumerate_adapters(
-        &self, surface_hint: Option<&<Self::A as Api>::Surface>,
-    );
+    unsafe fn enumerate_adapters(&self) -> Vec<ExposedAdapter<Self::A>>;
 }
+
+pub trait Surface {
+    type A: Api;
+
+    unsafe fn configure(
+        &self, device: &<Self::A as Api>::Device, config: &SurfaceConfiguration,
+    ) -> Result<(), SurfaceError>;
+
+    unsafe fn unconfigure(&self, device: &<Self::A as Api>::Device);
+
+    unsafe fn acquire_texture(&self, timeout: Option<core::time::Duration>);
+
+    unsafe fn discard_texture(&self);
+}
+
+pub trait Adapter {
+    type A: Api;
+
+    unsafe fn open(&self);
+
+    unsafe fn texture_format_capabilities();
+
+    unsafe fn surface_capabilities();
+}
+
+pub trait Device {
+    type A: Api;
+
+    unsafe fn create_buffer();
+
+    unsafe fn destroy_buffer();
+}
+
