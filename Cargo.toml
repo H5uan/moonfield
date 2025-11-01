@@ -1,10 +1,7 @@
 [workspace]
 members = [
-    "moonfield",
     "moonfield-core",
     "moonfield-rhi",
-    "moonfield-impl",
-    "moonfield-examples",
 ]
 resolver = "3"
 
