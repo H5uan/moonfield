@@ -1,100 +1,25 @@
 use std::rc::Rc;
 
-#[cfg(all(feature = "metal", target_os = "macos"))]
-use moonfield_rhi::metal::MetalGraphicsBackend;
-#[cfg(all(
-    feature = "vulkan",
-    not(all(feature = "metal", target_os = "macos"))
-))]
-use moonfield_rhi::vulkan::VulkanGraphicsBackend;
-use moonfield_rhi::{backend::SharedGraphicsBackend, error::GraphicsError};
 use tracing::{debug, info, warn};
 use winit::{
     event_loop::ActiveEventLoop,
     window::{Window, WindowAttributes},
 };
 
-use crate::{engine::error::EngineError, renderer::Renderer};
+use crate::engine::error::EngineError;
 
 pub mod error;
 
 pub struct InitilizedGraphicsContext {
     pub window: Window,
-    pub renderer: Renderer,
     params: GraphicsContextParams,
-}
-
-pub type GraphicsBackendConstructorResult =
-    Result<(Window, SharedGraphicsBackend), GraphicsError>;
-
-pub type GraphicsBackendConstructorCallback =
-    dyn Fn(
-        &GraphicsContextParams,
-        &ActiveEventLoop,
-        WindowAttributes,
-        bool,
-    ) -> GraphicsBackendConstructorResult;
-
-#[derive(Clone)]
-pub struct GraphicsBackendConstructor(Rc<GraphicsBackendConstructorCallback>);
-
-impl Default for GraphicsBackendConstructor {
-    fn default() -> Self {
-        // Prefer Metal on macOS when available
-        #[cfg(all(feature = "metal", target_os = "macos"))]
-        {
-            Self(Rc::new(|params, event_loop, window_attrs, named_objects| {
-                MetalGraphicsBackend::new(
-                    params.vsync,
-                    params.msaa_sample_count,
-                    event_loop,
-                    window_attrs,
-                    named_objects,
-                )
-            }))
-        }
-        // Use Vulkan on non-macOS platforms or when Metal is not available
-        #[cfg(all(
-            feature = "vulkan",
-            not(all(feature = "metal", target_os = "macos"))
-        ))]
-        {
-            Self(Rc::new(|params, event_loop, window_attrs, named_objects| {
-                VulkanGraphicsBackend::new(
-                    params.vsync,
-                    params.msaa_sample_count,
-                    event_loop,
-                    window_attrs,
-                    named_objects,
-                )
-            }))
-        }
-        // Fall back to unavailable if no backend is enabled
-        #[cfg(not(any(
-            all(feature = "metal", target_os = "macos"),
-            feature = "vulkan"
-        )))]
-        {
-            Self(Rc::new(
-                |_params, _event_loop, _window_attrs, _named_objects| {
-                    Err(GraphicsError::BackendUnavailable)
-                },
-            ))
-        }
-    }
 }
 
 #[derive(Clone)]
 pub struct GraphicsContextParams {
     pub window_attributes: WindowAttributes,
-
     pub vsync: bool,
-
     pub msaa_sample_count: Option<u8>,
-
-    pub graphics_backend_constructor: GraphicsBackendConstructor,
-
-    // To assign meaningful names for GPU objects
     pub named_objects: bool,
 }
 
@@ -110,8 +35,6 @@ pub struct EngineInitParams {
 
 pub struct Engine {
     pub graphics_context: GraphicsContext,
-
-    // Amount of time (in seconds) that passed from creation of the engine
     elapsed_time: f32,
 }
 
@@ -136,13 +59,15 @@ impl Engine {
         info!("Initializing graphics context");
 
         if let GraphicsContext::UnInitialized(params) = &self.graphics_context {
-            debug!("Creating graphics backend and window");
-            let (window, backend) = params.graphics_backend_constructor.0(
-                params,
-                active_event_loop,
-                params.window_attributes.clone(),
-                params.named_objects,
-            )?;
+            debug!("Creating window");
+            let window = active_event_loop
+                .create_window(params.window_attributes.clone())
+                .map_err(|e| {
+                    EngineError::Custom(format!(
+                        "Failed to create window: {}",
+                        e
+                    ))
+                })?;
 
             let frame_size =
                 (window.inner_size().width, window.inner_size().height);
@@ -151,13 +76,9 @@ impl Engine {
                 frame_size.0, frame_size.1
             );
 
-            debug!("Creating renderer");
-            let renderer = Renderer::new(backend, frame_size)?;
-
             self.graphics_context =
                 GraphicsContext::Initilized(InitilizedGraphicsContext {
                     window,
-                    renderer,
                     params: params.clone(),
                 });
 
@@ -173,12 +94,8 @@ impl Engine {
         }
     }
 
-    pub fn render(&mut self) -> Result<(), GraphicsError> {
-        if let GraphicsContext::Initilized(ref mut ctx) = self.graphics_context
-        {
-            ctx.renderer.render_frame()?;
-        }
-
+    pub fn render(&mut self) -> Result<(), EngineError> {
+        // Rendering logic removed - no backend available
         Ok(())
     }
 
@@ -192,8 +109,6 @@ impl Engine {
             if frame_size.0 == 0 || frame_size.1 == 0 {
                 return Ok(()); // ignore minimized case
             }
-
-            ctx.renderer.set_frame_size(frame_size)?;
 
             ctx.window.request_redraw();
             Ok(())

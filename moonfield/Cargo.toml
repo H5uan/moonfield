@@ -9,12 +9,5 @@ crate-type = ["rlib"]
 # Library dependencies
 [dependencies]
 moonfield-core = { path = "../moonfield-core" }
-
-# Platform-specific dependencies
-[target.'cfg(target_os = "macos")'.dependencies]
-moonfield-impl = { path = "../moonfield-impl", features = ["metal"] }
-moonfield-rhi = { path = "../moonfield-rhi", features = ["metal"] }
-
-[target.'cfg(not(target_os = "macos"))'.dependencies]
-moonfield-impl = { path = "../moonfield-impl", features = ["vulkan"] }
-moonfield-rhi = { path = "../moonfield-rhi", features = ["vulkan"] }
+moonfield-impl = { path = "../moonfield-impl" }
+moonfield-rhi = { path = "../moonfield-rhi" }

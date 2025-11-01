@@ -1,12 +1,5 @@
-mod instance; 
-mod surface;
-mod adapter;
-
 use core::fmt::Debug;
 use std::any::Any;
-
-pub use instance::*;
-pub use surface::*;
 
 /// Base trait for all RHI objects, allows downcasting via [`Any`].
 ///
