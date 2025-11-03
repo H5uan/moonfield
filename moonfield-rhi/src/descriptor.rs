@@ -318,7 +318,6 @@ impl<L> ExternalTextureDescriptor<L> {
 }
 
 #[derive(Clone, Debug, PartialEq)]
-#[cfg_attr(feature = "serde", derive(Serialize, Deserialize))]
 pub struct SamplerDescriptor<L> {
     /// Debug label of the sampler. This will show up in graphics debuggers for easy identification.
     pub label: L,
@@ -434,7 +433,6 @@ pub enum BufferBindingType {
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq, Hash)]
-#[cfg_attr(feature = "serde", derive(Serialize, Deserialize))]
 pub enum TextureSampleType {
     Float {
         filterable: bool,
@@ -472,12 +470,8 @@ pub enum SamplerBindingType {
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq, Hash)]
-#[cfg_attr(feature = "serde", derive(Serialize, Deserialize))]
 pub enum BindingType {
     /// A buffer binding.
-    ///
-    /// Corresponds to [WebGPU `GPUBufferBindingLayout`](
-    /// https://gpuweb.github.io/gpuweb/#dictdef-gpubufferbindinglayout).
     Buffer {
         /// Sub-type of the buffer binding.
         ty: BufferBindingType,
@@ -488,10 +482,8 @@ pub enum BindingType {
         /// for each dynamic binding in increasing order of binding number.
         ///
         /// [RPsbg]: ../wgpu/struct.RenderPass.html#method.set_bind_group
-        #[cfg_attr(feature = "serde", serde(default))]
         has_dynamic_offset: bool,
 
-       #[cfg_attr(feature = "serde", serde(default))]
         min_binding_size: Option<BufferSize>,
     },
     Sampler(SamplerBindingType),
@@ -636,4 +628,3 @@ impl<L> CreateTlasDescriptor<L> {
         }
     }
 }
-

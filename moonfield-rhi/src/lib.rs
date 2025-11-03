@@ -1,4 +1,4 @@
-use std::ops::Range;
+use std::{fmt, ops::Range, time::Duration};
 
 use tracing::trace;
 
@@ -75,7 +75,7 @@ impl core::str::FromStr for Backend {
 }
 
 bitflags::bitflags! {
-    /// Represents the backends that wgpu will use.
+    /// Represents the graphics backends that the RHI will use.
     #[repr(transparent)]
     #[derive(Debug, Copy, Clone, PartialEq, Eq, Hash)]
     pub struct Backends: u32 {
@@ -94,7 +94,7 @@ bitflags::bitflags! {
         /// Supported on Windows 10 and later
         const DX12 = 1 << Backend::Dx12 as u32;
 
-        /// All the apis that wgpu offers first tier of support for.
+        /// All the graphics APIs that offer first tier of support.
         ///
         /// * [`Backends::VULKAN`]
         /// * [`Backends::METAL`]
@@ -767,25 +767,20 @@ pub struct PrimitiveState {
     ///
     /// Specifying this value enables primitive restart, allowing individual strips to be separated
     /// with the index value `0xFFFF` when using `Uint16`, or `0xFFFFFFFF` when using `Uint32`.
-    #[cfg_attr(feature = "serde", serde(default))]
     pub strip_index_format: Option<IndexFormat>,
     /// The face to consider the front for the purpose of culling and stencil operations.
-    #[cfg_attr(feature = "serde", serde(default))]
     pub front_face: FrontFace,
     /// The face culling mode.
-    #[cfg_attr(feature = "serde", serde(default))]
     pub cull_mode: Option<Face>,
     /// If set to true, the polygon depth is not clipped to 0-1 before rasterization.
     ///
     /// Enabling this requires [`Features::DEPTH_CLIP_CONTROL`] to be enabled.
-    #[cfg_attr(feature = "serde", serde(default))]
     pub unclipped_depth: bool,
     /// Controls the way each polygon is rasterized. Can be either `Fill` (default), `Line` or `Point`
     ///
     /// Setting this to `Line` requires [`Features::POLYGON_MODE_LINE`] to be enabled.
     ///
     /// Setting this to `Point` requires [`Features::POLYGON_MODE_POINT`] to be enabled.
-    #[cfg_attr(feature = "serde", serde(default))]
     pub polygon_mode: PolygonMode,
     /// If set to true, the primitives are rendered with conservative overestimation. I.e. any rastered pixel touched by it is filled.
     /// Only valid for `[PolygonMode::Fill`]!
@@ -2594,8 +2589,7 @@ impl StencilState {
     #[must_use]
     pub fn is_read_only(&self, cull_mode: Option<Face>) -> bool {
         // The rules are defined in step 7 of the "Device timeline initialization steps"
-        // subsection of the "Render Pipeline Creation" section of WebGPU
-        // (link to the section: https://gpuweb.github.io/gpuweb/#render-pipeline-creation)
+        // subsection of the "Render Pipeline Creation" section
 
         if self.write_mask == 0 {
             return true;
@@ -2723,7 +2717,6 @@ impl<V: Default> Default for Operations<V> {
 
 #[repr(C)]
 #[derive(Clone, Debug, Hash, PartialEq, Eq)]
-#[cfg_attr(feature = "serde", derive(Serialize, Deserialize))]
 pub struct DepthStencilState {
     /// Format of the depth/stencil buffer, must be special depth format. Must match the format
     /// of the depth/stencil attachment in [`CommandEncoder::begin_render_pass`][CEbrp].
@@ -3683,7 +3676,6 @@ pub struct Extent3d {
     /// Height of the extent
     pub height: u32,
     /// The depth of the extent or the number of array layers
-    #[cfg_attr(feature = "serde", serde(default = "default_depth"))]
     pub depth_or_array_layers: u32,
 }
 
@@ -3772,15 +3764,6 @@ pub enum ExternalTextureFormat {
     Nv12,
     /// Separate [`TextureFormat::R8Unorm`] Y, Cb, and Cr planes.
     Yu12,
-}
-
-#[repr(C)]
-#[derive(Clone, Copy, Debug, PartialEq, bytemuck::Zeroable, bytemuck::Pod)]
-pub struct ExternalTextureTransferFunction {
-    pub a: f32,
-    pub b: f32,
-    pub g: f32,
-    pub k: f32,
 }
 
 impl Default for ExternalTextureTransferFunction {
@@ -4060,7 +4043,6 @@ impl ImageSubresourceRange {
     }
 }
 
-
 #[repr(C)]
 #[derive(Copy, Clone, Debug, Eq, PartialEq, Hash)]
 pub enum SamplerBorderColor {
@@ -4263,10 +4245,7 @@ impl ShaderRuntimeChecks {
     /// of each sub-configuration.
     #[must_use]
     pub const unsafe fn all(all_checks: bool) -> Self {
-        Self {
-            bounds_checks: all_checks,
-            force_loop_bounding: all_checks,
-        }
+        Self { bounds_checks: all_checks, force_loop_bounding: all_checks }
     }
 }
 
@@ -4361,4 +4340,3 @@ pub enum DeviceLostReason {
     /// The device's `destroy` method was called.
     Destroyed = 1,
 }
-
