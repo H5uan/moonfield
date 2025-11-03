@@ -1,6 +1,16 @@
-use std::{fmt, ops::Range, time::Duration};
+use std::{
+    fmt,
+    hash::{Hash, Hasher},
+    num::NonZeroU32,
+    ops::Range,
+    time::Duration,
+};
 
+use bitflags::Flags;
+use bytemuck::{Pod, Zeroable};
 use tracing::trace;
+
+use crate::features::Features;
 
 mod descriptor;
 mod error;
@@ -3766,6 +3776,15 @@ pub enum ExternalTextureFormat {
     Yu12,
 }
 
+#[repr(C)]
+#[derive(Clone, Copy, Debug, PartialEq, bytemuck::Zeroable, bytemuck::Pod)]
+pub struct ExternalTextureTransferFunction {
+    pub a: f32,
+    pub b: f32,
+    pub g: f32,
+    pub k: f32,
+}
+
 impl Default for ExternalTextureTransferFunction {
     fn default() -> Self {
         Self { a: 1.0, b: 1.0, g: 1.0, k: 1.0 }
@@ -4339,4 +4358,145 @@ pub enum DeviceLostReason {
     Unknown = 0,
     /// The device's `destroy` method was called.
     Destroyed = 1,
+}
+
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq, Hash)]
+pub enum BufferBindingType {
+    #[default]
+    Uniform,
+    Storage {
+        read_only: bool,
+    },
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Hash)]
+pub enum TextureSampleType {
+    Float {
+        filterable: bool,
+    },
+    Depth,
+    Sint,
+    Uint,
+}
+
+impl Default for TextureSampleType {
+    fn default() -> Self {
+        Self::Float { filterable: true }
+    }
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Hash)]
+pub enum StorageTextureAccess {
+    WriteOnly,
+    ReadOnly,
+    ReadWrite,
+    Atomic,
+}
+
+#[repr(C)]
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Hash)]
+pub enum SamplerBindingType {
+    /// The sampling result is produced based on more than a single color sample from a texture,
+    /// e.g. when bilinear interpolation is enabled.
+    Filtering,
+    /// The sampling result is produced based on a single color sample from a texture.
+    NonFiltering,
+    /// Use as a comparison sampler instead of a normal sampler.
+    /// For more info take a look at the analogous functionality in OpenGL: <https://www.khronos.org/opengl/wiki/Sampler_Object#Comparison_mode>.
+    Comparison,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Hash)]
+pub enum BindingType {
+    /// A buffer binding.
+    Buffer {
+        /// Sub-type of the buffer binding.
+        ty: BufferBindingType,
+
+        /// Indicates that the binding has a dynamic offset.
+        ///
+        /// One offset must be passed to [`RenderPass::set_bind_group`][RPsbg]
+        /// for each dynamic binding in increasing order of binding number.
+        ///
+        /// [RPsbg]: ../wgpu/struct.RenderPass.html#method.set_bind_group
+        has_dynamic_offset: bool,
+
+        min_binding_size: Option<BufferSize>,
+    },
+    Sampler(SamplerBindingType),
+    Texture {
+        /// Sample type of the texture binding.
+        sample_type: TextureSampleType,
+        /// Dimension of the texture view that is going to be sampled.
+        view_dimension: TextureViewDimension,
+        /// True if the texture has a sample count greater than 1. If this is true,
+        /// the texture must be declared as `texture_multisampled_2d` or
+        /// `texture_depth_multisampled_2d` in the shader, and read using `textureLoad`.
+        multisampled: bool,
+    },
+    StorageTexture {
+        /// Allowed access to this texture.
+        access: StorageTextureAccess,
+        /// Format of the texture.
+        format: TextureFormat,
+        /// Dimension of the texture view that is going to be sampled.
+        view_dimension: TextureViewDimension,
+    },
+
+    AccelerationStructure {
+        /// Whether this acceleration structure can be used to
+        /// create a ray query that has flag vertex return in the shader
+        ///
+        /// If enabled requires [`Features::EXPERIMENTAL_RAY_HIT_VERTEX_RETURN`]
+        vertex_return: bool,
+    },
+
+    ExternalTexture,
+}
+
+impl BindingType {
+    /// Returns true for buffer bindings with dynamic offset enabled.
+    #[must_use]
+    pub fn has_dynamic_offset(&self) -> bool {
+        match *self {
+            Self::Buffer { has_dynamic_offset, .. } => has_dynamic_offset,
+            _ => false,
+        }
+    }
+}
+
+#[repr(C)]
+#[derive(Clone, Copy, Debug, Default)]
+pub struct TexelCopyBufferLayout {
+    /// Offset into the buffer that is the start of the texture. Must be a multiple of texture block size.
+    /// For non-compressed textures, this is 1.
+    pub offset: BufferAddress,
+    /// Bytes per "row" in an image.
+    ///
+    /// A row is one row of pixels or of compressed blocks in the x direction.
+    ///
+    /// This value is required if there are multiple rows (i.e. height or depth is more than one pixel or pixel block for compressed textures)
+    ///
+    /// Must be a multiple of 256 for [`CommandEncoder::copy_buffer_to_texture`][CEcbtt]
+    /// and [`CommandEncoder::copy_texture_to_buffer`][CEcttb]. You must manually pad the
+    /// image such that this is a multiple of 256. It will not affect the image data.
+    ///
+    /// [`Queue::write_texture`][Qwt] does not have this requirement.
+    ///
+    /// Must be a multiple of the texture block size. For non-compressed textures, this is 1.
+    ///
+    /// [CEcbtt]: ../wgpu/struct.CommandEncoder.html#method.copy_buffer_to_texture
+    /// [CEcttb]: ../wgpu/struct.CommandEncoder.html#method.copy_texture_to_buffer
+    /// [Qwt]: ../wgpu/struct.Queue.html#method.write_texture
+    pub bytes_per_row: Option<u32>,
+    /// "Rows" that make up a single "image".
+    ///
+    /// A row is one row of pixels or of compressed blocks in the x direction.
+    ///
+    /// An image is one layer in the z direction of a 3D image or 2DArray texture.
+    ///
+    /// The amount of rows per image may be larger than the actual amount of rows of data.
+    ///
+    /// Required if there are multiple images (i.e. the depth is more than one).
+    pub rows_per_image: Option<u32>,
 }

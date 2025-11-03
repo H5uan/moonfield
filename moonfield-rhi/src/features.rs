@@ -1,3 +1,61 @@
+use std::{fmt, mem::size_of};
+
+use bitflags::{
+    Bits, Flags,
+    parser::{ParseError, ParseHex, WriteHex},
+};
+pub use webgpu_impl::*;
+mod webgpu_impl {
+    //! Constant values for [`super::FeaturesWebGPU`], separated so they can be picked up by
+    //! `cbindgen` in `mozilla-central` (where Firefox is developed).
+    #![allow(missing_docs)]
+
+    #[doc(hidden)]
+    pub const MOONFEILD_FEATURE_DEPTH_CLIP_CONTROL: u64 = 1 << 0;
+
+    #[doc(hidden)]
+    pub const MOONFEILD_FEATURE_DEPTH32FLOAT_STENCIL8: u64 = 1 << 1;
+
+    #[doc(hidden)]
+    pub const MOONFEILD_FEATURE_TEXTURE_COMPRESSION_BC: u64 = 1 << 2;
+
+    #[doc(hidden)]
+    pub const MOONFEILD_FEATURE_TEXTURE_COMPRESSION_BC_SLICED_3D: u64 = 1 << 3;
+
+    #[doc(hidden)]
+    pub const MOONFEILD_FEATURE_TEXTURE_COMPRESSION_ETC2: u64 = 1 << 4;
+
+    #[doc(hidden)]
+    pub const MOONFEILD_FEATURE_TEXTURE_COMPRESSION_ASTC: u64 = 1 << 5;
+
+    #[doc(hidden)]
+    pub const MOONFEILD_FEATURE_TEXTURE_COMPRESSION_ASTC_SLICED_3D: u64 = 1 << 6;
+
+    #[doc(hidden)]
+    pub const MOONFEILD_FEATURE_TIMESTAMP_QUERY: u64 = 1 << 7;
+
+    #[doc(hidden)]
+    pub const MOONFEILD_FEATURE_INDIRECT_FIRST_INSTANCE: u64 = 1 << 8;
+
+    #[doc(hidden)]
+    pub const MOONFEILD_FEATURE_SHADER_F16: u64 = 1 << 9;
+
+    #[doc(hidden)]
+    pub const MOONFEILD_FEATURE_RG11B10UFLOAT_RENDERABLE: u64 = 1 << 10;
+
+    #[doc(hidden)]
+    pub const MOONFEILD_FEATURE_BGRA8UNORM_STORAGE: u64 = 1 << 11;
+
+    #[doc(hidden)]
+    pub const MOONFEILD_FEATURE_FLOAT32_FILTERABLE: u64 = 1 << 12;
+
+    #[doc(hidden)]
+    pub const MOONFEILD_FEATURE_DUAL_SOURCE_BLENDING: u64 = 1 << 13;
+
+    #[doc(hidden)]
+    pub const MOONFEILD_FEATURE_CLIP_DISTANCES: u64 = 1 << 14;
+}
+
 macro_rules! bitflags_array_impl {
     ($impl_name:ident $inner_name:ident $name:ident $op:tt $($struct_names:ident)*) => (
         impl core::ops::$impl_name for $name {
@@ -141,7 +199,7 @@ macro_rules! bitflags_array {
             fn write_hex<W: fmt::Write>(&self, mut writer: W) -> fmt::Result {
                 let [$($lower_inner_name,)*] = self.0;
                 let mut wrote = false;
-                let mut stager = alloc::string::String::with_capacity(size_of::<$T>() * 2);
+                let mut stager = std::string::String::with_capacity(size_of::<$T>() * 2);
                 // we don't want to write it if it's just zero as there may be multiple zeros
                 // resulting in something like "00" being written out. We do want to write it if
                 // there has already been something written though.
