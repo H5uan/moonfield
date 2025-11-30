@@ -1,0 +1,13 @@
+[package]
+name = "moonfield-core"
+version = "0.1.0"
+edition = "2024"
+
+[dependencies]
+bytemuck = {workspace = true}
+nalgebra = {workspace = true}
+tracing = { workspace = true }
+tracing-subscriber = { workspace = true, features = ["env-filter"] }
+
+[features]
+default = []
