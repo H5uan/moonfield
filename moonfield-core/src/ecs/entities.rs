@@ -136,7 +136,8 @@ impl Entities {
             NonZeroU32::new(u32::from(meta.generation).wrapping_add(1))
                 .unwrap_or_else(|| NonZeroU32::new(1).unwrap());
 
-        let loc = mem::replace(&mut meta.location, EntityMetadata::EMPTY.location);
+        let loc =
+            mem::replace(&mut meta.location, EntityMetadata::EMPTY.location);
         self.pending.push(entity.id);
 
         let new_free_cursor = self.pending.len() as isize;
@@ -163,8 +164,9 @@ impl Entities {
     }
 
     pub fn reserve_entities(&self, count: u32) -> ReservedEntitiesIter<'_> {
-        let range_end =
-            self.reservation_cursor.fetch_sub(count as isize, Ordering::Relaxed);
+        let range_end = self
+            .reservation_cursor
+            .fetch_sub(count as isize, Ordering::Relaxed);
         let range_start = range_end - count as isize;
 
         let freelist_range = range_start.max(0) as usize..range_end as usize;
@@ -190,7 +192,9 @@ impl Entities {
     }
 
     /// Batch initialize entities
-    pub fn initialize_reserved_entities(&mut self, mut init: impl FnMut(u32, &mut Location)) {
+    pub fn initialize_reserved_entities(
+        &mut self, mut init: impl FnMut(u32, &mut Location),
+    ) {
         let free_cursor = *self.reservation_cursor.get_mut();
 
         let new_free_cursor = if free_cursor >= 0 {
@@ -221,7 +225,10 @@ impl Entities {
         }
     }
 
-    #[deprecated(since = "0.1.0", note = "Renamed to `initialize_reserved_entities` for clarity")]
+    #[deprecated(
+        since = "0.1.0",
+        note = "Renamed to `initialize_reserved_entities` for clarity"
+    )]
     pub fn flush(&mut self, init: impl FnMut(u32, &mut Location)) {
         self.initialize_reserved_entities(init)
     }

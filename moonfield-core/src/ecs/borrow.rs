@@ -70,7 +70,12 @@ impl SharedRuntimeBorrow {
     /// - `false` if any other borrow (shared or unique) was already active.
     pub fn borrow_mut(&self) -> bool {
         self.0
-            .compare_exchange(0, UNIQUE_BIT, Ordering::Acquire, Ordering::Relaxed)
+            .compare_exchange(
+                0,
+                UNIQUE_BIT,
+                Ordering::Acquire,
+                Ordering::Relaxed,
+            )
             .is_ok()
     }
 

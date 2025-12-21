@@ -191,7 +191,7 @@ where
     fn records_get_mut(&mut self, index: u32) -> Option<&mut PoolRecord<T, S>> {
         let index = usize::try_from(index).expect("Index overflowed usize");
         self.records.get_mut(index)
-    } 
+    }
 
     /// Allocates a new resource in the pool.
     ///
@@ -223,19 +223,19 @@ where
     /// # Examples
     ///
     /// ```rust
-/// use moonfield_core::allocator::{Pool, Handle};
-///
-/// struct Node {
-///     handle: Handle<Node>,
-///     data: String,
-/// }
-///
-/// let mut pool: Pool<Node> = Pool::new();
-/// let handle = pool.spawn_with(|handle| Node {
-///     handle,
-///     data: "Node data".to_string(),
-/// });
-/// ```
+    /// use moonfield_core::allocator::{Pool, Handle};
+    ///
+    /// struct Node {
+    ///     handle: Handle<Node>,
+    ///     data: String,
+    /// }
+    ///
+    /// let mut pool: Pool<Node> = Pool::new();
+    /// let handle = pool.spawn_with(|handle| Node {
+    ///     handle,
+    ///     data: "Node data".to_string(),
+    /// });
+    /// ```
     pub fn spawn_with<F>(&mut self, f: F) -> Handle<T>
     where
         F: FnOnce(Handle<T>) -> T, {
@@ -443,12 +443,13 @@ where
     /// ```
     pub fn len(&self) -> usize {
         // Count the number of non-empty slots
-        self.records.iter().filter(|record| {
-            unsafe { 
+        self.records
+            .iter()
+            .filter(|record| unsafe {
                 let slot_ref = record.slot.get().as_ref().unwrap();
                 slot_ref.is_some()
-            }
-        }).count()
+            })
+            .count()
     }
 
     /// Checks if the pool is empty (no allocated resources).
@@ -662,5 +663,3 @@ where
         None
     }
 }
-
-

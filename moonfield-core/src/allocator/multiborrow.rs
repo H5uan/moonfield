@@ -1,33 +1,33 @@
 //! # MultiBorrow Module
-//! 
+//!
 //! Multi-borrow context for safe concurrent access to pool resources.
-//! 
+//!
 //! This module provides a context that allows multiple immutable references
 //! or a single mutable reference to pool resources, enforcing Rust's borrowing rules
 //! at runtime.
-//! 
+//!
 //! ## Features
-//! 
+//!
 //! - **Borrowing Rules**: Enforces Rust's borrowing rules at runtime
 //! - **Multiple Immutable Borrows**: Allows multiple immutable references
 //! - **Single Mutable Borrow**: Ensures only one mutable reference exists
 //! - **Component Access**: Type-safe component access for ECS systems
-//! 
+//!
 //! ## Usage
-//! 
+//!
 //! ```rust
 //! use moonfield_core::allocator::{Pool, MultiBorrowContext};
-//! 
+//!
 //! let mut pool: Pool<String> = Pool::new();
 //! let handle1 = pool.spawn("Hello".to_string());
 //! let handle2 = pool.spawn("World".to_string());
-//! 
+//!
 //! let mut context = MultiBorrowContext::new(&mut pool);
-//! 
+//!
 //! // Get immutable references to different handles
 //! let ref1 = context.get(handle1);
 //! let ref2 = context.get(handle2);
-//! 
+//!
 //! // Use immutable references
 //! println!("Ref1: {}", *ref1);
 //! println!("Ref2: {}", *ref2);
@@ -41,15 +41,18 @@ use std::{
     ops::{Deref, DerefMut},
 };
 
-use crate::{allocator::{Handle, Pool, Slot}, type_traits::ComponentProvider};
+use crate::{
+    allocator::{Handle, Pool, Slot},
+    type_traits::ComponentProvider,
+};
 
 /// An immutable reference to a pool resource with automatic cleanup.
-/// 
+///
 /// This type ensures that the reference is properly tracked and cleaned up
 /// when it goes out of scope.
-/// 
+///
 /// # Type Parameters
-/// 
+///
 /// * `T` - The type of the referenced resource
 pub struct Ref<'a, 'b, T>
 where
@@ -89,12 +92,12 @@ where
 }
 
 /// A mutable reference to a pool resource with automatic cleanup.
-/// 
+///
 /// This type ensures that the reference is properly tracked and cleaned up
 /// when it goes out of scope.
-/// 
+///
 /// # Type Parameters
-/// 
+///
 /// * `T` - The type of the referenced resource
 pub struct RefMut<'a, 'b, T>
 where
@@ -143,30 +146,30 @@ where
 }
 
 /// Multi-borrow context that allows safe concurrent access to pool resources.
-/// 
+///
 /// This context enforces Rust's borrowing rules at runtime, allowing multiple
 /// immutable references or a single mutable reference to pool resources.
-/// 
+///
 /// # Type Parameters
-/// 
+///
 /// * `T` - The type of resources stored in the pool
 /// * `P` - The slot type for managing individual pool entries
-/// 
+///
 /// # Examples
-/// 
+///
 /// ```rust
 /// use moonfield_core::allocator::{Pool, MultiBorrowContext};
-/// 
+///
 /// let mut pool: Pool<String> = Pool::new();
 /// let handle1 = pool.spawn("Hello".to_string());
 /// let handle2 = pool.spawn("World".to_string());
-/// 
+///
 /// let mut context = MultiBorrowContext::new(&mut pool);
-/// 
+///
 /// // Multiple immutable borrows to different handles
 /// let ref1 = context.get(handle1);
 /// let ref2 = context.get(handle2);
-/// 
+///
 /// // Use immutable references
 /// println!("Ref1: {}", *ref1);
 /// println!("Ref2: {}", *ref2);
@@ -257,30 +260,27 @@ where
     P: Slot<Element = T> + 'static,
 {
     /// Creates a new multi-borrow context for the given pool.
-    /// 
+    ///
     /// # Arguments
-    /// 
+    ///
     /// * `pool` - A mutable reference to the pool
-    /// 
+    ///
     /// # Returns
-    /// 
+    ///
     /// A new multi-borrow context.
     #[inline]
     pub fn new(pool: &'a mut Pool<T, P>) -> Self {
-        Self { 
-            pool, 
-            borrowed_indices: RefCell::new(Vec::new()) 
-        }
+        Self { pool, borrowed_indices: RefCell::new(Vec::new()) }
     }
 
     /// Checks if a handle is currently borrowed.
-    /// 
+    ///
     /// # Arguments
-    /// 
+    ///
     /// * `handle` - The handle to check
-    /// 
+    ///
     /// # Returns
-    /// 
+    ///
     /// `true` if the handle is borrowed, `false` otherwise.
     #[inline]
     fn is_borrowed(&self, handle: Handle<T>) -> bool {
@@ -288,25 +288,23 @@ where
     }
 
     /// Marks a handle as borrowed.
-    /// 
+    ///
     /// # Arguments
-    /// 
+    ///
     /// * `handle` - The handle to mark as borrowed
     #[inline]
     fn mark_borrowed(&self, handle: Handle<T>) {
         self.borrowed_indices.borrow_mut().push(handle.index());
     }
 
-
-
     /// Tries to get an immutable reference to a pool element.
-    /// 
+    ///
     /// # Arguments
-    /// 
+    ///
     /// * `handle` - The handle of the element to borrow
-    /// 
+    ///
     /// # Returns
-    /// 
+    ///
     /// `Ok(Ref<T>)` if successful, `Err(MultiBorrowError<T>)` otherwise.
     #[inline]
     pub fn try_get<'b: 'a>(
@@ -320,40 +318,41 @@ where
             return Err(MultiBorrowError::MutablyBorrowed(handle));
         }
 
-        let record = self.pool.records_get(handle.index()).ok_or(
-            MultiBorrowError::InvalidHandleIndex(handle)
-        )?;
+        let record = self
+            .pool
+            .records_get(handle.index())
+            .ok_or(MultiBorrowError::InvalidHandleIndex(handle))?;
 
         if record.generation != handle.generation() {
             return Err(MultiBorrowError::InvalidHandleGeneration(handle));
         }
 
-        let resource = unsafe { 
-            record.slot.get().as_ref().and_then(|s| s.as_ref()).ok_or(
-                MultiBorrowError::Empty(handle)
-            )?
+        let resource = unsafe {
+            record
+                .slot
+                .get()
+                .as_ref()
+                .and_then(|s| s.as_ref())
+                .ok_or(MultiBorrowError::Empty(handle))?
         };
 
         self.mark_borrowed(handle);
 
-        Ok(Ref {
-            data: resource,
-            phantom: PhantomData,
-        })
+        Ok(Ref { data: resource, phantom: PhantomData })
     }
 
     /// Gets an immutable reference to a pool element.
-    /// 
+    ///
     /// # Arguments
-    /// 
+    ///
     /// * `handle` - The handle of the element to borrow
-    /// 
+    ///
     /// # Returns
-    /// 
+    ///
     /// A reference to the element.
-    /// 
+    ///
     /// # Panics
-    /// 
+    ///
     /// Panics if the borrow operation fails.
     #[inline]
     pub fn get<'b: 'a>(&'b self, handle: Handle<T>) -> Ref<'a, 'b, T> {
@@ -361,13 +360,13 @@ where
     }
 
     /// Tries to get a mutable reference to a pool element.
-    /// 
+    ///
     /// # Arguments
-    /// 
+    ///
     /// * `handle` - The handle of the element to borrow
-    /// 
+    ///
     /// # Returns
-    /// 
+    ///
     /// `Ok(RefMut<T>)` if successful, `Err(MultiBorrowError<T>)` otherwise.
     #[inline]
     pub fn try_get_mut<'b: 'a>(
@@ -381,57 +380,62 @@ where
             return Err(MultiBorrowError::ImmutablyBorrowed(handle));
         }
 
-        let record = self.pool.records_get_mut(handle.index()).ok_or(
-            MultiBorrowError::InvalidHandleIndex(handle)
-        )?;
+        let record = self
+            .pool
+            .records_get_mut(handle.index())
+            .ok_or(MultiBorrowError::InvalidHandleIndex(handle))?;
 
         if record.generation != handle.generation() {
             return Err(MultiBorrowError::InvalidHandleGeneration(handle));
         }
 
-        let resource = unsafe { 
-            record.slot.get().as_mut().and_then(|s| s.as_mut()).ok_or(
-                MultiBorrowError::Empty(handle)
-            )?
+        let resource = unsafe {
+            record
+                .slot
+                .get()
+                .as_mut()
+                .and_then(|s| s.as_mut())
+                .ok_or(MultiBorrowError::Empty(handle))?
         };
 
         self.mark_borrowed(handle);
 
-        Ok(RefMut {
-            data: resource,
-            phantom: PhantomData,
-        })
+        Ok(RefMut { data: resource, phantom: PhantomData })
     }
 
     /// Gets a mutable reference to a pool element.
-    /// 
+    ///
     /// # Arguments
-    /// 
+    ///
     /// * `handle` - The handle of the element to borrow
-    /// 
+    ///
     /// # Returns
-    /// 
+    ///
     /// A mutable reference to the element.
-    /// 
+    ///
     /// # Panics
-    /// 
+    ///
     /// Panics if the borrow operation fails.
     #[inline]
-    pub fn get_mut<'b: 'a>(&'b mut self, handle: Handle<T>) -> RefMut<'a, 'b, T> {
+    pub fn get_mut<'b: 'a>(
+        &'b mut self, handle: Handle<T>,
+    ) -> RefMut<'a, 'b, T> {
         self.try_get_mut(handle).unwrap()
     }
 
     /// Frees a resource from the pool.
-    /// 
+    ///
     /// # Arguments
-    /// 
+    ///
     /// * `handle` - The handle of the resource to free
-    /// 
+    ///
     /// # Returns
-    /// 
+    ///
     /// `Ok(T)` if successful, `Err(MultiBorrowError<T>)` otherwise.
     #[inline]
-    pub fn free(&mut self, handle: Handle<T>) -> Result<T, MultiBorrowError<T>> {
+    pub fn free(
+        &mut self, handle: Handle<T>,
+    ) -> Result<T, MultiBorrowError<T>> {
         if handle.is_none() {
             return Err(MultiBorrowError::InvalidHandleIndex(handle));
         }
@@ -457,13 +461,13 @@ where
     P: Slot<Element = T> + 'static,
 {
     /// Tries to get an immutable reference to a component of the specified type.
-    /// 
+    ///
     /// # Arguments
-    /// 
+    ///
     /// * `handle` - The handle of the object containing the component
-    /// 
+    ///
     /// # Returns
-    /// 
+    ///
     /// `Ok(Ref<C>)` if successful, `Err(MultiBorrowError<T>)` otherwise.
     #[inline]
     pub fn try_get_component_of_type<'b: 'a, C>(
@@ -480,41 +484,43 @@ where
             return Err(MultiBorrowError::MutablyBorrowed(handle));
         }
 
-        let record = self.pool.records_get(handle.index()).ok_or(
-            MultiBorrowError::InvalidHandleIndex(handle)
-        )?;
+        let record = self
+            .pool
+            .records_get(handle.index())
+            .ok_or(MultiBorrowError::InvalidHandleIndex(handle))?;
 
         if record.generation != handle.generation() {
             return Err(MultiBorrowError::InvalidHandleGeneration(handle));
         }
 
-        let resource = unsafe { 
-            record.slot.get().as_ref().and_then(|s| s.as_ref()).ok_or(
-                MultiBorrowError::Empty(handle)
-            )?
+        let resource = unsafe {
+            record
+                .slot
+                .get()
+                .as_ref()
+                .and_then(|s| s.as_ref())
+                .ok_or(MultiBorrowError::Empty(handle))?
         };
 
         // Query the component directly from the resource
-        let component = resource.query_component_ref(TypeId::of::<C>())
+        let component = resource
+            .query_component_ref(TypeId::of::<C>())
             .and_then(|c| c.downcast_ref())
             .ok_or(MultiBorrowError::NoSuchComponent(handle))?;
 
         self.mark_borrowed(handle);
 
-        Ok(Ref {
-            data: component,
-            phantom: PhantomData,
-        })
+        Ok(Ref { data: component, phantom: PhantomData })
     }
 
     /// Tries to get a mutable reference to a component of the specified type.
-    /// 
+    ///
     /// # Arguments
-    /// 
+    ///
     /// * `handle` - The handle of the object containing the component
-    /// 
+    ///
     /// # Returns
-    /// 
+    ///
     /// `Ok(RefMut<C>)` if successful, `Err(MultiBorrowError<T>)` otherwise.
     #[inline]
     pub fn try_get_component_of_type_mut<'b: 'a, C>(
@@ -531,31 +537,32 @@ where
             return Err(MultiBorrowError::ImmutablyBorrowed(handle));
         }
 
-        let record = self.pool.records_get_mut(handle.index()).ok_or(
-            MultiBorrowError::InvalidHandleIndex(handle)
-        )?;
+        let record = self
+            .pool
+            .records_get_mut(handle.index())
+            .ok_or(MultiBorrowError::InvalidHandleIndex(handle))?;
 
         if record.generation != handle.generation() {
             return Err(MultiBorrowError::InvalidHandleGeneration(handle));
         }
 
-        let resource = unsafe { 
-            record.slot.get().as_mut().and_then(|s| s.as_mut()).ok_or(
-                MultiBorrowError::Empty(handle)
-            )?
+        let resource = unsafe {
+            record
+                .slot
+                .get()
+                .as_mut()
+                .and_then(|s| s.as_mut())
+                .ok_or(MultiBorrowError::Empty(handle))?
         };
 
         // Query the component directly from the resource
-        let component = resource.query_component_mut(TypeId::of::<C>())
+        let component = resource
+            .query_component_mut(TypeId::of::<C>())
             .and_then(|c| c.downcast_mut())
             .ok_or(MultiBorrowError::NoSuchComponent(handle))?;
 
         self.mark_borrowed(handle);
 
-        Ok(RefMut {
-            data: component,
-            phantom: PhantomData,
-        })
+        Ok(RefMut { data: component, phantom: PhantomData })
     }
 }
-

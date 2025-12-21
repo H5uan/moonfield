@@ -1,8 +1,3 @@
-pub trait Query {
+pub trait Query {}
 
-}
-
-pub unsafe trait QueryShared {
-    
-}
-
+pub unsafe trait QueryShared {}

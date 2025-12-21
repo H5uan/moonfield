@@ -44,9 +44,12 @@ impl Archetype {
 
     pub(crate) fn clear(&mut self) {
         for (type_info, data) in self.types.iter().zip(&*self.data) {
-            for index in 0..self.len{
+            for index in 0..self.len {
                 unsafe {
-                    let removed = data.storage.as_ptr().add(index as usize * type_info.layout.size());
+                    let removed = data
+                        .storage
+                        .as_ptr()
+                        .add(index as usize * type_info.layout.size());
                     type_info.drop(removed);
                 }
             }
@@ -61,10 +64,6 @@ impl Archetype {
     pub fn has_dynamic(&self, id: TypeId) -> bool {
         self.index.contains_key(&id)
     }
-
-    
-
-    
 }
 
 struct ArchetypeData {
