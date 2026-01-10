@@ -8,8 +8,8 @@ name = "triangle"
 path = "src/main.rs"
 
 [dependencies]
-moonfield-core = { path = "../../moonfield-core" }
-moonfield-rhi = { path = "../../moonfield-rhi" }
+moonfield-core = { path = "../../crates/moonfield-core" }
+moonfield-rhi = { path = "../../crates/moonfield-rhi" }
 winit = { workspace = true }
 tracing = { workspace = true }
 tracing-subscriber = { workspace = true }

@@ -1,0 +1,8 @@
+[package]
+name = "moonfield-camera"
+version = "0.1.0"
+edition = "2024"
+
+[dependencies]
+nalgebra = {workspace = true}
+

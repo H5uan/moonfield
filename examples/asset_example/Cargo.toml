@@ -4,5 +4,5 @@ version = "0.1.0"
 edition = "2021"
 
 [dependencies]
-moonfield-core = { path = "../../moonfield-core" }
+moonfield-core = { path = "../../crates/moonfield-core" }
 tracing = "0.1"
