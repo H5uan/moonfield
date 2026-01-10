@@ -266,3 +266,7 @@ pub mod geometry {
         }
     }
 }
+
+/// Transform component for 3D transformations
+pub mod transform;
+pub use transform::Transform;
