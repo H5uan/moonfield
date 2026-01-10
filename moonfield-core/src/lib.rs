@@ -34,6 +34,7 @@
 use bytemuck::Pod;
 
 pub mod allocator;
+pub mod asset;
 pub mod ecs;
 pub mod logging;
 pub mod math;

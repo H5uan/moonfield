@@ -1,5 +1,5 @@
 [workspace]
-members = ["moonfield-core", "moonfield-rhi", "examples/triangle"]
+members = ["moonfield-core", "moonfield-rhi", "examples/triangle", "examples/asset_example"]
 resolver = "3"
 
 [workspace.package]
