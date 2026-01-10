@@ -5,8 +5,8 @@
 use std::path::Path;
 use std::fs;
 
-use super::{Asset, AssetLoader};
-use crate::asset::common::{TextureAsset, TextureFormat, MeshAsset, VertexLayout, VertexAttribute, VertexFormat, MaterialAsset, MaterialProperties};
+use super::AssetLoader;
+use crate::asset::common::{TextureAsset, TextureFormat, MeshAsset, VertexLayout, VertexAttribute, VertexFormat, MaterialAsset, MaterialProperties, ShaderAsset, ShaderType};
 
 /// Basic texture loader implementation.
 pub struct TextureLoader;
@@ -68,7 +68,7 @@ fn parse_obj_mesh(content: &str) -> Result<MeshAsset, Box<dyn std::error::Error>
     // In a real implementation, you'd want a robust OBJ parser
     
     let mut vertices = Vec::new();
-    let mut indices = Vec::new();
+    let indices = Vec::new();
     
     // This is a simplified parser just for demonstration
     for line in content.lines() {
@@ -178,6 +178,77 @@ impl AssetLoader<MaterialAsset> for MaterialLoader {
                 metallic_factor: 0.0,
                 roughness_factor: 0.5,
             },
+        })
+    }
+}
+
+/// Basic shader loader implementation.
+pub struct ShaderLoader;
+
+impl AssetLoader<ShaderAsset> for ShaderLoader {
+    fn load(&self, path: &Path) -> Result<ShaderAsset, Box<dyn std::error::Error>> {
+        let file_data = fs::read(path)?;
+        
+        // Determine shader type based on file extension
+        let shader_type = match path.extension().and_then(|ext| ext.to_str()) {
+            Some("vert") | Some("vertex") | Some("vs") | Some("vert.spv") | Some("vs.spv") => ShaderType::Vertex,
+            Some("frag") | Some("fragment") | Some("fs") | Some("frag.spv") | Some("fs.spv") => ShaderType::Fragment,
+            Some("comp") | Some("compute") | Some("cs") | Some("comp.spv") | Some("cs.spv") => ShaderType::Compute,
+            Some("geom") | Some("geometry") | Some("geom.spv") => ShaderType::Geometry,
+            Some("hull") | Some("hull.spv") => ShaderType::Hull,
+            Some("dom") | Some("domain") | Some("ds.spv") => ShaderType::Domain,
+            Some("metal") => {
+                // For Metal files, determine shader type from filename
+                let file_name = path.file_stem().and_then(|name| name.to_str()).unwrap_or("").to_lowercase();
+                if file_name.contains("frag") || file_name.contains("fragment") || file_name.contains("ps") {
+                    ShaderType::Fragment
+                } else if file_name.contains("vert") || file_name.contains("vertex") || file_name.contains("vs") {
+                    ShaderType::Vertex
+                } else {
+                    ShaderType::Fragment // Default for Metal
+                }
+            },
+            _ => {
+                // Default to fragment shader if extension is not recognized
+                // We can also try to detect shader type from filename
+                let file_name = path.file_stem().and_then(|name| name.to_str()).unwrap_or("").to_lowercase();
+                if file_name.contains("vert") || file_name.contains("vertex") || file_name.contains("vs") {
+                    ShaderType::Vertex
+                } else if file_name.contains("frag") || file_name.contains("fragment") || file_name.contains("fs") {
+                    ShaderType::Fragment
+                } else {
+                    ShaderType::Fragment // Default fallback
+                }
+            }
+        };
+        
+        // Determine entry point based on shader type
+        let entry_point = match shader_type {
+            ShaderType::Vertex => {
+                // Check if it's a Metal file to use the appropriate entry point
+                if path.extension().and_then(|ext| ext.to_str()) == Some("metal") {
+                    "vs_main".to_string() // Or "main0" depending on convention
+                } else {
+                    "vs_main".to_string()
+                }
+            },
+            ShaderType::Fragment => {
+                if path.extension().and_then(|ext| ext.to_str()) == Some("metal") {
+                    "fs_main".to_string() // Or "main0" depending on convention
+                } else {
+                    "fs_main".to_string()
+                }
+            },
+            ShaderType::Compute => "cs_main".to_string(),
+            ShaderType::Geometry => "gs_main".to_string(),
+            ShaderType::Hull => "hs_main".to_string(),
+            ShaderType::Domain => "ds_main".to_string(),
+        };
+        
+        Ok(ShaderAsset {
+            source: file_data,
+            shader_type,
+            entry_point,
         })
     }
 }

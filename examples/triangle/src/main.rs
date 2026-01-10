@@ -1,3 +1,4 @@
+use moonfield_core::asset::{AssetServer, AssetHandle, ShaderAsset};
 use moonfield_rhi::{types::Backend, *};
 use std::sync::Arc;
 use winit::application::ApplicationHandler;
@@ -22,6 +23,9 @@ struct TriangleApp {
     vertex_buffer: Option<Arc<dyn Buffer>>,
     command_pool: Option<Arc<dyn CommandPool>>,
     queue: Option<Arc<dyn Queue>>,
+    asset_server: Option<AssetServer>,
+    vertex_shader_handle: Option<AssetHandle<ShaderAsset>>,
+    fragment_shader_handle: Option<AssetHandle<ShaderAsset>>,
 }
 
 impl Default for TriangleApp {
@@ -36,12 +40,18 @@ impl Default for TriangleApp {
             vertex_buffer: None,
             command_pool: None,
             queue: None,
+            asset_server: None,
+            vertex_shader_handle: None,
+            fragment_shader_handle: None,
         }
     }
 }
 
 impl Drop for TriangleApp {
     fn drop(&mut self) {
+        self.fragment_shader_handle = None;
+        self.vertex_shader_handle = None;
+        self.asset_server = None;
         self.command_pool = None;
         self.queue = None;
         self.vertex_buffer = None;
@@ -99,6 +109,23 @@ impl ApplicationHandler for TriangleApp {
             image_count: capabilities.min_image_count.max(2),
         }).unwrap();
 
+        // Initialize asset server and register loaders
+        let mut asset_server = AssetServer::new();
+        asset_server.register_loader(Box::new(moonfield_core::asset::ShaderLoader));
+
+        // Load shaders using the asset system
+        // Build path relative to the project root
+        // CARGO_MANIFEST_DIR is the directory of the Cargo.toml file for this example
+        let manifest_dir = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"));
+        let project_root = manifest_dir.parent().unwrap().parent().unwrap(); // Go up twice to reach project root
+        
+        // Use SPIR-V files for Vulkan/Metal backends
+        let vertex_shader_path = project_root.join("assets/shaders/out/spir-v/triangle.vert.spv");
+        let fragment_shader_path = project_root.join("assets/shaders/out/spir-v/triangle.frag.spv");
+
+        let vertex_shader_handle = asset_server.load::<ShaderAsset>(vertex_shader_path.to_str().unwrap()).unwrap();
+        let fragment_shader_handle = asset_server.load::<ShaderAsset>(fragment_shader_path.to_str().unwrap()).unwrap();
+
         let vertices = vec![
             Vertex { position: [0.0, -0.5], color: [1.0, 0.0, 0.0] },
             Vertex { position: [0.5, 0.5], color: [0.0, 1.0, 0.0] },
@@ -121,25 +148,17 @@ impl ApplicationHandler for TriangleApp {
             vertex_buffer.unmap();
         }
 
-        let vertex_shader_code: &[u8] = if cfg!(target_os = "macos") {
-            include_bytes!("shaders/triangle.metal")
-        } else {
-            include_bytes!("shaders/triangle.vert.spv")
-        };
-
-        let fragment_shader_code: &[u8] = if cfg!(target_os = "macos") {
-            include_bytes!("shaders/triangle.metal")
-        } else {
-            include_bytes!("shaders/triangle.frag.spv")
-        };
+        // Get shader data from asset system
+        let vertex_shader_asset = asset_server.get(&vertex_shader_handle).unwrap();
+        let fragment_shader_asset = asset_server.get(&fragment_shader_handle).unwrap();
 
         let vertex_shader = device.create_shader_module(&types::ShaderModuleDescriptor {
-            code: vertex_shader_code,
+            code: &vertex_shader_asset.source,
             stage: types::ShaderStage::Vertex,
         }).unwrap();
 
         let fragment_shader = device.create_shader_module(&types::ShaderModuleDescriptor {
-            code: fragment_shader_code,
+            code: &fragment_shader_asset.source,
             stage: types::ShaderStage::Fragment,
         }).unwrap();
 
@@ -182,6 +201,9 @@ impl ApplicationHandler for TriangleApp {
         self.vertex_buffer = Some(vertex_buffer);
         self.command_pool = Some(command_pool);
         self.queue = Some(queue);
+        self.asset_server = Some(asset_server);
+        self.vertex_shader_handle = Some(vertex_shader_handle);
+        self.fragment_shader_handle = Some(fragment_shader_handle);
     }
 
     fn window_event(

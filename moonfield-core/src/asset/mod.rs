@@ -12,6 +12,7 @@ use std::path::Path;
 use crate::allocator::{Handle, Pool};
 
 pub use common::*;
+pub use loader::*;
 pub mod common;
 pub mod loader;
 
