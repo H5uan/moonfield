@@ -64,7 +64,7 @@ impl Adapter for MetalAdapter {
             let queue = self
                 .device
                 .newCommandQueue()
-                .ok_or(RhiError::DeviceCreationFailed)?;
+                .ok_or_else(|| RhiError::DeviceCreationFailed("Failed to create Metal command queue".to_string()))?;
 
             Ok(Arc::new(MetalDevice {
                 device: self.device.clone(),
@@ -118,7 +118,7 @@ impl Device for MetalDevice {
     fn create_shader_module(&self, desc: &ShaderModuleDescriptor) -> Result<Arc<dyn ShaderModule>, RhiError> {
         unsafe {
             let source = std::str::from_utf8(desc.code)
-                .map_err(|e| RhiError::ShaderCompilationFailed(e.to_string()))?;
+                .map_err(|e| RhiError::ShaderCompilationFailed(ShaderCompilationError::InvalidShaderCode(format!("Invalid UTF-8 in shader source: {}", e))))?;
             
             let ns_source = NSString::from_str(source);
             
@@ -127,7 +127,7 @@ impl Device for MetalDevice {
             let library = self
                 .device
                 .newLibraryWithSource_options_error(&ns_source, &options)
-                .map_err(|e| RhiError::ShaderCompilationFailed(format!("{:?}", e)))?;
+                .map_err(|e| RhiError::ShaderCompilationFailed(ShaderCompilationError::CompilationError(format!("Failed to create Metal shader library: {:?}", e))))?;
 
             Ok(Arc::new(MetalShaderModule {
                 library,
@@ -148,12 +148,12 @@ impl Device for MetalDevice {
             
             let vs_func_name = NSString::from_str("vertex_main");
             let vs_func = vs.library.newFunctionWithName(&vs_func_name)
-                .ok_or(RhiError::PipelineCreationFailed)?;
+                .ok_or_else(|| RhiError::PipelineCreationFailed("Failed to get vertex shader function".to_string()))?;
             pipeline_desc.setVertexFunction(Some(&vs_func));
 
             let fs_func_name = NSString::from_str("fragment_main");
             let fs_func = fs.library.newFunctionWithName(&fs_func_name)
-                .ok_or(RhiError::PipelineCreationFailed)?;
+                .ok_or_else(|| RhiError::PipelineCreationFailed("Failed to get fragment shader function".to_string()))?;
             pipeline_desc.setFragmentFunction(Some(&fs_func));
 
             let color_attachment = pipeline_desc
@@ -171,7 +171,7 @@ impl Device for MetalDevice {
             let pipeline_state = self
                 .device
                 .newRenderPipelineStateWithDescriptor_error(&pipeline_desc)
-                .map_err(|_| RhiError::PipelineCreationFailed)?;
+                .map_err(|e| RhiError::PipelineCreationFailed(format!("Failed to create Metal render pipeline state: {:?}", e)))?;
 
             Ok(Arc::new(MetalPipeline {
                 pipeline_state,
@@ -190,7 +190,7 @@ impl Device for MetalDevice {
             let buffer = self
                 .device
                 .newBufferWithLength_options(desc.size as usize, options)
-                .ok_or(RhiError::BufferCreationFailed)?;
+                .ok_or_else(|| RhiError::BufferCreationFailed(format!("Failed to create Metal buffer with size: {}", desc.size)))?;
 
             Ok(Arc::new(MetalBuffer { buffer }))
         }
@@ -221,7 +221,7 @@ impl Swapchain for MetalSwapchain {
             let drawable = self
                 .layer
                 .nextDrawable()
-                .ok_or(RhiError::AcquireImageFailed)?;
+                .ok_or_else(|| RhiError::AcquireImageFailed("Failed to acquire next drawable from Metal layer".to_string()))?;
 
             Ok(SwapchainImage {
                 index: 0,
@@ -299,7 +299,7 @@ impl CommandPool for MetalCommandPool {
             let command_buffer = self
                 .queue
                 .commandBuffer()
-                .ok_or(RhiError::CommandBufferAllocationFailed)?;
+                .ok_or_else(|| RhiError::CommandBufferAllocationFailed("Failed to allocate Metal command buffer".to_string()))?;
 
             Ok(Arc::new(MetalCommandBuffer {
                 command_buffer,

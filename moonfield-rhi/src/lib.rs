@@ -81,6 +81,8 @@ pub fn create_instance(backend: Backend) -> Result<Arc<dyn Instance>, RhiError> 
         }
         #[cfg(target_os = "macos")]
         Backend::Metal => Ok(Arc::new(backend::metal::MetalInstance::new()?)),
+        #[cfg(all(windows, feature = "dx12"))]
+        Backend::Dx12 => Ok(Arc::new(backend::dx12::Dx12Instance::new()?)),
         _ => Err(RhiError::BackendNotSupported),
     }
 }
@@ -96,6 +98,8 @@ pub fn create_instance_with_window(backend: Backend, window: &winit::window::Win
         }
         #[cfg(target_os = "macos")]
         Backend::Metal => Ok(Arc::new(backend::metal::MetalInstance::new()?)),
+        #[cfg(all(windows, feature = "dx12"))]
+        Backend::Dx12 => Ok(Arc::new(backend::dx12::Dx12Instance::new()?)),
         _ => Err(RhiError::BackendNotSupported),
     }
 }

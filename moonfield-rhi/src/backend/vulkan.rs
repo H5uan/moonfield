@@ -20,7 +20,7 @@ impl VulkanInstance {
     pub fn new_with_display(display: raw_window_handle::RawDisplayHandle) -> Result<Self, RhiError> {
         unsafe {
             let entry = ash::Entry::load()
-                .map_err(|e| RhiError::InitializationFailed(e.to_string()))?;
+                .map_err(|e| RhiError::InitializationFailed(format!("Failed to load Vulkan entry: {}", e)))?;
             
             let app_name = CString::new("Moonfield").unwrap();
             let engine_name = CString::new("MoonfieldEngine").unwrap();
@@ -33,7 +33,7 @@ impl VulkanInstance {
                 .api_version(vk::API_VERSION_1_3);
 
             let extension_names = ash_window::enumerate_required_extensions(display)
-            .map_err(|e| RhiError::InitializationFailed(e.to_string()))?
+            .map_err(|e| RhiError::InitializationFailed(format!("Failed to enumerate required extensions: {}", e)))?
             .to_vec();
 
             let layer_names = vec![CString::new("VK_LAYER_KHRONOS_validation").unwrap()];
@@ -49,7 +49,7 @@ impl VulkanInstance {
 
             let instance = entry
                 .create_instance(&create_info, None)
-                .map_err(|e| RhiError::InitializationFailed(e.to_string()))?;
+                .map_err(|e| RhiError::InitializationFailed(format!("Failed to create Vulkan instance: {}", e)))?;
 
             Ok(Self { entry, instance })
         }
@@ -66,7 +66,7 @@ impl Instance for VulkanInstance {
                 window.window_handle().unwrap().as_raw(),
                 None,
             )
-            .map_err(|e| RhiError::InitializationFailed(e.to_string()))?;
+            .map_err(|e| RhiError::InitializationFailed(format!("Failed to create Vulkan surface: {}", e)))?;
 
             let surface_loader = ash::khr::surface::Instance::new(&self.entry, &self.instance);
 
@@ -163,7 +163,7 @@ impl Adapter for VulkanAdapter {
                 .enumerate()
                 .find(|(_, props)| props.queue_flags.contains(vk::QueueFlags::GRAPHICS))
                 .map(|(i, _)| i as u32)
-                .ok_or(RhiError::DeviceCreationFailed)?;
+                .ok_or_else(|| RhiError::DeviceCreationFailed("No suitable graphics queue family found".to_string()))?;
 
             let queue_priorities = [1.0];
             let queue_create_info = vk::DeviceQueueCreateInfo::default()
@@ -184,7 +184,7 @@ impl Adapter for VulkanAdapter {
             let device = self
                 .instance
                 .create_device(self.physical_device, &device_create_info, None)
-                .map_err(|_| RhiError::DeviceCreationFailed)?;
+                .map_err(|e| RhiError::DeviceCreationFailed(format!("Failed to create logical device: {}", e)))?;
 
             let queue = device.get_device_queue(queue_family_index, 0);
 
@@ -255,11 +255,11 @@ impl Device for VulkanDevice {
 
             let swapchain = swapchain_loader
                 .create_swapchain(&create_info, None)
-                .map_err(|_| RhiError::SwapchainCreationFailed)?;
+                .map_err(|e| RhiError::SwapchainCreationFailed(format!("Failed to create swapchain: {}", e)))?;
 
             let images = swapchain_loader
                 .get_swapchain_images(swapchain)
-                .map_err(|_| RhiError::SwapchainCreationFailed)?;
+                .map_err(|e| RhiError::SwapchainCreationFailed(format!("Failed to get swapchain images: {}", e)))?;
 
             let image_views: Vec<_> = images
                 .iter()
@@ -290,13 +290,13 @@ impl Device for VulkanDevice {
                 let image_available = self
                     .device
                     .create_semaphore(&semaphore_create_info, None)
-                    .map_err(|_| RhiError::SwapchainCreationFailed)?;
+                    .map_err(|e| RhiError::SwapchainCreationFailed(format!("Failed to create image available semaphore: {}", e)))?;
                 image_available_semaphores.push(image_available);
                 
                 let render_finished = self
                     .device
                     .create_semaphore(&semaphore_create_info, None)
-                    .map_err(|_| RhiError::SwapchainCreationFailed)?;
+                    .map_err(|e| RhiError::SwapchainCreationFailed(format!("Failed to create render finished semaphore: {}", e)))?;
                 render_finished_semaphores.push(render_finished);
             }
 
@@ -331,7 +331,7 @@ impl Device for VulkanDevice {
             let shader_module = self
                 .device
                 .create_shader_module(&create_info, None)
-                .map_err(|e| RhiError::ShaderCompilationFailed(e.to_string()))?;
+                .map_err(|e| RhiError::ShaderCompilationFailed(ShaderCompilationError::CompilationError(format!("Failed to create shader module: {}", e))))?;
 
             Ok(Arc::new(VulkanShaderModule {
                 device: self.device.clone(),
@@ -429,7 +429,7 @@ impl Device for VulkanDevice {
             let pipeline_layout = self
                 .device
                 .create_pipeline_layout(&pipeline_layout_create_info, None)
-                .map_err(|_| RhiError::PipelineCreationFailed)?;
+                .map_err(|e| RhiError::PipelineCreationFailed(format!("Failed to create pipeline layout: {}", e)))?;
 
             let format = match desc.render_pass_format {
                 Format::B8G8R8A8Unorm => vk::Format::B8G8R8A8_UNORM,
@@ -456,7 +456,7 @@ impl Device for VulkanDevice {
             let pipelines = self
                 .device
                 .create_graphics_pipelines(vk::PipelineCache::null(), &[pipeline_create_info], None)
-                .map_err(|_| RhiError::PipelineCreationFailed)?;
+                .map_err(|e| RhiError::PipelineCreationFailed(format!("Failed to create graphics pipeline: {:?}", e)))?;
 
             Ok(Arc::new(VulkanPipeline {
                 device: self.device.clone(),
@@ -482,14 +482,14 @@ impl Device for VulkanDevice {
             let buffer = self
                 .device
                 .create_buffer(&buffer_info, None)
-                .map_err(|_| RhiError::BufferCreationFailed)?;
+                .map_err(|e| RhiError::BufferCreationFailed(format!("Failed to create buffer: {}", e)))?;
 
             let mem_requirements = self.device.get_buffer_memory_requirements(buffer);
 
             let memory_type_index = self.find_memory_type(
                 mem_requirements.memory_type_bits,
                 vk::MemoryPropertyFlags::HOST_VISIBLE | vk::MemoryPropertyFlags::HOST_COHERENT,
-            ).ok_or(RhiError::BufferCreationFailed)?;
+            ).ok_or_else(|| RhiError::BufferCreationFailed("Could not find suitable memory type for buffer".to_string()))?;
 
             let alloc_info = vk::MemoryAllocateInfo::default()
                 .allocation_size(mem_requirements.size)
@@ -498,11 +498,11 @@ impl Device for VulkanDevice {
             let memory = self
                 .device
                 .allocate_memory(&alloc_info, None)
-                .map_err(|_| RhiError::BufferCreationFailed)?;
+                .map_err(|e| RhiError::BufferCreationFailed(format!("Failed to allocate buffer memory: {}", e)))?;
 
             self.device
                 .bind_buffer_memory(buffer, memory, 0)
-                .map_err(|_| RhiError::BufferCreationFailed)?;
+                .map_err(|e| RhiError::BufferCreationFailed(format!("Failed to bind buffer memory: {}", e)))?;
 
             Ok(Arc::new(VulkanBuffer {
                 device: self.device.clone(),
@@ -522,17 +522,15 @@ impl Device for VulkanDevice {
             let command_pool = self
                 .device
                 .create_command_pool(&pool_info, None)
-                .map_err(|_| RhiError::CommandPoolCreationFailed)?;
+                .map_err(|e| RhiError::CommandPoolCreationFailed(format!("Failed to create command pool: {}", e)))?;
 
             let swapchain_weak = {
                 let raw_ptr = Arc::as_ptr(swapchain);
                 let vk_swapchain_ptr = raw_ptr as *const VulkanSwapchain;
-                unsafe {
-                    let temp_arc = Arc::from_raw(vk_swapchain_ptr);
-                    let weak = Arc::downgrade(&temp_arc);
-                    let _ = Arc::into_raw(temp_arc);
-                    weak
-                }
+                let temp_arc = Arc::from_raw(vk_swapchain_ptr);
+                let weak = Arc::downgrade(&temp_arc);
+                let _ = Arc::into_raw(temp_arc);
+                weak
             };
 
             Ok(Arc::new(VulkanCommandPool {
@@ -605,7 +603,7 @@ impl Swapchain for VulkanSwapchain {
                     semaphore,
                     vk::Fence::null(),
                 )
-                .map_err(|_| RhiError::AcquireImageFailed)?;
+                .map_err(|e| RhiError::AcquireImageFailed(format!("Failed to acquire next swapchain image: {}", e)))?;
 
             Ok(SwapchainImage {
                 index,
@@ -632,7 +630,7 @@ impl Swapchain for VulkanSwapchain {
 
             self.swapchain_loader
                 .queue_present(self.queue, &present_info)
-                .map_err(|_| RhiError::PresentFailed)?;
+                .map_err(|e| RhiError::PresentFailed(format!("Failed to present swapchain image: {}", e)))?;
 
             Ok(())
         }
@@ -711,7 +709,7 @@ impl Buffer for VulkanBuffer {
             self.device
                 .map_memory(self.memory, 0, self.size, vk::MemoryMapFlags::empty())
                 .map(|ptr| ptr as *mut u8)
-                .map_err(|_| RhiError::MapFailed)
+                .map_err(|e| RhiError::MapFailed(format!("Failed to map buffer memory: {}", e)))
         }
     }
 
@@ -748,7 +746,7 @@ impl CommandPool for VulkanCommandPool {
             let command_buffers = self
                 .device
                 .allocate_command_buffers(&alloc_info)
-                .map_err(|_| RhiError::CommandBufferAllocationFailed)?;
+                .map_err(|e| RhiError::CommandBufferAllocationFailed(format!("Failed to allocate command buffers: {}", e)))?;
 
             Ok(Arc::new(VulkanCommandBuffer {
                 device: self.device.clone(),
@@ -782,7 +780,7 @@ impl CommandBuffer for VulkanCommandBuffer {
             let begin_info = vk::CommandBufferBeginInfo::default();
             self.device
                 .begin_command_buffer(self.command_buffer, &begin_info)
-                .map_err(|_| RhiError::InitializationFailed("Failed to begin command buffer".to_string()))
+                .map_err(|e| RhiError::InitializationFailed(format!("Failed to begin command buffer: {}", e)))
         }
     }
 
@@ -790,7 +788,7 @@ impl CommandBuffer for VulkanCommandBuffer {
         unsafe {
             self.device
                 .end_command_buffer(self.command_buffer)
-                .map_err(|_| RhiError::InitializationFailed("Failed to end command buffer".to_string()))
+                .map_err(|e| RhiError::InitializationFailed(format!("Failed to end command buffer: {}", e)))
         }
     }
 
@@ -998,7 +996,7 @@ impl Queue for VulkanQueue {
 
             self.device
                 .queue_submit(self.queue, &[submit_info], vk::Fence::null())
-                .map_err(|_| RhiError::SubmitFailed)
+                .map_err(|e| RhiError::SubmitFailed(format!("Failed to submit command buffer to queue: {}", e)))
         }
     }
 
@@ -1006,7 +1004,7 @@ impl Queue for VulkanQueue {
         unsafe {
             self.device
                 .queue_wait_idle(self.queue)
-                .map_err(|_| RhiError::InitializationFailed("Queue wait idle failed".to_string()))
+                .map_err(|e| RhiError::InitializationFailed(format!("Queue wait idle failed: {}", e)))
         }
     }
 }

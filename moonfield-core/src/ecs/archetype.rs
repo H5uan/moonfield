@@ -85,7 +85,7 @@ impl TypeInfo {
     /// Construct a `TypeInfo` directly from the static type.
     pub fn of<T: 'static>() -> Self {
         unsafe fn drop_ptr<T>(x: *mut u8) {
-            x.cast::<T>().drop_in_place()
+            unsafe { x.cast::<T>().drop_in_place() }
         }
 
         Self {
@@ -106,7 +106,7 @@ impl TypeInfo {
     }
 
     pub unsafe fn drop(&self, data: *mut u8) {
-        (self.drop)(data)
+        unsafe { (self.drop)(data) }
     }
 }
 

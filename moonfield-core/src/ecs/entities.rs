@@ -1,6 +1,6 @@
 use std::{
     fmt, mem,
-    num::{NonZero, NonZeroU32, NonZeroU64},
+    num::{NonZeroU32, NonZeroU64},
     sync::atomic::{AtomicIsize, Ordering},
 };
 
