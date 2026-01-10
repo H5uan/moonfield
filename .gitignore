@@ -6,11 +6,7 @@ debug/
 Cargo.lock
 
 # Editor and IDE configurations
-.vscode/*
-!.vscode/settings.json
-!.vscode/tasks.json
-!.vscode/launch.json
-!.vscode/extensions.json
+.vscode/**
 .idea/
 *.swp
 *.swo

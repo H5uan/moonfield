@@ -10,27 +10,38 @@ pub struct MetalInstance {}
 
 impl MetalInstance {
     pub fn new() -> Result<Self, RhiError> {
+        tracing::debug!("Creating Metal instance");
+        tracing::info!("Metal instance created successfully");
         Ok(Self {})
     }
 }
 
 impl Instance for MetalInstance {
     fn create_surface(&self, window: &winit::window::Window) -> Result<Arc<dyn Surface>, RhiError> {
+        tracing::debug!("Creating Metal surface for window");
+        tracing::debug!("Metal surface created successfully");
         Ok(Arc::new(MetalSurface {}))
     }
 
     fn enumerate_adapters(&self) -> Vec<Arc<dyn Adapter>> {
+        tracing::debug!("Enumerating Metal adapters");
         unsafe {
             let devices = MTLCopyAllDevices();
             
-            (0..devices.count())
-                .filter_map(|i| devices.objectAtIndex(i))
+            let adapters: Vec<Arc<dyn Adapter>> = (0..devices.count())
+                .filter_map(|i| {
+                    devices.objectAtIndex(i)
+                })
                 .map(|device| {
+                    tracing::debug!("Found Metal device");
                     Arc::new(MetalAdapter {
                         device: Retained::retain(device).unwrap(),
                     }) as Arc<dyn Adapter>
                 })
-                .collect()
+                .collect();
+                
+            tracing::info!("Found {} Metal adapters", adapters.len());
+            adapters
         }
     }
 }
@@ -60,12 +71,17 @@ impl std::any::Any for MetalAdapter {
 
 impl Adapter for MetalAdapter {
     fn request_device(&self) -> Result<Arc<dyn Device>, RhiError> {
+        tracing::debug!("Requesting Metal logical device");
         unsafe {
             let queue = self
                 .device
                 .newCommandQueue()
-                .ok_or_else(|| RhiError::DeviceCreationFailed("Failed to create Metal command queue".to_string()))?;
+                .ok_or_else(|| {
+                    tracing::error!("Failed to create Metal command queue");
+                    RhiError::DeviceCreationFailed("Failed to create Metal command queue".to_string())
+                })?;
 
+            tracing::info!("Metal logical device created successfully");
             Ok(Arc::new(MetalDevice {
                 device: self.device.clone(),
                 queue,
@@ -75,8 +91,10 @@ impl Adapter for MetalAdapter {
 
     fn get_properties(&self) -> AdapterProperties {
         unsafe {
+            let name = self.device.name().to_string();
+            tracing::debug!("Getting Metal adapter properties: {}", name);
             AdapterProperties {
-                name: self.device.name().to_string(),
+                name,
                 vendor_id: 0,
                 device_id: 0,
             }
@@ -91,6 +109,7 @@ pub struct MetalDevice {
 
 impl Device for MetalDevice {
     fn create_swapchain(&self, desc: &SwapchainDescriptor) -> Result<Arc<dyn Swapchain>, RhiError> {
+        tracing::debug!("Creating Metal swapchain with format: {:?}, extent: {:?}", desc.format, desc.extent);
         unsafe {
             let layer = CAMetalLayer::new();
             layer.setDevice(Some(&self.device));
@@ -107,6 +126,7 @@ impl Device for MetalDevice {
                 height: desc.extent.height as f64,
             });
 
+            tracing::info!("Metal swapchain created successfully");
             Ok(Arc::new(MetalSwapchain {
                 layer,
                 format: desc.format,
@@ -116,9 +136,13 @@ impl Device for MetalDevice {
     }
 
     fn create_shader_module(&self, desc: &ShaderModuleDescriptor) -> Result<Arc<dyn ShaderModule>, RhiError> {
+        tracing::debug!("Creating Metal shader module for stage: {:?}", desc.stage);
         unsafe {
             let source = std::str::from_utf8(desc.code)
-                .map_err(|e| RhiError::ShaderCompilationFailed(ShaderCompilationError::InvalidShaderCode(format!("Invalid UTF-8 in shader source: {}", e))))?;
+                .map_err(|e| {
+                    tracing::error!("Invalid UTF-8 in shader source: {}", e);
+                    RhiError::ShaderCompilationFailed(ShaderCompilationError::InvalidShaderCode(format!("Invalid UTF-8 in shader source: {}", e)))
+                })?;
             
             let ns_source = NSString::from_str(source);
             
@@ -127,8 +151,12 @@ impl Device for MetalDevice {
             let library = self
                 .device
                 .newLibraryWithSource_options_error(&ns_source, &options)
-                .map_err(|e| RhiError::ShaderCompilationFailed(ShaderCompilationError::CompilationError(format!("Failed to create Metal shader library: {:?}", e))))?;
+                .map_err(|e| {
+                    tracing::error!("Failed to create Metal shader library: {:?}", e);
+                    RhiError::ShaderCompilationFailed(ShaderCompilationError::CompilationError(format!("Failed to create Metal shader library: {:?}", e)))
+                })?;
 
+            tracing::info!("Metal shader module created successfully for stage: {:?}", desc.stage);
             Ok(Arc::new(MetalShaderModule {
                 library,
                 stage: desc.stage,
@@ -137,6 +165,7 @@ impl Device for MetalDevice {
     }
 
     fn create_pipeline(&self, desc: &GraphicsPipelineDescriptor) -> Result<Arc<dyn Pipeline>, RhiError> {
+        tracing::debug!("Creating Metal graphics pipeline");
         unsafe {
             let vs_any = desc.vertex_shader.as_ref() as &dyn std::any::Any;
             let vs = vs_any.downcast_ref::<MetalShaderModule>().unwrap();
@@ -148,12 +177,18 @@ impl Device for MetalDevice {
             
             let vs_func_name = NSString::from_str("vertex_main");
             let vs_func = vs.library.newFunctionWithName(&vs_func_name)
-                .ok_or_else(|| RhiError::PipelineCreationFailed("Failed to get vertex shader function".to_string()))?;
+                .ok_or_else(|| {
+                    tracing::error!("Failed to get vertex shader function");
+                    RhiError::PipelineCreationFailed("Failed to get vertex shader function".to_string())
+                })?;
             pipeline_desc.setVertexFunction(Some(&vs_func));
 
             let fs_func_name = NSString::from_str("fragment_main");
             let fs_func = fs.library.newFunctionWithName(&fs_func_name)
-                .ok_or_else(|| RhiError::PipelineCreationFailed("Failed to get fragment shader function".to_string()))?;
+                .ok_or_else(|| {
+                    tracing::error!("Failed to get fragment shader function");
+                    RhiError::PipelineCreationFailed("Failed to get fragment shader function".to_string())
+                })?;
             pipeline_desc.setFragmentFunction(Some(&fs_func));
 
             let color_attachment = pipeline_desc
@@ -171,8 +206,12 @@ impl Device for MetalDevice {
             let pipeline_state = self
                 .device
                 .newRenderPipelineStateWithDescriptor_error(&pipeline_desc)
-                .map_err(|e| RhiError::PipelineCreationFailed(format!("Failed to create Metal render pipeline state: {:?}", e)))?;
+                .map_err(|e| {
+                    tracing::error!("Failed to create Metal render pipeline state: {:?}", e);
+                    RhiError::PipelineCreationFailed(format!("Failed to create Metal render pipeline state: {:?}", e))
+                })?;
 
+            tracing::info!("Metal graphics pipeline created successfully");
             Ok(Arc::new(MetalPipeline {
                 pipeline_state,
             }))
@@ -180,6 +219,7 @@ impl Device for MetalDevice {
     }
 
     fn create_buffer(&self, desc: &BufferDescriptor) -> Result<Arc<dyn Buffer>, RhiError> {
+        tracing::debug!("Creating Metal buffer with size: {}, memory location: {:?}", desc.size, desc.memory_location);
         unsafe {
             let options = match desc.memory_location {
                 MemoryLocation::GpuOnly => MTLResourceOptions::StorageModePrivate,
@@ -190,13 +230,19 @@ impl Device for MetalDevice {
             let buffer = self
                 .device
                 .newBufferWithLength_options(desc.size as usize, options)
-                .ok_or_else(|| RhiError::BufferCreationFailed(format!("Failed to create Metal buffer with size: {}", desc.size)))?;
+                .map_err(|_| {
+                    tracing::error!("Failed to create Metal buffer with size: {}", desc.size);
+                    RhiError::BufferCreationFailed(format!("Failed to create Metal buffer with size: {}", desc.size))
+                })?;
 
+            tracing::info!("Metal buffer created successfully with size: {}", desc.size);
             Ok(Arc::new(MetalBuffer { buffer }))
         }
     }
 
     fn create_command_pool(&self, swapchain: &Arc<dyn Swapchain>) -> Result<Arc<dyn CommandPool>, RhiError> {
+        tracing::debug!("Creating Metal command pool");
+        tracing::info!("Metal command pool created successfully");
         Ok(Arc::new(MetalCommandPool {
             queue: self.queue.clone(),
         }))
@@ -217,12 +263,17 @@ pub struct MetalSwapchain {
 
 impl Swapchain for MetalSwapchain {
     fn acquire_next_image(&self) -> Result<SwapchainImage, RhiError> {
+        tracing::debug!("Acquiring next image from Metal swapchain");
         unsafe {
             let drawable = self
                 .layer
                 .nextDrawable()
-                .ok_or_else(|| RhiError::AcquireImageFailed("Failed to acquire next drawable from Metal layer".to_string()))?;
+                .ok_or_else(|| {
+                    tracing::error!("Failed to acquire next drawable from Metal layer");
+                    RhiError::AcquireImageFailed("Failed to acquire next drawable from Metal layer".to_string())
+                })?;
 
+            tracing::debug!("Successfully acquired next image from Metal swapchain");
             Ok(SwapchainImage {
                 index: 0,
                 _handle: Retained::as_ptr(&drawable) as usize,
@@ -231,6 +282,7 @@ impl Swapchain for MetalSwapchain {
     }
 
     fn present(&self, image: SwapchainImage) -> Result<(), RhiError> {
+        tracing::debug!("Presenting image to Metal swapchain");
         Ok(())
     }
 
@@ -295,12 +347,17 @@ pub struct MetalCommandPool {
 
 impl CommandPool for MetalCommandPool {
     fn allocate_command_buffer(&self) -> Result<Arc<dyn CommandBuffer>, RhiError> {
+        tracing::debug!("Allocating Metal command buffer");
         unsafe {
             let command_buffer = self
                 .queue
                 .commandBuffer()
-                .ok_or_else(|| RhiError::CommandBufferAllocationFailed("Failed to allocate Metal command buffer".to_string()))?;
+                .ok_or_else(|| {
+                    tracing::error!("Failed to allocate Metal command buffer");
+                    RhiError::CommandBufferAllocationFailed("Failed to allocate Metal command buffer".to_string())
+                })?;
 
+            tracing::info!("Metal command buffer allocated successfully");
             Ok(Arc::new(MetalCommandBuffer {
                 command_buffer,
                 current_encoder: None,
@@ -410,14 +467,17 @@ pub struct MetalQueue {
 
 impl Queue for MetalQueue {
     fn submit(&self, command_buffers: &[Arc<dyn CommandBuffer>], _wait_semaphore: Option<u64>, _signal_semaphore: Option<u64>) -> Result<(), RhiError> {
-        for cb in command_buffers {
+        tracing::debug!("Submitting {} command buffers to Metal queue", command_buffers.len());
+        for (i, cb) in command_buffers.iter().enumerate() {
             let cb_any = cb.as_ref() as &dyn std::any::Any;
             let metal_cb = cb_any.downcast_ref::<MetalCommandBuffer>().unwrap();
             
+            tracing::trace!("Committing command buffer {}", i);
             unsafe {
                 metal_cb.command_buffer.commit();
             }
         }
+        tracing::debug!("Successfully submitted {} command buffers to Metal queue", command_buffers.len());
         Ok(())
     }
 

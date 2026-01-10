@@ -4,6 +4,7 @@ version = "0.1.0"
 edition = "2024"
 
 [dependencies]
+moonfield-core = { path = "../../moonfield-core" }
 moonfield-rhi = { path = "../../moonfield-rhi" }
 winit = { workspace = true }
 tracing = { workspace = true }

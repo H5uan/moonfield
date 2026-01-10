@@ -250,7 +250,11 @@ impl ApplicationHandler for TriangleApp {
 }
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
-    tracing_subscriber::fmt::init();
+    // Initialize tracing logging system from moonfield-core
+    moonfield_core::logging::init_auto_logging()
+        .expect("Failed to initialize logging system");
+
+    tracing::info!("Starting triangle example application");
 
     let event_loop = EventLoop::new()?;
     event_loop.set_control_flow(ControlFlow::Poll);
@@ -258,5 +262,6 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let mut app = TriangleApp::default();
     event_loop.run_app(&mut app)?;
 
+    tracing::info!("Application exited");
     Ok(())
 }

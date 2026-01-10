@@ -67,39 +67,65 @@ pub trait Queue {
 }
 
 pub fn create_instance(backend: Backend) -> Result<Arc<dyn Instance>, RhiError> {
+    tracing::debug!("Creating RHI instance for backend: {:?}", backend);
     match backend {
         #[cfg(feature = "vulkan")]
         Backend::Vulkan => {
             #[cfg(windows)]
             {
+                tracing::debug!("Using Vulkan backend");
                 Ok(Arc::new(backend::vulkan::VulkanInstance::new()?))
             }
             #[cfg(not(windows))]
             {
+                tracing::warn!("Vulkan backend not supported on this platform");
                 Err(RhiError::BackendNotSupported)
             }
         }
         #[cfg(target_os = "macos")]
-        Backend::Metal => Ok(Arc::new(backend::metal::MetalInstance::new()?)),
+        Backend::Metal => {
+            tracing::debug!("Using Metal backend");
+            Ok(Arc::new(backend::metal::MetalInstance::new()?))
+        }
         #[cfg(all(windows, feature = "dx12"))]
-        Backend::Dx12 => Ok(Arc::new(backend::dx12::Dx12Instance::new()?)),
-        _ => Err(RhiError::BackendNotSupported),
+        Backend::Dx12 => {
+            tracing::debug!("Using DirectX 12 backend");
+            Ok(Arc::new(backend::dx12::Dx12Instance::new()?))
+        }
+        _ => {
+            tracing::error!("Requested backend {:?} is not supported", backend);
+            Err(RhiError::BackendNotSupported)
+        }
     }
 }
 
 pub fn create_instance_with_window(backend: Backend, window: &winit::window::Window) -> Result<Arc<dyn Instance>, RhiError> {
+    tracing::debug!("Creating RHI instance with window for backend: {:?}", backend);
     match backend {
         #[cfg(feature = "vulkan")]
         Backend::Vulkan => {
             let display = window.display_handle()
-                .map_err(|e| RhiError::InitializationFailed(e.to_string()))?
+                .map_err(|e| {
+                    tracing::error!("Failed to get display handle: {}", e);
+                    RhiError::InitializationFailed(e.to_string())
+                })?
                 .as_raw();
+            tracing::debug!("Using Vulkan backend with window");
             Ok(Arc::new(backend::vulkan::VulkanInstance::new_with_display(display)?))
         }
         #[cfg(target_os = "macos")]
-        Backend::Metal => Ok(Arc::new(backend::metal::MetalInstance::new()?)),
+        Backend::Metal => {
+            tracing::debug!("Using Metal backend with window");
+            Ok(Arc::new(backend::metal::MetalInstance::new()?))
+        }
         #[cfg(all(windows, feature = "dx12"))]
-        Backend::Dx12 => Ok(Arc::new(backend::dx12::Dx12Instance::new()?)),
-        _ => Err(RhiError::BackendNotSupported),
+        Backend::Dx12 => {
+            tracing::debug!("Using DirectX 12 backend with window");
+            Ok(Arc::new(backend::dx12::Dx12Instance::new()?))
+        }
+        _ => {
+            tracing::error!("Requested backend {:?} is not supported with window", backend);
+            Err(RhiError::BackendNotSupported)
+        }
     }
 }

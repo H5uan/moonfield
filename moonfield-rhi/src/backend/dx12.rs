@@ -2,6 +2,9 @@ use std::sync::Arc;
 use crate::{types::*, Instance, Adapter, Device, Surface, Swapchain, ShaderModule, Pipeline, Buffer, CommandPool, CommandBuffer, Queue, RhiError};
 use winit::window::Window;
 
+// Import tracing for logging
+use tracing;
+
 // Import Windows-specific DirectX 12 types
 use windows::{
     core::*,
@@ -17,6 +20,7 @@ use std::result::Result as StdResult;
 
 // Initialize the DirectX 12 Agility SDK
 pub fn init_dx12_agility_sdk() -> StdResult<(), RhiError> {
+    tracing::debug!("Initializing DirectX 12 Agility SDK");
     // Attempt to initialize the Agility SDK
     unsafe {
         // Load the Agility SDK DLL if available
@@ -25,6 +29,7 @@ pub fn init_dx12_agility_sdk() -> StdResult<(), RhiError> {
         // This is a placeholder implementation
     }
     
+    tracing::info!("DirectX 12 Agility SDK initialized");
     Ok(())
 }
 
@@ -34,15 +39,22 @@ pub struct Dx12Instance {
 
 impl Dx12Instance {
     pub fn new() -> StdResult<Self, RhiError> {
+        tracing::debug!("Creating DirectX 12 instance");
         init_dx12_agility_sdk()?;
         
         unsafe {
-            let factory: IDXGIFactory4 = create_factory()?;
+            let factory: IDXGIFactory4 = create_factory()
+                .map_err(|e| {
+                    tracing::error!("Failed to create DXGI factory: {:?}", e);
+                    e
+                })?;
+            tracing::info!("DirectX 12 instance created successfully");
             Ok(Dx12Instance { factory })
         }
     }
 
     pub fn new_with_window(&self, _window: &Window) -> StdResult<Self, RhiError> {
+        tracing::debug!("Creating DirectX 12 instance with window");
         // For now, just return a new instance
         Self::new()
     }
@@ -50,17 +62,25 @@ impl Dx12Instance {
 
 impl Instance for Dx12Instance {
     fn create_surface(&self, window: &winit::window::Window) -> StdResult<Arc<dyn Surface>, RhiError> {
-        let dx12_surface = Dx12Surface::new(window)?;
+        tracing::debug!("Creating DirectX 12 surface for window");
+        let dx12_surface = Dx12Surface::new(window)
+            .map_err(|e| {
+                tracing::error!("Failed to create DirectX 12 surface: {:?}", e);
+                e
+            })?;
+        tracing::debug!("DirectX 12 surface created successfully");
         Ok(Arc::new(dx12_surface) as Arc<dyn Surface>)
     }
 
     fn enumerate_adapters(&self) -> Vec<Arc<dyn Adapter>> {
+        tracing::debug!("Enumerating DirectX 12 adapters");
         let mut adapters = Vec::new();
         unsafe {
             let mut i = 0;
             loop {
                 match self.factory.EnumAdapters1(i) {
                     Ok(adapter) => {
+                        tracing::debug!("Found DirectX 12 adapter");
                         // Check if this is a D3D12-compatible adapter
                         let hr = D3D12CreateDevice(
                             &adapter,
@@ -74,11 +94,15 @@ impl Instance for Dx12Instance {
                             }
                         }
                     }
-                    Err(_) => break, // No more adapters
+                    Err(_) => {
+                        tracing::debug!("No more DirectX 12 adapters found");
+                        break; // No more adapters
+                    }
                 }
                 i += 1;
             }
         }
+        tracing::info!("Found {} DirectX 12 adapters", adapters.len());
         adapters
     }
 }
@@ -145,6 +169,7 @@ impl Dx12Adapter {
 
 impl Adapter for Dx12Adapter {
     fn request_device(&self) -> StdResult<Arc<dyn Device>, RhiError> {
+        tracing::debug!("Requesting DirectX 12 logical device");
         unsafe {
             let mut device: Option<ID3D12Device> = None;
             let hr = D3D12CreateDevice(
@@ -154,19 +179,27 @@ impl Adapter for Dx12Adapter {
             );
             
             if hr.is_err() {
+                tracing::error!("Failed to create D3D12 device");
                 return Err(RhiError::DeviceCreationFailed("Failed to create D3D12 device".to_string()));
             }
 
             if let Some(d3d12_device) = device {
-                let dx12_device = Dx12Device::new(&d3d12_device)?;
+                let dx12_device = Dx12Device::new(&d3d12_device)
+                    .map_err(|e| {
+                        tracing::error!("Failed to initialize DirectX 12 device: {:?}", e);
+                        e
+                    })?;
+                tracing::info!("DirectX 12 logical device created successfully");
                 Ok(Arc::new(dx12_device) as Arc<dyn Device>)
             } else {
+                tracing::error!("D3D12 device creation returned null");
                 Err(RhiError::DeviceCreationFailed("D3D12 device creation returned null".to_string()))
             }
         }
     }
 
     fn get_properties(&self) -> AdapterProperties {
+        tracing::debug!("Getting DirectX 12 adapter properties");
         self.properties.clone()
     }
 }

@@ -12,15 +12,20 @@ pub struct VulkanInstance {
 
 impl VulkanInstance {
     pub fn new() -> Result<Self, RhiError> {
+        tracing::debug!("Creating Vulkan instance");
         Self::new_with_display(raw_window_handle::RawDisplayHandle::Windows(
             raw_window_handle::WindowsDisplayHandle::new()
         ))
     }
 
     pub fn new_with_display(display: raw_window_handle::RawDisplayHandle) -> Result<Self, RhiError> {
+        tracing::debug!("Creating Vulkan instance with display");
         unsafe {
             let entry = ash::Entry::load()
-                .map_err(|e| RhiError::InitializationFailed(format!("Failed to load Vulkan entry: {}", e)))?;
+                .map_err(|e| {
+                    tracing::error!("Failed to load Vulkan entry: {}", e);
+                    RhiError::InitializationFailed(format!("Failed to load Vulkan entry: {}", e))
+                })?;
             
             let app_name = CString::new("Moonfield").unwrap();
             let engine_name = CString::new("MoonfieldEngine").unwrap();
@@ -33,7 +38,10 @@ impl VulkanInstance {
                 .api_version(vk::API_VERSION_1_3);
 
             let extension_names = ash_window::enumerate_required_extensions(display)
-            .map_err(|e| RhiError::InitializationFailed(format!("Failed to enumerate required extensions: {}", e)))?
+            .map_err(|e| {
+                tracing::error!("Failed to enumerate required extensions: {}", e);
+                RhiError::InitializationFailed(format!("Failed to enumerate required extensions: {}", e))
+            })?
             .to_vec();
 
             let layer_names = vec![CString::new("VK_LAYER_KHRONOS_validation").unwrap()];
@@ -49,8 +57,12 @@ impl VulkanInstance {
 
             let instance = entry
                 .create_instance(&create_info, None)
-                .map_err(|e| RhiError::InitializationFailed(format!("Failed to create Vulkan instance: {}", e)))?;
+                .map_err(|e| {
+                    tracing::error!("Failed to create Vulkan instance: {}", e);
+                    RhiError::InitializationFailed(format!("Failed to create Vulkan instance: {}", e))
+                })?;
 
+            tracing::info!("Vulkan instance created successfully");
             Ok(Self { entry, instance })
         }
     }
@@ -58,6 +70,7 @@ impl VulkanInstance {
 
 impl Instance for VulkanInstance {
     fn create_surface(&self, window: &winit::window::Window) -> Result<Arc<dyn Surface>, RhiError> {
+        tracing::debug!("Creating Vulkan surface for window");
         unsafe {
             let surface = ash_window::create_surface(
                 &self.entry,
@@ -66,10 +79,14 @@ impl Instance for VulkanInstance {
                 window.window_handle().unwrap().as_raw(),
                 None,
             )
-            .map_err(|e| RhiError::InitializationFailed(format!("Failed to create Vulkan surface: {}", e)))?;
+            .map_err(|e| {
+                tracing::error!("Failed to create Vulkan surface: {}", e);
+                RhiError::InitializationFailed(format!("Failed to create Vulkan surface: {}", e))
+            })?;
 
             let surface_loader = ash::khr::surface::Instance::new(&self.entry, &self.instance);
 
+            tracing::debug!("Vulkan surface created successfully");
             Ok(Arc::new(VulkanSurface {
                 surface,
                 surface_loader,
@@ -78,18 +95,24 @@ impl Instance for VulkanInstance {
     }
 
     fn enumerate_adapters(&self) -> Vec<Arc<dyn Adapter>> {
+        tracing::debug!("Enumerating Vulkan physical devices");
         unsafe {
-            let physical_devices = self.instance.enumerate_physical_devices().unwrap_or_default();
+            let physical_devices = self.instance.enumerate_physical_devices()
+                .unwrap_or_default();
             
-            physical_devices
+            let adapters: Vec<Arc<dyn Adapter>> = physical_devices
                 .into_iter()
                 .map(|pdevice| {
+                    tracing::debug!("Found Vulkan physical device");
                     Arc::new(VulkanAdapter {
                         instance: self.instance.clone(),
                         physical_device: pdevice,
                     }) as Arc<dyn Adapter>
                 })
-                .collect()
+                .collect();
+                
+            tracing::info!("Found {} Vulkan adapters", adapters.len());
+            adapters
         }
     }
 }
@@ -153,6 +176,7 @@ pub struct VulkanAdapter {
 
 impl Adapter for VulkanAdapter {
     fn request_device(&self) -> Result<Arc<dyn Device>, RhiError> {
+        tracing::debug!("Requesting Vulkan logical device");
         unsafe {
             let queue_family_properties = self
                 .instance
@@ -163,7 +187,12 @@ impl Adapter for VulkanAdapter {
                 .enumerate()
                 .find(|(_, props)| props.queue_flags.contains(vk::QueueFlags::GRAPHICS))
                 .map(|(i, _)| i as u32)
-                .ok_or_else(|| RhiError::DeviceCreationFailed("No suitable graphics queue family found".to_string()))?;
+                .ok_or_else(|| {
+                    tracing::error!("No suitable graphics queue family found");
+                    RhiError::DeviceCreationFailed("No suitable graphics queue family found".to_string())
+                })?;
+
+            tracing::debug!("Found graphics queue family at index: {}", queue_family_index);
 
             let queue_priorities = [1.0];
             let queue_create_info = vk::DeviceQueueCreateInfo::default()
@@ -184,10 +213,14 @@ impl Adapter for VulkanAdapter {
             let device = self
                 .instance
                 .create_device(self.physical_device, &device_create_info, None)
-                .map_err(|e| RhiError::DeviceCreationFailed(format!("Failed to create logical device: {}", e)))?;
+                .map_err(|e| {
+                    tracing::error!("Failed to create logical device: {}", e);
+                    RhiError::DeviceCreationFailed(format!("Failed to create logical device: {}", e))
+                })?;
 
             let queue = device.get_device_queue(queue_family_index, 0);
 
+            tracing::info!("Vulkan logical device created successfully");
             Ok(Arc::new(VulkanDevice {
                 instance: self.instance.clone(),
                 physical_device: self.physical_device,
@@ -223,6 +256,7 @@ pub struct VulkanDevice {
 
 impl Device for VulkanDevice {
     fn create_swapchain(&self, desc: &SwapchainDescriptor) -> Result<Arc<dyn Swapchain>, RhiError> {
+        tracing::debug!("Creating Vulkan swapchain with format: {:?}, extent: {:?}", desc.format, desc.extent);
         let vk_surface = (&*desc.surface as &dyn Any)
             .downcast_ref::<VulkanSurface>()
             .expect("surface must be VulkanSurface");
@@ -255,11 +289,17 @@ impl Device for VulkanDevice {
 
             let swapchain = swapchain_loader
                 .create_swapchain(&create_info, None)
-                .map_err(|e| RhiError::SwapchainCreationFailed(format!("Failed to create swapchain: {}", e)))?;
+                .map_err(|e| {
+                    tracing::error!("Failed to create swapchain: {}", e);
+                    RhiError::SwapchainCreationFailed(format!("Failed to create swapchain: {}", e))
+                })?;
 
             let images = swapchain_loader
                 .get_swapchain_images(swapchain)
-                .map_err(|e| RhiError::SwapchainCreationFailed(format!("Failed to get swapchain images: {}", e)))?;
+                .map_err(|e| {
+                    tracing::error!("Failed to get swapchain images: {}", e);
+                    RhiError::SwapchainCreationFailed(format!("Failed to get swapchain images: {}", e))
+                })?;
 
             let image_views: Vec<_> = images
                 .iter()
@@ -277,7 +317,12 @@ impl Device for VulkanDevice {
                             layer_count: 1,
                         });
 
-                    self.device.create_image_view(&create_info, None).unwrap()
+                    self.device.create_image_view(&create_info, None)
+                        .map_err(|e| {
+                            tracing::error!("Failed to create image view: {}", e);
+                            e
+                        })
+                        .unwrap()
                 })
                 .collect();
 
@@ -286,21 +331,28 @@ impl Device for VulkanDevice {
             let mut image_available_semaphores = Vec::new();
             let mut render_finished_semaphores = Vec::new();
             
-            for _ in 0..images.len() {
+            for i in 0..images.len() {
                 let image_available = self
                     .device
                     .create_semaphore(&semaphore_create_info, None)
-                    .map_err(|e| RhiError::SwapchainCreationFailed(format!("Failed to create image available semaphore: {}", e)))?;
+                    .map_err(|e| {
+                        tracing::error!("Failed to create image available semaphore {}: {}", i, e);
+                        RhiError::SwapchainCreationFailed(format!("Failed to create image available semaphore: {}", e))
+                    })?;
                 image_available_semaphores.push(image_available);
                 
                 let render_finished = self
                     .device
                     .create_semaphore(&semaphore_create_info, None)
-                    .map_err(|e| RhiError::SwapchainCreationFailed(format!("Failed to create render finished semaphore: {}", e)))?;
+                    .map_err(|e| {
+                        tracing::error!("Failed to create render finished semaphore {}: {}", i, e);
+                        RhiError::SwapchainCreationFailed(format!("Failed to create render finished semaphore: {}", e))
+                    })?;
                 render_finished_semaphores.push(render_finished);
             }
 
             let image_count = images.len();
+            tracing::info!("Vulkan swapchain created successfully with {} images", image_count);
 
             Ok(Arc::new(VulkanSwapchain {
                 device: self.device.clone(),
@@ -320,6 +372,7 @@ impl Device for VulkanDevice {
     }
 
     fn create_shader_module(&self, desc: &ShaderModuleDescriptor) -> Result<Arc<dyn ShaderModule>, RhiError> {
+        tracing::debug!("Creating Vulkan shader module for stage: {:?}", desc.stage);
         unsafe {
             let code = std::slice::from_raw_parts(
                 desc.code.as_ptr() as *const u32,
@@ -331,8 +384,12 @@ impl Device for VulkanDevice {
             let shader_module = self
                 .device
                 .create_shader_module(&create_info, None)
-                .map_err(|e| RhiError::ShaderCompilationFailed(ShaderCompilationError::CompilationError(format!("Failed to create shader module: {}", e))))?;
+                .map_err(|e| {
+                    tracing::error!("Failed to create shader module: {}", e);
+                    RhiError::ShaderCompilationFailed(ShaderCompilationError::CompilationError(format!("Failed to create shader module: {}", e)))
+                })?;
 
+            tracing::info!("Vulkan shader module created successfully for stage: {:?}", desc.stage);
             Ok(Arc::new(VulkanShaderModule {
                 device: self.device.clone(),
                 shader_module,
