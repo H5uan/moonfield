@@ -4,6 +4,5 @@ version = "0.1.0"
 edition = "2024"
 
 [dependencies]
-nalgebra = {workspace = true}
-moonfield-core = {workspace = true}
+moonfield-math = {workspace = true}
 

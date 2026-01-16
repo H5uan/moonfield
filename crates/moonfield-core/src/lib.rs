@@ -37,7 +37,6 @@ pub mod allocator;
 pub mod asset;
 pub mod ecs;
 pub mod logging;
-pub mod math;
 pub mod type_traits;
 
 /// Converts a slice of `Pod` types to a slice of bytes.

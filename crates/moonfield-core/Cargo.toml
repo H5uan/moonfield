@@ -8,6 +8,8 @@ bytemuck = {workspace = true}
 nalgebra = {workspace = true}
 tracing = { workspace = true }
 tracing-subscriber = { workspace = true, features = ["env-filter"] }
+moonfield-transform = { workspace = true }
+moonfield-math = { workspace = true }
 
 [features]
 default = []

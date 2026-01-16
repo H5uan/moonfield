@@ -8,6 +8,8 @@ edition = "2024"
 [workspace.dependencies]
 moonfield-core = { path = "./crates/moonfield-core" }
 moonfield-rhi = { path = "./crates/moonfield-rhi" }
+moonfield-transform = { path = "./crates/moonfield-transform" }
+moonfield-math = { path = "./crates/moonfield-math" }
 
 winit = "0.30.12"
 raw-window-handle = "0.6.2"

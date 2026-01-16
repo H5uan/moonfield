@@ -3,8 +3,9 @@
 //! This module provides camera implementations for 3D graphics applications,
 //! including perspective and orthographic cameras with various utility functions.
 
-use moonfield_core::math::geometry::Ray;
-use moonfield_core::math::*;
+use moonfield_math::geometry::Ray;
+use moonfield_math::*;
+use moonfield_math::nalgebra;
 
 /// Type alias for a basic camera
 pub type Camera = PerspectiveCamera;

@@ -267,6 +267,5 @@ pub mod geometry {
     }
 }
 
-/// Transform component for 3D transformations
-pub mod transform;
-pub use transform::Transform;
+// Note: Transform is now defined in this crate rather than moonfield-transform
+// We'll define it here if needed, or re-export from moonfield-transform if preferred
