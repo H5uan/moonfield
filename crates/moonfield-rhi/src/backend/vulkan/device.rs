@@ -24,8 +24,8 @@ impl Device for VulkanDevice {
             let swapchain_loader = ash::khr::swapchain::Device::new(&self.instance, &self.device);
 
             let format = match desc.format {
-                Format::B8G8R8A8Unorm => ash::vk::Format::B8G8R8A8_UNORM,
-                Format::B8G8R8A8Srgb => ash::vk::Format::B8G8R8A8_SRGB,
+                Format::BGRA8Unorm => ash::vk::Format::B8G8R8A8_UNORM,
+                Format::BGRA8UnormSrgb => ash::vk::Format::B8G8R8A8_SRGB,
                 _ => ash::vk::Format::B8G8R8A8_UNORM,
             };
 
@@ -130,7 +130,7 @@ impl Device for VulkanDevice {
         }
     }
 
-    fn create_shader_module(&self, desc: &ShaderModuleDescriptor) -> Result<Arc<dyn ShaderModule>, RhiError> {  
+    fn create_shader_module(&self, desc: &ShaderModuleDescriptor) -> Result<Arc<dyn ShaderProgram>, RhiError> {  
         tracing::debug!("Creating Vulkan shader module for stage: {:?}", desc.stage);
         unsafe {
             let code = std::slice::from_raw_parts(
@@ -248,8 +248,8 @@ impl Device for VulkanDevice {
                 .map_err(|e| RhiError::PipelineCreationFailed(format!("Failed to create pipeline layout: {}", e)))?;
 
             let format = match desc.render_pass_format {
-                Format::B8G8R8A8Unorm => ash::vk::Format::B8G8R8A8_UNORM,
-                Format::B8G8R8A8Srgb => ash::vk::Format::B8G8R8A8_SRGB,
+                Format::BGRA8Unorm => ash::vk::Format::B8G8R8A8_UNORM,
+                Format::BGRA8UnormSrgb => ash::vk::Format::B8G8R8A8_SRGB,
                 _ => ash::vk::Format::B8G8R8A8_UNORM,
             };
 

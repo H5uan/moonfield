@@ -2,7 +2,7 @@ use std::any::Any;
 use std::sync::Arc;
 
 use crate::types::{RhiError, BufferDescriptor, GraphicsPipelineDescriptor, ShaderModuleDescriptor, SwapchainDescriptor};
-use crate::{Buffer, CommandPool, Pipeline, Queue, ShaderModule, Swapchain};
+use crate::{Buffer, CommandPool, Pipeline, Queue, ShaderProgram, Swapchain};
 
 /// Trait for logical device functionality
 pub trait Device: Any {
@@ -10,7 +10,7 @@ pub trait Device: Any {
     fn create_swapchain(&self, desc: &SwapchainDescriptor) -> Result<Arc<dyn Swapchain>, RhiError>;
     
     /// Creates a shader module
-    fn create_shader_module(&self, desc: &ShaderModuleDescriptor) -> Result<Arc<dyn ShaderModule>, RhiError>;
+    fn create_shader_module(&self, desc: &ShaderModuleDescriptor) -> Result<Arc<dyn ShaderProgram>, RhiError>;
     
     /// Creates a graphics pipeline
     fn create_pipeline(&self, desc: &GraphicsPipelineDescriptor) -> Result<Arc<dyn Pipeline>, RhiError>;

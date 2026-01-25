@@ -1,12 +1,15 @@
-use crate::{types::*, *};
-use ash::vk::Handle;
 use std::any::Any;
 use std::sync::Arc;
 
-use super::{VulkanAdapter};
+use ash::vk::Handle;
+
+use super::VulkanAdapter;
+use crate::{types::*, *};
 
 pub struct VulkanSurface {
+    /// KHR surface handle
     pub surface: ash::vk::SurfaceKHR,
+    /// KHR surface function loader
     pub surface_loader: ash::khr::surface::Instance,
 }
 
@@ -19,20 +22,31 @@ impl Surface for VulkanSurface {
         unsafe {
             let caps = self
                 .surface_loader
-                .get_physical_device_surface_capabilities(vk_adapter.physical_device, self.surface)
+                .get_physical_device_surface_capabilities(
+                    vk_adapter.physical_device,
+                    self.surface,
+                )
                 .unwrap();
 
             let formats = self
                 .surface_loader
-                .get_physical_device_surface_formats(vk_adapter.physical_device, self.surface)
+                .get_physical_device_surface_formats(
+                    vk_adapter.physical_device,
+                    self.surface,
+                )
                 .unwrap();
 
             SurfaceCapabilities {
-                formats: formats.iter().map(|f| match f.format {
-                    ash::vk::Format::B8G8R8A8_UNORM => Format::B8G8R8A8Unorm,
-                    ash::vk::Format::B8G8R8A8_SRGB => Format::B8G8R8A8Srgb,
-                    _ => Format::B8G8R8A8Unorm,
-                }).collect(),
+                formats: formats
+                    .iter()
+                    .map(|f| match f.format {
+                        ash::vk::Format::B8G8R8A8_UNORM => Format::BGRA8Unorm,
+                        ash::vk::Format::B8G8R8A8_SRGB => {
+                            Format::BGRA8UnormSrgb
+                        }
+                        _ => Format::BGRA8Unorm,
+                    })
+                    .collect(),
                 present_modes: vec![PresentMode::Fifo],
                 min_image_count: caps.min_image_count,
                 max_image_count: caps.max_image_count,

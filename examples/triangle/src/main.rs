@@ -1,6 +1,8 @@
-use moonfield_core::asset::{AssetServer, AssetHandle, ShaderAsset};
-use moonfield_rhi::{types::Backend, *};
 use std::sync::Arc;
+
+use moonfield_core::asset::{AssetHandle, AssetServer, ShaderAsset};
+use moonfield_rhi::{types::Backend, *};
+use shader_slang::Stage;
 use winit::application::ApplicationHandler;
 use winit::event::WindowEvent;
 use winit::event_loop::{ActiveEventLoop, ControlFlow, EventLoop};
@@ -75,7 +77,7 @@ impl ApplicationHandler for TriangleApp {
             .with_inner_size(winit::dpi::LogicalSize::new(800, 600));
 
         let window = Arc::new(event_loop.create_window(window_attrs).unwrap());
-        
+
         let backend = if cfg!(target_os = "macos") {
             Backend::Metal
         } else {
@@ -84,47 +86,56 @@ impl ApplicationHandler for TriangleApp {
 
         let instance = create_instance_with_window(backend, &window).unwrap();
         let surface = instance.create_surface(&window).unwrap();
-        
+
         let adapters = instance.enumerate_adapters();
         let adapter = adapters.first().expect("No adapters found");
-        
+
         tracing::info!("Using adapter: {:?}", adapter.get_properties());
 
         let device = adapter.request_device().unwrap();
-        
+
         let capabilities = surface.get_capabilities(adapter.as_ref());
         let format = capabilities.formats[0];
 
         let window_size = window.inner_size();
-        let extent = types::Extent2D { 
-            width: window_size.width, 
-            height: window_size.height 
+        let extent = types::Extent2D {
+            width: window_size.width,
+            height: window_size.height,
         };
 
-        let swapchain = device.create_swapchain(&types::SwapchainDescriptor {
-            surface: surface.clone(),
-            format,
-            extent,
-            present_mode: types::PresentMode::Fifo,
-            image_count: capabilities.min_image_count.max(2),
-        }).unwrap();
+        let swapchain = device
+            .create_swapchain(&types::SwapchainDescriptor {
+                surface: surface.clone(),
+                format,
+                extent,
+                present_mode: types::PresentMode::Fifo,
+                image_count: capabilities.min_image_count.max(2),
+            })
+            .unwrap();
 
         // Initialize asset server and register loaders
         let mut asset_server = AssetServer::new();
-        asset_server.register_loader(Box::new(moonfield_core::asset::ShaderLoader));
+        asset_server
+            .register_loader(Box::new(moonfield_core::asset::ShaderLoader));
 
         // Load shaders using the asset system
         // Build path relative to the project root
         // CARGO_MANIFEST_DIR is the directory of the Cargo.toml file for this example
         let manifest_dir = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"));
         let project_root = manifest_dir.parent().unwrap().parent().unwrap(); // Go up twice to reach project root
-        
-        // Use SPIR-V files for Vulkan/Metal backends
-        let vertex_shader_path = project_root.join("assets/shaders/out/spir-v/triangle.vert.spv");
-        let fragment_shader_path = project_root.join("assets/shaders/out/spir-v/triangle.frag.spv");
 
-        let vertex_shader_handle = asset_server.load::<ShaderAsset>(vertex_shader_path.to_str().unwrap()).unwrap();
-        let fragment_shader_handle = asset_server.load::<ShaderAsset>(fragment_shader_path.to_str().unwrap()).unwrap();
+        // Use SPIR-V files for Vulkan/Metal backends
+        let vertex_shader_path =
+            project_root.join("assets/shaders/out/spir-v/triangle.vert.spv");
+        let fragment_shader_path =
+            project_root.join("assets/shaders/out/spir-v/triangle.frag.spv");
+
+        let vertex_shader_handle = asset_server
+            .load::<ShaderAsset>(vertex_shader_path.to_str().unwrap())
+            .unwrap();
+        let fragment_shader_handle = asset_server
+            .load::<ShaderAsset>(fragment_shader_path.to_str().unwrap())
+            .unwrap();
 
         let vertices = vec![
             Vertex { position: [0.0, -0.5], color: [1.0, 0.0, 0.0] },
@@ -132,11 +143,13 @@ impl ApplicationHandler for TriangleApp {
             Vertex { position: [-0.5, 0.5], color: [0.0, 0.0, 1.0] },
         ];
 
-        let vertex_buffer = device.create_buffer(&types::BufferDescriptor {
-            size: (std::mem::size_of::<Vertex>() * vertices.len()) as u64,
-            usage: types::BufferUsage::Vertex,
-            memory_location: types::MemoryLocation::CpuToGpu,
-        }).unwrap();
+        let vertex_buffer = device
+            .create_buffer(&types::BufferDescriptor {
+                size: (std::mem::size_of::<Vertex>() * vertices.len()) as u64,
+                usage: types::BufferUsage::Vertex,
+                memory_location: types::MemoryLocation::CpuToGpu,
+            })
+            .unwrap();
 
         unsafe {
             let ptr = vertex_buffer.map().unwrap();
@@ -149,45 +162,53 @@ impl ApplicationHandler for TriangleApp {
         }
 
         // Get shader data from asset system
-        let vertex_shader_asset = asset_server.get(&vertex_shader_handle).unwrap();
-        let fragment_shader_asset = asset_server.get(&fragment_shader_handle).unwrap();
+        let vertex_shader_asset =
+            asset_server.get(&vertex_shader_handle).unwrap();
+        let fragment_shader_asset =
+            asset_server.get(&fragment_shader_handle).unwrap();
 
-        let vertex_shader = device.create_shader_module(&types::ShaderModuleDescriptor {
-            code: &vertex_shader_asset.source,
-            stage: types::ShaderStage::Vertex,
-        }).unwrap();
+        let vertex_shader = device
+            .create_shader_module(&types::ShaderModuleDescriptor {
+                code: &vertex_shader_asset.source,
+                stage: Stage::Vertex,
+            })
+            .unwrap();
 
-        let fragment_shader = device.create_shader_module(&types::ShaderModuleDescriptor {
-            code: &fragment_shader_asset.source,
-            stage: types::ShaderStage::Fragment,
-        }).unwrap();
+        let fragment_shader = device
+            .create_shader_module(&types::ShaderModuleDescriptor {
+                code: &fragment_shader_asset.source,
+                stage: Stage::Pixel,
+            })
+            .unwrap();
 
-        let pipeline = device.create_pipeline(&types::GraphicsPipelineDescriptor {
-            vertex_shader,
-            fragment_shader,
-            vertex_input: types::VertexInputDescriptor {
-                bindings: vec![types::VertexInputBinding {
-                    binding: 0,
-                    stride: std::mem::size_of::<Vertex>() as u32,
-                    input_rate: types::VertexInputRate::Vertex,
-                }],
-                attributes: vec![
-                    types::VertexInputAttribute {
-                        location: 0,
+        let pipeline = device
+            .create_pipeline(&types::GraphicsPipelineDescriptor {
+                vertex_shader,
+                fragment_shader,
+                vertex_input: types::VertexInputDescriptor {
+                    bindings: vec![types::VertexInputBinding {
                         binding: 0,
-                        format: types::VertexFormat::Float32x2,
-                        offset: 0,
-                    },
-                    types::VertexInputAttribute {
-                        location: 1,
-                        binding: 0,
-                        format: types::VertexFormat::Float32x3,
-                        offset: 8,
-                    },
-                ],
-            },
-            render_pass_format: format,
-        }).unwrap();
+                        stride: std::mem::size_of::<Vertex>() as u32,
+                        input_rate: types::VertexInputRate::Vertex,
+                    }],
+                    attributes: vec![
+                        types::VertexInputAttribute {
+                            location: 0,
+                            binding: 0,
+                            format: types::VertexFormat::Float32x2,
+                            offset: 0,
+                        },
+                        types::VertexInputAttribute {
+                            location: 1,
+                            binding: 0,
+                            format: types::VertexFormat::Float32x3,
+                            offset: 8,
+                        },
+                    ],
+                },
+                render_pass_format: format,
+            })
+            .unwrap();
 
         let command_pool = device.create_command_pool(&swapchain).unwrap();
         let queue = device.get_queue();
@@ -207,9 +228,7 @@ impl ApplicationHandler for TriangleApp {
     }
 
     fn window_event(
-        &mut self,
-        event_loop: &ActiveEventLoop,
-        _window_id: WindowId,
+        &mut self, event_loop: &ActiveEventLoop, _window_id: WindowId,
         event: WindowEvent,
     ) {
         match event {
@@ -232,20 +251,25 @@ impl ApplicationHandler for TriangleApp {
                     }
                 };
 
-                let command_buffer = command_pool.allocate_command_buffer().unwrap();
+                let command_buffer =
+                    command_pool.allocate_command_buffer().unwrap();
                 command_buffer.begin().unwrap();
 
                 let size = window.inner_size();
-                command_buffer.set_viewport(size.width as f32, size.height as f32);
+                command_buffer
+                    .set_viewport(size.width as f32, size.height as f32);
                 command_buffer.set_scissor(size.width, size.height);
 
-                command_buffer.begin_render_pass(&types::RenderPassDescriptor {
-                    color_attachments: vec![types::ColorAttachment {
-                        load_op: types::LoadOp::Clear,
-                        store_op: types::StoreOp::Store,
-                        clear_value: [0.0, 0.0, 0.0, 1.0],
-                    }],
-                }, &image);
+                command_buffer.begin_render_pass(
+                    &types::RenderPassDescriptor {
+                        color_attachments: vec![types::ColorAttachment {
+                            load_op: types::LoadOp::Clear,
+                            store_op: types::StoreOp::Store,
+                            clear_value: [0.5, 0.5, 0.5, 1.0],
+                        }],
+                    },
+                    &image,
+                );
 
                 command_buffer.bind_pipeline(pipeline.as_ref());
                 command_buffer.bind_vertex_buffer(vertex_buffer.as_ref());
@@ -254,7 +278,13 @@ impl ApplicationHandler for TriangleApp {
                 command_buffer.end_render_pass();
                 command_buffer.end().unwrap();
 
-                queue.submit(&[command_buffer], Some(image.wait_semaphore), Some(image.signal_semaphore)).unwrap();
+                queue
+                    .submit(
+                        &[command_buffer],
+                        Some(image.wait_semaphore),
+                        Some(image.signal_semaphore),
+                    )
+                    .unwrap();
 
                 if let Err(e) = swapchain.present(image) {
                     tracing::error!("Failed to present: {:?}", e);
