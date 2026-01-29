@@ -1,7 +1,7 @@
 #[cfg(feature = "vulkan")]
 pub mod vulkan;
 
-#[cfg(target_os = "macos")]
+#[cfg(all(target_os = "macos", feature = "metal"))]
 pub mod metal;
 
 #[cfg(all(windows, feature = "dx12"))]

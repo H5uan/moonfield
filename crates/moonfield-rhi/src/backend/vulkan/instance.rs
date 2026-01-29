@@ -1,6 +1,6 @@
 use std::sync::Arc;
 
-use ash::vk::Handle;
+use ash::vk;
 use raw_window_handle::{HasDisplayHandle, HasWindowHandle};
 
 use super::{VulkanAdapter, VulkanSurface};
@@ -44,7 +44,7 @@ impl VulkanInstance {
                 .engine_version(ash::vk::make_api_version(0, 1, 4, 0))
                 .api_version(ash::vk::make_api_version(0, 1, 4, 0));
 
-            let extension_names =
+            let mut extension_names =
                 ash_window::enumerate_required_extensions(display)
                     .map_err(|e| {
                         tracing::error!(
@@ -58,16 +58,31 @@ impl VulkanInstance {
                     })?
                     .to_vec();
 
+            // On macOS with MoltenVK, portability enumeration must be enabled explicitly
+            #[cfg(target_os = "macos")]
+            {
+                extension_names.push(
+                    b"VK_KHR_portability_enumeration\0".as_ptr() as *const i8,
+                );
+            }
+
             let layer_names = vec![
                 std::ffi::CString::new("VK_LAYER_KHRONOS_validation").unwrap(),
             ];
             let layer_names_raw: Vec<*const i8> =
                 layer_names.iter().map(|name| name.as_ptr()).collect();
 
-            let create_info = ash::vk::InstanceCreateInfo::default()
+            let mut create_info = ash::vk::InstanceCreateInfo::default()
                 .application_info(&app_info)
                 .enabled_extension_names(&extension_names)
                 .enabled_layer_names(&layer_names_raw);
+
+            // Required by Vulkan-Loader when only portability drivers (like MoltenVK) are present
+            #[cfg(target_os = "macos")]
+            {
+                create_info.flags |=
+                    vk::InstanceCreateFlags::ENUMERATE_PORTABILITY_KHR;
+            }
 
             let instance =
                 entry.create_instance(&create_info, None).map_err(|e| {

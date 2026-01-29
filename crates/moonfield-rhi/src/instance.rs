@@ -26,24 +26,28 @@ pub fn create_instance(
 ) -> Result<Arc<dyn Instance>, RhiError> {
     tracing::debug!("Creating RHI instance for backend: {:?}", backend);
     match backend {
-        #[cfg(feature = "vulkan")]
+        // Vulkan backend on supported platforms (Windows and macOS for now)
+        #[cfg(all(feature = "vulkan", any(windows, target_os = "macos")))]
         crate::types::Backend::Vulkan => {
-            #[cfg(windows)]
-            {
-                tracing::debug!("Using Vulkan backend");
-                Ok(Arc::new(crate::backend::vulkan::VulkanInstance::new()?))
-            }
-            #[cfg(not(windows))]
-            {
-                tracing::warn!("Vulkan backend not supported on this platform");
-                Err(RhiError::BackendNotSupported)
-            }
+            tracing::debug!("Using Vulkan backend");
+            Ok(Arc::new(
+                crate::backend::vulkan::VulkanInstance::new()?,
+            ))
         }
-        #[cfg(target_os = "macos")]
-        crate::types::Backend::Metal => {
-            tracing::debug!("Using Metal backend");
-            Ok(Arc::new(crate::backend::metal::MetalInstance::new()?))
+
+        // Vulkan feature is enabled but the current platform is not supported
+        #[cfg(all(feature = "vulkan", not(any(windows, target_os = "macos"))))]
+        crate::types::Backend::Vulkan => {
+            tracing::warn!(
+                "Vulkan backend not supported on this platform"
+            );
+            Err(RhiError::BackendNotSupported)
         }
+        // #[cfg(target_os = "macos")]
+        // crate::types::Backend::Metal => {
+        //     tracing::debug!("Using Metal backend");
+        //     Ok(Arc::new(crate::backend::metal::MetalInstance::new()?))
+        // }
         #[cfg(all(windows, feature = "dx12"))]
         crate::types::Backend::Dx12 => {
             tracing::debug!("Using DirectX 12 backend");
@@ -81,7 +85,8 @@ pub fn create_instance_with_window(
                 )?,
             ))
         }
-        #[cfg(target_os = "macos")]
+
+        #[cfg(all(target_os = "macos", feature = "metal"))]
         crate::types::Backend::Metal => {
             tracing::debug!("Using Metal backend with window");
             Ok(Arc::new(crate::backend::metal::MetalInstance::new()?))

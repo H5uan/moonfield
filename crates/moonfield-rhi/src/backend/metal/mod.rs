@@ -477,7 +477,7 @@ impl CommandBuffer for MetalCommandBuffer {
             }
         }
     }
-}
+
 
 pub struct MetalQueue {
     queue: Retained<ProtocolObject<dyn MTLCommandQueue>>,

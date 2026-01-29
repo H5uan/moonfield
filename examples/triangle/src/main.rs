@@ -78,11 +78,7 @@ impl ApplicationHandler for TriangleApp {
 
         let window = Arc::new(event_loop.create_window(window_attrs).unwrap());
 
-        let backend = if cfg!(target_os = "macos") {
-            Backend::Metal
-        } else {
-            Backend::Vulkan
-        };
+        let backend = Backend::Vulkan;
 
         let instance = create_instance_with_window(backend, &window).unwrap();
         let surface = instance.create_surface(&window).unwrap();
