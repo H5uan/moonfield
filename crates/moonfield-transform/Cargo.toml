@@ -1,0 +1,9 @@
+[package]
+name = "moonfield-transform"
+version = "0.1.0"
+edition = "2024"
+
+[dependencies]
+moonfield-math = { workspace = true }
+
+[dev-dependencies]

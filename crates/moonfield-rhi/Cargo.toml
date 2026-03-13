@@ -1,0 +1,36 @@
+[package]
+name = "moonfield-rhi"
+version = "0.1.0"
+edition = "2024"
+
+[dependencies]
+moonfield-core = { path = "../moonfield-core" }
+
+# Cross-platform dependencies
+winit = { workspace = true }
+tracing = { workspace = true }
+bytemuck = { workspace = true }
+thiserror = { workspace = true }
+shader-slang = { workspace = true }
+bitflags = { workspace = true }
+raw-window-handle = { workspace = true }
+
+# DirectX 12 dependencies (optional)
+windows = { version = "0.52", features = ["Win32_Graphics_Direct3D12", "Win32_Graphics_Dxgi", "Win32_Foundation", "Win32_System_Com", "Win32_System_LibraryLoader"], optional = true }
+
+ash = { workspace = true, optional = true }
+ash-window = { workspace = true, optional = true }
+
+[target.'cfg(target_os = "macos")'.dependencies]
+objc2 = { workspace = true }
+objc2-metal = { workspace = true }
+objc2-quartz-core = { workspace = true }
+objc2-foundation = { workspace = true }
+
+
+
+[features]
+default = ["vulkan"]
+vulkan = ["ash", "ash-window"]
+metal = []
+dx12 = ["windows"]
