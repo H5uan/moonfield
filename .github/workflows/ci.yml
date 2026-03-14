@@ -59,6 +59,13 @@ jobs:
           sudo apt-get update
           sudo apt-get install -y libvulkan-dev
 
+      - name: Install dependencies (macOS)
+        if: matrix.os == 'macos-latest'
+        run: |
+          xcode-select --install || true
+          brew install llvm
+          echo "LIBCLANG_PATH=$(brew --prefix llvm)/lib" >> $GITHUB_ENV
+
       - name: Install Vulkan SDK (Windows)
         if: matrix.os == 'windows-latest'
         run: |
@@ -100,6 +107,13 @@ jobs:
         run: |
           sudo apt-get update
           sudo apt-get install -y libvulkan-dev vulkan-validationlayers
+
+      - name: Install dependencies (macOS)
+        if: matrix.os == 'macos-latest'
+        run: |
+          xcode-select --install || true
+          brew install llvm
+          echo "LIBCLANG_PATH=$(brew --prefix llvm)/lib" >> $GITHUB_ENV
 
       - name: Install Vulkan SDK (Windows)
         if: matrix.os == 'windows-latest'
@@ -146,6 +160,13 @@ jobs:
           sudo apt-get update
           sudo apt-get install -y libvulkan-dev
 
+      - name: Install dependencies (macOS)
+        if: matrix.os == 'macos-latest'
+        run: |
+          xcode-select --install || true
+          brew install llvm
+          echo "LIBCLANG_PATH=$(brew --prefix llvm)/lib" >> $GITHUB_ENV
+
       - name: Install Vulkan SDK (Windows)
         if: matrix.os == 'windows-latest'
         run: |
@@ -178,6 +199,13 @@ jobs:
         run: |
           sudo apt-get update
           sudo apt-get install -y libvulkan-dev
+
+      - name: Install dependencies (macOS)
+        if: matrix.os == 'macos-latest'
+        run: |
+          xcode-select --install || true
+          brew install llvm
+          echo "LIBCLANG_PATH=$(brew --prefix llvm)/lib" >> $GITHUB_ENV
 
       - name: Install Vulkan SDK (Windows)
         if: matrix.os == 'windows-latest'
