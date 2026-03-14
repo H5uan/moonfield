@@ -120,7 +120,8 @@ fn main() {
             .args(["--sdk", "macosx", "--show-sdk-path"])
             .output()
         {
-            let sdk_path = String::from_utf8_lossy(&output.stdout).trim().to_string();
+            let sdk_path =
+                String::from_utf8_lossy(&output.stdout).trim().to_string();
             if !sdk_path.is_empty() {
                 builder = builder.clang_arg(format!("-isysroot{}", sdk_path));
             }
