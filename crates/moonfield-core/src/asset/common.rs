@@ -2,8 +2,6 @@
 //!
 //! Defines common asset types used throughout the engine.
 
-
-
 use super::{Asset, AssetHandle};
 
 /// Texture asset wrapper.
@@ -36,11 +34,11 @@ impl Asset for TextureAsset {
     fn type_id(&self) -> std::any::TypeId {
         std::any::TypeId::of::<Self>()
     }
-    
+
     fn as_any(&self) -> &dyn std::any::Any {
         self
     }
-    
+
     fn as_any_mut(&mut self) -> &mut dyn std::any::Any {
         self
     }
@@ -94,11 +92,11 @@ impl Asset for MeshAsset {
     fn type_id(&self) -> std::any::TypeId {
         std::any::TypeId::of::<Self>()
     }
-    
+
     fn as_any(&self) -> &dyn std::any::Any {
         self
     }
-    
+
     fn as_any_mut(&mut self) -> &mut dyn std::any::Any {
         self
     }
@@ -134,11 +132,11 @@ impl Asset for MaterialAsset {
     fn type_id(&self) -> std::any::TypeId {
         std::any::TypeId::of::<Self>()
     }
-    
+
     fn as_any(&self) -> &dyn std::any::Any {
         self
     }
-    
+
     fn as_any_mut(&mut self) -> &mut dyn std::any::Any {
         self
     }
@@ -170,11 +168,11 @@ impl Asset for ShaderAsset {
     fn type_id(&self) -> std::any::TypeId {
         std::any::TypeId::of::<Self>()
     }
-    
+
     fn as_any(&self) -> &dyn std::any::Any {
         self
     }
-    
+
     fn as_any_mut(&mut self) -> &mut dyn std::any::Any {
         self
     }
@@ -199,20 +197,20 @@ pub struct AnimationChannel {
     /// Keyframes for translation.
     pub translation_keys: Vec<(f32, [f32; 3])>, // (time, translation)
     /// Keyframes for rotation.
-    pub rotation_keys: Vec<(f32, [f32; 4])>,    // (time, quaternion)
+    pub rotation_keys: Vec<(f32, [f32; 4])>, // (time, quaternion)
     /// Keyframes for scale.
-    pub scale_keys: Vec<(f32, [f32; 3])>,       // (time, scale)
+    pub scale_keys: Vec<(f32, [f32; 3])>, // (time, scale)
 }
 
 impl Asset for AnimationAsset {
     fn type_id(&self) -> std::any::TypeId {
         std::any::TypeId::of::<Self>()
     }
-    
+
     fn as_any(&self) -> &dyn std::any::Any {
         self
     }
-    
+
     fn as_any_mut(&mut self) -> &mut dyn std::any::Any {
         self
     }

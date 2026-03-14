@@ -1,7 +1,9 @@
-use crate::{types::*, Pipeline};
+use crate::{Pipeline, types::*};
 
 pub struct MetalPipeline {
-    pub pipeline_state: objc2::rc::Retained<objc2::runtime::ProtocolObject<dyn objc2_metal::MTLRenderPipelineState>>,
+    pub pipeline_state: objc2::rc::Retained<
+        objc2::runtime::ProtocolObject<dyn objc2_metal::MTLRenderPipelineState>,
+    >,
 }
 
 impl std::any::Any for MetalPipeline {

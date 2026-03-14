@@ -4,7 +4,6 @@ use ash::vk::Handle;
 use moonfield_shader::SlangStage as Stage;
 
 #[allow(unused_imports)]
-
 use crate::{types::*, *};
 
 pub struct VulkanShaderModule {

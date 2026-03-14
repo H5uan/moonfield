@@ -1,8 +1,9 @@
-use crate::{types::*, Instance, Surface, Adapter, RhiError};
 use std::sync::Arc;
 
 // Import tracing for logging
 use tracing;
+
+use crate::{Adapter, Instance, RhiError, Surface, types::*};
 
 pub struct MetalInstance {}
 
@@ -15,7 +16,9 @@ impl MetalInstance {
 }
 
 impl Instance for MetalInstance {
-    fn create_surface(&self, window: &winit::window::Window) -> Result<Arc<dyn Surface>, RhiError> {
+    fn create_surface(
+        &self, window: &winit::window::Window,
+    ) -> Result<Arc<dyn Surface>, RhiError> {
         tracing::debug!("Creating Metal surface for window");
         tracing::debug!("Metal surface created successfully");
         Ok(Arc::new(MetalSurface {}))
@@ -25,11 +28,9 @@ impl Instance for MetalInstance {
         tracing::debug!("Enumerating Metal adapters");
         unsafe {
             let devices = objc2_metal::MTLCopyAllDevices();
-            
+
             let adapters: Vec<Arc<dyn Adapter>> = (0..devices.count())
-                .filter_map(|i| {
-                    devices.objectAtIndex(i)
-                })
+                .filter_map(|i| devices.objectAtIndex(i))
                 .map(|device| {
                     tracing::debug!("Found Metal device");
                     Arc::new(MetalAdapter {
@@ -37,7 +38,7 @@ impl Instance for MetalInstance {
                     }) as Arc<dyn Adapter>
                 })
                 .collect();
-                
+
             tracing::info!("Found {} Metal adapters", adapters.len());
             adapters
         }

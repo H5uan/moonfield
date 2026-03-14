@@ -1,3 +1,15 @@
+#![allow(
+    dead_code,
+    unused_imports,
+    unused_mut,
+    clippy::arc_with_non_send_sync,
+    clippy::manual_inspect,
+    clippy::missing_safety_doc,
+    clippy::manual_find,
+    clippy::useless_vec,
+    clippy::assertions_on_constants
+)]
+
 pub mod adapter;
 pub mod backend;
 pub mod buffer;

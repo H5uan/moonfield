@@ -19,11 +19,13 @@
 //!
 //! ## Usage
 //!
-//! ```rust,no_run
-//! use slang_rs::GlobalSession;
+//! ```rust,ignore
+//! // Low-level FFI bindings are available via ffi::root
+//! use moonfield_shader::ffi::root::slang;
 //!
-//! let session = GlobalSession::new()?;
-//! // ... compile shaders
+//! // Create a global session
+//! let global_session: *mut slang::ISlangUnknown = std::ptr::null_mut();
+//! // ... use Slang API
 //! ```
 
 #![allow(non_camel_case_types, non_snake_case)]
@@ -61,7 +63,9 @@ impl std::fmt::Display for Error {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
             Error::ApiError(code) => write!(f, "Slang API error: {}", code),
-            Error::InvalidArgument(msg) => write!(f, "Invalid argument: {}", msg),
+            Error::InvalidArgument(msg) => {
+                write!(f, "Invalid argument: {}", msg)
+            }
             Error::NullPointer => write!(f, "Null pointer encountered"),
             Error::NotSupported => write!(f, "Operation not supported"),
             Error::StringConversion => write!(f, "String conversion error"),

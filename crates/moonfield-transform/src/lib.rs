@@ -1,9 +1,11 @@
 //! Transform component for 3D transformations
-//! 
+//!
 //! This crate provides a Transform component that represents position, rotation, and scale
 //! in 3D space. It provides utility methods for common transformation operations.
 
-use moonfield_math::{Vec3 as Vector3, Quat as UnitQuaternion, Mat4 as Matrix4, Point3, nalgebra};
+use moonfield_math::{
+    Mat4 as Matrix4, Point3, Quat as UnitQuaternion, Vec3 as Vector3, nalgebra,
+};
 
 /// A component that represents the position, rotation, and scale of an entity in 3D space
 #[derive(Debug, Clone, Copy, PartialEq)]
@@ -54,12 +56,10 @@ impl Transform {
     }
 
     /// Create a new transform with the specified translation, rotation, and scale
-    pub fn from_translation_rotation_scale(translation: Vector3, rotation: UnitQuaternion, scale: Vector3) -> Self {
-        Self {
-            translation,
-            rotation,
-            scale,
-        }
+    pub fn from_translation_rotation_scale(
+        translation: Vector3, rotation: UnitQuaternion, scale: Vector3,
+    ) -> Self {
+        Self { translation, rotation, scale }
     }
 
     /// Get the forward direction of the transform (in world space)
@@ -99,7 +99,7 @@ impl Transform {
 
     /// Rotate the transform by the given quaternion
     pub fn rotate(&mut self, rotation: UnitQuaternion) {
-        self.rotation = self.rotation * rotation;
+        self.rotation *= rotation;
         // Note: nalgebra quaternions stay normalized through multiplication, so no renormalization needed
     }
 
@@ -136,11 +136,7 @@ impl Transform {
 
         // Create rotation matrix from basis vectors
         let rotation_matrix = nalgebra::Rotation3::from_matrix_unchecked(
-            nalgebra::Matrix3::from_columns(&[
-                right,
-                up_new,
-                forward,
-            ])
+            nalgebra::Matrix3::from_columns(&[right, up_new, forward]),
         );
 
         // Convert to quaternion
@@ -162,7 +158,11 @@ impl Transform {
 
     /// Compute the inverse transformation matrix for this transform
     pub fn compute_inverse_matrix(&self) -> Matrix4 {
-        let inv_scale = Vector3::new(1.0 / self.scale.x, 1.0 / self.scale.y, 1.0 / self.scale.z);
+        let inv_scale = Vector3::new(
+            1.0 / self.scale.x,
+            1.0 / self.scale.y,
+            1.0 / self.scale.z,
+        );
         Matrix4::new_nonuniform_scaling(&inv_scale)
             * self.rotation.inverse().to_homogeneous()
             * Matrix4::new_translation(&(-self.translation))
@@ -181,7 +181,8 @@ impl Transform {
 
     /// Combine this transform with another transform
     pub fn combine(&self, other: &Self) -> Self {
-        let combined_translation = self.transform_point(Point3::from(other.translation));
+        let combined_translation =
+            self.transform_point(Point3::from(other.translation));
         let combined_rotation = self.rotation * other.rotation;
         let combined_scale = Vector3::new(
             self.scale.x * other.scale.x,
@@ -198,17 +199,14 @@ impl Transform {
 
     /// Interpolate between two transforms
     pub fn lerp(start: &Self, end: &Self, t: f32) -> Self {
-        let t_clamped = t.max(0.0).min(1.0);
-        
-        let translation = start.translation + (end.translation - start.translation) * t_clamped;
+        let t_clamped = t.clamp(0.0, 1.0);
+
+        let translation = start.translation
+            + (end.translation - start.translation) * t_clamped;
         let rotation = start.rotation.slerp(&end.rotation, t_clamped);
         let scale = start.scale + (end.scale - start.scale) * t_clamped;
 
-        Self {
-            translation,
-            rotation,
-            scale,
-        }
+        Self { translation, rotation, scale }
     }
 }
 
@@ -242,7 +240,7 @@ mod tests {
     fn test_compute_matrix_identity() {
         let transform = Transform::identity();
         let matrix = transform.compute_matrix();
-        
+
         // Identity transform should produce identity matrix
         let expected = Matrix4::identity();
         assert!((matrix - expected).norm() < 1e-5);
@@ -253,10 +251,10 @@ mod tests {
         let transform = Transform::identity();
         let forward = transform.forward();
         assert!((forward - Vector3::new(0.0, 0.0, -1.0)).norm() < 1e-5);
-        
+
         let up = transform.up();
         assert!((up - Vector3::new(0.0, 1.0, 0.0)).norm() < 1e-5);
-        
+
         let right = transform.right();
         assert!((right - Vector3::new(1.0, 0.0, 0.0)).norm() < 1e-5);
     }

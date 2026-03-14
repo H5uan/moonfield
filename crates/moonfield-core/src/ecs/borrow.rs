@@ -18,7 +18,6 @@ const COUNTER_MASK: usize = usize::MAX >> 1;
 ///
 /// This structure will abort the process if the shared borrow counter overflows, as this
 /// indicates a catastrophic failure in borrow management.
-
 #[repr(align(64))]
 pub struct SharedRuntimeBorrow(AtomicUsize);
 

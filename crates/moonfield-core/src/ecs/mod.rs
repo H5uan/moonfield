@@ -1,3 +1,5 @@
+#![allow(dead_code)]
+
 mod archetype;
 mod borrow;
 mod entities;

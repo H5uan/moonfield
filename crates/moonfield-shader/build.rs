@@ -31,8 +31,12 @@ fn main() {
         // Tell cargo to tell rustc to link the slang library
         println!("cargo:rustc-link-lib=dylib=slang");
     } else {
-        println!("cargo:warning=Slang library not found in expected locations. Build may fail at link time.");
-        println!("cargo:warning=To fix this, build Slang first: cd slang && cmake --preset default && cmake --build --preset release");
+        println!(
+            "cargo:warning=Slang library not found in expected locations. Build may fail at link time."
+        );
+        println!(
+            "cargo:warning=To fix this, build Slang first: cd slang && cmake --preset default && cmake --build --preset release"
+        );
     }
 
     // Platform-specific settings
@@ -64,7 +68,14 @@ fn main() {
         // Disable exceptions for cleaner bindings
         .clang_arg("-fno-exceptions")
         // Define platform macros for the preprocessor
-        .clang_arg(format!("-DSLANG_PTR_IS_64={}", if target_arch == "x86_64" || target_arch == "aarch64" { 1 } else { 0 }))
+        .clang_arg(format!(
+            "-DSLANG_PTR_IS_64={}",
+            if target_arch == "x86_64" || target_arch == "aarch64" {
+                1
+            } else {
+                0
+            }
+        ))
         // Allowlist patterns for Slang types and functions
         // Core types
         .allowlist_type("Slang.*")
@@ -87,9 +98,8 @@ fn main() {
         .generate_comments(true)
         // Keep C++ namespaces
         .enable_cxx_namespaces()
-        // Derive common traits (but not hash/ord for function pointer types)
+        // Derive common traits (but not eq/hash/ord for function pointer types)
         .derive_default(true)
-        .derive_eq(true)
         // Note: Hash and Ord are not derived because some Slang structs contain
         // function pointers which don't have meaningful hash/ord implementations
         // Parse callbacks for cargo integration
@@ -98,25 +108,19 @@ fn main() {
     // Platform-specific bindgen configuration
     if is_windows && is_msvc {
         // On Windows MSVC, we need to handle __stdcall properly
-        builder = builder
-            .clang_arg("-D_MSC_VER=1930")
-            .clang_arg("-D_WIN64");
+        builder = builder.clang_arg("-D_MSC_VER=1930").clang_arg("-D_WIN64");
     } else if is_windows {
         // Windows with GNU toolchain
-        builder = builder
-            .clang_arg("-D__MINGW32__")
-            .clang_arg("-D_WIN64");
+        builder = builder.clang_arg("-D__MINGW32__").clang_arg("-D_WIN64");
     } else {
         // Unix-like platforms
-        builder = builder
-            .clang_arg("-D__linux__")
-            .clang_arg("-DSLANG_LINUX=1");
+        builder = builder.clang_arg("-D__linux__").clang_arg("-DSLANG_LINUX=1");
     }
 
     // Generate the bindings
-    let bindings = builder
-        .generate()
-        .expect("Unable to generate bindings - ensure Slang headers are present");
+    let bindings = builder.generate().expect(
+        "Unable to generate bindings - ensure Slang headers are present",
+    );
 
     // Write the bindings to the $OUT_DIR/bindings.rs file
     let out_path = PathBuf::from(env::var("OUT_DIR").unwrap());

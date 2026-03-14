@@ -4,15 +4,17 @@
 //! Provides loading, caching, and management of various asset types with handles
 //! for safe resource access.
 
+#![allow(dead_code)]
+
 use std::any::{Any, TypeId};
 use std::collections::HashMap;
 use std::hash::{Hash, Hasher};
 use std::path::Path;
 
-use crate::allocator::{Handle, Pool};
-
 pub use common::*;
 pub use loader::*;
+
+use crate::allocator::{Handle, Pool};
 pub mod common;
 pub mod loader;
 
@@ -38,10 +40,10 @@ pub trait Asset: Send + Sync + 'static {
     fn type_id(&self) -> TypeId {
         TypeId::of::<Self>()
     }
-    
+
     /// Returns a reference to the asset as `Any` for downcasting.
     fn as_any(&self) -> &dyn std::any::Any;
-    
+
     /// Returns a mutable reference to the asset as `Any` for downcasting.
     fn as_any_mut(&mut self) -> &mut dyn std::any::Any;
 }
@@ -56,10 +58,7 @@ pub struct AssetHandle<T: Asset> {
 impl<T: Asset> AssetHandle<T> {
     /// Creates a new asset handle from an internal handle.
     pub fn new(handle: Handle<AssetContainer>) -> Self {
-        Self {
-            handle,
-            _phantom: std::marker::PhantomData,
-        }
+        Self { handle, _phantom: std::marker::PhantomData }
     }
 
     /// Returns the internal handle.
@@ -98,12 +97,7 @@ pub struct AssetContainer {
 impl AssetContainer {
     /// Creates a new asset container.
     pub fn new(asset: Box<dyn Asset>, id: AssetId) -> Self {
-        Self {
-            asset,
-            id,
-            strong_count: 0,
-            loaded: true,
-        }
+        Self { asset, id, strong_count: 0, loaded: true }
     }
 }
 
@@ -146,10 +140,10 @@ impl<T: Asset> AssetStorage<T> {
     pub fn add(&mut self, asset: T) -> AssetHandle<T> {
         let id = AssetId::new(self.next_id);
         self.next_id += 1;
-        
+
         let container = AssetContainer::new(Box::new(asset), id);
         let handle = self.pool.spawn(container);
-        
+
         AssetHandle::new(handle)
     }
 
@@ -189,6 +183,7 @@ pub struct AssetServer {
     /// Loader for different asset types.
     loaders: HashMap<TypeId, Box<dyn Any>>,
     /// Global asset ID counter.
+    #[allow(dead_code)]
     global_asset_counter: u64,
 }
 
@@ -209,40 +204,48 @@ impl AssetServer {
     }
 
     /// Registers a loader for a specific asset type.
-    pub fn register_loader<T: Asset + 'static>(&mut self, loader: Box<dyn AssetLoader<T>>) {
+    pub fn register_loader<T: Asset + 'static>(
+        &mut self, loader: Box<dyn AssetLoader<T>>,
+    ) {
         let type_id = TypeId::of::<T>();
         self.loaders.insert(type_id, Box::new(loader));
     }
 
     /// Loads an asset from a file path.
-    pub fn load<T: Asset + 'static>(&mut self, path: &str) -> Result<AssetHandle<T>, Box<dyn std::error::Error>> {
+    pub fn load<T: Asset + 'static>(
+        &mut self, path: &str,
+    ) -> Result<AssetHandle<T>, Box<dyn std::error::Error>> {
         let type_id = TypeId::of::<T>();
-        
+
         // Check if asset is already loaded
-        if let Some(storage_any) = self.storages.get(&type_id) {
-            if let Some(storage) = storage_any.downcast_ref::<AssetStorage<T>>() {
-                if let Some(existing_handle) = storage.path_to_handle.get(path) {
-                    // Return existing handle if found
-                    return Ok(AssetHandle::new(*existing_handle));
-                }
-            }
+        if let Some(storage_any) = self.storages.get(&type_id)
+            && let Some(storage) = storage_any.downcast_ref::<AssetStorage<T>>()
+            && let Some(existing_handle) = storage.path_to_handle.get(path)
+        {
+            // Return existing handle if found
+            return Ok(AssetHandle::new(*existing_handle));
         }
-        
+
         // Load the asset using the registered loader first
         let asset = if let Some(loader_box) = self.loaders.get(&type_id) {
-            let loader = loader_box.downcast_ref::<Box<dyn AssetLoader<T>>>().unwrap();
+            let loader =
+                loader_box.downcast_ref::<Box<dyn AssetLoader<T>>>().unwrap();
             loader.load(Path::new(path))?
         } else {
-            return Err(format!("No loader registered for asset type: {:?}", type_id).into());
+            return Err(format!(
+                "No loader registered for asset type: {:?}",
+                type_id
+            )
+            .into());
         };
-        
+
         // Now get or create storage and add the asset
         let storage = self.get_or_create_storage::<T>();
         let handle = storage.add(asset);
-        
+
         // Store the path-to-handle mapping
         storage.path_to_handle.insert(path.to_string(), handle.as_handle());
-        
+
         Ok(handle)
     }
 
@@ -253,7 +256,9 @@ impl AssetServer {
     }
 
     /// Gets a reference to an asset from its handle.
-    pub fn get<T: Asset + 'static>(&self, handle: &AssetHandle<T>) -> Option<&T> {
+    pub fn get<T: Asset + 'static>(
+        &self, handle: &AssetHandle<T>,
+    ) -> Option<&T> {
         if let Some(storage) = self.get_storage::<T>() {
             storage.get(handle)
         } else {
@@ -262,7 +267,9 @@ impl AssetServer {
     }
 
     /// Gets a mutable reference to an asset from its handle.
-    pub fn get_mut<T: Asset + 'static>(&mut self, handle: &AssetHandle<T>) -> Option<&mut T> {
+    pub fn get_mut<T: Asset + 'static>(
+        &mut self, handle: &AssetHandle<T>,
+    ) -> Option<&mut T> {
         if let Some(storage) = self.get_storage_mut::<T>() {
             storage.get_mut(handle)
         } else {
@@ -271,7 +278,9 @@ impl AssetServer {
     }
 
     /// Checks if an asset handle is valid.
-    pub fn contains<T: Asset + 'static>(&self, handle: &AssetHandle<T>) -> bool {
+    pub fn contains<T: Asset + 'static>(
+        &self, handle: &AssetHandle<T>,
+    ) -> bool {
         if let Some(storage) = self.get_storage::<T>() {
             storage.contains(handle)
         } else {
@@ -280,7 +289,9 @@ impl AssetServer {
     }
 
     /// Removes an asset from the server.
-    pub fn remove<T: Asset + 'static>(&mut self, handle: AssetHandle<T>) -> bool {
+    pub fn remove<T: Asset + 'static>(
+        &mut self, handle: AssetHandle<T>,
+    ) -> bool {
         if let Some(storage) = self.get_storage_mut::<T>() {
             storage.remove(handle)
         } else {
@@ -289,17 +300,17 @@ impl AssetServer {
     }
 
     /// Gets or creates a storage for a specific asset type.
-    fn get_or_create_storage<T: Asset + 'static>(&mut self) -> &mut AssetStorage<T> {
+    fn get_or_create_storage<T: Asset + 'static>(
+        &mut self,
+    ) -> &mut AssetStorage<T> {
         let type_id = TypeId::of::<T>();
-        
-        if !self.storages.contains_key(&type_id) {
-            let storage: AssetStorage<T> = AssetStorage::new();
-            self.storages.insert(type_id, Box::new(storage));
-        }
-        
+
         self.storages
-            .get_mut(&type_id)
-            .unwrap()
+            .entry(type_id)
+            .or_insert_with(|| {
+                let storage: AssetStorage<T> = AssetStorage::new();
+                Box::new(storage)
+            })
             .downcast_mut::<AssetStorage<T>>()
             .unwrap()
     }
@@ -307,14 +318,16 @@ impl AssetServer {
     /// Gets a storage for a specific asset type.
     fn get_storage<T: Asset + 'static>(&self) -> Option<&AssetStorage<T>> {
         let type_id = TypeId::of::<T>();
-        
+
         self.storages.get(&type_id)?.downcast_ref::<AssetStorage<T>>()
     }
 
     /// Gets a mutable storage for a specific asset type.
-    fn get_storage_mut<T: Asset + 'static>(&mut self) -> Option<&mut AssetStorage<T>> {
+    fn get_storage_mut<T: Asset + 'static>(
+        &mut self,
+    ) -> Option<&mut AssetStorage<T>> {
         let type_id = TypeId::of::<T>();
-        
+
         self.storages.get_mut(&type_id)?.downcast_mut::<AssetStorage<T>>()
     }
 }

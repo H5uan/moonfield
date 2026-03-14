@@ -1,17 +1,13 @@
+// Use explicit Result type to avoid confusion with windows::core::Result
+use std::result::Result as StdResult;
 use std::sync::Arc;
-use crate::{types::*, Adapter, AdapterProperties, RhiError};
-
-// Import Windows-specific DirectX 12 types
-use windows::{
-    core::*,
-    Win32::Graphics::Dxgi::*,
-};
 
 // Import tracing for logging
 use tracing;
+// Import Windows-specific DirectX 12 types
+use windows::{Win32::Graphics::Dxgi::*, core::*};
 
-// Use explicit Result type to avoid confusion with windows::core::Result
-use std::result::Result as StdResult;
+use crate::{Adapter, AdapterProperties, RhiError, types::*};
 
 pub struct Dx12Adapter {
     pub adapter: IDXGIAdapter1,
@@ -23,9 +19,12 @@ impl Dx12Adapter {
         let mut desc: DXGI_ADAPTER_DESC1 = unsafe { std::mem::zeroed() };
         unsafe {
             let hr = adapter.GetDesc1(&mut desc);
-            hr.map_err(|e| 
-                RhiError::InitializationFailed(format!("Failed to get adapter description: {}", e))
-            )?;
+            hr.map_err(|e| {
+                RhiError::InitializationFailed(format!(
+                    "Failed to get adapter description: {}",
+                    e
+                ))
+            })?;
         }
 
         let name = unsafe {
@@ -54,23 +53,32 @@ impl Adapter for Dx12Adapter {
                 D3D_FEATURE_LEVEL_11_0,
                 &mut device,
             );
-            
+
             if hr.is_err() {
                 tracing::error!("Failed to create D3D12 device");
-                return Err(RhiError::DeviceCreationFailed("Failed to create D3D12 device".to_string()));
+                return Err(RhiError::DeviceCreationFailed(
+                    "Failed to create D3D12 device".to_string(),
+                ));
             }
 
             if let Some(d3d12_device) = device {
                 let dx12_device = super::device::Dx12Device::new(&d3d12_device)
                     .map_err(|e| {
-                        tracing::error!("Failed to initialize DirectX 12 device: {:?}", e);
+                        tracing::error!(
+                            "Failed to initialize DirectX 12 device: {:?}",
+                            e
+                        );
                         e
                     })?;
-                tracing::info!("DirectX 12 logical device created successfully");
+                tracing::info!(
+                    "DirectX 12 logical device created successfully"
+                );
                 Ok(Arc::new(dx12_device) as Arc<dyn crate::Device>)
             } else {
                 tracing::error!("D3D12 device creation returned null");
-                Err(RhiError::DeviceCreationFailed("D3D12 device creation returned null".to_string()))
+                Err(RhiError::DeviceCreationFailed(
+                    "D3D12 device creation returned null".to_string(),
+                ))
             }
         }
     }

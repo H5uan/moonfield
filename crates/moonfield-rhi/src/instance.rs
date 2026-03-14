@@ -30,17 +30,13 @@ pub fn create_instance(
         #[cfg(all(feature = "vulkan", any(windows, target_os = "macos")))]
         crate::types::Backend::Vulkan => {
             tracing::debug!("Using Vulkan backend");
-            Ok(Arc::new(
-                crate::backend::vulkan::VulkanInstance::new()?,
-            ))
+            Ok(Arc::new(crate::backend::vulkan::VulkanInstance::new()?))
         }
 
         // Vulkan feature is enabled but the current platform is not supported
         #[cfg(all(feature = "vulkan", not(any(windows, target_os = "macos"))))]
         crate::types::Backend::Vulkan => {
-            tracing::warn!(
-                "Vulkan backend not supported on this platform"
-            );
+            tracing::warn!("Vulkan backend not supported on this platform");
             Err(RhiError::BackendNotSupported)
         }
         // #[cfg(target_os = "macos")]

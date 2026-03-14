@@ -2,7 +2,9 @@ use std::sync::Arc;
 
 use moonfield_core::asset::{AssetHandle, AssetServer, ShaderAsset};
 use moonfield_rhi::{types::Backend, *};
-use moonfield_shader::ffi::{SlangStage_SLANG_STAGE_VERTEX, SlangStage_SLANG_STAGE_PIXEL};
+use moonfield_shader::ffi::{
+    SlangStage_SLANG_STAGE_PIXEL, SlangStage_SLANG_STAGE_VERTEX,
+};
 use winit::application::ApplicationHandler;
 use winit::event::WindowEvent;
 use winit::event_loop::{ActiveEventLoop, ControlFlow, EventLoop};
@@ -15,6 +17,7 @@ struct Vertex {
     color: [f32; 3],
 }
 
+#[derive(Default)]
 struct TriangleApp {
     window: Option<Arc<Window>>,
     _instance: Option<Arc<dyn Instance>>,
@@ -28,25 +31,6 @@ struct TriangleApp {
     asset_server: Option<AssetServer>,
     vertex_shader_handle: Option<AssetHandle<ShaderAsset>>,
     fragment_shader_handle: Option<AssetHandle<ShaderAsset>>,
-}
-
-impl Default for TriangleApp {
-    fn default() -> Self {
-        Self {
-            window: None,
-            _instance: None,
-            _surface: None,
-            device: None,
-            swapchain: None,
-            pipeline: None,
-            vertex_buffer: None,
-            command_pool: None,
-            queue: None,
-            asset_server: None,
-            vertex_shader_handle: None,
-            fragment_shader_handle: None,
-        }
-    }
 }
 
 impl Drop for TriangleApp {
@@ -133,7 +117,7 @@ impl ApplicationHandler for TriangleApp {
             .load::<ShaderAsset>(fragment_shader_path.to_str().unwrap())
             .unwrap();
 
-        let vertices = vec![
+        let vertices = [
             Vertex { position: [0.0, -0.5], color: [1.0, 0.0, 0.0] },
             Vertex { position: [0.5, 0.5], color: [0.0, 1.0, 0.0] },
             Vertex { position: [-0.5, 0.5], color: [0.0, 0.0, 1.0] },
@@ -279,7 +263,9 @@ impl ApplicationHandler for TriangleApp {
                     ) => {
                         if msg.contains("suboptimal") {
                             // Swapchain needs resize, trigger it on next resize event
-                            tracing::warn!("Swapchain is suboptimal, will resize on next event");
+                            tracing::warn!(
+                                "Swapchain is suboptimal, will resize on next event"
+                            );
                         } else {
                             tracing::error!("Failed to acquire image: {}", msg);
                         }
@@ -331,7 +317,9 @@ impl ApplicationHandler for TriangleApp {
                         moonfield_rhi::types::RhiError::PresentFailed(msg)
                             if msg.contains("out of date") =>
                         {
-                            tracing::warn!("Swapchain out of date, will recreate on next resize event");
+                            tracing::warn!(
+                                "Swapchain out of date, will recreate on next resize event"
+                            );
                         }
                         _ => {
                             tracing::error!("Failed to present: {:?}", e);

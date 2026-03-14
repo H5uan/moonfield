@@ -1,6 +1,8 @@
-use crate::{types::*, *};
-use ash::vk::Handle;
 use std::sync::Arc;
+
+use ash::vk::Handle;
+
+use crate::{types::*, *};
 
 pub struct VulkanPipeline {
     pub device: ash::Device,

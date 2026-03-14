@@ -1,11 +1,14 @@
-use crate::{types::*, Adapter, Device, AdapterProperties, RhiError};
 use std::sync::Arc;
 
 // Import tracing for logging
 use tracing;
 
+use crate::{Adapter, AdapterProperties, Device, RhiError, types::*};
+
 pub struct MetalAdapter {
-    pub device: objc2::rc::Retained<objc2::runtime::ProtocolObject<dyn objc2_metal::MTLDevice>>,
+    pub device: objc2::rc::Retained<
+        objc2::runtime::ProtocolObject<dyn objc2_metal::MTLDevice>,
+    >,
 }
 
 impl std::any::Any for MetalAdapter {
@@ -18,19 +21,15 @@ impl Adapter for MetalAdapter {
     fn request_device(&self) -> Result<Arc<dyn Device>, RhiError> {
         tracing::debug!("Requesting Metal logical device");
         unsafe {
-            let queue = self
-                .device
-                .newCommandQueue()
-                .ok_or_else(|| {
-                    tracing::error!("Failed to create Metal command queue");
-                    RhiError::DeviceCreationFailed("Failed to create Metal command queue".to_string())
-                })?;
+            let queue = self.device.newCommandQueue().ok_or_else(|| {
+                tracing::error!("Failed to create Metal command queue");
+                RhiError::DeviceCreationFailed(
+                    "Failed to create Metal command queue".to_string(),
+                )
+            })?;
 
             tracing::info!("Metal logical device created successfully");
-            Ok(Arc::new(MetalDevice {
-                device: self.device.clone(),
-                queue,
-            }))
+            Ok(Arc::new(MetalDevice { device: self.device.clone(), queue }))
         }
     }
 
@@ -38,11 +37,7 @@ impl Adapter for MetalAdapter {
         unsafe {
             let name = self.device.name().to_string();
             tracing::debug!("Getting Metal adapter properties: {}", name);
-            AdapterProperties {
-                name,
-                vendor_id: 0,
-                device_id: 0,
-            }
+            AdapterProperties { name, vendor_id: 0, device_id: 0 }
         }
     }
 }

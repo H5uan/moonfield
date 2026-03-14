@@ -1,25 +1,28 @@
-use crate::{types::*, Instance, Adapter, Device, Surface, Swapchain, ShaderModule, Pipeline, Buffer, CommandPool, CommandBuffer, Queue, RhiError};
+use crate::{
+    Adapter, Buffer, CommandBuffer, CommandPool, Device, Instance, Pipeline,
+    Queue, RhiError, ShaderModule, Surface, Swapchain, types::*,
+};
 
-mod instance;
 mod adapter;
+mod buffer;
+mod command_buffer;
+mod command_pool;
 mod device;
+mod instance;
+mod pipeline;
+mod queue;
+mod shader_module;
 mod surface;
 mod swapchain;
-mod shader_module;
-mod pipeline;
-mod buffer;
-mod command_pool;
-mod command_buffer;
-mod queue;
 
-pub use instance::*;
 pub use adapter::*;
+pub use buffer::*;
+pub use command_buffer::*;
+pub use command_pool::*;
 pub use device::*;
+pub use instance::*;
+pub use pipeline::*;
+pub use queue::*;
+pub use shader_module::*;
 pub use surface::*;
 pub use swapchain::*;
-pub use shader_module::*;
-pub use pipeline::*;
-pub use buffer::*;
-pub use command_pool::*;
-pub use command_buffer::*;
-pub use queue::*;

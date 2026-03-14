@@ -1,7 +1,9 @@
-use crate::{types::*, Surface, SurfaceCapabilities, Format, PresentMode, Adapter};
-
 // Import tracing for logging
 use tracing;
+
+use crate::{
+    Adapter, Format, PresentMode, Surface, SurfaceCapabilities, types::*,
+};
 
 pub struct MetalSurface {}
 

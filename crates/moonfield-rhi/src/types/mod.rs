@@ -38,9 +38,12 @@ mod tests {
     fn test_rhi_error_variants() {
         let _err1 = error::RhiError::InitializationFailed("test".to_string());
         let _err2 = error::RhiError::DeviceCreationFailed("test".to_string());
-        let _err3 = error::RhiError::SwapchainCreationFailed("test".to_string());
+        let _err3 =
+            error::RhiError::SwapchainCreationFailed("test".to_string());
         let _err4 = error::RhiError::ShaderCompilationFailed(
-            error::ShaderCompilationError::InvalidShaderCode("test".to_string()),
+            error::ShaderCompilationError::InvalidShaderCode(
+                "test".to_string(),
+            ),
         );
         let _err5 = error::RhiError::ResourceNotFound("test".to_string());
         let _err6 = error::RhiError::OutOfMemory("test".to_string());

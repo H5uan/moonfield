@@ -7,5 +7,4 @@ struct ShaderObjectID {
 
 struct ResourceSlot {
     binding_type: BindingType,
-    
 }

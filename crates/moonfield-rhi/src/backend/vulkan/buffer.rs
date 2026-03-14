@@ -1,6 +1,8 @@
-use crate::{types::*, *};
-use ash::vk::Handle;
 use std::sync::Arc;
+
+use ash::vk::Handle;
+
+use crate::{types::*, *};
 
 pub struct VulkanBuffer {
     pub device: ash::Device,
@@ -13,9 +15,19 @@ impl Buffer for VulkanBuffer {
     fn map(&self) -> Result<*mut u8, RhiError> {
         unsafe {
             self.device
-                .map_memory(self.memory, 0, self.size, ash::vk::MemoryMapFlags::empty())
+                .map_memory(
+                    self.memory,
+                    0,
+                    self.size,
+                    ash::vk::MemoryMapFlags::empty(),
+                )
                 .map(|ptr| ptr as *mut u8)
-                .map_err(|e| RhiError::MapFailed(format!("Failed to map buffer memory: {}", e)))
+                .map_err(|e| {
+                    RhiError::MapFailed(format!(
+                        "Failed to map buffer memory: {}",
+                        e
+                    ))
+                })
         }
     }
 

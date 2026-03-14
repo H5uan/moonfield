@@ -61,9 +61,9 @@ impl VulkanInstance {
             // On macOS with MoltenVK, portability enumeration must be enabled explicitly
             #[cfg(target_os = "macos")]
             {
-                extension_names.push(
-                    b"VK_KHR_portability_enumeration\0".as_ptr() as *const i8,
-                );
+                extension_names
+                    .push(b"VK_KHR_portability_enumeration\0".as_ptr()
+                        as *const i8);
             }
 
             let layer_names = vec![

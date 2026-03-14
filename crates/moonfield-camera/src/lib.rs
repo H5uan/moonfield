@@ -4,8 +4,8 @@
 //! including perspective and orthographic cameras with various utility functions.
 
 use moonfield_math::geometry::Ray;
-use moonfield_math::*;
 use moonfield_math::nalgebra;
+use moonfield_math::*;
 
 /// Type alias for a basic camera
 pub type Camera = PerspectiveCamera;
@@ -343,6 +343,7 @@ pub struct OrthographicCamera {
 
 impl OrthographicCamera {
     /// Create a new orthographic camera
+    #[allow(clippy::too_many_arguments)]
     pub fn new(
         position: Point3, orientation: Quat, left: f32, right: f32,
         bottom: f32, top: f32, near_plane: f32, far_plane: f32,
@@ -360,6 +361,7 @@ impl OrthographicCamera {
     }
 
     /// Create an orthographic camera with a look-at transformation
+    #[allow(clippy::too_many_arguments)]
     pub fn look_at(
         eye: Point3, target: Point3, up: Vec3, left: f32, right: f32,
         bottom: f32, top: f32, near_plane: f32, far_plane: f32,

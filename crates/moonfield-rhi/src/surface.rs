@@ -1,7 +1,7 @@
 use std::any::Any;
 
-use crate::types::SurfaceCapabilities;
 use crate::Adapter;
+use crate::types::SurfaceCapabilities;
 
 /// Trait for surface functionality (handles window-system integration)
 pub trait Surface: Any {

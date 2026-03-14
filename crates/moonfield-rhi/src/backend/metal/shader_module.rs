@@ -1,7 +1,9 @@
-use crate::{types::*, ShaderModule, ShaderStage};
+use crate::{ShaderModule, ShaderStage, types::*};
 
 pub struct MetalShaderModule {
-    pub library: objc2::rc::Retained<objc2::runtime::ProtocolObject<dyn objc2_metal::MTLLibrary>>,
+    pub library: objc2::rc::Retained<
+        objc2::runtime::ProtocolObject<dyn objc2_metal::MTLLibrary>,
+    >,
     pub stage: ShaderStage,
 }
 

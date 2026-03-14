@@ -1,10 +1,10 @@
-use crate::{types::*, ShaderModule, ShaderStage, RhiError};
+// Use explicit Result type to avoid confusion with windows::core::Result
+use std::result::Result as StdResult;
 
 // Import tracing for logging
 use tracing;
 
-// Use explicit Result type to avoid confusion with windows::core::Result
-use std::result::Result as StdResult;
+use crate::{RhiError, ShaderModule, ShaderStage, types::*};
 
 pub struct Dx12ShaderModule {
     #[allow(dead_code)]
@@ -17,17 +17,14 @@ impl Dx12ShaderModule {
         // In a real implementation, we would validate the shader bytecode
         // For now, we'll just store the bytecode
         let bytecode = desc.code.to_vec();
-        
-        Ok(Dx12ShaderModule {
-            bytecode,
-            stage: desc.stage.clone(),
-        })
+
+        Ok(Dx12ShaderModule { bytecode, stage: desc.stage.clone() })
     }
-    
+
     pub fn get_bytecode(&self) -> &[u8] {
         &self.bytecode
     }
-    
+
     pub fn get_stage(&self) -> &ShaderStage {
         &self.stage
     }

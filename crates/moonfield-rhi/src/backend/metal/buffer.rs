@@ -1,7 +1,9 @@
-use crate::{types::*, Buffer, RhiError};
+use crate::{Buffer, RhiError, types::*};
 
 pub struct MetalBuffer {
-    pub buffer: objc2::rc::Retained<objc2::runtime::ProtocolObject<dyn objc2_metal::MTLBuffer>>,
+    pub buffer: objc2::rc::Retained<
+        objc2::runtime::ProtocolObject<dyn objc2_metal::MTLBuffer>,
+    >,
 }
 
 impl std::any::Any for MetalBuffer {

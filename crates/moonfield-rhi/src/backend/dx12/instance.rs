@@ -1,20 +1,17 @@
+// Use explicit Result type to avoid confusion with windows::core::Result
+use std::result::Result as StdResult;
 use std::sync::Arc;
-use crate::{types::*, Instance, Surface, Adapter, RhiError};
-use winit::window::Window;
 
 // Import tracing for logging
 use tracing;
-
 // Import Windows-specific DirectX 12 types
 use windows::{
-    core::*,
-    Win32::Graphics::Dxgi::*,
-    Win32::Foundation::*,
-    Win32::System::LibraryLoader::GetModuleHandleW,
+    Win32::Foundation::*, Win32::Graphics::Dxgi::*,
+    Win32::System::LibraryLoader::GetModuleHandleW, core::*,
 };
+use winit::window::Window;
 
-// Use explicit Result type to avoid confusion with windows::core::Result
-use std::result::Result as StdResult;
+use crate::{Adapter, Instance, RhiError, Surface, types::*};
 
 // Initialize the DirectX 12 Agility SDK
 pub fn init_dx12_agility_sdk() -> StdResult<(), RhiError> {
@@ -26,7 +23,7 @@ pub fn init_dx12_agility_sdk() -> StdResult<(), RhiError> {
         // Note: In a real implementation, you would dynamically load the Agility SDK DLL
         // This is a placeholder implementation
     }
-    
+
     tracing::info!("DirectX 12 Agility SDK initialized");
     Ok(())
 }
@@ -39,19 +36,20 @@ impl Dx12Instance {
     pub fn new() -> StdResult<Self, RhiError> {
         tracing::debug!("Creating DirectX 12 instance");
         init_dx12_agility_sdk()?;
-        
+
         unsafe {
-            let factory: IDXGIFactory4 = create_factory()
-                .map_err(|e| {
-                    tracing::error!("Failed to create DXGI factory: {:?}", e);
-                    e
-                })?;
+            let factory: IDXGIFactory4 = create_factory().map_err(|e| {
+                tracing::error!("Failed to create DXGI factory: {:?}", e);
+                e
+            })?;
             tracing::info!("DirectX 12 instance created successfully");
             Ok(Dx12Instance { factory })
         }
     }
 
-    pub fn new_with_window(&self, _window: &Window) -> StdResult<Self, RhiError> {
+    pub fn new_with_window(
+        &self, _window: &Window,
+    ) -> StdResult<Self, RhiError> {
         tracing::debug!("Creating DirectX 12 instance with window");
         // For now, just return a new instance
         Self::new()
@@ -59,13 +57,14 @@ impl Dx12Instance {
 }
 
 impl Instance for Dx12Instance {
-    fn create_surface(&self, window: &winit::window::Window) -> StdResult<Arc<dyn Surface>, RhiError> {
+    fn create_surface(
+        &self, window: &winit::window::Window,
+    ) -> StdResult<Arc<dyn Surface>, RhiError> {
         tracing::debug!("Creating DirectX 12 surface for window");
-        let dx12_surface = Dx12Surface::new(window)
-            .map_err(|e| {
-                tracing::error!("Failed to create DirectX 12 surface: {:?}", e);
-                e
-            })?;
+        let dx12_surface = Dx12Surface::new(window).map_err(|e| {
+            tracing::error!("Failed to create DirectX 12 surface: {:?}", e);
+            e
+        })?;
         tracing::debug!("DirectX 12 surface created successfully");
         Ok(Arc::new(dx12_surface) as Arc<dyn Surface>)
     }
@@ -87,8 +86,11 @@ impl Instance for Dx12Instance {
                         );
 
                         if hr.is_ok() {
-                            if let Ok(dx12_adapter) = Dx12Adapter::new(adapter) {
-                                adapters.push(Arc::new(dx12_adapter) as Arc<dyn Adapter>);
+                            if let Ok(dx12_adapter) = Dx12Adapter::new(adapter)
+                            {
+                                adapters
+                                    .push(Arc::new(dx12_adapter)
+                                        as Arc<dyn Adapter>);
                             }
                         }
                     }
@@ -108,7 +110,7 @@ impl Instance for Dx12Instance {
 unsafe fn create_factory() -> StdResult<IDXGIFactory4, RhiError> {
     // Create DXGI factory
     let mut factory4: Option<IDXGIFactory4> = None;
-    
+
     // Try to create a debug factory first if we're in debug mode
     #[cfg(debug_assertions)]
     {
@@ -124,12 +126,17 @@ unsafe fn create_factory() -> StdResult<IDXGIFactory4, RhiError> {
     // Create the factory
     let hr = CreateDXGIFactory1(&mut factory4);
     if hr.is_err() {
-        return Err(RhiError::InitializationFailed(format!("Failed to create DXGI factory: {}", hr.err().unwrap())));
+        return Err(RhiError::InitializationFailed(format!(
+            "Failed to create DXGI factory: {}",
+            hr.err().unwrap()
+        )));
     }
-    
+
     if let Some(f) = factory4 {
         Ok(f)
     } else {
-        Err(RhiError::InitializationFailed("Factory creation returned null".to_string()))
+        Err(RhiError::InitializationFailed(
+            "Factory creation returned null".to_string(),
+        ))
     }
 }
