@@ -112,8 +112,21 @@ fn main() {
     } else if is_windows {
         // Windows with GNU toolchain
         builder = builder.clang_arg("-D__MINGW32__").clang_arg("-D_WIN64");
+    } else if target_os == "macos" {
+        // macOS
+        builder = builder.clang_arg("-D__APPLE__").clang_arg("-DSLANG_OSX=1");
+        // Set sysroot for macOS to find system headers
+        if let Ok(output) = std::process::Command::new("xcrun")
+            .args(["--sdk", "macosx", "--show-sdk-path"])
+            .output()
+        {
+            let sdk_path = String::from_utf8_lossy(&output.stdout).trim().to_string();
+            if !sdk_path.is_empty() {
+                builder = builder.clang_arg(format!("-isysroot{}", sdk_path));
+            }
+        }
     } else {
-        // Unix-like platforms
+        // Linux and other Unix-like platforms
         builder = builder.clang_arg("-D__linux__").clang_arg("-DSLANG_LINUX=1");
     }
 
