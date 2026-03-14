@@ -30,3 +30,7 @@ build_info.rs      # Build script generated files
 *.bak
 .history/
 *.vsix
+
+# AI
+.claude/
+memory/

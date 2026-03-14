@@ -2,7 +2,7 @@ use std::sync::Arc;
 
 use moonfield_core::asset::{AssetHandle, AssetServer, ShaderAsset};
 use moonfield_rhi::{types::Backend, *};
-use shader_slang::Stage;
+use moonfield_shader::ffi::{SlangStage_SLANG_STAGE_VERTEX, SlangStage_SLANG_STAGE_PIXEL};
 use winit::application::ApplicationHandler;
 use winit::event::WindowEvent;
 use winit::event_loop::{ActiveEventLoop, ControlFlow, EventLoop};
@@ -166,14 +166,14 @@ impl ApplicationHandler for TriangleApp {
         let vertex_shader = device
             .create_shader_module(&types::ShaderModuleDescriptor {
                 code: &vertex_shader_asset.source,
-                stage: Stage::Vertex,
+                stage: SlangStage_SLANG_STAGE_VERTEX,
             })
             .unwrap();
 
         let fragment_shader = device
             .create_shader_module(&types::ShaderModuleDescriptor {
                 code: &fragment_shader_asset.source,
-                stage: Stage::Pixel,
+                stage: SlangStage_SLANG_STAGE_PIXEL,
             })
             .unwrap();
 

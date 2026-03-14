@@ -1,7 +1,9 @@
 use std::sync::Arc;
 
 use ash::vk::Handle;
-use shader_slang::Stage;
+use moonfield_shader::SlangStage as Stage;
+
+#[allow(unused_imports)]
 
 use crate::{types::*, *};
 

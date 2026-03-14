@@ -1,0 +1,28 @@
+[package]
+name = "moonfield-shader"
+version = "0.1.0"
+edition = "2024"
+authors = ["Moonfield Contributors"]
+license = "MIT OR Apache-2.0"
+description = "Shader compilation for Moonfield graphics engine"
+repository = "https://github.com/H5uan/moonfield"
+keywords = ["shader", "slang", "compiler", "graphics", "gpu"]
+categories = ["graphics", "compilers", "external-ffi-bindings"]
+rust-version = "1.85"
+build = "build.rs"
+
+[dependencies]
+libc = "0.2"
+
+[build-dependencies]
+bindgen = "0.72"
+cc = "1.0"
+
+[lib]
+name = "moonfield_shader"
+crate-type = ["lib"]
+
+[features]
+default = ["static-link"]
+static-link = []
+dynamic-link = []

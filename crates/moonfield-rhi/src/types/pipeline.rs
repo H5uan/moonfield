@@ -1,6 +1,6 @@
 use std::sync::Arc;
 
-use shader_slang::Stage;
+use moonfield_shader::SlangStage as Stage;
 
 use crate::types::format::Format;
 use crate::types::vertex::VertexInputDescriptor;
