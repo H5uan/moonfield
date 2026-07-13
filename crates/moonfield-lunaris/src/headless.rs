@@ -12,13 +12,24 @@ use crate::error::Result;
 use ash::vk;
 
 /// A headless recording context.
+///
+/// Fields are ordered so that Rust drops them in the correct Vulkan
+/// dependency order: child objects first, then device, then instance.
 pub struct HeadlessContext {
     #[allow(dead_code)]
-    instance: Instance,
-    device: Device,
+    command_buffer: CommandBuffer,
+    #[allow(dead_code)]
+    command_pool: CommandPool,
+    #[allow(dead_code)]
     render_pass: RenderPass,
+    #[allow(dead_code)]
     pipeline: GraphicsPipeline,
+    #[allow(dead_code)]
     vertex_buffer: Buffer,
+    #[allow(dead_code)]
+    device: Device,
+    #[allow(dead_code)]
+    instance: Instance,
 }
 
 #[repr(C)]
@@ -31,9 +42,9 @@ struct Vertex {
 impl HeadlessContext {
     /// Create a headless context and record one frame into a command buffer.
     ///
-    /// The returned `CommandBuffer` is ready to be submitted to the graphics
-    /// queue. It is allocated from an internally created `CommandPool`.
-    pub fn record_frame() -> Result<(Self, CommandBuffer)> {
+    /// The command buffer is owned by the returned context and is ready to be
+    /// submitted to the graphics queue.
+    pub fn record_frame() -> Result<Self> {
         let instance = Instance::new_headless()?;
         let device = Device::new(&instance, None)?;
 
@@ -113,16 +124,15 @@ impl HeadlessContext {
         command_buffer.draw(3, 1, 0, 0);
         command_buffer.end()?;
 
-        Ok((
-            Self {
-                instance,
-                device,
-                render_pass,
-                pipeline,
-                vertex_buffer,
-            },
+        Ok(Self {
+            instance,
+            device,
+            render_pass,
+            pipeline,
+            vertex_buffer,
+            command_pool,
             command_buffer,
-        ))
+        })
     }
 }
 
