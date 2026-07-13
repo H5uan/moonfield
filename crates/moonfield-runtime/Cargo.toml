@@ -1,0 +1,13 @@
+[package]
+name = "moonfield-runtime"
+version.workspace = true
+edition.workspace = true
+
+[dependencies]
+moonfield-base = { workspace = true }
+moonfield-core = { workspace = true }
+moonfield-lunaris = { workspace = true }
+v8 = "150.1.0"
+notify = "6.1"
+serde_json = "1.0"
+anyhow = "1.0"

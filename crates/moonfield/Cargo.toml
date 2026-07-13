@@ -1,0 +1,14 @@
+[package]
+name = "moonfield"
+version.workspace = true
+edition.workspace = true
+
+[[bin]]
+name = "moonfield"
+path = "src/main.rs"
+
+[dependencies]
+moonfield-base = { workspace = true }
+moonfield-core = { workspace = true }
+moonfield-runtime = { workspace = true }
+moonfield-lunaris = { workspace = true }

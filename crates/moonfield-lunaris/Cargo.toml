@@ -1,0 +1,12 @@
+[package]
+name = "moonfield-lunaris"
+version.workspace = true
+edition.workspace = true
+
+[dependencies]
+moonfield-base = { workspace = true }
+moonfield-core = { workspace = true }
+ash = "0.38"
+ash-window = "0.13"
+raw-window-handle = "0.6"
+shader-slang = "0.1"
