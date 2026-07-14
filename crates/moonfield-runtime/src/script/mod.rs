@@ -1,16 +1,26 @@
 //! TypeScript/JavaScript scripting runtime for moonfield.
 //!
 //! The runtime is backend-agnostic through the [`ScriptRuntime`] trait. The
-//! default backend is QuickJS via `rquickjs`; the trait boundary leaves room
-//! for a V8 backend in the future.
+//! default backend is V8 via the `v8` crate; the `rquickjs` backend is
+//! available behind the `quickjs-backend` feature.
 
 pub mod api;
 pub mod hot_reload;
+
+#[cfg(feature = "quickjs-backend")]
 pub mod quickjs;
+
+#[cfg(feature = "v8-backend")]
+pub mod v8_runtime;
 
 pub use api::ScriptApi;
 pub use hot_reload::HotReloader;
+
+#[cfg(feature = "quickjs-backend")]
 pub use quickjs::QuickJsRuntime;
+
+#[cfg(feature = "v8-backend")]
+pub use v8_runtime::V8Runtime;
 
 use std::path::Path;
 
@@ -83,8 +93,8 @@ pub fn load_script<P: AsRef<Path>>(path: P) -> Result<String> {
 /// Minimal TypeScript-to-JavaScript transpiler.
 ///
 /// This implementation strips simple type annotations and interface/type
-/// declarations so that the resulting source can be run by QuickJS. It is not
-/// a full TS compiler; for production use replace this with `tsc`/`swc`.
+/// declarations so that the resulting source can be run by the JS engine. It
+/// is not a full TS compiler; for production use replace this with `tsc`/`swc`.
 pub fn transpile_typescript(source: &str) -> Result<String> {
     // For the example scripts we rely on a build-time `tsc` step (see
     // scripts/tsconfig.json). If a .ts file is loaded directly at runtime we

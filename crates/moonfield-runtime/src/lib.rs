@@ -7,7 +7,11 @@ pub mod script;
 
 use moonfield_base::info;
 use moonfield_core::{App, Plugin, Resources};
-use script::{QuickJsRuntime, ScriptApi, ScriptRuntime};
+#[cfg(feature = "v8-backend")]
+use script::{ScriptApi, ScriptRuntime, V8Runtime as Runtime};
+
+#[cfg(feature = "quickjs-backend")]
+use script::{ScriptApi, ScriptRuntime, QuickJsRuntime as Runtime};
 use std::path::Path;
 
 /// Runtime plugin.
@@ -46,7 +50,7 @@ pub fn run_default_script() -> crate::script::Result<()> {
     };
 
     let source = script::load_script(&script_path)?;
-    let mut runtime = QuickJsRuntime::new(ScriptApi::default())?;
+    let mut runtime = Runtime::new(ScriptApi::default())?;
     runtime.load(script_path.to_string_lossy().as_ref(), &source)?;
     let _ = runtime.call("main");
     Ok(())
