@@ -7,7 +7,9 @@ version = "0.1.0"
 edition = "2021"
 
 [workspace.dependencies]
+moonfield-app = { path = "crates/moonfield-app" }
 moonfield-base = { path = "crates/moonfield-base" }
 moonfield-core = { path = "crates/moonfield-core" }
 moonfield-runtime = { path = "crates/moonfield-runtime" }
 moonfield-lunaris = { path = "crates/moonfield-lunaris" }
+thiserror = "1"
