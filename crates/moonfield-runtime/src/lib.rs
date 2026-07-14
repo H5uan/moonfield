@@ -11,7 +11,7 @@ use moonfield_core::{App, Plugin, Resources};
 use script::{ScriptApi, ScriptRuntime, V8Runtime as Runtime};
 
 #[cfg(feature = "quickjs-backend")]
-use script::{ScriptApi, ScriptRuntime, QuickJsRuntime as Runtime};
+use script::{QuickJsRuntime as Runtime, ScriptApi, ScriptRuntime};
 use std::path::Path;
 
 /// Runtime plugin.
@@ -43,11 +43,7 @@ pub fn run_default_script() -> crate::script::Result<()> {
     let script_dir = Path::new("scripts");
     let js_path = script_dir.join("record_frame.js");
     let ts_path = script_dir.join("record_frame.ts");
-    let script_path = if js_path.exists() {
-        js_path
-    } else {
-        ts_path
-    };
+    let script_path = if js_path.exists() { js_path } else { ts_path };
 
     let source = script::load_script(&script_path)?;
     let mut runtime = Runtime::new(ScriptApi::default())?;

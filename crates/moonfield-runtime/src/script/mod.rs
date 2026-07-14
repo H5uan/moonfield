@@ -13,6 +13,7 @@ pub mod quickjs;
 #[cfg(feature = "v8-backend")]
 pub mod v8_runtime;
 
+pub use api::HostFn;
 pub use api::ScriptApi;
 pub use hot_reload::HotReloader;
 
@@ -23,6 +24,12 @@ pub use quickjs::QuickJsRuntime;
 pub use v8_runtime::V8Runtime;
 
 use std::path::Path;
+
+use swc_common::{sync::Lrc, FileName, Globals, Mark, SourceMap, GLOBALS};
+use swc_ecma_ast::{EsVersion, Module, Pass, Program};
+use swc_ecma_codegen::{text_writer::JsWriter, Config, Emitter};
+use swc_ecma_parser::{lexer::Lexer, Parser, StringInput, Syntax, TsSyntax};
+use swc_ecma_transforms_typescript::strip;
 
 /// Errors that can occur in the scripting layer.
 #[derive(Debug)]
@@ -90,27 +97,60 @@ pub fn load_script<P: AsRef<Path>>(path: P) -> Result<String> {
     }
 }
 
-/// Minimal TypeScript-to-JavaScript transpiler.
+/// Transpile TypeScript source to JavaScript by stripping type annotations.
 ///
-/// This implementation strips simple type annotations and interface/type
-/// declarations so that the resulting source can be run by the JS engine. It
-/// is not a full TS compiler; for production use replace this with `tsc`/`swc`.
+/// Backed by `swc` (real parser + type-strip transform + codegen), so it
+/// correctly handles generics, type assertions, interfaces, enums, etc. — not
+/// just line-level stripping. The `GLOBALS` thread-local is required by swc's
+/// hygiene/marks machinery, so transpilation runs inside `GLOBALS.set`.
 pub fn transpile_typescript(source: &str) -> Result<String> {
-    // For the example scripts we rely on a build-time `tsc` step (see
-    // scripts/tsconfig.json). If a .ts file is loaded directly at runtime we
-    // strip the most common annotations so basic examples still work.
-    let mut output = String::new();
-    for line in source.lines() {
-        let trimmed = line.trim();
-        // Skip interface/type/import type-only declarations.
-        if trimmed.starts_with("interface ")
-            || trimmed.starts_with("type ")
-            || trimmed.starts_with("declare ")
-        {
-            continue;
-        }
-        output.push_str(line);
-        output.push('\n');
+    GLOBALS.set(&Globals::default(), || transpile_inner(source))
+}
+
+fn transpile_inner(source: &str) -> Result<String> {
+    let source = source.to_string();
+    let cm: Lrc<SourceMap> = Default::default();
+    let fm = cm.new_source_file(Lrc::new(FileName::Custom("script.ts".into())), source);
+
+    let lexer = Lexer::new(
+        Syntax::Typescript(TsSyntax::default()),
+        EsVersion::Es2020,
+        StringInput::from(&*fm),
+        None,
+    );
+    let mut parser = Parser::new_from(lexer);
+
+    let module: Module = parser
+        .parse_module()
+        .map_err(|e| ScriptError::Transpile(format!("parse error: {:?}", e)))?;
+    let recoverable = parser.take_errors();
+    if !recoverable.is_empty() {
+        return Err(ScriptError::Transpile(format!(
+            "parse error: {:?}",
+            recoverable
+        )));
     }
-    Ok(output)
+
+    // `strip` returns an `impl Pass`; `Pass::process` mutates a `Program`.
+    let mut program = Program::Module(module);
+    let mut pass = strip(Mark::new(), Mark::new());
+    pass.process(&mut program);
+    let module = match program {
+        Program::Module(m) => m,
+        _ => return Err(ScriptError::Transpile("expected module".into())),
+    };
+
+    let mut buf = Vec::new();
+    {
+        let mut emitter = Emitter {
+            cfg: Config::default(),
+            cm: cm.clone(),
+            comments: None,
+            wr: JsWriter::new(cm.clone(), "\n", &mut buf, None),
+        };
+        emitter
+            .emit_module(&module)
+            .map_err(|e| ScriptError::Transpile(format!("codegen error: {:?}", e)))?;
+    }
+    String::from_utf8(buf).map_err(|e| ScriptError::Transpile(format!("non-utf8 output: {}", e)))
 }

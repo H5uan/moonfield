@@ -54,10 +54,7 @@ impl HotReloader {
                 if changed {
                     let source = super::load_script(&self.script_path)?;
                     runtime.reload()?;
-                    runtime.load(
-                        self.script_path.to_string_lossy().as_ref(),
-                        &source,
-                    )?;
+                    runtime.load(self.script_path.to_string_lossy().as_ref(), &source)?;
                 }
             }
         }
