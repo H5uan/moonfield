@@ -1,8 +1,6 @@
 use crate::{Plugin, PluginGroup};
-use std::{
-    any::{Any, TypeId},
-    collections::{HashMap, HashSet},
-};
+use moonfield_ecs::{IntoSystem, System, World};
+use std::collections::HashSet;
 
 /// Errors that can occur while adding a [`Plugin`] to an [`App`].
 #[derive(Debug, PartialEq, Eq, thiserror::Error)]
@@ -10,33 +8,6 @@ pub enum AppError {
     /// A plugin with the same name was already added.
     #[error("duplicate plugin {plugin_name:?}")]
     DuplicatePlugin { plugin_name: String },
-}
-
-/// A type-erased resource container.
-#[derive(Default)]
-pub struct Resources {
-    data: HashMap<TypeId, Box<dyn Any>>,
-}
-
-impl Resources {
-    /// Insert a resource.
-    pub fn insert<R: 'static>(&mut self, resource: R) {
-        self.data.insert(TypeId::of::<R>(), Box::new(resource));
-    }
-
-    /// Get a reference to a resource.
-    pub fn get<R: 'static>(&self) -> Option<&R> {
-        self.data
-            .get(&TypeId::of::<R>())
-            .and_then(|boxed| boxed.downcast_ref::<R>())
-    }
-
-    /// Get a mutable reference to a resource.
-    pub fn get_mut<R: 'static>(&mut self) -> Option<&mut R> {
-        self.data
-            .get_mut(&TypeId::of::<R>())
-            .and_then(|boxed| boxed.downcast_mut::<R>())
-    }
 }
 
 /// The main application container.
@@ -48,10 +19,10 @@ pub struct App {
     plugins: Vec<Box<dyn Plugin>>,
     plugin_names: HashSet<String>,
     runner: Box<dyn FnMut(&mut App)>,
-    resources: Resources,
-    startup_fns: Vec<Box<dyn FnOnce(&mut Resources)>>,
-    shutdown_fns: Vec<Box<dyn FnOnce(&mut Resources)>>,
-    update_fns: Vec<Box<dyn FnMut(&mut Resources) -> bool>>,
+    world: World,
+    startup_fns: Vec<Box<dyn FnOnce(&mut World)>>,
+    shutdown_fns: Vec<Box<dyn FnOnce(&mut World)>>,
+    update_fns: Vec<Box<dyn FnMut(&mut World) -> bool>>,
     initialized: bool,
 }
 
@@ -68,7 +39,7 @@ impl App {
             plugins: Vec::new(),
             plugin_names: HashSet::new(),
             runner: Box::new(|_| {}),
-            resources: Resources::default(),
+            world: World::new(),
             startup_fns: Vec::new(),
             shutdown_fns: Vec::new(),
             update_fns: Vec::new(),
@@ -93,10 +64,7 @@ impl App {
 
     /// Registers a boxed plugin, returning an error if a unique plugin with
     /// the same name was already added.
-    pub fn add_boxed_plugin(
-        &mut self,
-        plugin: Box<dyn Plugin>,
-    ) -> Result<(), AppError> {
+    pub fn add_boxed_plugin(&mut self, plugin: Box<dyn Plugin>) -> Result<(), AppError> {
         let name = plugin.name().to_string();
         if plugin.is_unique() && !self.plugin_names.insert(name.clone()) {
             return Err(AppError::DuplicatePlugin { plugin_name: name });
@@ -106,37 +74,34 @@ impl App {
         Ok(())
     }
 
-    /// Inserts a resource into the app.
-    pub fn insert_resource<R: 'static>(&mut self, resource: R) -> &mut Self {
-        self.resources.insert(resource);
+    /// Inserts a resource into the app's world.
+    pub fn insert_resource<R: moonfield_ecs::Resource>(&mut self, resource: R) -> &mut Self {
+        self.world.insert_resource(resource);
         self
     }
 
     /// Gets an immutable reference to a previously inserted resource.
-    pub fn get_resource<R: 'static>(&self) -> Option<&R> {
-        self.resources.get()
+    pub fn get_resource<R: moonfield_ecs::Resource>(&self) -> Option<std::cell::Ref<'_, R>> {
+        self.world.get_resource::<R>()
     }
 
     /// Gets a mutable reference to a previously inserted resource.
-    pub fn get_resource_mut<R: 'static>(&mut self) -> Option<&mut R> {
-        self.resources.get_mut()
+    pub fn get_resource_mut<R: moonfield_ecs::Resource>(&self) -> Option<std::cell::RefMut<'_, R>> {
+        self.world.get_resource_mut::<R>()
     }
 
-    /// Access resources immutably.
-    pub fn resources(&self) -> &Resources {
-        &self.resources
+    /// Access the underlying ECS world immutably.
+    pub fn world(&self) -> &World {
+        &self.world
     }
 
-    /// Access resources mutably.
-    pub fn resources_mut(&mut self) -> &mut Resources {
-        &mut self.resources
+    /// Access the underlying ECS world mutably.
+    pub fn world_mut(&mut self) -> &mut World {
+        &mut self.world
     }
 
     /// Sets the runner function that will be invoked by [`App::run`].
-    pub fn set_runner(
-        &mut self,
-        runner: impl FnMut(&mut App) + 'static,
-    ) -> &mut Self {
+    pub fn set_runner(&mut self, runner: impl FnMut(&mut App) + 'static) -> &mut Self {
         self.runner = Box::new(runner);
         self
     }
@@ -144,7 +109,7 @@ impl App {
     /// Register a startup callback.
     pub fn add_startup_system<F>(&mut self, f: F) -> &mut Self
     where
-        F: FnOnce(&mut Resources) + 'static,
+        F: FnOnce(&mut World) + 'static,
     {
         self.startup_fns.push(Box::new(f));
         self
@@ -153,7 +118,7 @@ impl App {
     /// Register a shutdown callback.
     pub fn add_shutdown_system<F>(&mut self, f: F) -> &mut Self
     where
-        F: FnOnce(&mut Resources) + 'static,
+        F: FnOnce(&mut World) + 'static,
     {
         self.shutdown_fns.push(Box::new(f));
         self
@@ -162,9 +127,28 @@ impl App {
     /// Register an update callback. Returning `false` ends the loop.
     pub fn add_update_system<F>(&mut self, f: F) -> &mut Self
     where
-        F: FnMut(&mut Resources) -> bool + 'static,
+        F: FnMut(&mut World) -> bool + 'static,
     {
         self.update_fns.push(Box::new(f));
+        self
+    }
+
+    /// Register an ECS system to run every frame.
+    pub fn add_systems(&mut self, system: impl IntoSystem) -> &mut Self {
+        let mut sys = system.system();
+        self.update_fns.push(Box::new(move |world: &mut World| {
+            sys.run(world);
+            true
+        }));
+        self
+    }
+
+    /// Register an ECS startup system to run once at startup.
+    pub fn add_startup_system_ecs(&mut self, system: impl IntoSystem) -> &mut Self {
+        let mut sys = system.system();
+        self.startup_fns.push(Box::new(move |world: &mut World| {
+            sys.run(world);
+        }));
         self
     }
 
@@ -173,7 +157,7 @@ impl App {
         moonfield_base::initialize();
         self.initialized = true;
         for f in self.startup_fns.drain(..) {
-            f(&mut self.resources);
+            f(&mut self.world);
         }
     }
 
@@ -185,8 +169,9 @@ impl App {
         if !self.initialized {
             self.startup();
         }
+        self.world.apply_commands();
         for f in &mut self.update_fns {
-            if !f(&mut self.resources) {
+            if !f(&mut self.world) {
                 return false;
             }
         }
@@ -211,7 +196,7 @@ impl App {
             return;
         }
         for f in self.shutdown_fns.drain(..) {
-            f(&mut self.resources);
+            f(&mut self.world);
         }
         moonfield_base::shutdown();
         self.initialized = false;
@@ -329,8 +314,7 @@ pub mod sealed {
         }
     }
 
-    impl<A, MA, B, MB, C, MC, D, MD> Plugins<(PluginsTupleMarker, MA, MB, MC, MD)>
-        for (A, B, C, D)
+    impl<A, MA, B, MB, C, MC, D, MD> Plugins<(PluginsTupleMarker, MA, MB, MC, MD)> for (A, B, C, D)
     where
         A: Plugins<MA>,
         B: Plugins<MB>,
@@ -346,8 +330,8 @@ pub mod sealed {
         }
     }
 
-    impl<A, MA, B, MB, C, MC, D, MD, E, ME>
-        Plugins<(PluginsTupleMarker, MA, MB, MC, MD, ME)> for (A, B, C, D, E)
+    impl<A, MA, B, MB, C, MC, D, MD, E, ME> Plugins<(PluginsTupleMarker, MA, MB, MC, MD, ME)>
+        for (A, B, C, D, E)
     where
         A: Plugins<MA>,
         B: Plugins<MB>,

@@ -100,10 +100,12 @@ impl PluginGroupBuilder {
     /// Panics if the plugin type is not already in the group.
     pub fn set<T: Plugin>(mut self, plugin: T) -> Self {
         let id = TypeId::of::<T>();
-        let entry = self
-            .plugins
-            .get_mut(&id)
-            .unwrap_or_else(|| panic!("Plugin {} does not exist in this PluginGroup", std::any::type_name::<T>()));
+        let entry = self.plugins.get_mut(&id).unwrap_or_else(|| {
+            panic!(
+                "Plugin {} does not exist in this PluginGroup",
+                std::any::type_name::<T>()
+            )
+        });
         entry.plugin = Box::new(plugin);
         self
     }

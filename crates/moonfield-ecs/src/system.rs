@@ -26,9 +26,7 @@ where
     F: FnMut(&mut World) + Send + Sync + 'static,
 {
     fn system(self) -> impl System {
-        FnSystem {
-            f: self,
-        }
+        FnSystem { f: self }
     }
 }
 
