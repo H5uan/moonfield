@@ -30,6 +30,7 @@ pub use api::HostValue;
 pub use api::ScriptApi;
 pub use api::ScriptFunction;
 pub use api::TypedArrayValue;
+pub use hot_reload::HotReloadHandler;
 pub use hot_reload::HotReloader;
 pub use module::ModuleRegistry;
 

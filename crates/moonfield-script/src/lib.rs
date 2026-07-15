@@ -14,7 +14,7 @@ use script::{ScriptApi, ScriptRuntime, V8Runtime as Runtime};
 
 #[cfg(feature = "quickjs-backend")]
 use script::{QuickJsRuntime as Runtime, ScriptApi, ScriptRuntime};
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
 /// Script system plugin.
 ///
@@ -93,6 +93,9 @@ pub fn run_script_module(entry: &str) -> crate::script::Result<()> {
 }
 
 /// Recursively resolve and register all dependencies of a module.
+///
+/// Uses the full resolution chain: relative paths, bare specifiers,
+/// `node_modules` lookup, `package.json` main field, and `index.js` fallback.
 #[cfg(feature = "v8-backend")]
 fn resolve_dependencies(registry: &mut script::ModuleRegistry, name: &str) -> crate::script::Result<()> {
     let deps: Vec<String> = {
@@ -102,42 +105,62 @@ fn resolve_dependencies(registry: &mut script::ModuleRegistry, name: &str) -> cr
         info.imports.clone()
     };
 
+    let search_dirs = vec![
+        PathBuf::from("."),
+        PathBuf::from("scripts"),
+        PathBuf::from("target/scripts"),
+    ];
+
     for dep in &deps {
-        let resolved = registry
-            .resolve(dep, name)
-            .ok_or_else(|| script::ScriptError::Execution(format!(
-                "cannot resolve '{}' from '{}'",
-                dep, name
-            )))?;
+        // Try the in-registry resolve first (fast path).
+        let resolved = registry.resolve(dep, name);
 
-        if !registry.contains(&resolved) {
-            let dep_path = Path::new(&resolved);
-            let candidates = [
-                dep_path.with_extension("js"),
-                dep_path.with_extension("ts"),
-                Path::new("scripts").join(&resolved).with_extension("js"),
-                Path::new("scripts").join(&resolved).with_extension("ts"),
-                Path::new("target/scripts").join(&resolved).with_extension("js"),
-            ];
+        if let Some(resolved) = resolved {
+            if !registry.contains(&resolved) {
+                // Try to find the file on disk using the resolved name.
+                let dep_path = Path::new(&resolved);
+                let candidates = [
+                    dep_path.to_path_buf(),
+                    dep_path.with_extension("js"),
+                    dep_path.with_extension("ts"),
+                    Path::new("scripts").join(&resolved).with_extension("js"),
+                    Path::new("scripts").join(&resolved).with_extension("ts"),
+                    Path::new("target/scripts").join(&resolved).with_extension("js"),
+                ];
 
-            let mut loaded = false;
-            for candidate in &candidates {
-                if candidate.exists() {
-                    let source = script::load_script(candidate)?;
-                    registry.register(&resolved, source);
-                    loaded = true;
-                    break;
+                let mut loaded = false;
+                for candidate in &candidates {
+                    if candidate.exists() {
+                        let source = script::load_script(candidate)?;
+                        registry.register(&resolved, source);
+                        loaded = true;
+                        break;
+                    }
                 }
-            }
 
-            if !loaded {
-                return Err(script::ScriptError::Execution(format!(
-                    "module '{}' not found on disk",
-                    resolved
-                )));
-            }
+                if !loaded {
+                    return Err(script::ScriptError::Execution(format!(
+                        "module '{}' not found on disk",
+                        resolved
+                    )));
+                }
 
-            resolve_dependencies(registry, &resolved)?;
+                resolve_dependencies(registry, &resolved)?;
+            }
+        } else {
+            // Full resolution chain for bare specifiers and node_modules.
+            let (canonical, path) = registry
+                .resolve_full(dep, name, &search_dirs)
+                .ok_or_else(|| script::ScriptError::Execution(format!(
+                    "cannot resolve '{}' from '{}'",
+                    dep, name
+                )))?;
+
+            if !registry.contains(&canonical) {
+                let source = script::load_script(&path)?;
+                registry.register(&canonical, source);
+                resolve_dependencies(registry, &canonical)?;
+            }
         }
     }
 

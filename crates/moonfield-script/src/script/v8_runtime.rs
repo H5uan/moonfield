@@ -1,8 +1,9 @@
 //! V8 backend for the scripting runtime.
 
-use super::{HostFn, HostValue, Result, ScriptApi, ScriptError, ScriptRuntime, TypedArrayValue};
+use super::{HostFn, HostValue, HotReloadHandler, Result, ScriptApi, ScriptError, ScriptRuntime, TypedArrayValue};
 use moonfield_base::{error, info, warn};
 use std::collections::HashMap;
+use std::path::Path;
 use std::sync::Once;
 
 static V8_INIT: Once = Once::new();
@@ -13,12 +14,20 @@ static V8_INIT: Once = Once::new();
 /// and `Module::instantiate_module2`. The resolve callback is a static method that
 /// reads a `ModuleMap` pointer from the isolate's data slot (set before
 /// `instantiate_module2` and removed after). This pattern follows Deno's approach.
+///
+/// Hot reload: stores the last [`ModuleRegistry`] and entry point so that
+/// [`HotReloadHandler::on_file_changed`] can recompile the changed module and
+/// re-instantiate the graph without rebuilding the entire V8 context.
 pub struct V8Runtime {
     isolate: v8::OwnedIsolate,
     context: v8::Global<v8::Context>,
     // Boxed so the registry vector's storage is never moved while V8 externals
     // hold raw pointers into it.
     api: Box<ScriptApi>,
+    /// Cached registry for hot reload (populated by `load_module_graph`).
+    registry: Option<super::ModuleRegistry>,
+    /// Cached entry point for hot reload.
+    entry: Option<String>,
 }
 
 impl ScriptRuntime for V8Runtime {
@@ -45,6 +54,8 @@ impl ScriptRuntime for V8Runtime {
             isolate,
             context,
             api: Box::new(api),
+            registry: None,
+            entry: None,
         };
         rt.register_api()?;
         Ok(rt)
@@ -323,6 +334,10 @@ impl V8Runtime {
             }
         }
 
+        // Cache the registry and entry for hot reload.
+        self.registry = Some(registry.clone());
+        self.entry = Some(entry.to_string());
+
         Ok(())
     }
 
@@ -385,6 +400,30 @@ impl V8Runtime {
         _referrer: v8::Local<'s, v8::Module>,
     ) -> Option<v8::Local<'s, v8::Object>> {
         None
+    }
+}
+
+impl HotReloadHandler for V8Runtime {
+    fn on_file_changed(&mut self, changed_path: &Path) -> Result<()> {
+        // Take the cached registry and entry out to avoid double borrow.
+        let mut registry = self
+            .registry
+            .take()
+            .ok_or_else(|| ScriptError::Execution("no cached registry for hot reload".into()))?;
+        let entry = self
+            .entry
+            .clone()
+            .ok_or_else(|| ScriptError::Execution("no cached entry for hot reload".into()))?;
+
+        // Re-read the changed file and update the registry.
+        let source = super::load_script(changed_path)?;
+        let name = changed_path
+            .to_str()
+            .ok_or_else(|| ScriptError::Execution("invalid path".into()))?;
+        registry.register(name, source);
+
+        // Re-instantiate the module graph with the updated registry.
+        self.load_module_graph(&registry, &entry)
     }
 }
 

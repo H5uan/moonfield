@@ -27,9 +27,11 @@
 //! 1. Relative paths (`./foo`, `../bar/baz`) — resolved against the importer's
 //!    directory.
 //! 2. Absolute paths — used as-is.
-//! 3. Bare specifiers (`"lodash"`) — not yet supported; returns an error.
+//! 3. Bare specifiers (`"lodash"`) — resolved via `node_modules/` lookup,
+//!    `package.json` main field, and `index.js` fallback.
 
 use std::collections::HashMap;
+use std::fs;
 use std::path::{Path, PathBuf};
 
 use swc_common::sync::Lrc;
@@ -58,7 +60,7 @@ pub struct ModuleInfo {
 ///
 /// The registry is populated by the runtime before instantiation. It does not
 /// depend on any specific JS engine, so it lives in the backend-agnostic layer.
-#[derive(Default)]
+#[derive(Clone, Default)]
 pub struct ModuleRegistry {
     modules: HashMap<String, ModuleInfo>,
     base_path: PathBuf,
@@ -150,6 +152,148 @@ impl ModuleRegistry {
         }
 
         None
+    }
+
+    /// Full resolution chain: supports relative paths, bare specifiers,
+    /// `node_modules` lookup, `package.json` main field, and `index.js` fallback.
+    ///
+    /// Returns the resolved canonical name and the file path it was found at.
+    pub fn resolve_full(
+        &self,
+        specifier: &str,
+        base: &str,
+        search_dirs: &[PathBuf],
+    ) -> Option<(String, PathBuf)> {
+        // 1. Relative specifier: resolve against the base module's directory.
+        if specifier.starts_with('.') || specifier.starts_with('/') {
+            let base_dir = if specifier.starts_with('/') {
+                PathBuf::from(".")
+            } else {
+                let p = Path::new(base).parent().unwrap_or(Path::new("."));
+                p.to_path_buf()
+            };
+            let resolved = Self::normalize_path(&base_dir.join(specifier));
+            let dir = resolved.parent();
+            let stem = resolved
+                .file_name()
+                .and_then(|n| n.to_str())
+                .unwrap_or("");
+            return Self::resolve_file_or_dir(&resolved, &resolved, stem, dir);
+        }
+
+        // 2. Bare specifier: search search_dirs + node_modules walk.
+        for search_dir in search_dirs {
+            // Check search_dir directly.
+            let candidate = search_dir.join(specifier);
+            let dir = candidate.parent();
+            if let Some(result) = Self::resolve_file_or_dir(&candidate, &candidate, specifier, dir) {
+                return Some(result);
+            }
+
+            // Search node_modules/ under this directory and its ancestors.
+            if let Some(result) = Self::resolve_in_node_modules(specifier, search_dir) {
+                return Some(result);
+            }
+        }
+
+        // 3. Fallback: check if already registered.
+        if self.modules.contains_key(specifier) {
+            return Some((specifier.to_string(), PathBuf::from(specifier)));
+        }
+        // Try with .js and .ts extensions.
+        for ext in &["js", "ts", "mjs", "cjs"] {
+            let with_ext = format!("{}.{}", specifier, ext);
+            if self.modules.contains_key(&with_ext) {
+                return Some((with_ext.to_string(), PathBuf::from(with_ext)));
+            }
+        }
+
+        None
+    }
+
+    /// Try to resolve `specifier` within `node_modules/` directories,
+    /// walking up from `start_dir` to the filesystem root.
+    fn resolve_in_node_modules(specifier: &str, start_dir: &Path) -> Option<(String, PathBuf)> {
+        let mut current = Some(start_dir);
+        while let Some(dir) = current {
+            let nm = dir.join("node_modules").join(specifier);
+            if let Some(result) = Self::resolve_file_or_dir(&nm, &nm, specifier, nm.parent()) {
+                return Some(result);
+            }
+            current = dir.parent();
+        }
+        None
+    }
+
+    /// Given a candidate path, try these in order:
+    /// 1. exact path + `.js` / `.ts` / `.mjs` / `.cjs`
+    /// 2. `package.json` → `main` field
+    /// 3. `index.js` / `index.ts` / `index.mjs` / `index.cjs`
+    fn resolve_file_or_dir(
+        candidate: &Path,
+        _display_path: &Path,
+        _specifier: &str,
+        _parent_dir: Option<&Path>,
+    ) -> Option<(String, PathBuf)> {
+        // 1. Direct file with extension.
+        if candidate.is_file() {
+            if let Some(name) = candidate.to_str() {
+                return Some((name.to_string(), candidate.to_path_buf()));
+            }
+        }
+
+        // 2. Try adding extensions.
+        for ext in &["js", "ts", "mjs", "cjs"] {
+            let with_ext = candidate.with_extension(ext);
+            if with_ext.is_file() {
+                let name = with_ext.to_string_lossy().replace('\\', "/");
+                return Some((name, with_ext));
+            }
+        }
+
+        // 3. If candidate is a directory, check package.json and index files.
+        if candidate.is_dir() {
+            // Check package.json main field.
+            let pkg_json = candidate.join("package.json");
+            if pkg_json.is_file() {
+                if let Some(main) = Self::read_package_json_main(&pkg_json) {
+                    let main_path = candidate.join(&main);
+                    // Resolve main_path relative to the candidate directory.
+                    let resolved = Self::normalize_path(&main_path);
+                    let dir = resolved.parent();
+                    let stem = resolved
+                        .file_name()
+                        .and_then(|n| n.to_str())
+                        .unwrap_or("");
+                    if let Some(result) =
+                        Self::resolve_file_or_dir(&resolved, &resolved, stem, dir)
+                    {
+                        return Some(result);
+                    }
+                }
+            }
+
+            // Check index files.
+            for ext in &["js", "ts", "mjs", "cjs"] {
+                let index = candidate.join(format!("index.{}", ext));
+                if index.is_file() {
+                    let name = index.to_string_lossy().replace('\\', "/");
+                    return Some((name, index));
+                }
+            }
+        }
+
+        None
+    }
+
+    /// Read the `main` field from a `package.json` file.
+    fn read_package_json_main(pkg_json: &Path) -> Option<String> {
+        let content = fs::read_to_string(pkg_json).ok()?;
+        let parsed: serde_json::Value = serde_json::from_str(&content).ok()?;
+        parsed
+            .get("main")
+            .and_then(|v| v.as_str())
+            .map(|s| s.to_string())
     }
 
     /// Topologically sort modules by dependency order.
