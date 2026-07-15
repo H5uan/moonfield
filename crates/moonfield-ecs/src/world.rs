@@ -2,8 +2,8 @@ use std::any::TypeId;
 use std::collections::HashMap;
 
 use crate::{
-    entity::{Entity, EntityId},
     component::{Component, ComponentStorage, ErasedStorage},
+    entity::{Entity, EntityId},
     resource::Resource,
     Commands, EntityChanges, Query, Resources,
 };
@@ -164,7 +164,9 @@ impl World {
         self.components.get(&TypeId::of::<T>())?.get::<T>()
     }
 
-    pub(crate) fn component_storage_mut<T: Component>(&mut self) -> Option<&mut ComponentStorage<T>> {
+    pub(crate) fn component_storage_mut<T: Component>(
+        &mut self,
+    ) -> Option<&mut ComponentStorage<T>> {
         self.components.get_mut(&TypeId::of::<T>())?.get_mut::<T>()
     }
 }

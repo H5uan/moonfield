@@ -11,13 +11,17 @@ mod app;
 mod plugin;
 mod plugin_group;
 
-pub use app::{App, AppError, Plugins, Resources};
+pub use app::{App, AppError, Plugins};
+pub use moonfield_ecs::Resource;
 pub use plugin::Plugin;
 pub use plugin_group::{PluginGroup, PluginGroupBuilder};
 
 /// Common imports.
 pub mod prelude {
-    pub use crate::{App, Plugin, PluginGroup, PluginGroupBuilder, Resources};
+    pub use crate::{App, Plugin, PluginGroup, PluginGroupBuilder, Resource};
+    pub use moonfield_ecs::prelude::{
+        Commands, Component, Entity, IntoSystem, Query, System, World,
+    };
 }
 
 #[cfg(test)]
@@ -114,10 +118,7 @@ mod tests {
     fn single_plugin_is_built() {
         let (mut app, events) = make_app();
         app.add_plugins(A);
-        assert_eq!(
-            events.lock().unwrap().as_slice(),
-            &["A::build".to_string()]
-        );
+        assert_eq!(events.lock().unwrap().as_slice(), &["A::build".to_string()]);
     }
 
     #[test]
@@ -154,10 +155,7 @@ mod tests {
     fn plugin_group_disable_prevents_adding() {
         let (mut app, events) = make_app();
         app.add_plugins(MyGroup.disable::<B>());
-        assert_eq!(
-            events.lock().unwrap().as_slice(),
-            &["A::build", "C::build"]
-        );
+        assert_eq!(events.lock().unwrap().as_slice(), &["A::build", "C::build"]);
     }
 
     #[test]
@@ -220,9 +218,6 @@ mod tests {
 
         let (mut app, events) = make_app();
         app.add_plugins((D, D));
-        assert_eq!(
-            events.lock().unwrap().as_slice(),
-            &["D::build", "D::build"]
-        );
+        assert_eq!(events.lock().unwrap().as_slice(), &["D::build", "D::build"]);
     }
 }

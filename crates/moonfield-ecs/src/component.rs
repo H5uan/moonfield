@@ -74,11 +74,17 @@ impl<T: Component> ComponentStorage<T> {
     }
 
     pub fn iter(&self) -> impl Iterator<Item = (Entity, &T)> {
-        self.dense_entities.iter().copied().zip(self.dense_data.iter())
+        self.dense_entities
+            .iter()
+            .copied()
+            .zip(self.dense_data.iter())
     }
 
     pub fn iter_mut(&mut self) -> impl Iterator<Item = (Entity, &mut T)> {
-        self.dense_entities.iter().copied().zip(self.dense_data.iter_mut())
+        self.dense_entities
+            .iter()
+            .copied()
+            .zip(self.dense_data.iter_mut())
     }
 
     pub fn len(&self) -> usize {

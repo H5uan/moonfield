@@ -20,9 +20,7 @@ pub use world::World;
 
 /// Common ECS imports.
 pub mod prelude {
-    pub use crate::{
-        Commands, Component, Entity, IntoSystem, Query, Resource, System, World,
-    };
+    pub use crate::{Commands, Component, Entity, IntoSystem, Query, Resource, System, World};
 }
 
 /// Type-erased resource storage.
@@ -110,7 +108,10 @@ mod tests {
         world.spawn2(Position { x: 3.0, y: 4.0 }, Velocity { x: 0.5, y: 0.5 });
 
         let positions: Vec<_> = world.query::<&Position>().map(|p| p.clone()).collect();
-        assert_eq!(positions, vec![Position { x: 1.0, y: 2.0 }, Position { x: 3.0, y: 4.0 }]);
+        assert_eq!(
+            positions,
+            vec![Position { x: 1.0, y: 2.0 }, Position { x: 3.0, y: 4.0 }]
+        );
     }
 
     #[test]

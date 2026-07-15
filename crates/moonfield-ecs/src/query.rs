@@ -29,10 +29,12 @@ pub trait Query {
 // ------------------------------------------------------------------
 
 impl<T: Component> Query for &T {
-    type Item<'w> = &'w T
+    type Item<'w>
+        = &'w T
     where
         Self: 'w;
-    type Iter<'w> = Box<dyn Iterator<Item = (Entity, &'w T)> + 'w>
+    type Iter<'w>
+        = Box<dyn Iterator<Item = (Entity, &'w T)> + 'w>
     where
         Self: 'w;
 
@@ -59,10 +61,12 @@ impl<T: Component> Query for &T {
 // ------------------------------------------------------------------
 
 impl<T: Component> Query for &mut T {
-    type Item<'w> = &'w mut T
+    type Item<'w>
+        = &'w mut T
     where
         Self: 'w;
-    type Iter<'w> = Box<dyn Iterator<Item = (Entity, &'w mut T)> + 'w>
+    type Iter<'w>
+        = Box<dyn Iterator<Item = (Entity, &'w mut T)> + 'w>
     where
         Self: 'w;
 
@@ -89,10 +93,12 @@ impl<T: Component> Query for &mut T {
 // ------------------------------------------------------------------
 
 impl<A: Component, B: Component> Query for (&A, &B) {
-    type Item<'w> = (&'w A, &'w B)
+    type Item<'w>
+        = (&'w A, &'w B)
     where
         Self: 'w;
-    type Iter<'w> = Box<dyn Iterator<Item = (Entity, (&'w A, &'w B))> + 'w>
+    type Iter<'w>
+        = Box<dyn Iterator<Item = (Entity, (&'w A, &'w B))> + 'w>
     where
         Self: 'w;
 
@@ -100,16 +106,23 @@ impl<A: Component, B: Component> Query for (&A, &B) {
     where
         Self: 'w,
     {
-        match (world.component_storage::<A>(), world.component_storage::<B>()) {
+        match (
+            world.component_storage::<A>(),
+            world.component_storage::<B>(),
+        ) {
             (Some(a), Some(b)) => {
                 if a.len() <= b.len() {
-                    Box::new(a.iter().filter_map(move |(e, a_val)| {
-                        b.get(e).map(|b_val| (e, (a_val, b_val)))
-                    }))
+                    Box::new(
+                        a.iter().filter_map(move |(e, a_val)| {
+                            b.get(e).map(|b_val| (e, (a_val, b_val)))
+                        }),
+                    )
                 } else {
-                    Box::new(b.iter().filter_map(move |(e, b_val)| {
-                        a.get(e).map(|a_val| (e, (a_val, b_val)))
-                    }))
+                    Box::new(
+                        b.iter().filter_map(move |(e, b_val)| {
+                            a.get(e).map(|a_val| (e, (a_val, b_val)))
+                        }),
+                    )
                 }
             }
             _ => Box::new(std::iter::empty()),
@@ -129,10 +142,12 @@ impl<A: Component, B: Component> Query for (&A, &B) {
 // ------------------------------------------------------------------
 
 impl<A: Component, B: Component> Query for (&mut A, &B) {
-    type Item<'w> = (&'w mut A, &'w B)
+    type Item<'w>
+        = (&'w mut A, &'w B)
     where
         Self: 'w;
-    type Iter<'w> = Box<dyn Iterator<Item = (Entity, (&'w mut A, &'w B))> + 'w>
+    type Iter<'w>
+        = Box<dyn Iterator<Item = (Entity, (&'w mut A, &'w B))> + 'w>
     where
         Self: 'w;
 
@@ -169,10 +184,12 @@ impl<A: Component, B: Component> Query for (&mut A, &B) {
 // ------------------------------------------------------------------
 
 impl<A: Component, B: Component> Query for (&mut A, &mut B) {
-    type Item<'w> = (&'w mut A, &'w mut B)
+    type Item<'w>
+        = (&'w mut A, &'w mut B)
     where
         Self: 'w;
-    type Iter<'w> = Box<dyn Iterator<Item = (Entity, (&'w mut A, &'w mut B))> + 'w>
+    type Iter<'w>
+        = Box<dyn Iterator<Item = (Entity, (&'w mut A, &'w mut B))> + 'w>
     where
         Self: 'w;
 
@@ -209,10 +226,12 @@ impl<A: Component, B: Component> Query for (&mut A, &mut B) {
 // ------------------------------------------------------------------
 
 impl<A: Component, B: Component, C: Component> Query for (&A, &B, &C) {
-    type Item<'w> = (&'w A, &'w B, &'w C)
+    type Item<'w>
+        = (&'w A, &'w B, &'w C)
     where
         Self: 'w;
-    type Iter<'w> = Box<dyn Iterator<Item = (Entity, (&'w A, &'w B, &'w C))> + 'w>
+    type Iter<'w>
+        = Box<dyn Iterator<Item = (Entity, (&'w A, &'w B, &'w C))> + 'w>
     where
         Self: 'w;
 
@@ -220,12 +239,15 @@ impl<A: Component, B: Component, C: Component> Query for (&A, &B, &C) {
     where
         Self: 'w,
     {
-        match (world.component_storage::<A>(), world.component_storage::<B>(), world.component_storage::<C>()) {
-            (Some(a), Some(b), Some(c)) => {
-                Box::new(a.iter().filter_map(move |(e, a_val)| {
-                    b.get(e).and_then(|b_val| c.get(e).map(|c_val| (e, (a_val, b_val, c_val))))
-                }))
-            }
+        match (
+            world.component_storage::<A>(),
+            world.component_storage::<B>(),
+            world.component_storage::<C>(),
+        ) {
+            (Some(a), Some(b), Some(c)) => Box::new(a.iter().filter_map(move |(e, a_val)| {
+                b.get(e)
+                    .and_then(|b_val| c.get(e).map(|c_val| (e, (a_val, b_val, c_val))))
+            })),
             _ => Box::new(std::iter::empty()),
         }
     }
@@ -243,10 +265,12 @@ impl<A: Component, B: Component, C: Component> Query for (&A, &B, &C) {
 // ------------------------------------------------------------------
 
 impl<T: Component> Query for Option<&T> {
-    type Item<'w> = Option<&'w T>
+    type Item<'w>
+        = Option<&'w T>
     where
         Self: 'w;
-    type Iter<'w> = Box<dyn Iterator<Item = (Entity, Option<&'w T>)> + 'w>
+    type Iter<'w>
+        = Box<dyn Iterator<Item = (Entity, Option<&'w T>)> + 'w>
     where
         Self: 'w;
 
@@ -273,10 +297,12 @@ impl<T: Component> Query for Option<&T> {
 // ------------------------------------------------------------------
 
 impl Query for Entity {
-    type Item<'w> = Entity
+    type Item<'w>
+        = Entity
     where
         Self: 'w;
-    type Iter<'w> = Box<dyn Iterator<Item = (Entity, Entity)> + 'w>
+    type Iter<'w>
+        = Box<dyn Iterator<Item = (Entity, Entity)> + 'w>
     where
         Self: 'w;
 
