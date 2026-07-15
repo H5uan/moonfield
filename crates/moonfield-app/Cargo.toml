@@ -4,4 +4,5 @@ version.workspace = true
 edition.workspace = true
 
 [dependencies]
+moonfield-base = { workspace = true }
 thiserror = { workspace = true }

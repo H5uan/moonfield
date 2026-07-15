@@ -4,8 +4,8 @@
 //! exercises the Vulkan and Slang backends on startup.
 
 use crate::{Compiler, Device, Instance};
+use moonfield_app::{App, Plugin, Resources};
 use moonfield_base::{error, info};
-use moonfield_core::{App, Plugin, Resources};
 
 /// Runtime plugin.
 pub struct LunarisPlugin;

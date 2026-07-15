@@ -1,0 +1,8 @@
+[package]
+name = "moonfield-winit"
+version.workspace = true
+edition.workspace = true
+
+[dependencies]
+moonfield-app = { workspace = true }
+winit = "0.30.13"

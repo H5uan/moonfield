@@ -8,7 +8,8 @@ name = "moonfield"
 path = "src/main.rs"
 
 [dependencies]
+moonfield-app = { workspace = true }
 moonfield-base = { workspace = true }
-moonfield-core = { workspace = true }
 moonfield-script = { workspace = true }
 moonfield-lunaris = { workspace = true }
+moonfield-winit = { workspace = true }

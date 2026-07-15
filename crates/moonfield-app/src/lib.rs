@@ -11,13 +11,13 @@ mod app;
 mod plugin;
 mod plugin_group;
 
-pub use app::{App, AppError, Plugins};
+pub use app::{App, AppError, Plugins, Resources};
 pub use plugin::Plugin;
 pub use plugin_group::{PluginGroup, PluginGroupBuilder};
 
 /// Common imports.
 pub mod prelude {
-    pub use crate::{App, Plugin, PluginGroup, PluginGroupBuilder};
+    pub use crate::{App, Plugin, PluginGroup, PluginGroupBuilder, Resources};
 }
 
 #[cfg(test)]

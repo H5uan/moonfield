@@ -12,6 +12,33 @@ pub enum AppError {
     DuplicatePlugin { plugin_name: String },
 }
 
+/// A type-erased resource container.
+#[derive(Default)]
+pub struct Resources {
+    data: HashMap<TypeId, Box<dyn Any>>,
+}
+
+impl Resources {
+    /// Insert a resource.
+    pub fn insert<R: 'static>(&mut self, resource: R) {
+        self.data.insert(TypeId::of::<R>(), Box::new(resource));
+    }
+
+    /// Get a reference to a resource.
+    pub fn get<R: 'static>(&self) -> Option<&R> {
+        self.data
+            .get(&TypeId::of::<R>())
+            .and_then(|boxed| boxed.downcast_ref::<R>())
+    }
+
+    /// Get a mutable reference to a resource.
+    pub fn get_mut<R: 'static>(&mut self) -> Option<&mut R> {
+        self.data
+            .get_mut(&TypeId::of::<R>())
+            .and_then(|boxed| boxed.downcast_mut::<R>())
+    }
+}
+
 /// The main application container.
 ///
 /// An [`App`] holds registered plugins and a runner. Plugins are built when
@@ -21,7 +48,11 @@ pub struct App {
     plugins: Vec<Box<dyn Plugin>>,
     plugin_names: HashSet<String>,
     runner: Box<dyn FnMut(&mut App)>,
-    resources: HashMap<TypeId, Box<dyn Any>>,
+    resources: Resources,
+    startup_fns: Vec<Box<dyn FnOnce(&mut Resources)>>,
+    shutdown_fns: Vec<Box<dyn FnOnce(&mut Resources)>>,
+    update_fns: Vec<Box<dyn FnMut(&mut Resources) -> bool>>,
+    initialized: bool,
 }
 
 impl Default for App {
@@ -37,7 +68,11 @@ impl App {
             plugins: Vec::new(),
             plugin_names: HashSet::new(),
             runner: Box::new(|_| {}),
-            resources: HashMap::new(),
+            resources: Resources::default(),
+            startup_fns: Vec::new(),
+            shutdown_fns: Vec::new(),
+            update_fns: Vec::new(),
+            initialized: false,
         }
     }
 
@@ -50,9 +85,15 @@ impl App {
         self
     }
 
+    /// Register a single plugin (convenience wrapper).
+    pub fn add_plugin<P: Plugin>(&mut self, plugin: P) -> &mut Self {
+        self.add_plugins(plugin);
+        self
+    }
+
     /// Registers a boxed plugin, returning an error if a unique plugin with
     /// the same name was already added.
-    pub(crate) fn add_boxed_plugin(
+    pub fn add_boxed_plugin(
         &mut self,
         plugin: Box<dyn Plugin>,
     ) -> Result<(), AppError> {
@@ -66,23 +107,29 @@ impl App {
     }
 
     /// Inserts a resource into the app.
-    pub fn insert_resource<R: Any>(&mut self, resource: R) -> &mut Self {
-        self.resources.insert(TypeId::of::<R>(), Box::new(resource));
+    pub fn insert_resource<R: 'static>(&mut self, resource: R) -> &mut Self {
+        self.resources.insert(resource);
         self
     }
 
     /// Gets an immutable reference to a previously inserted resource.
-    pub fn get_resource<R: Any>(&self) -> Option<&R> {
-        self.resources
-            .get(&TypeId::of::<R>())
-            .and_then(|r| r.downcast_ref::<R>())
+    pub fn get_resource<R: 'static>(&self) -> Option<&R> {
+        self.resources.get()
     }
 
     /// Gets a mutable reference to a previously inserted resource.
-    pub fn get_resource_mut<R: Any>(&mut self) -> Option<&mut R> {
-        self.resources
-            .get_mut(&TypeId::of::<R>())
-            .and_then(|r| r.downcast_mut::<R>())
+    pub fn get_resource_mut<R: 'static>(&mut self) -> Option<&mut R> {
+        self.resources.get_mut()
+    }
+
+    /// Access resources immutably.
+    pub fn resources(&self) -> &Resources {
+        &self.resources
+    }
+
+    /// Access resources mutably.
+    pub fn resources_mut(&mut self) -> &mut Resources {
+        &mut self.resources
     }
 
     /// Sets the runner function that will be invoked by [`App::run`].
@@ -94,18 +141,90 @@ impl App {
         self
     }
 
+    /// Register a startup callback.
+    pub fn add_startup_system<F>(&mut self, f: F) -> &mut Self
+    where
+        F: FnOnce(&mut Resources) + 'static,
+    {
+        self.startup_fns.push(Box::new(f));
+        self
+    }
+
+    /// Register a shutdown callback.
+    pub fn add_shutdown_system<F>(&mut self, f: F) -> &mut Self
+    where
+        F: FnOnce(&mut Resources) + 'static,
+    {
+        self.shutdown_fns.push(Box::new(f));
+        self
+    }
+
+    /// Register an update callback. Returning `false` ends the loop.
+    pub fn add_update_system<F>(&mut self, f: F) -> &mut Self
+    where
+        F: FnMut(&mut Resources) -> bool + 'static,
+    {
+        self.update_fns.push(Box::new(f));
+        self
+    }
+
+    /// Run startup systems.
+    pub fn startup(&mut self) {
+        moonfield_base::initialize();
+        self.initialized = true;
+        for f in self.startup_fns.drain(..) {
+            f(&mut self.resources);
+        }
+    }
+
+    /// Run a single update tick. Returns `false` if any system returned `false`.
+    ///
+    /// This is the per-frame counterpart of [`run_updates`]; it runs startup
+    /// once on the first call, then invokes each update system exactly once.
+    pub fn update(&mut self) -> bool {
+        if !self.initialized {
+            self.startup();
+        }
+        for f in &mut self.update_fns {
+            if !f(&mut self.resources) {
+                return false;
+            }
+        }
+        true
+    }
+
+    /// Run the update loop until a system returns `false` or no systems remain.
+    pub fn run_updates(&mut self) {
+        loop {
+            if !self.update() {
+                break;
+            }
+            if self.update_fns.is_empty() {
+                break;
+            }
+        }
+    }
+
+    /// Run shutdown systems.
+    pub fn shutdown(&mut self) {
+        if !self.initialized {
+            return;
+        }
+        for f in self.shutdown_fns.drain(..) {
+            f(&mut self.resources);
+        }
+        moonfield_base::shutdown();
+        self.initialized = false;
+    }
+
     /// Finishes all plugins, runs the runner, and then cleans up all plugins.
     pub fn run(&mut self) {
-        // Temporarily move the plugin registry out so we can call lifecycle
-        // hooks while holding `&mut self`.
         let plugins = std::mem::take(&mut self.plugins);
 
         for plugin in &plugins {
             plugin.finish(self);
         }
 
-        // Temporarily swap the runner out so we can call it with `&mut self`
-        // without borrowing the runner field at the same time.
         let mut runner = std::mem::replace(&mut self.runner, Box::new(|_| {}));
         runner(self);
         self.runner = runner;
@@ -115,6 +234,14 @@ impl App {
         }
 
         self.plugins = plugins;
+    }
+}
+
+impl Drop for App {
+    fn drop(&mut self) {
+        if self.initialized {
+            self.shutdown();
+        }
     }
 }
 

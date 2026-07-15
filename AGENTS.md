@@ -9,12 +9,12 @@ The workspace is a Cargo-managed monorepo under `crates/`:
 ```
 crates/
   moonfield/          # Binary crate — the main executable entry point (src/main.rs)
+  moonfield-app/      # Bevy-style App/Plugin framework (Plugin, PluginGroup, App, Resources)
   moonfield-base/     # Shared base types and utilities
-  moonfield-core/     # Core domain abstractions
   moonfield-lunaris/  # Vulkan RHI (ash-based): device, swapchain, pipeline, shaders, headless recording
-  moonfield-runtime/  # Scripting runtime with v8 and QuickJS backends, hot reload (src/script/)
+  moonfield-script/   # Scripting runtime with v8 and QuickJS backends, hot reload (src/script/)
+  moonfield-winit/    # Windowing plugin (winit), provides WinitPlugin + WinitWindow resource
 scripts/              # TypeScript helper scripts (e.g. record_frame.ts)
-.cargo/config.toml    # Cargo network and build configuration
 ```
 
 ## Build, Test, and Development Commands

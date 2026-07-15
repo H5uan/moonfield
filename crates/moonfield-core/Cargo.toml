@@ -1,7 +1,0 @@
-[package]
-name = "moonfield-core"
-version.workspace = true
-edition.workspace = true
-
-[dependencies]
-moonfield-base = { workspace = true }

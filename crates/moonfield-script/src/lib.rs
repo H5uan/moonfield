@@ -7,8 +7,8 @@
 
 pub mod script;
 
+use moonfield_app::{App, Plugin, Resources};
 use moonfield_base::info;
-use moonfield_core::{App, Plugin, Resources};
 #[cfg(feature = "v8-backend")]
 use script::{ScriptApi, ScriptRuntime, V8Runtime as Runtime};
 
