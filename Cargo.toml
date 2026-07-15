@@ -12,5 +12,6 @@ moonfield-base = { path = "crates/moonfield-base" }
 moonfield-script = { path = "crates/moonfield-script" }
 moonfield-script-macros = { path = "crates/moonfield-script-macros" }
 moonfield-lunaris = { path = "crates/moonfield-lunaris" }
+moonfield-window = { path = "crates/moonfield-window" }
 moonfield-winit = { path = "crates/moonfield-winit" }
 thiserror = "2.0.18"

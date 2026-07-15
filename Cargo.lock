@@ -1397,10 +1397,20 @@ dependencies = [
 ]
 
 [[package]]
+name = "moonfield-window"
+version = "0.1.0"
+dependencies = [
+ "moonfield-app",
+ "raw-window-handle",
+]
+
+[[package]]
 name = "moonfield-winit"
 version = "0.1.0"
 dependencies = [
  "moonfield-app",
+ "moonfield-window",
+ "raw-window-handle",
  "winit",
 ]
 

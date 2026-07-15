@@ -13,7 +13,8 @@ crates/
   moonfield-base/     # Shared base types and utilities
   moonfield-lunaris/  # Vulkan RHI (ash-based): device, swapchain, pipeline, shaders, headless recording
   moonfield-script/   # Scripting runtime with v8 and QuickJS backends, hot reload (src/script/)
-  moonfield-winit/    # Windowing plugin (winit), provides WinitPlugin + WinitWindow resource
+  moonfield-window/   # Abstract windowing types (Window resource, RawHandleWrapper), no backend deps
+  moonfield-winit/    # Windowing backend (winit), bridges winit Window → moonfield-window resources
 scripts/              # TypeScript helper scripts (e.g. record_frame.ts)
 ```
 

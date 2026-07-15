@@ -4,6 +4,8 @@
 //! loop, driving the application's update cycle.
 
 use moonfield_app::{App, Plugin};
+use moonfield_window::RawHandleWrapper;
+use raw_window_handle::{HasDisplayHandle, HasWindowHandle};
 use std::sync::Arc;
 use winit::{
     application::ApplicationHandler,
@@ -14,9 +16,10 @@ use winit::{
 
 /// Plugin that creates a winit window and runs the winit event loop.
 ///
-/// The plugin stores the window as a [`WinitWindow`] resource and replaces the
-/// app's runner with a winit-based event loop. On each `about_to_wait` event
-/// the app's update systems are invoked.
+/// The plugin stores the window as a [`WinitWindow`] resource, creates the
+/// abstract [`moonfield_window::Window`] resource, and replaces the app's
+/// runner with a winit-based event loop. On each `about_to_wait` event the
+/// app's update systems are invoked.
 ///
 /// # Example
 ///
@@ -65,10 +68,10 @@ impl Default for WinitPlugin {
     }
 }
 
-/// A resource holding the winit [`Window`].
+/// A resource holding the raw winit [`Window`].
 ///
 /// Other plugins (e.g. `moonfield-lunaris`) can access this resource to create
-/// a Vulkan surface from the window handle.
+/// a Vulkan surface from the window handle via `raw-window-handle`.
 #[derive(Clone)]
 pub struct WinitWindow(pub Arc<Window>);
 
@@ -148,7 +151,33 @@ impl ApplicationHandler for WinitHandler<'_> {
         match event_loop.create_window(attrs) {
             Ok(window) => {
                 let window = Arc::new(window);
+
+                // — Store the raw winit window for direct access (e.g. surface creation) —
                 self.app.insert_resource(WinitWindow(window.clone()));
+
+                // — Create the abstract moonfield Window resource —
+                self.app.insert_resource(moonfield_window::Window {
+                    title: self.config.title.clone(),
+                    width: self.config.width,
+                    height: self.config.height,
+                });
+
+                // — Create raw handle wrapper for surface creation —
+                match (
+                    window.as_ref().window_handle(),
+                    window.as_ref().display_handle(),
+                ) {
+                    (Ok(w_handle), Ok(d_handle)) => {
+                        self.app.insert_resource(RawHandleWrapper {
+                            window_handle: w_handle.into(),
+                            display_handle: d_handle.into(),
+                        });
+                    }
+                    _ => {
+                        eprintln!("[moonfield-winit] failed to get window handles");
+                    }
+                }
+
                 self.window = Some(window);
             }
             Err(e) => {
@@ -169,21 +198,37 @@ impl ApplicationHandler for WinitHandler<'_> {
                 event_loop.exit();
             }
             winit::event::WindowEvent::Resized(size) => {
-                let _ = size;
-                // TODO: forward resize to swapchain / renderer
+                // Update the abstract Window resource with the new size.
+                if let Some(win) = self.app.get_resource_mut::<moonfield_window::Window>() {
+                    win.width = size.width;
+                    win.height = size.height;
+                }
+                // Rebuild raw handles when the window is resized (the handles
+                // themselves are still valid, but the size is updated above).
+                if let Some(window) = &self.window {
+                    match (
+                        window.as_ref().window_handle(),
+                        window.as_ref().display_handle(),
+                    ) {
+                        (Ok(w_handle), Ok(d_handle)) => {
+                            self.app.insert_resource(RawHandleWrapper {
+                                window_handle: w_handle.into(),
+                                display_handle: d_handle.into(),
+                            });
+                        }
+                        _ => {}
+                    }
+                }
             }
             _ => {}
         }
     }
 
     fn about_to_wait(&mut self, event_loop: &ActiveEventLoop) {
-        // Apply control-flow preference each cycle.
         match self.config.wait_mode {
             WaitMode::Poll => event_loop.set_control_flow(ControlFlow::Poll),
             WaitMode::Wait => event_loop.set_control_flow(ControlFlow::Wait),
         }
-        // Run exactly one frame per event-loop tick, matching Bevy's
-        // App::update() semantics.
         self.app.update();
     }
 }

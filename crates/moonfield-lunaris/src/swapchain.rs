@@ -4,7 +4,7 @@ use crate::device::Device;
 use crate::error::{Error, Result};
 use crate::instance::Instance;
 use ash::vk;
-use raw_window_handle::{DisplayHandle, WindowHandle};
+use raw_window_handle::{DisplayHandle, HasDisplayHandle, HasWindowHandle, WindowHandle};
 
 /// A window surface.
 pub struct Surface {
@@ -40,6 +40,27 @@ impl Surface {
         })
     }
 
+    /// Create a surface from a type that implements [`HasWindowHandle`] and
+    /// [`HasDisplayHandle`] (e.g. `winit::window::Window`).
+    ///
+    /// This is a safe wrapper around [`from_handles`].
+    pub fn from_window(
+        entry: &ash::Entry,
+        instance: &Instance,
+        window: &(impl HasWindowHandle + HasDisplayHandle),
+    ) -> Result<Self> {
+        let window_handle = window
+            .window_handle()
+            .map_err(|e| Error::Backend(format!("failed to get window handle: {e}")))?;
+        let display_handle = window
+            .display_handle()
+            .map_err(|e| Error::Backend(format!("failed to get display handle: {e}")))?;
+
+        // SAFETY: the handles are valid for the lifetime of the window, which
+        // is guaranteed by the caller for the returned Surface.
+        unsafe { Self::from_handles(entry, instance, window_handle, display_handle) }
+    }
+
     /// Access the raw surface handle.
     pub fn raw(&self) -> vk::SurfaceKHR {
         self.surface
@@ -53,12 +74,17 @@ impl Surface {
         unsafe {
             self.surface_instance
                 .get_physical_device_surface_capabilities(physical_device, self.surface)
-                .map_err(|e| Error::Backend(format!("failed to query surface capabilities: {:?}", e)))
+                .map_err(|e| {
+                    Error::Backend(format!("failed to query surface capabilities: {:?}", e))
+                })
         }
     }
 
     /// Query supported surface formats.
-    pub fn formats(&self, physical_device: vk::PhysicalDevice) -> Result<Vec<vk::SurfaceFormatKHR>> {
+    pub fn formats(
+        &self,
+        physical_device: vk::PhysicalDevice,
+    ) -> Result<Vec<vk::SurfaceFormatKHR>> {
         unsafe {
             self.surface_instance
                 .get_physical_device_surface_formats(physical_device, self.surface)
@@ -134,10 +160,14 @@ impl Swapchain {
             capabilities.current_extent
         } else {
             vk::Extent2D {
-                width: window_size[0]
-                    .clamp(capabilities.min_image_extent.width, capabilities.max_image_extent.width),
-                height: window_size[1]
-                    .clamp(capabilities.min_image_extent.height, capabilities.max_image_extent.height),
+                width: window_size[0].clamp(
+                    capabilities.min_image_extent.width,
+                    capabilities.max_image_extent.width,
+                ),
+                height: window_size[1].clamp(
+                    capabilities.min_image_extent.height,
+                    capabilities.max_image_extent.height,
+                ),
             }
         };
 
@@ -199,7 +229,9 @@ impl Swapchain {
                     device
                         .raw()
                         .create_image_view(&create_info, None)
-                        .map_err(|e| Error::Backend(format!("failed to create image view: {:?}", e)))
+                        .map_err(|e| {
+                            Error::Backend(format!("failed to create image view: {:?}", e))
+                        })
                 }
             })
             .collect();
