@@ -4,7 +4,7 @@ use std::collections::HashMap;
 
 mod commands;
 mod component;
-mod entity;
+mod entities;
 mod query;
 mod resource;
 mod system;
@@ -12,7 +12,7 @@ mod world;
 
 pub use commands::{CommandQueue, Commands};
 pub use component::{Component, ComponentStorage};
-pub use entity::Entity;
+pub use entities::Entity;
 pub use query::Query;
 pub use resource::Resource;
 pub use system::{IntoSystem, System};

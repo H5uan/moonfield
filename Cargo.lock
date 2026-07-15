@@ -1349,6 +1349,7 @@ name = "moonfield-ecs"
 version = "0.1.0"
 dependencies = [
  "moonfield-base",
+ "serde",
 ]
 
 [[package]]
@@ -1387,7 +1388,6 @@ dependencies = [
  "moonfield-render",
  "moonfield-script-macros",
  "notify",
- "regex",
  "rquickjs",
  "serde_json",
  "swc_common",

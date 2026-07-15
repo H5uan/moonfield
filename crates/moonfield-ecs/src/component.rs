@@ -31,7 +31,7 @@ impl<T: Component> Default for ComponentStorage<T> {
 
 impl<T: Component> ComponentStorage<T> {
     pub fn insert(&mut self, entity: Entity, value: T) {
-        let raw = entity.id();
+        let raw = entity.id() as u64;
         if let Some(&idx) = self.entity_indices.get(&raw) {
             self.dense_data[idx] = value;
         } else {
@@ -43,7 +43,7 @@ impl<T: Component> ComponentStorage<T> {
     }
 
     pub fn remove(&mut self, entity: Entity) -> Option<T> {
-        let raw = entity.id();
+        let raw = entity.id() as u64;
         let idx = self.entity_indices.remove(&raw)?;
         let last = self.dense_data.len() - 1;
 
@@ -52,7 +52,7 @@ impl<T: Component> ComponentStorage<T> {
             self.dense_data.swap(idx, last);
             self.dense_entities.swap(idx, last);
             let moved_entity = self.dense_entities[idx];
-            self.entity_indices.insert(moved_entity.id(), idx);
+            self.entity_indices.insert(moved_entity.id() as u64, idx);
         }
 
         self.dense_entities.pop();
@@ -60,17 +60,17 @@ impl<T: Component> ComponentStorage<T> {
     }
 
     pub fn get(&self, entity: Entity) -> Option<&T> {
-        let idx = *self.entity_indices.get(&entity.id())?;
+        let idx = *self.entity_indices.get(&(entity.id() as u64))?;
         self.dense_data.get(idx)
     }
 
     pub fn get_mut(&mut self, entity: Entity) -> Option<&mut T> {
-        let idx = *self.entity_indices.get(&entity.id())?;
+        let idx = *self.entity_indices.get(&(entity.id() as u64))?;
         self.dense_data.get_mut(idx)
     }
 
     pub fn contains(&self, entity: Entity) -> bool {
-        self.entity_indices.contains_key(&entity.id())
+        self.entity_indices.contains_key(&(entity.id() as u64))
     }
 
     pub fn iter(&self) -> impl Iterator<Item = (Entity, &T)> {

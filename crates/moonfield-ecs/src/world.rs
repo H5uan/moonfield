@@ -3,7 +3,7 @@ use std::collections::HashMap;
 
 use crate::{
     component::{Component, ComponentStorage, ErasedStorage},
-    entity::{Entity, EntityId},
+    entities::{Entity, EntityId},
     resource::Resource,
     Commands, EntityChanges, Query, Resources,
 };

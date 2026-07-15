@@ -5,3 +5,4 @@ edition.workspace = true
 
 [dependencies]
 moonfield-base = { workspace = true }
+serde = "1.0.228"
