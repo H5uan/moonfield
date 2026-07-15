@@ -9,6 +9,7 @@ edition = "2021"
 [workspace.dependencies]
 moonfield-app = { path = "crates/moonfield-app" }
 moonfield-base = { path = "crates/moonfield-base" }
+moonfield-ecs = { path = "crates/moonfield-ecs" }
 moonfield-script = { path = "crates/moonfield-script" }
 moonfield-script-macros = { path = "crates/moonfield-script-macros" }
 moonfield-lunaris = { path = "crates/moonfield-lunaris" }

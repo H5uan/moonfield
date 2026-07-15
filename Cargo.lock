@@ -1353,6 +1353,13 @@ name = "moonfield-base"
 version = "0.1.0"
 
 [[package]]
+name = "moonfield-ecs"
+version = "0.1.0"
+dependencies = [
+ "moonfield-base",
+]
+
+[[package]]
 name = "moonfield-lunaris"
 version = "0.1.0"
 dependencies = [
