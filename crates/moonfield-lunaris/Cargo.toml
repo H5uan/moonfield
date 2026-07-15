@@ -6,6 +6,8 @@ edition.workspace = true
 [dependencies]
 moonfield-app = { workspace = true }
 moonfield-base = { workspace = true }
+moonfield-ecs = { workspace = true }
+moonfield-log = { workspace = true }
 ash = "0.38.0"
 ash-window = "0.13.0"
 gpu-allocator = "0.28.0"

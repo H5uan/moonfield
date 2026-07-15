@@ -1344,6 +1344,7 @@ version = "0.1.0"
 dependencies = [
  "moonfield-app",
  "moonfield-base",
+ "moonfield-log",
  "moonfield-lunaris",
  "moonfield-script",
  "moonfield-winit",
@@ -1390,6 +1391,7 @@ dependencies = [
  "moonfield-app",
  "moonfield-base",
  "moonfield-ecs",
+ "moonfield-log",
  "raw-window-handle",
  "shader-slang",
 ]
@@ -1400,6 +1402,7 @@ version = "0.1.0"
 dependencies = [
  "moonfield-app",
  "moonfield-base",
+ "moonfield-log",
  "moonfield-lunaris",
  "moonfield-script-macros",
  "notify",
@@ -1437,6 +1440,7 @@ name = "moonfield-winit"
 version = "0.1.0"
 dependencies = [
  "moonfield-app",
+ "moonfield-log",
  "moonfield-window",
  "raw-window-handle",
  "winit",

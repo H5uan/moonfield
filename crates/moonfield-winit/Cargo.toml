@@ -5,6 +5,7 @@ edition.workspace = true
 
 [dependencies]
 moonfield-app = { workspace = true }
+moonfield-log = { workspace = true }
 moonfield-window = { workspace = true }
 raw-window-handle = "0.6.2"
 winit = "0.30.13"

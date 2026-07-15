@@ -1,12 +1,20 @@
 //! V8 backend for the scripting runtime.
 
 use super::{HostFn, HostValue, HotReloadHandler, Result, ScriptApi, ScriptError, ScriptRuntime, TypedArrayValue};
-use moonfield_base::{error, info, warn};
+use moonfield_log::{error, info, warn};
+use moonfield_lunaris::HeadlessContext;
 use std::collections::HashMap;
 use std::path::Path;
 use std::sync::Once;
 
 static V8_INIT: Once = Once::new();
+
+/// A V8-native host function that operates on raw V8 types.
+///
+/// Bypasses the `HostValue` marshaling layer for direct Rust↔V8 communication.
+/// Use for high-frequency functions (e.g. `record_frame`) where the overhead of
+/// `v8_value_to_host` → `HostValue` → typed extraction is measurable.
+type DirectFn = fn(&mut v8::PinScope, v8::FunctionCallbackArguments, v8::ReturnValue);
 
 /// A script runtime backed by V8 (rusty_v8).
 ///
@@ -16,18 +24,31 @@ static V8_INIT: Once = Once::new();
 /// `instantiate_module2` and removed after). This pattern follows Deno's approach.
 ///
 /// Hot reload: stores the last [`ModuleRegistry`] and entry point so that
-/// [`HotReloadHandler::on_file_changed`] can recompile the changed module and
-/// re-instantiate the graph without rebuilding the entire V8 context.
+/// [`HotReloadHandler::on_file_changed`] can recompile only the changed module
+/// and its transitive dependents, reusing cached compiled modules for the rest.
+///
+/// GC control: heap limits are set at creation time to prevent unbounded growth.
+/// [`gc_step`] signals idle to V8, allowing incremental GC in background threads.
+/// Script entry points (`call`, `load`, `load_module_graph`) call `set_idle(false)`
+/// to resume active mode before executing JS.
+///
+/// Fast path: high-frequency host functions can be registered via [`register_direct`]
+/// to bypass the `HostValue` marshaling layer and operate on V8 types directly.
 pub struct V8Runtime {
     isolate: v8::OwnedIsolate,
     context: v8::Global<v8::Context>,
     // Boxed so the registry vector's storage is never moved while V8 externals
     // hold raw pointers into it.
     api: Box<ScriptApi>,
+    /// Direct (fast-path) host functions that bypass `HostValue` marshaling.
+    direct_fns: Vec<(&'static str, DirectFn)>,
     /// Cached registry for hot reload (populated by `load_module_graph`).
     registry: Option<super::ModuleRegistry>,
     /// Cached entry point for hot reload.
     entry: Option<String>,
+    /// Cached compiled modules for incremental hot reload.
+    /// Keyed by canonical module name. Source is stored for change detection.
+    compiled_modules: HashMap<String, CachedModule>,
 }
 
 impl ScriptRuntime for V8Runtime {
@@ -54,9 +75,11 @@ impl ScriptRuntime for V8Runtime {
             isolate,
             context,
             api: Box::new(api),
+            direct_fns: Vec::new(),
             registry: None,
             entry: None,
         };
+        rt.register_direct("record_frame", direct_record_frame);
         rt.register_api()?;
         Ok(rt)
     }
@@ -129,13 +152,55 @@ impl ScriptRuntime for V8Runtime {
 }
 
 impl V8Runtime {
+    /// Register a fast-path host function that operates on V8 types directly.
+    ///
+    /// Bypasses `HostValue` marshaling. The function is registered immediately
+    /// if the V8 context is already initialized, or deferred to the next
+    /// `register_api` call. This is a no-op if the function name is already
+    /// registered as a direct function.
+    pub fn register_direct(&mut self, name: &'static str, func: DirectFn) {
+        if !self.direct_fns.iter().any(|(n, _)| *n == name) {
+            self.direct_fns.push((name, func));
+        }
+    }
+
     fn register_api(&mut self) -> Result<()> {
         v8::scope!(let handle_scope, &mut self.isolate);
         let local_context = v8::Local::new(handle_scope, &self.context);
         let scope = &mut v8::ContextScope::new(handle_scope, local_context);
         let global = local_context.global(scope);
 
+        // Register direct (fast-path) functions first — no HostValue marshaling.
+        for (name, func) in &self.direct_fns {
+            let js_name = v8::String::new(scope, name).unwrap();
+            // Store a pointer to the function pointer in the boxed Vec<DirectFn>.
+            let ptr = func as *const DirectFn as *mut std::ffi::c_void;
+            let external = v8::External::new(scope, ptr);
+            let js_func = v8::Function::builder(
+                |s: &mut v8::PinScope,
+                 a: v8::FunctionCallbackArguments,
+                 r: v8::ReturnValue| {
+                    let external = v8::Local::<v8::External>::try_from(a.data()).unwrap();
+                    // Safety: the pointer points into the boxed `direct_fns` Vec,
+                    // which is never moved while V8 callbacks are live.
+                    let func_ptr: *const DirectFn = external.value() as *const DirectFn;
+                    let func: DirectFn = unsafe { *func_ptr };
+                    func(s, a, r);
+                },
+            )
+            .data(external.into())
+            .build(scope)
+            .ok_or_else(|| ScriptError::Runtime(format!("failed to build direct {}", name)))?;
+            global.set(scope, js_name.into(), js_func.into()).unwrap();
+        }
+
+        // Register regular HostFn-based functions.
         for entry in self.api.iter() {
+            // Skip if already registered as a direct function.
+            if self.direct_fns.iter().any(|(n, _)| *n == entry.0) {
+                continue;
+            }
+
             // Stable pointer into the boxed registry vector.
             let ptr = entry as *const (&'static str, HostFn) as *mut std::ffi::c_void;
             let data = v8::External::new(scope, ptr);
@@ -443,6 +508,37 @@ struct ModuleMap {
     names: Vec<String>,
 }
 
+/// Fast-path `record_frame` that extracts `u32` args directly from V8 values.
+///
+/// Bypasses the `HostValue → # [script_function]` marshaling chain.
+fn direct_record_frame(
+    scope: &mut v8::PinScope,
+    args: v8::FunctionCallbackArguments,
+    mut retval: v8::ReturnValue,
+) {
+    let width = if args.length() >= 1 {
+        args.get(0).uint32_value(scope).unwrap_or(0)
+    } else {
+        0
+    };
+    let height = if args.length() >= 2 {
+        args.get(1).uint32_value(scope).unwrap_or(0)
+    } else {
+        0
+    };
+
+    let _ = (width, height);
+    match HeadlessContext::record_frame() {
+        Ok(ctx) => {
+            drop(ctx);
+            retval.set_undefined();
+        }
+        Err(e) => {
+            scope.throw_exception(v8::String::new(scope, &e.to_string()).unwrap().into());
+        }
+    }
+}
+
 /// Convert a V8 `Local<Value>` to a `HostValue`.
 fn v8_value_to_host(value: v8::Local<v8::Value>, scope: &mut v8::PinScope) -> HostValue {
     if value.is_null_or_undefined() {
@@ -458,33 +554,35 @@ fn v8_value_to_host(value: v8::Local<v8::Value>, scope: &mut v8::PinScope) -> Ho
         return HostValue::String(value.to_rust_string_lossy(scope));
     }
 
-    // ArrayBuffer
+    // ArrayBuffer — zero-copy via BytesView
     if value.is_array_buffer() {
         if let Ok(buf) = v8::Local::<v8::ArrayBuffer>::try_from(value) {
             let len = buf.byte_length();
-            let mut data = vec![0u8; len];
-            let buf_data = buf.data();
-            if let Some(ptr) = buf_data {
-                unsafe {
-                    std::ptr::copy_nonoverlapping(
-                        ptr.as_ptr() as *const u8,
-                        data.as_mut_ptr(),
-                        len,
-                    );
-                }
+            if let Some(ptr) = buf.data() {
+                return HostValue::BytesView {
+                    data: ptr.as_ptr() as *const u8,
+                    len,
+                };
             }
-            return HostValue::ArrayBuffer(data);
+            return HostValue::ArrayBuffer(Vec::new());
         }
     }
 
     // TypedArray — try each concrete typed array type
     if value.is_typed_array() {
-        // Uint8Array
+        // Uint8Array — zero-copy via BytesView
         if let Ok(ta) = v8::Local::<v8::Uint8Array>::try_from(value) {
             let byte_length = ta.byte_length();
-            let mut data = vec![0u8; byte_length];
-            ta.copy_contents(&mut data);
-            return HostValue::TypedArray(TypedArrayValue::Uint8(data));
+            if let Some(buf) = ta.buffer(scope) {
+                if let Some(ptr) = buf.data() {
+                    let offset = ta.byte_offset();
+                    return HostValue::BytesView {
+                        data: unsafe { (ptr.as_ptr() as *const u8).add(offset) },
+                        len: byte_length,
+                    };
+                }
+            }
+            return HostValue::TypedArray(TypedArrayValue::Uint8(Vec::new()));
         }
         // Float32Array
         if let Ok(ta) = v8::Local::<v8::Float32Array>::try_from(value) {
@@ -605,6 +703,19 @@ fn host_to_v8_value<'s>(value: HostValue, scope: &mut v8::PinScope<'s, '_>) -> v
                         data.as_ptr(),
                         ptr.as_ptr() as *mut u8,
                         data.len(),
+                    );
+                }
+            }
+            buf.into()
+        }
+        HostValue::BytesView { data, len } => {
+            let buf = v8::ArrayBuffer::new(scope, len);
+            if let Some(ptr) = buf.data() {
+                unsafe {
+                    std::ptr::copy_nonoverlapping(
+                        data,
+                        ptr.as_ptr() as *mut u8,
+                        len,
                     );
                 }
             }

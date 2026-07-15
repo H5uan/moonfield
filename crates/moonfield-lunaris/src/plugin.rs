@@ -4,8 +4,9 @@
 //! exercises the Vulkan and Slang backends on startup.
 
 use crate::{Compiler, Device, Instance};
-use moonfield_app::{App, Plugin, Resources};
-use moonfield_base::{error, info};
+use moonfield_app::{App, Plugin};
+use moonfield_log::{error, info};
+use moonfield_ecs::World;
 
 /// Runtime plugin.
 pub struct LunarisPlugin;
@@ -16,11 +17,11 @@ impl Plugin for LunarisPlugin {
     }
 
     fn build(&self, app: &mut App) {
-        app.add_startup_system(|_res: &mut Resources| {
+        app.add_startup_system(|_world: &mut World| {
             init_vulkan();
             compile_test_shader();
         });
-        app.add_shutdown_system(|_res: &mut Resources| {
+        app.add_shutdown_system(|_world: &mut World| {
             info!("Lunaris shutdown system");
         });
     }

@@ -4,6 +4,7 @@
 //! loop, driving the application's update cycle.
 
 use moonfield_app::{App, Plugin};
+use moonfield_log::error;
 use moonfield_window::RawHandleWrapper;
 use raw_window_handle::{HasDisplayHandle, HasWindowHandle};
 use std::sync::Arc;
@@ -131,7 +132,7 @@ pub fn winit_runner(app: &mut App) {
     };
 
     if let Err(e) = event_loop.run_app(&mut handler) {
-        eprintln!("[moonfield-winit] event loop exited with error: {e}");
+        error!("event loop exited with error: {e}");
     }
 }
 
@@ -174,14 +175,14 @@ impl ApplicationHandler for WinitHandler<'_> {
                         });
                     }
                     _ => {
-                        eprintln!("[moonfield-winit] failed to get window handles");
+                        error!("failed to get window handles");
                     }
                 }
 
                 self.window = Some(window);
             }
             Err(e) => {
-                eprintln!("[moonfield-winit] failed to create window: {e}");
+                error!("failed to create window: {e}");
                 event_loop.exit();
             }
         }
@@ -199,7 +200,7 @@ impl ApplicationHandler for WinitHandler<'_> {
             }
             winit::event::WindowEvent::Resized(size) => {
                 // Update the abstract Window resource with the new size.
-                if let Some(win) = self.app.get_resource_mut::<moonfield_window::Window>() {
+                if let Some(mut win) = self.app.get_resource_mut::<moonfield_window::Window>() {
                     win.width = size.width;
                     win.height = size.height;
                 }

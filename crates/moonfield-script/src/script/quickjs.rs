@@ -1,7 +1,7 @@
 //! QuickJS backend for the scripting runtime.
 
 use super::{HostValue, Result, ScriptApi, ScriptError, ScriptRuntime};
-use moonfield_base::{error, info, warn};
+use moonfield_log::{error, info, warn};
 use rquickjs::function::{Func, Rest};
 use rquickjs::{CaughtError, Context, Runtime, Value};
 
@@ -91,7 +91,7 @@ impl QuickJsRuntime {
                                 host_args.push(quickjs_value_to_host(arg));
                             }
                             if let Err(e) = (wrapper.func)(&host_args) {
-                                eprintln!("{} error: {}", wrapper.name, e);
+                                error!("{} error: {}", wrapper.name, e);
                             }
                             Ok(())
                         }),
