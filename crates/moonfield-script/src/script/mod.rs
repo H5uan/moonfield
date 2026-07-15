@@ -29,6 +29,7 @@ pub use api::HostFn;
 pub use api::HostValue;
 pub use api::ScriptApi;
 pub use api::ScriptFunction;
+pub use api::TypedArrayElement;
 pub use api::TypedArrayValue;
 pub use hot_reload::HotReloadHandler;
 pub use hot_reload::HotReloader;
@@ -92,6 +93,31 @@ pub trait ScriptRuntime {
 
     /// Call a top-level function exported by the loaded script.
     fn call(&mut self, function: &str) -> Result<()>;
+
+    /// Warm up the JIT compiler by running the entry function a few times.
+    ///
+    /// V8's JIT (Sparkplug/Turbofan) requires multiple executions before
+    /// compiling hot paths. Calling this after loading the script ensures
+    /// the frame loop runs compiled code from the first frame.
+    ///
+    /// Default implementation is a no-op for engines without JIT (QuickJS).
+    fn warmup(&mut self, function: &str) -> Result<()> {
+        // JIT compilers need multiple calls to trigger compilation.
+        // Default: 3 iterations to hit baseline JIT thresholds.
+        for _ in 0..3 {
+            self.call(function)?;
+        }
+        Ok(())
+    }
+
+    /// Run incremental garbage collection during idle time.
+    ///
+    /// Call this once per frame (e.g. from an update system) to let the JS
+    /// engine do incremental GC work, avoiding unpredictable full-GC pauses
+    /// during script execution.
+    ///
+    /// Default implementation is a no-op.
+    fn gc_step(&mut self) {}
 }
 
 /// Load a script file, resolving TypeScript to pre-compiled JavaScript.
@@ -102,10 +128,10 @@ pub trait ScriptRuntime {
 ///    a. First look for a `.js` file at `target/scripts/<filename>.js`
 ///       (build-time tsc output).
 ///    b. If not found, look for a `.js` file alongside the `.ts` file.
-///    c. If neither exists, return the raw `.ts` source (V8's native
-///       `--strip-types` will handle it at parse time).
-///
-/// For the `quickjs-backend` feature, step 2c falls back to swc transpilation.
+///    c. If neither exists and the `quickjs-backend` feature is active,
+///       fall back to swc-based transpilation. Otherwise, return an error
+///       (V8 requires pre-compiled JS, or the `.ts` file must be pre-compiled
+///       via `tsc`; see `scripts/tsconfig.json`).
 pub fn load_script<P: AsRef<Path>>(path: P) -> Result<String> {
     let path = path.as_ref();
 
@@ -132,18 +158,29 @@ pub fn load_script<P: AsRef<Path>>(path: P) -> Result<String> {
         }
     }
 
-    // No pre-compiled JS found. Fall through to swc-based transpilation.
-    let source = std::fs::read_to_string(path)
-        .map_err(|e| ScriptError::Execution(format!("failed to read script: {}", e)))?;
-    transpile_typescript(&source)
+    // No pre-compiled JS found. QuickJS backend can fall back to swc transpilation;
+    // V8 backend requires pre-compiled JS.
+    #[cfg(feature = "quickjs-backend")]
+    {
+        let source = std::fs::read_to_string(path)
+            .map_err(|e| ScriptError::Execution(format!("failed to read script: {}", e)))?;
+        return transpile_typescript(&source);
+    }
+
+    #[cfg(not(feature = "quickjs-backend"))]
+    Err(ScriptError::Execution(format!(
+        "no pre-compiled JavaScript found for '{}'. \
+         TypeScript must be compiled via `tsc` before running. \
+         See `scripts/tsconfig.json`.",
+        path.display()
+    )))
 }
 
 /// Transpile TypeScript source to JavaScript by stripping type annotations.
 ///
 /// Uses swc's TypeScript strip transform to remove type annotations.
-/// For the V8 backend, type stripping is also available at runtime via
-/// V8's `--strip-types` flag, but this function provides a uniform
-/// swc-based approach for both backends.
+/// Only available when the `quickjs-backend` feature is active.
+#[cfg(feature = "quickjs-backend")]
 pub fn transpile_typescript(source: &str) -> Result<String> {
     use swc_common::{sync::Lrc, FileName, Globals, Mark, SourceMap, GLOBALS};
     use swc_ecma_ast::{EsVersion, Module, Pass, Program};

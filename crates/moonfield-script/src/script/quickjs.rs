@@ -31,6 +31,10 @@ impl ScriptRuntime for QuickJsRuntime {
         // Give QuickJS a generous stack limit so that host functions (which may
         // call into Vulkan drivers) do not overflow the JS engine's C stack.
         runtime.set_max_stack_size(8 * 1024 * 1024);
+        // Set memory limit (128 MB) and GC threshold (4 MB) to prevent
+        // unbounded growth and trigger GC proactively.
+        runtime.set_memory_limit(128 * 1024 * 1024);
+        runtime.set_gc_threshold(4 * 1024 * 1024);
         let context = Context::full(&runtime)
             .map_err(|e| ScriptError::BackendNotAvailable(format!("quickjs context: {:?}", e)))?;
 
@@ -72,6 +76,12 @@ impl ScriptRuntime for QuickJsRuntime {
             },
         )?;
         Ok(())
+    }
+
+    fn gc_step(&mut self) {
+        // QuickJS uses reference counting with a cycle collector.
+        // run_gc triggers the cycle collector — fast for typical heaps.
+        self.runtime.run_gc();
     }
 }
 

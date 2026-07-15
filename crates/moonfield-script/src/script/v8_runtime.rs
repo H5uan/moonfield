@@ -1,8 +1,11 @@
 //! V8 backend for the scripting runtime.
 
-use super::{HostFn, HostValue, HotReloadHandler, Result, ScriptApi, ScriptError, ScriptRuntime, TypedArrayValue};
+use super::{
+    HostFn, HostValue, HotReloadHandler, Result, ScriptApi, ScriptError, ScriptRuntime,
+    TypedArrayElement, TypedArrayValue,
+};
 use moonfield_log::{error, info, warn};
-use moonfield_lunaris::HeadlessContext;
+use moonfield_render::HeadlessContext;
 use std::collections::HashMap;
 use std::path::Path;
 use std::sync::Once;
@@ -63,7 +66,12 @@ impl ScriptRuntime for V8Runtime {
             v8::V8::initialize();
         });
 
-        let mut isolate = v8::Isolate::new(v8::CreateParams::default());
+        // Set heap limits: 4 MB initial, 128 MB max.
+        // This lets V8 plan incremental GC cycles and prevents unbounded growth.
+        let create_params =
+            v8::CreateParams::default().heap_limits(4 * 1024 * 1024, 128 * 1024 * 1024);
+
+        let mut isolate = v8::Isolate::new(create_params);
 
         let context = {
             v8::scope!(let handle_scope, &mut isolate);
@@ -78,6 +86,7 @@ impl ScriptRuntime for V8Runtime {
             direct_fns: Vec::new(),
             registry: None,
             entry: None,
+            compiled_modules: HashMap::new(),
         };
         rt.register_direct("record_frame", direct_record_frame);
         rt.register_api()?;
@@ -85,6 +94,7 @@ impl ScriptRuntime for V8Runtime {
     }
 
     fn load(&mut self, name: &str, source: &str) -> Result<()> {
+        self.isolate.set_idle(false);
         v8::scope!(let handle_scope, &mut self.isolate);
         let local_context = v8::Local::new(handle_scope, &self.context);
         let scope = &mut v8::ContextScope::new(handle_scope, local_context);
@@ -127,6 +137,7 @@ impl ScriptRuntime for V8Runtime {
     }
 
     fn call(&mut self, function: &str) -> Result<()> {
+        self.isolate.set_idle(false);
         v8::scope!(let handle_scope, &mut self.isolate);
         let local_context = v8::Local::new(handle_scope, &self.context);
         let scope = &mut v8::ContextScope::new(handle_scope, local_context);
@@ -148,6 +159,14 @@ impl ScriptRuntime for V8Runtime {
             )));
         }
         Ok(())
+    }
+
+    fn gc_step(&mut self) {
+        // Signal V8 that the isolate is idle. V8's background GC thread can
+        // do incremental sweeping during the gap between frames.
+        // `set_idle(false)` is called by `call`/`load`/`load_module_graph`
+        // before any JS execution resumes active mode.
+        self.isolate.set_idle(true);
     }
 }
 
@@ -177,9 +196,7 @@ impl V8Runtime {
             let ptr = func as *const DirectFn as *mut std::ffi::c_void;
             let external = v8::External::new(scope, ptr);
             let js_func = v8::Function::builder(
-                |s: &mut v8::PinScope,
-                 a: v8::FunctionCallbackArguments,
-                 r: v8::ReturnValue| {
+                |s: &mut v8::PinScope, a: v8::FunctionCallbackArguments, r: v8::ReturnValue| {
                     let external = v8::Local::<v8::External>::try_from(a.data()).unwrap();
                     // Safety: the pointer points into the boxed `direct_fns` Vec,
                     // which is never moved while V8 callbacks are live.
@@ -297,58 +314,102 @@ impl V8Runtime {
 impl V8Runtime {
     /// Load a module graph using V8's native ESModule API.
     ///
-    /// 1. Pre-compiles all modules via `ScriptCompiler::compile_module`.
+    /// 1. Compiles modules via `ScriptCompiler::compile_module`, caching
+    ///    compiled handles in `self.compiled_modules` for incremental reload.
     /// 2. Stores compiled `Local<Module>` handles in a `ModuleMap`.
     /// 3. Stores a `*const ModuleMap` pointer in the isolate slot.
     /// 4. Calls `Module::instantiate_module2` with a static resolve callback.
     /// 5. Evaluates the entry module and calls `exports.main()`.
-    pub fn load_module_graph(&mut self, registry: &super::ModuleRegistry, entry: &str) -> Result<()> {
+    ///
+    /// On reload, modules whose source hasn't changed reuse cached compiled
+    /// handles (already evaluated by V8). Only modules removed from the cache
+    /// (by `on_file_changed`) are re-compiled.
+    pub fn load_module_graph(
+        &mut self,
+        registry: &super::ModuleRegistry,
+        entry: &str,
+    ) -> Result<()> {
         let order = registry
             .order_dependencies(entry)
             .map_err(|e| ScriptError::Execution(format!("dependency resolution: {}", e)))?;
 
+        self.isolate.set_idle(false);
         v8::scope!(let handle_scope, &mut self.isolate);
         let local_context = v8::Local::new(handle_scope, &self.context);
         let scope = &mut v8::ContextScope::new(handle_scope, local_context);
 
-        // Step 1: pre-compile all modules.
+        // Step 1: compile modules, reusing cached handles where source matches.
         let mut module_map = ModuleMap {
             modules: HashMap::new(),
             names: order.clone(),
         };
 
         for module_name in &order {
-            let info = registry
-                .get(module_name)
-                .ok_or_else(|| ScriptError::Execution(format!("module '{}' not found", module_name)))?;
+            let info = registry.get(module_name).ok_or_else(|| {
+                ScriptError::Execution(format!("module '{}' not found", module_name))
+            })?;
 
-            // Use the original ESM source (not the CJS transform) for native modules.
-            let code = v8::String::new(scope, &info.source)
-                .ok_or_else(|| ScriptError::Execution("failed to create source string".into()))?;
-            let origin = v8::ScriptOrigin::new(
-                scope,
-                v8::String::new(scope, module_name).unwrap().into(),
-                0, 0, false, 0, None, false, false, true,
-                None,
-            );
-            let mut source = v8::script_compiler::Source::new(code, Some(&origin));
-            let module = v8::script_compiler::compile_module(scope, &mut source)
-                .ok_or_else(|| {
-                    let msg = format!("failed to compile module '{}'", module_name);
-                    ScriptError::Execution(msg)
+            // Check if a cached compiled module with matching source exists.
+            let cached = self.compiled_modules.get(module_name);
+            let reuse = cached.is_some_and(|c| c.source == info.source);
+
+            if reuse {
+                // Reuse cached compiled module (already evaluated by V8).
+                let module_global = cached.unwrap().module.clone();
+                module_map.modules.insert(
+                    module_name.clone(),
+                    ModuleEntry {
+                        module: module_global,
+                        namespace: None,
+                    },
+                );
+            } else {
+                // Compile from source and cache.
+                let code = v8::String::new(scope, &info.source).ok_or_else(|| {
+                    ScriptError::Execution("failed to create source string".into())
                 })?;
+                let origin = v8::ScriptOrigin::new(
+                    scope,
+                    v8::String::new(scope, module_name).unwrap().into(),
+                    0,
+                    0,
+                    false,
+                    0,
+                    None,
+                    false,
+                    false,
+                    true,
+                    None,
+                );
+                let mut source = v8::script_compiler::Source::new(code, Some(&origin));
+                let module =
+                    v8::script_compiler::compile_module(scope, &mut source).ok_or_else(|| {
+                        let msg = format!("failed to compile module '{}'", module_name);
+                        ScriptError::Execution(msg)
+                    })?;
 
-            module_map.modules.insert(
-                module_name.clone(),
-                ModuleEntry {
-                    module: v8::Global::new(scope, module),
-                    namespace: None,
-                },
-            );
+                let module_global = v8::Global::new(scope, module);
+                self.compiled_modules.insert(
+                    module_name.clone(),
+                    CachedModule {
+                        module: module_global.clone(),
+                        source: info.source.clone(),
+                    },
+                );
+                module_map.modules.insert(
+                    module_name.clone(),
+                    ModuleEntry {
+                        module: module_global,
+                        namespace: None,
+                    },
+                );
+            }
         }
 
         // Step 2: get the entry module handle.
-        let entry_entry = module_map.modules.get(entry)
+        let entry_entry = module_map
+            .modules
+            .get(entry)
             .ok_or_else(|| ScriptError::Execution(format!("entry '{}' not found", entry)))?;
         let entry_module = v8::Local::new(scope, &entry_entry.module);
 
@@ -393,9 +454,9 @@ impl V8Runtime {
         if let Some(main_val) = namespace_obj.get(tc_scope, main_name.into()) {
             if let Ok(main_func) = v8::Local::<v8::Function>::try_from(main_val) {
                 let recv: v8::Local<v8::Value> = v8::undefined(tc_scope).into();
-                main_func.call(tc_scope, recv.into(), &[]).ok_or_else(|| {
-                    ScriptError::Runtime("call to 'main' failed".into())
-                })?;
+                main_func
+                    .call(tc_scope, recv.into(), &[])
+                    .ok_or_else(|| ScriptError::Runtime("call to 'main' failed".into()))?;
             }
         }
 
@@ -417,7 +478,11 @@ impl V8Runtime {
     ) -> Option<v8::Local<'s, v8::Module>> {
         v8::callback_scope!(unsafe scope, context);
         let module_map = unsafe {
-            scope.get_slot::<*const ModuleMap>().unwrap().as_ref().unwrap()
+            scope
+                .get_slot::<*const ModuleMap>()
+                .unwrap()
+                .as_ref()
+                .unwrap()
         };
 
         let specifier_str = specifier.to_rust_string_lossy(scope);
@@ -480,16 +545,41 @@ impl HotReloadHandler for V8Runtime {
             .clone()
             .ok_or_else(|| ScriptError::Execution("no cached entry for hot reload".into()))?;
 
-        // Re-read the changed file and update the registry.
+        // Re-read the changed file.
         let source = super::load_script(changed_path)?;
-        let name = changed_path
-            .to_str()
-            .ok_or_else(|| ScriptError::Execution("invalid path".into()))?;
-        registry.register(name, source);
+
+        // Find the module key that matches the changed file path.
+        // The file watcher reports absolute paths, but the registry uses
+        // relative canonical names. `register` will canonicalize the fallback.
+        let module_name = registry
+            .find_by_file_path(changed_path)
+            .unwrap_or_else(|| changed_path.to_str().unwrap_or("").to_string());
+
+        // Update the module's source in the registry.
+        registry.register(&module_name, source);
+
+        // Compute the affected set: the changed module + all modules that
+        // transitively import it. These must be re-compiled because V8 modules
+        // are one-shot (can't re-instantiate/re-evaluate). Removing them from
+        // the cache forces load_module_graph to re-compile them, while
+        // unaffected modules reuse their cached (already evaluated) handles.
+        let affected = registry.transitive_importers(&module_name);
+        for name in &affected {
+            self.compiled_modules.remove(name);
+        }
 
         // Re-instantiate the module graph with the updated registry.
         self.load_module_graph(&registry, &entry)
     }
+}
+
+/// A compiled module handle cached for incremental hot reload.
+///
+/// The `source` field enables change detection: if the source matches, the
+/// cached `Global<Module>` can be reused without recompilation.
+struct CachedModule {
+    module: v8::Global<v8::Module>,
+    source: String,
 }
 
 /// A compiled module handle and its exports namespace.
@@ -568,7 +658,7 @@ fn v8_value_to_host(value: v8::Local<v8::Value>, scope: &mut v8::PinScope) -> Ho
         }
     }
 
-    // TypedArray — try each concrete typed array type
+    // TypedArray — zero-copy via TypedArrayView (Uint8 uses BytesView for as_bytes_view compat)
     if value.is_typed_array() {
         // Uint8Array — zero-copy via BytesView
         if let Ok(ta) = v8::Local::<v8::Uint8Array>::try_from(value) {
@@ -584,68 +674,110 @@ fn v8_value_to_host(value: v8::Local<v8::Value>, scope: &mut v8::PinScope) -> Ho
             }
             return HostValue::TypedArray(TypedArrayValue::Uint8(Vec::new()));
         }
-        // Float32Array
+        // Float32Array — zero-copy via TypedArrayView
         if let Ok(ta) = v8::Local::<v8::Float32Array>::try_from(value) {
-            let len = ta.length();
-            let byte_len = len * 4;
-            let mut bytes = vec![0u8; byte_len];
-            ta.copy_contents(&mut bytes);
-            let data = unsafe { std::mem::transmute::<Vec<u8>, Vec<f32>>(bytes) };
-            return HostValue::TypedArray(TypedArrayValue::Float32(data));
+            let byte_length = ta.byte_length();
+            if let Some(buf) = ta.buffer(scope) {
+                if let Some(ptr) = buf.data() {
+                    let offset = ta.byte_offset();
+                    return HostValue::TypedArrayView {
+                        data: unsafe { (ptr.as_ptr() as *const u8).add(offset) },
+                        len: byte_length,
+                        element: TypedArrayElement::Float32,
+                    };
+                }
+            }
+            return HostValue::TypedArray(TypedArrayValue::Float32(Vec::new()));
         }
-        // Float64Array
+        // Float64Array — zero-copy via TypedArrayView
         if let Ok(ta) = v8::Local::<v8::Float64Array>::try_from(value) {
-            let len = ta.length();
-            let byte_len = len * 8;
-            let mut bytes = vec![0u8; byte_len];
-            ta.copy_contents(&mut bytes);
-            let data = unsafe { std::mem::transmute::<Vec<u8>, Vec<f64>>(bytes) };
-            return HostValue::TypedArray(TypedArrayValue::Float64(data));
+            let byte_length = ta.byte_length();
+            if let Some(buf) = ta.buffer(scope) {
+                if let Some(ptr) = buf.data() {
+                    let offset = ta.byte_offset();
+                    return HostValue::TypedArrayView {
+                        data: unsafe { (ptr.as_ptr() as *const u8).add(offset) },
+                        len: byte_length,
+                        element: TypedArrayElement::Float64,
+                    };
+                }
+            }
+            return HostValue::TypedArray(TypedArrayValue::Float64(Vec::new()));
         }
-        // Int8Array
+        // Int8Array — zero-copy via TypedArrayView
         if let Ok(ta) = v8::Local::<v8::Int8Array>::try_from(value) {
-            let len = ta.length();
-            let byte_len = len;
-            let mut bytes = vec![0u8; byte_len];
-            ta.copy_contents(&mut bytes);
-            let data = unsafe { std::mem::transmute::<Vec<u8>, Vec<i8>>(bytes) };
-            return HostValue::TypedArray(TypedArrayValue::Int8(data));
+            let byte_length = ta.byte_length();
+            if let Some(buf) = ta.buffer(scope) {
+                if let Some(ptr) = buf.data() {
+                    let offset = ta.byte_offset();
+                    return HostValue::TypedArrayView {
+                        data: unsafe { (ptr.as_ptr() as *const u8).add(offset) },
+                        len: byte_length,
+                        element: TypedArrayElement::Int8,
+                    };
+                }
+            }
+            return HostValue::TypedArray(TypedArrayValue::Int8(Vec::new()));
         }
-        // Uint16Array
+        // Uint16Array — zero-copy via TypedArrayView
         if let Ok(ta) = v8::Local::<v8::Uint16Array>::try_from(value) {
-            let len = ta.length();
-            let byte_len = len * 2;
-            let mut bytes = vec![0u8; byte_len];
-            ta.copy_contents(&mut bytes);
-            let data = unsafe { std::mem::transmute::<Vec<u8>, Vec<u16>>(bytes) };
-            return HostValue::TypedArray(TypedArrayValue::Uint16(data));
+            let byte_length = ta.byte_length();
+            if let Some(buf) = ta.buffer(scope) {
+                if let Some(ptr) = buf.data() {
+                    let offset = ta.byte_offset();
+                    return HostValue::TypedArrayView {
+                        data: unsafe { (ptr.as_ptr() as *const u8).add(offset) },
+                        len: byte_length,
+                        element: TypedArrayElement::Uint16,
+                    };
+                }
+            }
+            return HostValue::TypedArray(TypedArrayValue::Uint16(Vec::new()));
         }
-        // Int16Array
+        // Int16Array — zero-copy via TypedArrayView
         if let Ok(ta) = v8::Local::<v8::Int16Array>::try_from(value) {
-            let len = ta.length();
-            let byte_len = len * 2;
-            let mut bytes = vec![0u8; byte_len];
-            ta.copy_contents(&mut bytes);
-            let data = unsafe { std::mem::transmute::<Vec<u8>, Vec<i16>>(bytes) };
-            return HostValue::TypedArray(TypedArrayValue::Int16(data));
+            let byte_length = ta.byte_length();
+            if let Some(buf) = ta.buffer(scope) {
+                if let Some(ptr) = buf.data() {
+                    let offset = ta.byte_offset();
+                    return HostValue::TypedArrayView {
+                        data: unsafe { (ptr.as_ptr() as *const u8).add(offset) },
+                        len: byte_length,
+                        element: TypedArrayElement::Int16,
+                    };
+                }
+            }
+            return HostValue::TypedArray(TypedArrayValue::Int16(Vec::new()));
         }
-        // Uint32Array
+        // Uint32Array — zero-copy via TypedArrayView
         if let Ok(ta) = v8::Local::<v8::Uint32Array>::try_from(value) {
-            let len = ta.length();
-            let byte_len = len * 4;
-            let mut bytes = vec![0u8; byte_len];
-            ta.copy_contents(&mut bytes);
-            let data = unsafe { std::mem::transmute::<Vec<u8>, Vec<u32>>(bytes) };
-            return HostValue::TypedArray(TypedArrayValue::Uint32(data));
+            let byte_length = ta.byte_length();
+            if let Some(buf) = ta.buffer(scope) {
+                if let Some(ptr) = buf.data() {
+                    let offset = ta.byte_offset();
+                    return HostValue::TypedArrayView {
+                        data: unsafe { (ptr.as_ptr() as *const u8).add(offset) },
+                        len: byte_length,
+                        element: TypedArrayElement::Uint32,
+                    };
+                }
+            }
+            return HostValue::TypedArray(TypedArrayValue::Uint32(Vec::new()));
         }
-        // Int32Array
+        // Int32Array — zero-copy via TypedArrayView
         if let Ok(ta) = v8::Local::<v8::Int32Array>::try_from(value) {
-            let len = ta.length();
-            let byte_len = len * 4;
-            let mut bytes = vec![0u8; byte_len];
-            ta.copy_contents(&mut bytes);
-            let data = unsafe { std::mem::transmute::<Vec<u8>, Vec<i32>>(bytes) };
-            return HostValue::TypedArray(TypedArrayValue::Int32(data));
+            let byte_length = ta.byte_length();
+            if let Some(buf) = ta.buffer(scope) {
+                if let Some(ptr) = buf.data() {
+                    let offset = ta.byte_offset();
+                    return HostValue::TypedArrayView {
+                        data: unsafe { (ptr.as_ptr() as *const u8).add(offset) },
+                        len: byte_length,
+                        element: TypedArrayElement::Int32,
+                    };
+                }
+            }
+            return HostValue::TypedArray(TypedArrayValue::Int32(Vec::new()));
         }
     }
 
@@ -689,7 +821,10 @@ fn v8_value_to_host(value: v8::Local<v8::Value>, scope: &mut v8::PinScope) -> Ho
 }
 
 /// Convert a `HostValue` to a V8 `Local<Value>`.
-fn host_to_v8_value<'s>(value: HostValue, scope: &mut v8::PinScope<'s, '_>) -> v8::Local<'s, v8::Value> {
+fn host_to_v8_value<'s>(
+    value: HostValue,
+    scope: &mut v8::PinScope<'s, '_>,
+) -> v8::Local<'s, v8::Value> {
     match value {
         HostValue::Null => v8::null(scope).into(),
         HostValue::Bool(b) => v8::Boolean::new(scope, b).into(),
@@ -712,14 +847,54 @@ fn host_to_v8_value<'s>(value: HostValue, scope: &mut v8::PinScope<'s, '_>) -> v
             let buf = v8::ArrayBuffer::new(scope, len);
             if let Some(ptr) = buf.data() {
                 unsafe {
-                    std::ptr::copy_nonoverlapping(
-                        data,
-                        ptr.as_ptr() as *mut u8,
-                        len,
-                    );
+                    std::ptr::copy_nonoverlapping(data, ptr.as_ptr() as *mut u8, len);
                 }
             }
             buf.into()
+        }
+        HostValue::TypedArrayView { data, len, element } => {
+            // TypedArrayView is a zero-copy view into V8's own backing store.
+            // When returned back to V8, we copy the data into a new ArrayBuffer
+            // and wrap it in the appropriate typed array.
+            let buf = v8::ArrayBuffer::new(scope, len);
+            if let Some(ptr) = buf.data() {
+                unsafe {
+                    std::ptr::copy_nonoverlapping(data, ptr.as_ptr() as *mut u8, len);
+                }
+            }
+            let count = len
+                / match element {
+                    TypedArrayElement::Uint8 | TypedArrayElement::Int8 => 1,
+                    TypedArrayElement::Uint16 | TypedArrayElement::Int16 => 2,
+                    TypedArrayElement::Uint32
+                    | TypedArrayElement::Int32
+                    | TypedArrayElement::Float32 => 4,
+                    TypedArrayElement::Float64 => 8,
+                };
+            match element {
+                TypedArrayElement::Uint8 => {
+                    v8::Uint8Array::new(scope, buf, 0, count).unwrap().into()
+                }
+                TypedArrayElement::Int8 => v8::Int8Array::new(scope, buf, 0, count).unwrap().into(),
+                TypedArrayElement::Uint16 => {
+                    v8::Uint16Array::new(scope, buf, 0, count).unwrap().into()
+                }
+                TypedArrayElement::Int16 => {
+                    v8::Int16Array::new(scope, buf, 0, count).unwrap().into()
+                }
+                TypedArrayElement::Uint32 => {
+                    v8::Uint32Array::new(scope, buf, 0, count).unwrap().into()
+                }
+                TypedArrayElement::Int32 => {
+                    v8::Int32Array::new(scope, buf, 0, count).unwrap().into()
+                }
+                TypedArrayElement::Float32 => {
+                    v8::Float32Array::new(scope, buf, 0, count).unwrap().into()
+                }
+                TypedArrayElement::Float64 => {
+                    v8::Float64Array::new(scope, buf, 0, count).unwrap().into()
+                }
+            }
         }
         HostValue::Object(map) => {
             let obj = v8::Object::new(scope);
@@ -745,80 +920,128 @@ fn host_to_v8_value<'s>(value: HostValue, scope: &mut v8::PinScope<'s, '_>) -> v
                     let buf = v8::ArrayBuffer::new(scope, data.len());
                     if let Some(ptr) = buf.data() {
                         unsafe {
-                            std::ptr::copy_nonoverlapping(data.as_ptr(), ptr.as_ptr() as *mut u8, data.len());
+                            std::ptr::copy_nonoverlapping(
+                                data.as_ptr(),
+                                ptr.as_ptr() as *mut u8,
+                                data.len(),
+                            );
                         }
                     }
-                    v8::Uint8Array::new(scope, buf, 0, data.len()).unwrap().into()
+                    v8::Uint8Array::new(scope, buf, 0, data.len())
+                        .unwrap()
+                        .into()
                 }
                 TypedArrayValue::Float32(data) => {
                     let byte_len = data.len() * 4;
                     let buf = v8::ArrayBuffer::new(scope, byte_len);
                     if let Some(ptr) = buf.data() {
                         unsafe {
-                            std::ptr::copy_nonoverlapping(data.as_ptr() as *const u8, ptr.as_ptr() as *mut u8, byte_len);
+                            std::ptr::copy_nonoverlapping(
+                                data.as_ptr() as *const u8,
+                                ptr.as_ptr() as *mut u8,
+                                byte_len,
+                            );
                         }
                     }
-                    v8::Float32Array::new(scope, buf, 0, data.len()).unwrap().into()
+                    v8::Float32Array::new(scope, buf, 0, data.len())
+                        .unwrap()
+                        .into()
                 }
                 TypedArrayValue::Float64(data) => {
                     let byte_len = data.len() * 8;
                     let buf = v8::ArrayBuffer::new(scope, byte_len);
                     if let Some(ptr) = buf.data() {
                         unsafe {
-                            std::ptr::copy_nonoverlapping(data.as_ptr() as *const u8, ptr.as_ptr() as *mut u8, byte_len);
+                            std::ptr::copy_nonoverlapping(
+                                data.as_ptr() as *const u8,
+                                ptr.as_ptr() as *mut u8,
+                                byte_len,
+                            );
                         }
                     }
-                    v8::Float64Array::new(scope, buf, 0, data.len()).unwrap().into()
+                    v8::Float64Array::new(scope, buf, 0, data.len())
+                        .unwrap()
+                        .into()
                 }
                 TypedArrayValue::Int8(data) => {
                     let byte_len = data.len();
                     let buf = v8::ArrayBuffer::new(scope, byte_len);
                     if let Some(ptr) = buf.data() {
                         unsafe {
-                            std::ptr::copy_nonoverlapping(data.as_ptr() as *const u8, ptr.as_ptr() as *mut u8, byte_len);
+                            std::ptr::copy_nonoverlapping(
+                                data.as_ptr() as *const u8,
+                                ptr.as_ptr() as *mut u8,
+                                byte_len,
+                            );
                         }
                     }
-                    v8::Int8Array::new(scope, buf, 0, data.len()).unwrap().into()
+                    v8::Int8Array::new(scope, buf, 0, data.len())
+                        .unwrap()
+                        .into()
                 }
                 TypedArrayValue::Uint16(data) => {
                     let byte_len = data.len() * 2;
                     let buf = v8::ArrayBuffer::new(scope, byte_len);
                     if let Some(ptr) = buf.data() {
                         unsafe {
-                            std::ptr::copy_nonoverlapping(data.as_ptr() as *const u8, ptr.as_ptr() as *mut u8, byte_len);
+                            std::ptr::copy_nonoverlapping(
+                                data.as_ptr() as *const u8,
+                                ptr.as_ptr() as *mut u8,
+                                byte_len,
+                            );
                         }
                     }
-                    v8::Uint16Array::new(scope, buf, 0, data.len()).unwrap().into()
+                    v8::Uint16Array::new(scope, buf, 0, data.len())
+                        .unwrap()
+                        .into()
                 }
                 TypedArrayValue::Int16(data) => {
                     let byte_len = data.len() * 2;
                     let buf = v8::ArrayBuffer::new(scope, byte_len);
                     if let Some(ptr) = buf.data() {
                         unsafe {
-                            std::ptr::copy_nonoverlapping(data.as_ptr() as *const u8, ptr.as_ptr() as *mut u8, byte_len);
+                            std::ptr::copy_nonoverlapping(
+                                data.as_ptr() as *const u8,
+                                ptr.as_ptr() as *mut u8,
+                                byte_len,
+                            );
                         }
                     }
-                    v8::Int16Array::new(scope, buf, 0, data.len()).unwrap().into()
+                    v8::Int16Array::new(scope, buf, 0, data.len())
+                        .unwrap()
+                        .into()
                 }
                 TypedArrayValue::Uint32(data) => {
                     let byte_len = data.len() * 4;
                     let buf = v8::ArrayBuffer::new(scope, byte_len);
                     if let Some(ptr) = buf.data() {
                         unsafe {
-                            std::ptr::copy_nonoverlapping(data.as_ptr() as *const u8, ptr.as_ptr() as *mut u8, byte_len);
+                            std::ptr::copy_nonoverlapping(
+                                data.as_ptr() as *const u8,
+                                ptr.as_ptr() as *mut u8,
+                                byte_len,
+                            );
                         }
                     }
-                    v8::Uint32Array::new(scope, buf, 0, data.len()).unwrap().into()
+                    v8::Uint32Array::new(scope, buf, 0, data.len())
+                        .unwrap()
+                        .into()
                 }
                 TypedArrayValue::Int32(data) => {
                     let byte_len = data.len() * 4;
                     let buf = v8::ArrayBuffer::new(scope, byte_len);
                     if let Some(ptr) = buf.data() {
                         unsafe {
-                            std::ptr::copy_nonoverlapping(data.as_ptr() as *const u8, ptr.as_ptr() as *mut u8, byte_len);
+                            std::ptr::copy_nonoverlapping(
+                                data.as_ptr() as *const u8,
+                                ptr.as_ptr() as *mut u8,
+                                byte_len,
+                            );
                         }
                     }
-                    v8::Int32Array::new(scope, buf, 0, data.len()).unwrap().into()
+                    v8::Int32Array::new(scope, buf, 0, data.len())
+                        .unwrap()
+                        .into()
                 }
             };
             val

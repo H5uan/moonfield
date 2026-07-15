@@ -111,12 +111,8 @@ pub fn script_function(_attr: TokenStream, item: TokenStream) -> TokenStream {
         }
     };
 
-    let stmt_tokens: Vec<proc_macro2::TokenStream> = func
-        .block
-        .stmts
-        .iter()
-        .map(|s| quote!(#s))
-        .collect();
+    let stmt_tokens: Vec<proc_macro2::TokenStream> =
+        func.block.stmts.iter().map(|s| quote!(#s)).collect();
 
     // Use the original function verbatim via quote!(#func), then add the struct + impl.
     let output = quote! {

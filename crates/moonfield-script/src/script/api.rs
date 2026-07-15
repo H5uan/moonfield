@@ -2,13 +2,13 @@
 
 use std::collections::HashMap;
 
-use moonfield_lunaris::HeadlessContext;
+use moonfield_render::HeadlessContext;
 
 /// A value that can be passed between scripts and host functions.
 ///
 /// Backends marshal between their native JS types and `HostValue` so that
 /// host functions work with a uniform, engine-agnostic type system.
-#[derive(Debug, Clone)]
+#[derive(Debug)]
 pub enum HostValue {
     Null,
     Bool(bool),
@@ -21,6 +21,58 @@ pub enum HostValue {
     Array(Vec<HostValue>),
     /// A typed array (e.g. Float32Array, Uint8Array).
     TypedArray(TypedArrayValue),
+    /// Zero-copy view into the JS engine's backing store.
+    /// Only valid during the host function call. Must not be stored beyond the callback.
+    BytesView {
+        data: *const u8,
+        len: usize,
+    },
+    /// Zero-copy view into a typed array's backing store.
+    /// `element` records the original JS typed array element type so
+    /// callers can safely interpret the data without re-checking alignment.
+    /// Only valid during the host function call. Must not be stored.
+    TypedArrayView {
+        data: *const u8,
+        len: usize, // in bytes
+        element: TypedArrayElement,
+    },
+}
+
+/// Element type of a JavaScript typed array, for use with [`HostValue::TypedArrayView`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum TypedArrayElement {
+    Uint8,
+    Int8,
+    Uint16,
+    Int16,
+    Uint32,
+    Int32,
+    Float32,
+    Float64,
+}
+
+impl Clone for HostValue {
+    fn clone(&self) -> Self {
+        match self {
+            HostValue::Null => HostValue::Null,
+            HostValue::Bool(b) => HostValue::Bool(*b),
+            HostValue::Number(n) => HostValue::Number(*n),
+            HostValue::String(s) => HostValue::String(s.clone()),
+            HostValue::ArrayBuffer(buf) => HostValue::ArrayBuffer(buf.clone()),
+            HostValue::Object(map) => HostValue::Object(map.clone()),
+            HostValue::Array(arr) => HostValue::Array(arr.clone()),
+            HostValue::TypedArray(ta) => HostValue::TypedArray(ta.clone()),
+            HostValue::BytesView { data, len } => HostValue::BytesView {
+                data: *data,
+                len: *len,
+            },
+            HostValue::TypedArrayView { data, len, element } => HostValue::TypedArrayView {
+                data: *data,
+                len: *len,
+                element: *element,
+            },
+        }
+    }
 }
 
 /// Represents a JavaScript typed array with its element type and data.
@@ -99,19 +151,47 @@ impl HostValue {
         }
     }
 
-    /// Try to extract `&[u8]` from ArrayBuffer or Uint8 typed array.
+    /// Try to extract `&[u8]` from ArrayBuffer, Uint8 typed array, BytesView, or TypedArrayView.
     pub fn as_bytes(&self) -> Option<&[u8]> {
         match self {
             HostValue::ArrayBuffer(buf) => Some(buf.as_slice()),
             HostValue::TypedArray(TypedArrayValue::Uint8(buf)) => Some(buf.as_slice()),
+            HostValue::BytesView { data, len } => {
+                Some(unsafe { std::slice::from_raw_parts(*data, *len) })
+            }
+            HostValue::TypedArrayView { data, len, .. } => {
+                Some(unsafe { std::slice::from_raw_parts(*data, *len) })
+            }
             _ => None,
         }
     }
 
-    /// Try to extract `&[f32]` from Float32 typed array.
+    /// Try to extract `&[u8]` from BytesView (zero-copy view into JS engine's backing store).
+    pub fn as_bytes_view(&self) -> Option<&[u8]> {
+        match self {
+            HostValue::BytesView { data, len } => {
+                Some(unsafe { std::slice::from_raw_parts(*data, *len) })
+            }
+            _ => None,
+        }
+    }
+
+    /// Try to extract `&[f32]` from Float32 typed array or TypedArrayView (zero-copy).
     pub fn as_f32_slice(&self) -> Option<&[f32]> {
         match self {
             HostValue::TypedArray(TypedArrayValue::Float32(buf)) => Some(buf.as_slice()),
+            HostValue::TypedArrayView {
+                data,
+                len,
+                element: TypedArrayElement::Float32,
+            } => {
+                let n = *len / std::mem::size_of::<f32>();
+                if n > 0 {
+                    Some(unsafe { std::slice::from_raw_parts(*data as *const f32, n) })
+                } else {
+                    Some(&[])
+                }
+            }
             _ => None,
         }
     }

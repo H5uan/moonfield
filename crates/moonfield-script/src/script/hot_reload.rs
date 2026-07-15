@@ -42,10 +42,7 @@ impl HotReloader {
             .watch(dir.as_ref(), RecursiveMode::Recursive)
             .map_err(|e| ScriptError::Execution(format!("watch dir: {}", e)))?;
 
-        Ok(Self {
-            watcher,
-            rx,
-        })
+        Ok(Self { watcher, rx })
     }
 
     /// Poll for file system events and forward to the handler.

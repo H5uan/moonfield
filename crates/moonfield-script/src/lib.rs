@@ -15,11 +15,15 @@ use script::{ScriptApi, ScriptRuntime, V8Runtime as Runtime};
 
 #[cfg(feature = "quickjs-backend")]
 use script::{QuickJsRuntime as Runtime, ScriptApi, ScriptRuntime};
+use std::cell::RefCell;
 use std::path::Path;
+use std::rc::Rc;
 
 /// Script system plugin.
 ///
 /// Runs the default script (`scripts/record_frame.ts` or `.js`) on startup.
+/// The runtime is kept alive across frames so that `gc_step()` can be called
+/// each frame for incremental GC control.
 pub struct ScriptPlugin;
 
 impl Plugin for ScriptPlugin {
@@ -28,14 +32,46 @@ impl Plugin for ScriptPlugin {
     }
 
     fn build(&self, app: &mut App) {
-        app.add_startup_system(|_world: &mut World| {
+        // V8Runtime is !Send + !Sync, so it can't be a World resource.
+        // Use Rc<RefCell<Option<Runtime>>> — the update system only
+        // requires FnMut + 'static (no Send).
+        let runtime_slot: Rc<RefCell<Option<Runtime>>> = Rc::new(RefCell::new(None));
+
+        let slot = runtime_slot.clone();
+        app.add_startup_system(move |_world: &mut World| {
             info!("Script plugin startup");
-            if let Err(e) = run_default_script() {
-                info!("Failed to run default script: {}", e);
+            match Runtime::new(ScriptApi::default()) {
+                Ok(mut runtime) => {
+                    let script_dir = Path::new("scripts");
+                    let js_path = script_dir.join("record_frame.js");
+                    let ts_path = script_dir.join("record_frame.ts");
+                    let script_path = if js_path.exists() { js_path } else { ts_path };
+                    match script::load_script(&script_path) {
+                        Ok(source) => {
+                            let _ = runtime.load(script_path.to_string_lossy().as_ref(), &source);
+                            let _ = runtime.warmup("main");
+                            let _ = runtime.call("main");
+                        }
+                        Err(e) => info!("Failed to load script: {}", e),
+                    }
+                    *slot.borrow_mut() = Some(runtime);
+                }
+                Err(e) => info!("Failed to create script runtime: {}", e),
             }
         });
-        app.add_shutdown_system(|_world: &mut World| {
+
+        let slot = runtime_slot.clone();
+        app.add_update_system(move |_world: &mut World| {
+            if let Some(rt) = slot.borrow_mut().as_mut() {
+                rt.gc_step();
+            }
+            true
+        });
+
+        let slot = runtime_slot;
+        app.add_shutdown_system(move |_world: &mut World| {
             info!("Script plugin shutdown");
+            *slot.borrow_mut() = None;
         });
     }
 }
@@ -86,7 +122,8 @@ pub fn run_script_module(entry: &str) -> crate::script::Result<()> {
     let canonical_name = registry.register(entry, source);
 
     // Resolve and register all transitive dependencies.
-    registry.resolve_dependencies(&canonical_name)
+    registry
+        .resolve_dependencies(&canonical_name)
         .map_err(|e| script::ScriptError::Execution(e))?;
 
     let mut runtime = Runtime::new(ScriptApi::default())?;

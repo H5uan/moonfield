@@ -1,6 +1,8 @@
 //! Integration tests for the scripting runtime.
 
-use moonfield_script::script::{load_script, ModuleRegistry, ScriptApi, ScriptRuntime};
+#[cfg(feature = "v8-backend")]
+use moonfield_script::script::ModuleRegistry;
+use moonfield_script::script::{load_script, ScriptApi, ScriptRuntime};
 
 #[cfg(feature = "v8-backend")]
 use moonfield_script::script::V8Runtime as Runtime;
@@ -49,7 +51,8 @@ fn reload_changes_behavior() {
 }
 
 /// V8 backend requires TypeScript to be pre-compiled via tsc.
-/// This test verifies that loading a `.ts` file directly gives a helpful error.
+/// This test verifies that trying to load a `.ts` source directly gives a
+/// helpful error (the `load_script` function will reject it before reaching V8).
 #[cfg(feature = "v8-backend")]
 #[test]
 fn v8_rejects_raw_typescript() {
@@ -59,8 +62,10 @@ fn v8_rejects_raw_typescript() {
     assert!(result.is_err(), "V8 should reject raw TS source");
     let msg = result.unwrap_err().to_string();
     assert!(
-        msg.contains("SyntaxError") || msg.contains("Unexpected token"),
-        "error should mention syntax error, got: {msg}"
+        msg.contains("SyntaxError")
+            || msg.contains("unexpected token")
+            || msg.contains("pre-compiled"),
+        "error should mention syntax error or pre-compiled requirement, got: {msg}"
     );
 }
 
@@ -88,7 +93,8 @@ fn v8_module_graph_with_imports() {
     registry.register(
         "main",
         "import { greet } from \"./utils\";\n\
-         export function main() { greet(); }".to_string(),
+         export function main() { greet(); }"
+            .to_string(),
     );
     registry.register(
         "./utils",
