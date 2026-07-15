@@ -114,6 +114,28 @@ pub fn script_function(_attr: TokenStream, item: TokenStream) -> TokenStream {
     let stmt_tokens: Vec<proc_macro2::TokenStream> =
         func.block.stmts.iter().map(|s| quote!(#s)).collect();
 
+    // Generate TypeScript signature for .d.ts generation.
+    let ts_params: Vec<String> = params
+        .iter()
+        .map(|p| {
+            let ty_str = quote!(#(&p.ty)).to_string();
+            format!("{}: {}", p.name, rust_type_to_ts(&ty_str))
+        })
+        .collect();
+    let ts_ret = match &func.sig.output {
+        ReturnType::Default => "void".to_string(),
+        ReturnType::Type(_, ty) => {
+            let ty_str = quote!(#ty).to_string();
+            return_type_to_ts(&ty_str).to_string()
+        }
+    };
+    let ts_sig = format!(
+        "declare function {}({}): {};",
+        fn_name_str,
+        ts_params.join(", "),
+        ts_ret
+    );
+
     // Use the original function verbatim via quote!(#func), then add the struct + impl.
     let output = quote! {
         #(#attrs)*
@@ -131,6 +153,10 @@ pub fn script_function(_attr: TokenStream, item: TokenStream) -> TokenStream {
                 #(#extractions)*
                 #ret_conversion
             }
+
+            fn ts_signature() -> &'static str {
+                #ts_sig
+            }
         }
     };
 
@@ -140,6 +166,40 @@ pub fn script_function(_attr: TokenStream, item: TokenStream) -> TokenStream {
 struct ParamInfo {
     name: String,
     ty: Type,
+}
+
+/// Map a Rust type string to a TypeScript type string.
+fn rust_type_to_ts(ty_str: &str) -> &str {
+    let ty_str = ty_str.trim_start_matches("& ").to_string();
+    match ty_str.as_str() {
+        "u32" | "i32" | "u64" | "i64" | "usize" | "isize" | "f32" | "f64" => "number",
+        "bool" => "boolean",
+        "String" | "&str" => "string",
+        "Vec<u8>" => "Uint8Array",
+        _ => "any",
+    }
+}
+
+/// Map a return type string to a TypeScript return type.
+fn return_type_to_ts(ty_str: &str) -> &'static str {
+    let ty_str = ty_str.trim();
+    if ty_str.contains("Result") {
+        if ty_str.contains("()") {
+            "void"
+        } else if ty_str.contains("bool") {
+            "boolean"
+        } else if ty_str.contains("String") && !ty_str.contains("Vec<u8>") {
+            "string"
+        } else if ty_str.contains("Vec<u8>") {
+            "Uint8Array"
+        } else {
+            "any"
+        }
+    } else if ty_str == "()" {
+        "void"
+    } else {
+        "any"
+    }
 }
 
 /// Generate code to extract a parameter from `args` slice.

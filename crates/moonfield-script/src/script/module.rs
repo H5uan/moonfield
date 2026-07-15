@@ -33,37 +33,20 @@
 use std::collections::HashMap;
 use std::fs;
 use std::path::{Path, PathBuf};
-use std::sync::LazyLock;
 
-use regex::Regex;
-
-#[cfg(feature = "quickjs-backend")]
 use swc_common::sync::Lrc;
-#[cfg(feature = "quickjs-backend")]
-use swc_common::{FileName, Globals, Mark, SourceMap, GLOBALS};
-#[cfg(feature = "quickjs-backend")]
+use swc_common::{FileName, Globals, SourceMap, GLOBALS};
 use swc_ecma_ast::*;
+use swc_ecma_parser::{lexer::Lexer, Parser, StringInput, Syntax, TsSyntax};
+
+#[cfg(feature = "quickjs-backend")]
+use swc_common::Mark;
 #[cfg(feature = "quickjs-backend")]
 use swc_ecma_codegen::{text_writer::JsWriter, Config as CodegenConfig, Emitter};
-#[cfg(feature = "quickjs-backend")]
-use swc_ecma_parser::{lexer::Lexer, Parser, StringInput, Syntax, TsSyntax};
 #[cfg(feature = "quickjs-backend")]
 use swc_ecma_transforms_module::common_js::{common_js, Config as CjsConfig, FeatureFlag};
 #[cfg(feature = "quickjs-backend")]
 use swc_ecma_transforms_module::path::Resolver;
-
-/// Regex for ESM import/export specifiers.
-///
-/// Matches:
-///   `import { x } from "./foo"`     → `"./foo"`
-///   `import x from "./foo"`         → `"./foo"`
-///   `import * as x from "./foo"`    → `"./foo"`
-///   `export { x } from "./foo"`     → `"./foo"`
-///   `export * from "./foo"`         → `"./foo"`
-///   `import "./side-effect"`        → `"./side-effect"`  (bare import)
-static IMPORT_RE: LazyLock<Regex> = LazyLock::new(|| {
-    Regex::new(r#"(?:import|export)\s+(?:\{[^}]*\}|\*\s*as\s+\w+|\w+(?:,\s*(?:\{[^}]*\}|\*\s*as\s+\w+|\w+))?)?\s*(?:from\s+)?["']([^"']+)["']"#).unwrap()
-});
 
 /// A compiled module, holding its source and resolved dependency list.
 #[derive(Clone)]
@@ -532,28 +515,13 @@ impl ModuleRegistry {
         components.iter().collect()
     }
 
-    /// Regex-based: extract import specifiers from ESM source.
+    /// AST-based: extract import specifiers from JavaScript/TypeScript source.
     ///
-    /// Lightweight alternative to AST parsing. Handles all common import/export
-    /// forms including bare imports, named imports, and re-exports.
+    /// Uses swc to parse the source into an AST, then walks module-level
+    /// declarations to find `import` and `export ... from` specifiers.
+    /// More robust than regex — won't match import-like patterns inside
+    /// strings, comments, or regex literals.
     fn extract_imports(source: &str) -> Vec<String> {
-        let mut imports: Vec<String> = Vec::new();
-        for cap in IMPORT_RE.captures_iter(source) {
-            let specifier = cap[1].to_string();
-            // Filter out node: built-in specifiers.
-            if !specifier.starts_with("node:") {
-                imports.push(specifier);
-            }
-        }
-        imports
-    }
-
-    /// AST-based: extract import specifiers from JavaScript source.
-    /// Only available when swc is compiled (QuickJS backend).
-    /// Kept for reference; the regex-based `extract_imports` is used in practice.
-    #[cfg(feature = "quickjs-backend")]
-    #[allow(dead_code)]
-    fn extract_imports_ast(source: &str) -> Vec<String> {
         let mut imports = Vec::new();
         let module = match parse_module(source) {
             Ok(m) => m,
@@ -561,27 +529,19 @@ impl ModuleRegistry {
         };
 
         for item in &module.body {
-            match item {
-                ModuleItem::ModuleDecl(decl) => {
-                    let src = match decl {
-                        ModuleDecl::Import(import) => Some(&import.src),
-                        ModuleDecl::ExportNamed(e) => e.src.as_ref(),
-                        ModuleDecl::ExportAll(e) => Some(&e.src),
-                        ModuleDecl::ExportDefaultExpr(_)
-                        | ModuleDecl::ExportDefaultDecl(_)
-                        | ModuleDecl::ExportDecl(_)
-                        | ModuleDecl::TsImportEquals(_)
-                        | ModuleDecl::TsExportAssignment(_)
-                        | ModuleDecl::TsNamespaceExport(_) => None,
-                    };
-                    if let Some(src) = src {
-                        let specifier = src.value.to_string_lossy();
-                        if !specifier.starts_with("node:") {
-                            imports.push(specifier.into_owned());
-                        }
+            if let ModuleItem::ModuleDecl(decl) = item {
+                let src = match decl {
+                    ModuleDecl::Import(import) => Some(&import.src),
+                    ModuleDecl::ExportNamed(e) => e.src.as_ref(),
+                    ModuleDecl::ExportAll(e) => Some(&e.src),
+                    _ => None,
+                };
+                if let Some(src) = src {
+                    let specifier = src.value.to_string_lossy();
+                    if !specifier.starts_with("node:") {
+                        imports.push(specifier.into_owned());
                     }
                 }
-                _ => {}
             }
         }
         imports
@@ -643,8 +603,6 @@ impl ModuleRegistry {
 }
 
 /// Parse JavaScript/TypeScript source into a Module AST.
-/// Only available when swc is compiled (QuickJS backend).
-#[cfg(feature = "quickjs-backend")]
 fn parse_module(source: &str) -> Result<Module, String> {
     GLOBALS.set(&Globals::default(), || {
         let cm: Lrc<SourceMap> = Default::default();

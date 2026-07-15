@@ -468,6 +468,13 @@ impl V8Runtime {
         self.registry = Some(registry);
         self.entry = Some(entry.to_string());
 
+        // Evict compiled modules that are no longer in the dependency graph.
+        // This prevents Global<Module> handle leaks from stale modules.
+        let active: std::collections::HashSet<&str> =
+            order.iter().map(|s| s.as_str()).collect();
+        self.compiled_modules
+            .retain(|name, _| active.contains(name.as_str()));
+
         Ok(())
     }
 
