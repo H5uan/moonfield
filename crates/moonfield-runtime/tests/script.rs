@@ -1,6 +1,6 @@
 //! Integration tests for the scripting runtime.
 
-use moonfield_runtime::script::{load_script, transpile_typescript, ScriptApi, ScriptRuntime};
+use moonfield_runtime::script::{load_script, ScriptApi, ScriptRuntime};
 
 #[cfg(feature = "v8-backend")]
 use moonfield_runtime::script::V8Runtime as Runtime;
@@ -46,13 +46,30 @@ fn reload_changes_behavior() {
     runtime.call("main").expect("call reloaded main");
 }
 
+/// V8 backend requires TypeScript to be pre-compiled via tsc.
+/// This test verifies that loading a `.ts` file directly gives a helpful error.
+#[cfg(feature = "v8-backend")]
+#[test]
+fn v8_rejects_raw_typescript() {
+    let ts = "function main(): void { record_frame(); }";
+    let mut runtime = Runtime::new(ScriptApi::default()).expect("runtime");
+    let result = runtime.load("main.ts", ts);
+    assert!(result.is_err(), "V8 should reject raw TS source");
+    let msg = result.unwrap_err().to_string();
+    assert!(
+        msg.contains("SyntaxError") || msg.contains("Unexpected token"),
+        "error should mention syntax error, got: {msg}"
+    );
+}
+
+/// QuickJS backend needs swc-based transpilation for TypeScript.
+#[cfg(feature = "quickjs-backend")]
 #[test]
 fn transpile_strips_typescript_annotations() {
     let ts = "function main(): void {\n    const x: number = 42;\n    const y = x as number;\n    record_frame();\n}";
-    let js = transpile_typescript(ts).expect("transpile");
+    let js = moonfield_runtime::script::transpile_typescript(ts).expect("transpile");
 
-    // Type annotations must be gone (this is what the old line-stripper
-    // frequently failed at).
+    // Type annotations must be gone.
     assert!(!js.contains(": void"));
     assert!(!js.contains(": number"));
     assert!(!js.contains("as number"));
@@ -87,7 +104,7 @@ fn runtime_error_reports_useful_message() {
     let err = runtime.call("main");
     assert!(err.is_err(), "calling an undefined function must error");
     let msg = err.unwrap_err().to_string();
-    // The message must carry the actual V8 exception text, not a generic
+    // The message must carry the actual engine exception text, not a generic
     // "failed to run script".
     assert!(
         msg.contains("not defined") || msg.contains("callMissingThing"),

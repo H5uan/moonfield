@@ -18,6 +18,10 @@ pub struct V8Runtime {
 impl ScriptRuntime for V8Runtime {
     fn new(api: ScriptApi) -> Result<Self> {
         V8_INIT.call_once(|| {
+            // TypeScript is compiled at build time via `tsc` (see scripts/tsconfig.json).
+            // The runtime loads pre-compiled JavaScript from target/scripts/.
+            // Native type stripping is not yet available in this V8 version.
+
             let platform = v8::new_default_platform(0, false).make_shared();
             v8::V8::initialize_platform(platform);
             v8::V8::initialize();
@@ -57,7 +61,7 @@ impl ScriptRuntime for V8Runtime {
             None,
             false,
             false,
-            false,
+            false, // is_module: false — plain script
             None,
         );
         let code = v8::String::new(tc, source)
@@ -188,6 +192,61 @@ impl V8Runtime {
         }
         let cname = v8::String::new(scope, "console").unwrap();
         global.set(scope, cname.into(), console.into());
+
+        Ok(())
+    }
+}
+
+impl V8Runtime {
+    /// Load a module using V8's native ESModule API.
+    ///
+    /// Compiles, instantiates, and evaluates the module. The module's exports
+    /// become accessible via `get_module_namespace()`. For modules with imports,
+    /// use `load_module_graph()` instead.
+    pub fn load_module(&mut self, name: &str, source: &str) -> Result<()> {
+        v8::scope!(let handle_scope, &mut self.isolate);
+        let local_context = v8::Local::new(handle_scope, &self.context);
+        let scope = &mut v8::ContextScope::new(handle_scope, local_context);
+
+        let name_str = v8::String::new(scope, name).unwrap();
+        let origin = v8::ScriptOrigin::new(
+            scope,
+            name_str.into(),
+            0,
+            0,
+            false,
+            0,
+            None,
+            false,
+            false,
+            true, // is_module: true — compile as ESModule
+            None,
+        );
+
+        let code = v8::String::new(scope, source)
+            .ok_or_else(|| ScriptError::Execution("failed to create source string".into()))?;
+
+        let mut src = v8::script_compiler::Source::new(code, Some(&origin));
+        let module = v8::script_compiler::compile_module(scope, &mut src)
+            .ok_or_else(|| ScriptError::Execution("failed to compile module".into()))?;
+
+        // Instantiate: for now, self-contained modules only (no imports).
+        // The resolve callback returns None for any import, which will fail
+        // if the module actually has imports.
+        let instantiated = module.instantiate_module(scope, |_context, _specifier, _attrs, _referrer| {
+            None
+        });
+        if instantiated != Some(true) {
+            // Capture exception before it's lost.
+            return Err(ScriptError::Execution("module instantiation failed".into()));
+        }
+
+        // Evaluate.
+        module.evaluate(scope).ok_or_else(|| {
+            // Use a simple error message since we can't capture the exception
+            // without a TryCatch scope.
+            ScriptError::Execution("module evaluation failed".into())
+        })?;
 
         Ok(())
     }
