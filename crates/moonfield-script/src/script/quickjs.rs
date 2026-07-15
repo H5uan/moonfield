@@ -1,9 +1,9 @@
 //! QuickJS backend for the scripting runtime.
 
-use super::{HostFn, Result, ScriptApi, ScriptError, ScriptRuntime};
+use super::{HostValue, Result, ScriptApi, ScriptError, ScriptRuntime};
 use moonfield_base::{error, info, warn};
-use rquickjs::function::Func;
-use rquickjs::{CaughtError, Context, Runtime};
+use rquickjs::function::{Func, Rest};
+use rquickjs::{CaughtError, Context, Runtime, Value};
 
 /// JavaScript shim that wires a `console` object to the `__mf_log` host
 /// function registered below. Stringifying via `String(...)` matches browser
@@ -81,12 +81,19 @@ impl QuickJsRuntime {
             .with(|ctx| {
                 let global = ctx.globals();
                 for &(name, func) in self.api.iter() {
+                    // Use a non-capturing wrapper to avoid borrow issues with `name`.
+                    let wrapper = ApiFuncWrapper { name, func };
                     global.set(
                         name,
-                        Func::from(move || {
-                            if let Err(e) = func(&[]) {
-                                eprintln!("{} error: {}", name, e);
+                        Func::from(move |args: Rest<Value>| -> rquickjs::Result<()> {
+                            let mut host_args: Vec<HostValue> = Vec::with_capacity(args.0.len());
+                            for arg in args.0.iter() {
+                                host_args.push(quickjs_value_to_host(arg));
                             }
+                            if let Err(e) = (wrapper.func)(&host_args) {
+                                eprintln!("{} error: {}", wrapper.name, e);
+                            }
+                            Ok(())
                         }),
                     )?;
                 }
@@ -105,6 +112,60 @@ impl QuickJsRuntime {
             .map_err(|e: rquickjs::Error| ScriptError::Runtime(format!("{:?}", e)))?;
         Ok(())
     }
+}
+
+/// Helper to hold a (name, func) pair without lifetime issues.
+struct ApiFuncWrapper {
+    name: &'static str,
+    func: super::HostFn,
+}
+
+/// Convert a QuickJS `Value` to a `HostValue`.
+fn quickjs_value_to_host(value: &Value) -> HostValue {
+    if value.is_undefined() || value.is_null() {
+        return HostValue::Null;
+    }
+    if let Some(b) = value.as_bool() {
+        return HostValue::Bool(b);
+    }
+    if let Some(n) = value.as_float() {
+        return HostValue::Number(n);
+    }
+    if let Some(n) = value.as_int() {
+        return HostValue::Number(n as f64);
+    }
+    if let Some(s) = value.as_string() {
+        if let Ok(s) = s.to_string() {
+            return HostValue::String(s);
+        }
+    }
+    if let Some(arr) = value.as_array() {
+        let mut items = Vec::new();
+        for item in arr.iter() {
+            if let Ok(item) = item {
+                items.push(quickjs_value_to_host(&item));
+            }
+        }
+        return HostValue::Array(items);
+    }
+    if let Some(obj) = value.as_object() {
+        let mut map = std::collections::HashMap::new();
+        for key in obj.keys::<String>() {
+            if let Ok(key) = key {
+                if let Ok(val) = obj.get::<_, Value>(&key) {
+                    map.insert(key, quickjs_value_to_host(&val));
+                }
+            }
+        }
+        return HostValue::Object(map);
+    }
+    // Fallback: stringify
+    if let Some(s) = value.as_string() {
+        if let Ok(s) = s.to_string() {
+            return HostValue::String(s);
+        }
+    }
+    HostValue::String(format!("{:?}", value))
 }
 
 /// Turn a caught QuickJS error into a human-readable string with message,

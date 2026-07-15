@@ -1,6 +1,6 @@
 //! V8 backend for the scripting runtime.
 
-use super::{HostFn, HostValue, Result, ScriptApi, ScriptError, ScriptRuntime};
+use super::{HostFn, HostValue, Result, ScriptApi, ScriptError, ScriptRuntime, TypedArrayValue};
 use moonfield_base::{error, info, warn};
 use std::sync::Once;
 
@@ -348,6 +348,8 @@ fn v8_value_to_host(value: v8::Local<v8::Value>, scope: &mut v8::PinScope) -> Ho
     if value.is_string() {
         return HostValue::String(value.to_rust_string_lossy(scope));
     }
+
+    // ArrayBuffer
     if value.is_array_buffer() {
         if let Ok(buf) = v8::Local::<v8::ArrayBuffer>::try_from(value) {
             let len = buf.byte_length();
@@ -365,6 +367,116 @@ fn v8_value_to_host(value: v8::Local<v8::Value>, scope: &mut v8::PinScope) -> Ho
             return HostValue::ArrayBuffer(data);
         }
     }
+
+    // TypedArray — try each concrete typed array type
+    if value.is_typed_array() {
+        // Uint8Array
+        if let Ok(ta) = v8::Local::<v8::Uint8Array>::try_from(value) {
+            let byte_length = ta.byte_length();
+            let mut data = vec![0u8; byte_length];
+            ta.copy_contents(&mut data);
+            return HostValue::TypedArray(TypedArrayValue::Uint8(data));
+        }
+        // Float32Array
+        if let Ok(ta) = v8::Local::<v8::Float32Array>::try_from(value) {
+            let len = ta.length();
+            let byte_len = len * 4;
+            let mut bytes = vec![0u8; byte_len];
+            ta.copy_contents(&mut bytes);
+            let data = unsafe { std::mem::transmute::<Vec<u8>, Vec<f32>>(bytes) };
+            return HostValue::TypedArray(TypedArrayValue::Float32(data));
+        }
+        // Float64Array
+        if let Ok(ta) = v8::Local::<v8::Float64Array>::try_from(value) {
+            let len = ta.length();
+            let byte_len = len * 8;
+            let mut bytes = vec![0u8; byte_len];
+            ta.copy_contents(&mut bytes);
+            let data = unsafe { std::mem::transmute::<Vec<u8>, Vec<f64>>(bytes) };
+            return HostValue::TypedArray(TypedArrayValue::Float64(data));
+        }
+        // Int8Array
+        if let Ok(ta) = v8::Local::<v8::Int8Array>::try_from(value) {
+            let len = ta.length();
+            let byte_len = len;
+            let mut bytes = vec![0u8; byte_len];
+            ta.copy_contents(&mut bytes);
+            let data = unsafe { std::mem::transmute::<Vec<u8>, Vec<i8>>(bytes) };
+            return HostValue::TypedArray(TypedArrayValue::Int8(data));
+        }
+        // Uint16Array
+        if let Ok(ta) = v8::Local::<v8::Uint16Array>::try_from(value) {
+            let len = ta.length();
+            let byte_len = len * 2;
+            let mut bytes = vec![0u8; byte_len];
+            ta.copy_contents(&mut bytes);
+            let data = unsafe { std::mem::transmute::<Vec<u8>, Vec<u16>>(bytes) };
+            return HostValue::TypedArray(TypedArrayValue::Uint16(data));
+        }
+        // Int16Array
+        if let Ok(ta) = v8::Local::<v8::Int16Array>::try_from(value) {
+            let len = ta.length();
+            let byte_len = len * 2;
+            let mut bytes = vec![0u8; byte_len];
+            ta.copy_contents(&mut bytes);
+            let data = unsafe { std::mem::transmute::<Vec<u8>, Vec<i16>>(bytes) };
+            return HostValue::TypedArray(TypedArrayValue::Int16(data));
+        }
+        // Uint32Array
+        if let Ok(ta) = v8::Local::<v8::Uint32Array>::try_from(value) {
+            let len = ta.length();
+            let byte_len = len * 4;
+            let mut bytes = vec![0u8; byte_len];
+            ta.copy_contents(&mut bytes);
+            let data = unsafe { std::mem::transmute::<Vec<u8>, Vec<u32>>(bytes) };
+            return HostValue::TypedArray(TypedArrayValue::Uint32(data));
+        }
+        // Int32Array
+        if let Ok(ta) = v8::Local::<v8::Int32Array>::try_from(value) {
+            let len = ta.length();
+            let byte_len = len * 4;
+            let mut bytes = vec![0u8; byte_len];
+            ta.copy_contents(&mut bytes);
+            let data = unsafe { std::mem::transmute::<Vec<u8>, Vec<i32>>(bytes) };
+            return HostValue::TypedArray(TypedArrayValue::Int32(data));
+        }
+    }
+
+    // Array
+    if value.is_array() {
+        if let Ok(arr) = v8::Local::<v8::Array>::try_from(value) {
+            let len = arr.length() as usize;
+            let mut items = Vec::with_capacity(len);
+            for i in 0..len {
+                if let Some(item) = arr.get_index(scope, i as u32) {
+                    items.push(v8_value_to_host(item, scope));
+                }
+            }
+            return HostValue::Array(items);
+        }
+    }
+
+    // Object
+    if value.is_object() {
+        if let Ok(obj) = v8::Local::<v8::Object>::try_from(value) {
+            let mut map = std::collections::HashMap::new();
+            let names = obj.get_own_property_names(scope, Default::default());
+            if let Some(names) = names {
+                let len = names.length() as usize;
+                for i in 0..len {
+                    if let Some(key_val) = names.get_index(scope, i as u32) {
+                        let key_str = key_val.to_rust_string_lossy(scope);
+                        let key = v8::String::new(scope, &key_str).unwrap();
+                        if let Some(val) = obj.get(scope, key.into()) {
+                            map.insert(key_str, v8_value_to_host(val, scope));
+                        }
+                    }
+                }
+            }
+            return HostValue::Object(map);
+        }
+    }
+
     // Fallback: stringify.
     HostValue::String(value.to_rust_string_lossy(scope))
 }
@@ -388,6 +500,108 @@ fn host_to_v8_value<'s>(value: HostValue, scope: &mut v8::PinScope<'s, '_>) -> v
                 }
             }
             buf.into()
+        }
+        HostValue::Object(map) => {
+            let obj = v8::Object::new(scope);
+            for (k, v) in map {
+                let key = v8::String::new(scope, &k).unwrap();
+                let val = host_to_v8_value(v, scope);
+                obj.set(scope, key.into(), val);
+            }
+            obj.into()
+        }
+        HostValue::Array(items) => {
+            let len = items.len() as u32;
+            let arr = v8::Array::new(scope, len as i32);
+            for (i, item) in items.into_iter().enumerate() {
+                let val = host_to_v8_value(item, scope);
+                arr.set_index(scope, i as u32, val);
+            }
+            arr.into()
+        }
+        HostValue::TypedArray(ta) => {
+            let val: v8::Local<'s, v8::Value> = match ta {
+                TypedArrayValue::Uint8(data) => {
+                    let buf = v8::ArrayBuffer::new(scope, data.len());
+                    if let Some(ptr) = buf.data() {
+                        unsafe {
+                            std::ptr::copy_nonoverlapping(data.as_ptr(), ptr.as_ptr() as *mut u8, data.len());
+                        }
+                    }
+                    v8::Uint8Array::new(scope, buf, 0, data.len()).unwrap().into()
+                }
+                TypedArrayValue::Float32(data) => {
+                    let byte_len = data.len() * 4;
+                    let buf = v8::ArrayBuffer::new(scope, byte_len);
+                    if let Some(ptr) = buf.data() {
+                        unsafe {
+                            std::ptr::copy_nonoverlapping(data.as_ptr() as *const u8, ptr.as_ptr() as *mut u8, byte_len);
+                        }
+                    }
+                    v8::Float32Array::new(scope, buf, 0, data.len()).unwrap().into()
+                }
+                TypedArrayValue::Float64(data) => {
+                    let byte_len = data.len() * 8;
+                    let buf = v8::ArrayBuffer::new(scope, byte_len);
+                    if let Some(ptr) = buf.data() {
+                        unsafe {
+                            std::ptr::copy_nonoverlapping(data.as_ptr() as *const u8, ptr.as_ptr() as *mut u8, byte_len);
+                        }
+                    }
+                    v8::Float64Array::new(scope, buf, 0, data.len()).unwrap().into()
+                }
+                TypedArrayValue::Int8(data) => {
+                    let byte_len = data.len();
+                    let buf = v8::ArrayBuffer::new(scope, byte_len);
+                    if let Some(ptr) = buf.data() {
+                        unsafe {
+                            std::ptr::copy_nonoverlapping(data.as_ptr() as *const u8, ptr.as_ptr() as *mut u8, byte_len);
+                        }
+                    }
+                    v8::Int8Array::new(scope, buf, 0, data.len()).unwrap().into()
+                }
+                TypedArrayValue::Uint16(data) => {
+                    let byte_len = data.len() * 2;
+                    let buf = v8::ArrayBuffer::new(scope, byte_len);
+                    if let Some(ptr) = buf.data() {
+                        unsafe {
+                            std::ptr::copy_nonoverlapping(data.as_ptr() as *const u8, ptr.as_ptr() as *mut u8, byte_len);
+                        }
+                    }
+                    v8::Uint16Array::new(scope, buf, 0, data.len()).unwrap().into()
+                }
+                TypedArrayValue::Int16(data) => {
+                    let byte_len = data.len() * 2;
+                    let buf = v8::ArrayBuffer::new(scope, byte_len);
+                    if let Some(ptr) = buf.data() {
+                        unsafe {
+                            std::ptr::copy_nonoverlapping(data.as_ptr() as *const u8, ptr.as_ptr() as *mut u8, byte_len);
+                        }
+                    }
+                    v8::Int16Array::new(scope, buf, 0, data.len()).unwrap().into()
+                }
+                TypedArrayValue::Uint32(data) => {
+                    let byte_len = data.len() * 4;
+                    let buf = v8::ArrayBuffer::new(scope, byte_len);
+                    if let Some(ptr) = buf.data() {
+                        unsafe {
+                            std::ptr::copy_nonoverlapping(data.as_ptr() as *const u8, ptr.as_ptr() as *mut u8, byte_len);
+                        }
+                    }
+                    v8::Uint32Array::new(scope, buf, 0, data.len()).unwrap().into()
+                }
+                TypedArrayValue::Int32(data) => {
+                    let byte_len = data.len() * 4;
+                    let buf = v8::ArrayBuffer::new(scope, byte_len);
+                    if let Some(ptr) = buf.data() {
+                        unsafe {
+                            std::ptr::copy_nonoverlapping(data.as_ptr() as *const u8, ptr.as_ptr() as *mut u8, byte_len);
+                        }
+                    }
+                    v8::Int32Array::new(scope, buf, 0, data.len()).unwrap().into()
+                }
+            };
+            val
         }
     }
 }

@@ -32,6 +32,15 @@
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 
+use swc_common::sync::Lrc;
+use swc_common::{FileName, Globals, Mark, SourceMap, GLOBALS};
+use swc_ecma_ast::*;
+use swc_ecma_codegen::{text_writer::JsWriter, Config as CodegenConfig, Emitter};
+use swc_ecma_parser::{lexer::Lexer, Parser, StringInput, Syntax, TsSyntax};
+use swc_ecma_transforms_module::common_js::{common_js, Config as CjsConfig, FeatureFlag};
+use swc_ecma_transforms_module::path::Resolver;
+
+
 /// A compiled module, holding its source and resolved dependency list.
 #[derive(Clone)]
 pub struct ModuleInfo {
@@ -75,8 +84,8 @@ impl ModuleRegistry {
     /// Transforms ESModule syntax to CommonJS. Returns the canonical name.
     pub fn register(&mut self, name: &str, source: String) -> String {
         let canonical = self.canonicalize(name);
-        let imports = Self::extract_imports(&source);
-        let cjs_source = Self::transform_to_cjs(&source, &imports);
+        let imports = Self::extract_imports_ast(&source);
+        let cjs_source = Self::transform_to_cjs_ast(&source);
         self.modules.insert(
             canonical.clone(),
             ModuleInfo {
@@ -236,341 +245,116 @@ impl ModuleRegistry {
         components.iter().collect()
     }
 
-    /// Transform ESModule source to CommonJS.
-    ///
-    /// Handles:
-    /// - `import { x } from "./foo"` → `const { x } = require("./foo")`
-    /// - `import x from "./foo"` → `const { default: x } = require("./foo")`
-    /// - `import * as x from "./foo"` → `const x = require("./foo")`
-    /// - `import "./foo"` → `require("./foo")`
-    /// - `export function foo() {}` → `function foo() {} exports.foo = foo`
-    /// - `export default x` → `exports.default = x`
-    /// - `export { x, y }` → `exports.x = x; exports.y = y`
-    /// - `export { x as y }` → `exports.y = x`
-    /// - `export const x = 1` → `const x = 1; exports.x = x`
-    /// - `export class X {}` → `class X {} exports.X = X`
-    fn transform_to_cjs(source: &str, _imports: &[String]) -> String {
-        let mut output = String::new();
-        let mut export_names = Vec::new();
-
-        for line in source.lines() {
-            let trimmed = line.trim();
-
-            // Skip comments.
-            if trimmed.starts_with("//") {
-                output.push_str(line);
-                output.push('\n');
-                continue;
-            }
-
-            // Handle `import x from "..."` and `import { x } from "..."`
-            if trimmed.starts_with("import ") && trimmed.contains("from") {
-                let after_import = trimmed[6..].trim().to_string();
-                let (bindings, specifier) = if let Some(from_pos) = after_import.rfind(" from ") {
-                    let bind = &after_import[..from_pos];
-                    let spec = &after_import[from_pos + 6..];
-                    (bind.trim(), Self::extract_string_literal(spec.trim()))
-                } else {
-                    // Keep the line as-is.
-                    output.push_str(line);
-                    output.push('\n');
-                    continue;
-                };
-
-                if let Some(spec) = specifier {
-                    output.push_str(&format!("    const {} = __require(\"{}\");\n", 
-                        transform_import_bindings(bindings), spec));
-                } else {
-                    output.push_str(line);
-                    output.push('\n');
-                }
-                continue;
-            }
-
-            // Handle `import "..."` (side-effect imports)
-            if trimmed.starts_with("import ") && !trimmed.contains("from") {
-                if let Some(spec) = Self::extract_string_literal(&trimmed[6..].trim()) {
-                    output.push_str(&format!("    __require(\"{}\");\n", spec));
-                } else {
-                    output.push_str(line);
-                    output.push('\n');
-                }
-                continue;
-            }
-
-            // Handle `export default ...`
-            if trimmed.starts_with("export default ") {
-                let expr = &trimmed[14..].trim();
-                output.push_str(line);
-                // Add the export assignment if it's a declaration.
-                if !expr.starts_with('{') && !expr.starts_with('[') && !expr.starts_with('`') {
-                    output.push_str("\nexports.default = default_export;\n");
-                } else {
-                    output.push_str("\nexports.default = ");
-                    output.push_str(expr);
-                    output.push_str(";\n");
-                }
-                continue;
-            }
-
-            // Handle `export { x, y }` and `export { x as y }`
-            if trimmed.starts_with("export {") && trimmed.ends_with('}') {
-                let inner = &trimmed[7..trimmed.len() - 1].trim();
-                for item in inner.split(',') {
-                    let item = item.trim();
-                    if let Some(as_pos) = item.find(" as ") {
-                        let local = &item[..as_pos].trim();
-                        let exported = &item[as_pos + 4..].trim();
-                        output.push_str(&format!("exports.{} = {};\n", exported, local));
-                    } else {
-                        output.push_str(&format!("exports.{} = {};\n", item, item));
-                    }
-                }
-                continue;
-            }
-
-            // Handle `export { x, y } from "..."` (re-exports)
-            if trimmed.starts_with("export {") && trimmed.contains("from") {
-                if let Some(from_pos) = trimmed.rfind(" from ") {
-                    let inner = &trimmed[7..from_pos].trim();
-                    let spec = &trimmed[from_pos + 6..].trim();
-                    if let Some(spec) = Self::extract_string_literal(spec) {
-                        for item in inner.split(',') {
-                            let item = item.trim();
-                            if let Some(as_pos) = item.find(" as ") {
-                                let local = &item[..as_pos].trim();
-                                let exported = &item[as_pos + 4..].trim();
-                                output.push_str(&format!(
-                                    "exports.{} = __require(\"{}\").{};\n",
-                                    exported, spec, local
-                                ));
-                            } else {
-                                output.push_str(&format!(
-                                    "exports.{} = __require(\"{}\").{};\n",
-                                    item, spec, item
-                                ));
-                            }
-                        }
-                    }
-                }
-                continue;
-            }
-
-            // Handle `export function name(...)` or `export async function name(...)`
-            if trimmed.starts_with("export function ") || trimmed.starts_with("export async function ") {
-                let after_export = if trimmed.starts_with("export async function ") {
-                    &trimmed[22..]
-                } else {
-                    &trimmed[15..]
-                };
-                // Extract function name.
-                if let Some(paren) = after_export.find('(') {
-                    let name = &after_export[..paren].trim();
-                    export_names.push(name.to_string());
-                }
-                // Remove "export " prefix.
-                output.push_str(&line.replacen("export ", "", 1));
-                output.push('\n');
-                continue;
-            }
-
-            // Handle `export class Name ...`
-            if trimmed.starts_with("export class ") {
-                let after_export = &trimmed[12..].trim();
-                if let Some(brace) = after_export.find('{') {
-                    let name = &after_export[..brace].trim();
-                    export_names.push(name.to_string());
-                } else if let Some(extends_pos) = after_export.find("extends ") {
-                    let name = &after_export[..extends_pos].trim();
-                    export_names.push(name.to_string());
-                }
-                // Remove "export " prefix.
-                output.push_str(&line.replacen("export ", "", 1));
-                output.push('\n');
-                continue;
-            }
-
-            // Handle `export const/let/var ...`
-            if trimmed.starts_with("export const ") || trimmed.starts_with("export let ") || trimmed.starts_with("export var ") {
-                let after_export = &trimmed[6..].trim(); // remove "export "
-                // Remove the const/let/var keyword.
-                let decl_keyword_end = after_export.find(' ').unwrap_or(after_export.len());
-                let after_keyword = &after_export[decl_keyword_end + 1..].trim();
-                // Extract the first declared name.
-                if let Some(assign) = after_keyword.find('=') {
-                    let name = &after_keyword[..assign].trim();
-                    // Handle destructuring.
-                    if name.starts_with('{') || name.starts_with('[') {
-                        output.push_str(&line.replacen("export ", "", 1));
-                        output.push('\n');
-                    } else {
-                        let name = name.trim_end_matches(';').trim();
-                        output.push_str(&line.replacen("export ", "", 1));
-                        output.push('\n');
-                        export_names.push(name.to_string());
-                    }
-                } else {
-                    // Just a declaration without assignment, e.g. `export let x;`
-                    output.push_str(&line.replacen("export ", "", 1));
-                    output.push('\n');
-                    // Extract the name (it's the first word after const/let/var).
-                    let decl_part = after_keyword.trim_end_matches(';').trim();
-                    if let Some(comma) = decl_part.find(',') {
-                        let name = &decl_part[..comma].trim();
-                        export_names.push(name.to_string());
-                    } else {
-                        export_names.push(decl_part.to_string());
-                    }
-                }
-                continue;
-            }
-
-            // Handle `export * from "..."` (barrel re-export)
-            if trimmed.starts_with("export * from ") {
-                if let Some(spec) = Self::extract_string_literal(&trimmed[13..].trim()) {
-                    output.push_str(&format!(
-                        "const __barrel = __require(\"{}\");\n\
-                         Object.keys(__barrel).forEach(k => exports[k] = __barrel[k]);\n",
-                        spec
-                    ));
-                }
-                continue;
-            }
-
-            // Handle `export * as name from "..."`
-            if trimmed.starts_with("export * as ") && trimmed.contains("from") {
-                if let Some(from_pos) = trimmed.rfind(" from ") {
-                    let ns_name = &trimmed[11..from_pos].trim();
-                    if let Some(spec) = Self::extract_string_literal(&trimmed[from_pos + 6..].trim()) {
-                        output.push_str(&format!(
-                            "exports.{} = __require(\"{}\");\n",
-                            ns_name, spec
-                        ));
-                    }
-                }
-                continue;
-            }
-
-            // Handle `export = ...` (TypeScript)
-            if trimmed.starts_with("export = ") {
-                let expr = &trimmed[8..].trim();
-                output.push_str(&format!("module.exports = {};\n", expr));
-                continue;
-            }
-
-            // Pass through all other lines.
-            output.push_str(line);
-            output.push('\n');
-        }
-
-        // Add exports assignments for tracked names.
-        for name in &export_names {
-            output.push_str(&format!("exports.{} = {};\n", name, name));
-        }
-
-        output
-    }
-
-    /// Extract a string literal from a source fragment (e.g. `"foo"` or `'foo'`).
-    /// Handles trailing characters like `";` or `');`.
-    fn extract_string_literal(s: &str) -> Option<String> {
-        let s = s.trim();
-        for quote in ['"', '\''] {
-            if s.starts_with(quote) {
-                // Find the closing quote, handling trailing characters.
-                if let Some(end) = s[1..].find(quote) {
-                    return Some(s[1..=end].to_string());
-                }
-            }
-        }
-        None
-    }
-
-    /// Extract import specifiers from JavaScript source.
-    fn extract_imports(source: &str) -> Vec<String> {
+    /// AST-based: extract import specifiers from JavaScript source.
+    fn extract_imports_ast(source: &str) -> Vec<String> {
         let mut imports = Vec::new();
-        for line in source.lines() {
-            let trimmed = line.trim();
-            if trimmed.starts_with("//") {
-                continue;
-            }
+        let module = match parse_module(source) {
+            Ok(m) => m,
+            Err(_) => return imports,
+        };
 
-            if let Some(from_pos) = trimmed.find("from") {
-                let before_from = &trimmed[..from_pos].trim();
-                if before_from.starts_with("import") || before_from.starts_with("export") {
-                    let after_from = &trimmed[from_pos + 4..].trim();
-                    for quote in ['"', '\''] {
-                        if let Some(start) = after_from.find(quote) {
-                            let rest = &after_from[start + 1..];
-                            if let Some(end) = rest.find(quote) {
-                                let specifier = &rest[..end];
-                                if !specifier.starts_with("node:") {
-                                    imports.push(specifier.to_string());
-                                }
-                                break;
-                            }
+        for item in &module.body {
+            match item {
+                ModuleItem::ModuleDecl(decl) => {
+                    let src = match decl {
+                        ModuleDecl::Import(import) => Some(&import.src),
+                        ModuleDecl::ExportNamed(e) => e.src.as_ref(),
+                        ModuleDecl::ExportAll(e) => Some(&e.src),
+                        ModuleDecl::ExportDefaultExpr(_)
+                        | ModuleDecl::ExportDefaultDecl(_)
+                        | ModuleDecl::ExportDecl(_)
+                        | ModuleDecl::TsImportEquals(_)
+                        | ModuleDecl::TsExportAssignment(_)
+                        | ModuleDecl::TsNamespaceExport(_) => None,
+                    };
+                    if let Some(src) = src {
+                        let specifier = src.value.to_string_lossy();
+                        if !specifier.starts_with("node:") {
+                            imports.push(specifier.into_owned());
                         }
                     }
                 }
-            }
-
-            if trimmed.starts_with("import ") && !trimmed.contains("from") {
-                for quote in ['"', '\''] {
-                    if let Some(start) = trimmed.find(quote) {
-                        let rest = &trimmed[start + 1..];
-                        if let Some(end) = rest.find(quote) {
-                            imports.push(rest[..end].to_string());
-                            break;
-                        }
-                    }
-                }
+                _ => {}
             }
         }
         imports
     }
+
+    /// AST-based: transform ESModule source to CommonJS using swc.
+    ///
+    /// Uses `swc_ecma_transforms_module`'s `common_js` pass to perform the
+    /// transformation, then replaces `require` with `__require` to match the
+    /// runtime's module loading convention.
+    fn transform_to_cjs_ast(source: &str) -> String {
+        let module = match parse_module(source) {
+            Ok(m) => m,
+            Err(e) => return format!("/* transform error: {} */\n{}", e, source),
+        };
+
+        let mut program = Program::Module(module);
+
+        GLOBALS.set(&Globals::default(), || {
+            let unresolved_mark = Mark::new();
+
+            let mut pass = common_js(
+                Resolver::default(),
+                unresolved_mark,
+                CjsConfig {
+                    allow_top_level_this: true,
+                    strict: false,
+                    strict_mode: false,
+                    ..Default::default()
+                },
+                FeatureFlag {
+                    support_block_scoping: true,
+                    support_arrow: true,
+                },
+            );
+
+            // Apply the transform pass
+            pass.process(&mut program);
+
+            // Generate code from the transformed AST
+            let cm: Lrc<SourceMap> = Default::default();
+            let mut buf = Vec::new();
+            {
+                let mut emitter = Emitter {
+                    cfg: CodegenConfig::default(),
+                    cm: cm.clone(),
+                    comments: None,
+                    wr: JsWriter::new(cm, "\n", &mut buf, None),
+                };
+                let _ = emitter.emit_program(&program);
+            }
+
+            let output = String::from_utf8(buf).unwrap_or_default();
+            // Replace `require` with `__require` to match the runtime convention
+            output.replace("require(", "__require(")
+        })
+    }
 }
 
-/// Transform import bindings like `{ x, y as z }` or `* as name` or `defaultName`.
-///
-/// Returns the right-hand side of the `const ... = __require(...)` assignment.
-/// For named imports, this includes the braces, e.g. `{ value }` or `{ x, y: z }`.
-/// For default imports, this is `{ default: name }`.
-/// For namespace imports, this is just the name.
-fn transform_import_bindings(bindings: &str) -> String {
-    let bindings = bindings.trim();
+/// Parse JavaScript/TypeScript source into a Module AST.
+fn parse_module(source: &str) -> Result<Module, String> {
+    GLOBALS.set(&Globals::default(), || {
+        let cm: Lrc<SourceMap> = Default::default();
+        let fm = cm.new_source_file(
+            Lrc::new(FileName::Custom("module.ts".into())),
+            source.to_string(),
+        );
 
-    // `import * as name from "..."` → `const name = require("...")`
-    if bindings.starts_with("* as ") {
-        return bindings[5..].trim().to_string();
-    }
+        let lexer = Lexer::new(
+            Syntax::Typescript(TsSyntax::default()),
+            EsVersion::Es2022,
+            StringInput::from(&*fm),
+            None,
+        );
+        let mut parser = Parser::new_from(lexer);
 
-    // `import defaultName from "..."` → `const { default: defaultName } = require("...")`
-    if !bindings.starts_with('{') {
-        let name = bindings.trim();
-        if name.contains(',') {
-            // `import defaultName, { x } from "..."` → `const { default: defaultName, x } = require("...")`
-            let parts: Vec<&str> = name.splitn(2, ',').collect();
-            let default_name = parts[0].trim();
-            let rest = parts[1].trim();
-            return format!("{{ default: {}, {} }}", default_name, &rest[1..rest.len() - 1]);
-        }
-        return format!("{{ default: {} }}", name);
-    }
-
-    // `import { x, y as z } from "..."` → `const { x, y: z } = require("...")`
-    let inner = &bindings[1..bindings.len() - 1].trim();
-    let mut parts = Vec::new();
-    for item in inner.split(',') {
-        let item = item.trim();
-        if let Some(as_pos) = item.find(" as ") {
-            let local = &item[..as_pos].trim();
-            let exported = &item[as_pos + 4..].trim();
-            parts.push(format!("{}: {}", exported, local));
-        } else {
-            parts.push(item.to_string());
-        }
-    }
-    format!("{{ {} }}", parts.join(", "))
+        parser
+            .parse_module()
+            .map_err(|e| format!("parse error: {:?}", e))
+    })
 }
 
 #[cfg(test)]
@@ -586,7 +370,7 @@ import './bar';
 export { baz } from './baz';
 // import { ignored } from "./ignored";
 "#;
-        let imports = ModuleRegistry::extract_imports(source);
+        let imports = ModuleRegistry::extract_imports_ast(source);
         assert!(imports.contains(&"./foo".to_string()));
         assert!(imports.contains(&"side-effect".to_string()));
         assert!(imports.contains(&"./bar".to_string()));
@@ -610,8 +394,7 @@ export { baz } from './baz';
     #[test]
     fn test_transform_import_to_require() {
         let source = "import { foo } from \"./bar\";\nfoo();\n";
-        let imports = ModuleRegistry::extract_imports(source);
-        let cjs = ModuleRegistry::transform_to_cjs(source, &imports);
+        let cjs = ModuleRegistry::transform_to_cjs_ast(source);
         assert!(cjs.contains("__require"));
         assert!(cjs.contains("./bar"));
     }
@@ -619,18 +402,16 @@ export { baz } from './baz';
     #[test]
     fn test_transform_export_function() {
         let source = "export function main() { return 42; }\n";
-        let imports = ModuleRegistry::extract_imports(source);
-        let cjs = ModuleRegistry::transform_to_cjs(source, &imports);
-        assert!(cjs.contains("exports.main"));
-        assert!(cjs.contains("function main"));
+        let cjs = ModuleRegistry::transform_to_cjs_ast(source);
+        assert!(cjs.contains("exports"), "CJS should contain exports");
+        assert!(cjs.contains("main"));
     }
 
     #[test]
     fn test_transform_export_default() {
         let source = "export default 42;\n";
-        let imports = ModuleRegistry::extract_imports(source);
-        let cjs = ModuleRegistry::transform_to_cjs(source, &imports);
-        assert!(cjs.contains("exports.default"));
+        let cjs = ModuleRegistry::transform_to_cjs_ast(source);
+        assert!(cjs.contains("exports"), "CJS should contain exports");
     }
 
     #[test]

@@ -28,6 +28,7 @@ pub mod v8_runtime;
 pub use api::HostFn;
 pub use api::HostValue;
 pub use api::ScriptApi;
+pub use api::TypedArrayValue;
 pub use hot_reload::HotReloader;
 pub use module::ModuleRegistry;
 
@@ -129,31 +130,18 @@ pub fn load_script<P: AsRef<Path>>(path: P) -> Result<String> {
         }
     }
 
-    // No pre-compiled JS found.
-    // For QuickJS backend, fall through to swc-based transpilation.
-    // For V8 backend, return a helpful error guiding the user to run tsc.
-    #[cfg(feature = "quickjs-backend")]
-    {
-        let source = std::fs::read_to_string(path)
-            .map_err(|e| ScriptError::Execution(format!("failed to read script: {}", e)))?;
-        return transpile_typescript(&source);
-    }
-
-    #[cfg(not(feature = "quickjs-backend"))]
-    {
-        Err(ScriptError::Execution(format!(
-            "TypeScript must be pre-compiled: no .js found for '{}'. \
-             Run `tsc` (see scripts/tsconfig.json) to generate target/scripts/",
-            path.display()
-        )))
-    }
+    // No pre-compiled JS found. Fall through to swc-based transpilation.
+    let source = std::fs::read_to_string(path)
+        .map_err(|e| ScriptError::Execution(format!("failed to read script: {}", e)))?;
+    transpile_typescript(&source)
 }
 
 /// Transpile TypeScript source to JavaScript by stripping type annotations.
 ///
-/// Only available with the `quickjs-backend` feature (QuickJS has no native
-/// TS support). V8 handles type stripping natively via `--strip-types`.
-#[cfg(feature = "quickjs-backend")]
+/// Uses swc's TypeScript strip transform to remove type annotations.
+/// For the V8 backend, type stripping is also available at runtime via
+/// V8's `--strip-types` flag, but this function provides a uniform
+/// swc-based approach for both backends.
 pub fn transpile_typescript(source: &str) -> Result<String> {
     use swc_common::{sync::Lrc, FileName, Globals, Mark, SourceMap, GLOBALS};
     use swc_ecma_ast::{EsVersion, Module, Pass, Program};

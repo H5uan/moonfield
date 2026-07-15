@@ -1,5 +1,7 @@
 //! Rust APIs exposed to scripts.
 
+use std::collections::HashMap;
+
 use moonfield_lunaris::HeadlessContext;
 
 /// A value that can be passed between scripts and host functions.
@@ -13,6 +15,25 @@ pub enum HostValue {
     Number(f64),
     String(String),
     ArrayBuffer(Vec<u8>),
+    /// A JavaScript plain object (string-keyed map).
+    Object(HashMap<String, HostValue>),
+    /// A JavaScript array.
+    Array(Vec<HostValue>),
+    /// A typed array (e.g. Float32Array, Uint8Array).
+    TypedArray(TypedArrayValue),
+}
+
+/// Represents a JavaScript typed array with its element type and data.
+#[derive(Debug, Clone)]
+pub enum TypedArrayValue {
+    Uint8(Vec<u8>),
+    Int8(Vec<i8>),
+    Uint16(Vec<u16>),
+    Int16(Vec<i16>),
+    Uint32(Vec<u32>),
+    Int32(Vec<i32>),
+    Float32(Vec<f32>),
+    Float64(Vec<f64>),
 }
 
 impl HostValue {
@@ -53,6 +74,47 @@ impl HostValue {
             _ => None,
         }
     }
+
+    /// Try to extract an `&HashMap<String, HostValue>` from this value.
+    pub fn as_object(&self) -> Option<&HashMap<String, HostValue>> {
+        match self {
+            HostValue::Object(m) => Some(m),
+            _ => None,
+        }
+    }
+
+    /// Try to extract a `&[HostValue]` from this value.
+    pub fn as_array(&self) -> Option<&[HostValue]> {
+        match self {
+            HostValue::Array(a) => Some(a.as_slice()),
+            _ => None,
+        }
+    }
+
+    /// Try to extract a `&TypedArrayValue` from this value.
+    pub fn as_typed_array(&self) -> Option<&TypedArrayValue> {
+        match self {
+            HostValue::TypedArray(t) => Some(t),
+            _ => None,
+        }
+    }
+
+    /// Try to extract `&[u8]` from ArrayBuffer or Uint8 typed array.
+    pub fn as_bytes(&self) -> Option<&[u8]> {
+        match self {
+            HostValue::ArrayBuffer(buf) => Some(buf.as_slice()),
+            HostValue::TypedArray(TypedArrayValue::Uint8(buf)) => Some(buf.as_slice()),
+            _ => None,
+        }
+    }
+
+    /// Try to extract `&[f32]` from Float32 typed array.
+    pub fn as_f32_slice(&self) -> Option<&[f32]> {
+        match self {
+            HostValue::TypedArray(TypedArrayValue::Float32(buf)) => Some(buf.as_slice()),
+            _ => None,
+        }
+    }
 }
 
 impl From<f64> for HostValue {
@@ -82,6 +144,36 @@ impl From<String> for HostValue {
 impl From<&str> for HostValue {
     fn from(v: &str) -> Self {
         HostValue::String(v.to_string())
+    }
+}
+
+impl From<HashMap<String, HostValue>> for HostValue {
+    fn from(v: HashMap<String, HostValue>) -> Self {
+        HostValue::Object(v)
+    }
+}
+
+impl From<Vec<HostValue>> for HostValue {
+    fn from(v: Vec<HostValue>) -> Self {
+        HostValue::Array(v)
+    }
+}
+
+impl From<Vec<u8>> for HostValue {
+    fn from(v: Vec<u8>) -> Self {
+        HostValue::ArrayBuffer(v)
+    }
+}
+
+impl From<Vec<f32>> for HostValue {
+    fn from(v: Vec<f32>) -> Self {
+        HostValue::TypedArray(TypedArrayValue::Float32(v))
+    }
+}
+
+impl From<Vec<f64>> for HostValue {
+    fn from(v: Vec<f64>) -> Self {
+        HostValue::TypedArray(TypedArrayValue::Float64(v))
     }
 }
 
