@@ -69,7 +69,7 @@ pub const DEFAULT_FILTER: &str = concat!(
 ///     App::new()
 ///         .add_plugins(LogPlugin {
 ///             level: Level::DEBUG,
-///             filter: "wgpu=error,moonfield_lunaris=info".to_string(),
+///             filter: "wgpu=error,moonfield_render=info".to_string(),
 ///             custom_layer: |_| None,
 ///         })
 ///         .run();
@@ -77,7 +77,7 @@ pub const DEFAULT_FILTER: &str = concat!(
 /// ```
 ///
 /// Log level can also be changed using the `RUST_LOG` environment variable.
-/// For example, using `RUST_LOG=wgpu=error,moonfield_lunaris=info cargo run ..`
+/// For example, using `RUST_LOG=wgpu=error,moonfield_render=info cargo run ..`
 ///
 /// If you define the `RUST_LOG` environment variable, the [`LogPlugin`] settings
 /// will be ignored.
@@ -129,16 +129,14 @@ impl Plugin for LogPlugin {
         #[cfg(feature = "trace")]
         let subscriber = subscriber.with(tracing_error::ErrorLayer::default());
 
-        let fmt_layer =
-            (self.fmt_layer())(app).unwrap_or_else(|| {
-                Box::new(tracing_subscriber::fmt::Layer::default().with_writer(std::io::stderr))
-            });
+        let fmt_layer = (self.fmt_layer())(app).unwrap_or_else(|| {
+            Box::new(tracing_subscriber::fmt::Layer::default().with_writer(std::io::stderr))
+        });
 
         let subscriber = subscriber.with(fmt_layer);
 
         let logger_already_set = LogTracer::init().is_err();
-        let subscriber_already_set =
-            tracing::subscriber::set_global_default(subscriber).is_err();
+        let subscriber_already_set = tracing::subscriber::set_global_default(subscriber).is_err();
 
         match (logger_already_set, subscriber_already_set) {
             (true, true) => tracing::error!(

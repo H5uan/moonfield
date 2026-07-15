@@ -1,11 +1,11 @@
-//! Headless smoke test for Lunaris Vulkan RHI.
+//! Headless smoke test for Lunar Mare Vulkan RHI.
 //!
 //! Verifies that instance, device, command pool, command buffer, shader modules,
 //! render pass, graphics pipeline, and buffer can be created and that a command
 //! buffer can be recorded with a pipeline bind and draw command.
 
 use ash::vk;
-use moonfield_lunaris::{
+use moonfield_render::{
     Buffer, CommandPool, Compiler, Device, GraphicsPipeline, Instance, RenderPass, ShaderModule,
 };
 
@@ -139,7 +139,9 @@ PsOutput main(PsInput input)
 
     let queue_family_index = device.queue_family_indices().graphics;
     let command_pool = CommandPool::new(&device, queue_family_index).expect("command pool");
-    let mut command_buffer = command_pool.allocate_command_buffer().expect("command buffer");
+    let mut command_buffer = command_pool
+        .allocate_command_buffer()
+        .expect("command buffer");
 
     command_buffer
         .begin(vk::CommandBufferUsageFlags::ONE_TIME_SUBMIT)

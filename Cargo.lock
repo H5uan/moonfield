@@ -1345,7 +1345,7 @@ dependencies = [
  "moonfield-app",
  "moonfield-base",
  "moonfield-log",
- "moonfield-lunaris",
+ "moonfield-render",
  "moonfield-script",
  "moonfield-winit",
 ]
@@ -1382,7 +1382,7 @@ dependencies = [
 ]
 
 [[package]]
-name = "moonfield-lunaris"
+name = "moonfield-render"
 version = "0.1.0"
 dependencies = [
  "ash",
@@ -1403,7 +1403,7 @@ dependencies = [
  "moonfield-app",
  "moonfield-base",
  "moonfield-log",
- "moonfield-lunaris",
+ "moonfield-render",
  "moonfield-script-macros",
  "notify",
  "regex",

@@ -1,9 +1,9 @@
 //! Moonfield sample application entry point.
 
-use moonfield_app::App;
 use moonfield_app::prelude::World;
+use moonfield_app::App;
 use moonfield_log::info;
-use moonfield_lunaris::LunarisPlugin;
+use moonfield_render::RenderPlugin;
 use moonfield_script::ScriptPlugin;
 use moonfield_winit::WinitPlugin;
 
@@ -22,7 +22,7 @@ fn main() {
     app.add_systems(print_fps);
 
     app.add_plugin(ScriptPlugin);
-    app.add_plugin(LunarisPlugin);
+    app.add_plugin(RenderPlugin);
     app.add_plugin(WinitPlugin::default());
 
     app.run();

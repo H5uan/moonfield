@@ -11,7 +11,7 @@ crates/
   moonfield/          # Binary crate — the main executable entry point (src/main.rs)
   moonfield-app/      # Bevy-style App/Plugin framework (Plugin, PluginGroup, App, Resources)
   moonfield-base/     # Shared base types and utilities
-  moonfield-lunaris/  # Vulkan RHI (ash-based): device, swapchain, pipeline, shaders, headless recording
+  moonfield-render/   # Lunar Mare — Vulkan RHI (ash-based): device, swapchain, pipeline, shaders, headless recording
   moonfield-script/   # Scripting runtime with v8 and QuickJS backends, hot reload (src/script/)
   moonfield-window/   # Abstract windowing types (Window resource, RawHandleWrapper), no backend deps
   moonfield-winit/    # Windowing backend (winit), bridges winit Window → moonfield-window resources
@@ -36,7 +36,7 @@ The runtime supports two scripting backends selected via Cargo features: `v8-bac
 - Follow standard `rustfmt` formatting — run `cargo fmt` before committing.
 - Run `cargo clippy` and resolve all warnings before opening a PR.
 - Use `snake_case` for modules, functions, and variables; `PascalCase` for types and enums.
-- Module files mirror their logical grouping (e.g. `device.rs`, `swapchain.rs`, `pipeline.rs` in `moonfield-lunaris`).
+- Module files mirror their logical grouping (e.g. `device.rs`, `swapchain.rs`, `pipeline.rs` in `moonfield-render`).
 
 ## Testing Guidelines
 

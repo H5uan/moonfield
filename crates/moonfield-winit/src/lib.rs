@@ -71,7 +71,7 @@ impl Default for WinitPlugin {
 
 /// A resource holding the raw winit [`Window`].
 ///
-/// Other plugins (e.g. `moonfield-lunaris`) can access this resource to create
+/// Other plugins (e.g. `moonfield-render`) can access this resource to create
 /// a Vulkan surface from the window handle via `raw-window-handle`.
 #[derive(Clone)]
 pub struct WinitWindow(pub Arc<Window>);

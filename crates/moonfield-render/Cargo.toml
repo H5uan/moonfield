@@ -1,5 +1,5 @@
 [package]
-name = "moonfield-lunaris"
+name = "moonfield-render"
 version.workspace = true
 edition.workspace = true
 

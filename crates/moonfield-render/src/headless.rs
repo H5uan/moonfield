@@ -4,11 +4,11 @@
 //! simple Slang shaders, creates a graphics pipeline and vertex buffer, and
 //! records a command buffer that draws a triangle.
 
+use crate::error::Result;
 use crate::{
     Buffer, CommandBuffer, CommandPool, Compiler, Device, GraphicsPipeline, Instance, RenderPass,
     ShaderModule,
 };
-use crate::error::Result;
 use ash::vk;
 
 /// A headless recording context.
@@ -50,7 +50,8 @@ impl HeadlessContext {
 
         let compiler = Compiler::new()?;
 
-        let vertex_spirv = compiler.compile_source_to_spirv("triangle_vs", VERTEX_SHADER, "main")?;
+        let vertex_spirv =
+            compiler.compile_source_to_spirv("triangle_vs", VERTEX_SHADER, "main")?;
         let fragment_spirv =
             compiler.compile_source_to_spirv("triangle_fs", FRAGMENT_SHADER, "main")?;
 

@@ -1,13 +1,11 @@
 //! Abstract windowing types for Moonfield.
 //!
 //! This crate defines the [`Window`] resource and [`RawHandleWrapper`] that
-//! other crates (lunaris, winit, etc.) use to communicate about windows
+//! other crates (render, winit, etc.) use to communicate about windows
 //! without depending on a specific windowing backend.
 
 use moonfield_app::App;
-use raw_window_handle::{
-    RawDisplayHandle, RawWindowHandle,
-};
+use raw_window_handle::{RawDisplayHandle, RawWindowHandle};
 
 /// Plugin that registers the default [`Window`] resource.
 ///
@@ -44,13 +42,25 @@ impl Default for Window {
 /// Raw window and display handles, suitable for graphics API surface creation.
 ///
 /// Created by a windowing backend from the platform-native window handle.
-/// Renderers (e.g. `moonfield-lunaris`) use this to create a Vulkan surface
+/// Renderers (e.g. `moonfield-render`) use this to create a Vulkan surface
 /// without depending on any specific windowing library.
+///
+/// # Safety
+///
+/// `RawHandleWrapper` is `Send + Sync` even though the underlying
+/// `raw-window-handle` types may not be, because the handles are only used
+/// to create Vulkan surfaces and are never accessed concurrently in a way
+/// that would cause undefined behaviour.
 #[derive(Debug, Clone)]
 pub struct RawHandleWrapper {
     pub window_handle: RawWindowHandle,
     pub display_handle: RawDisplayHandle,
 }
+
+// SAFETY: The handles are only passed to Vulkan surface creation and are
+// never concurrently mutated in a way that would cause UB.
+unsafe impl Send for RawHandleWrapper {}
+unsafe impl Sync for RawHandleWrapper {}
 
 impl moonfield_app::Plugin for WindowPlugin {
     fn build(&self, app: &mut App) {

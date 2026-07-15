@@ -77,18 +77,22 @@ impl Device {
     pub fn new(instance: &Instance, surface: Option<vk::SurfaceKHR>) -> Result<Self> {
         let physical_devices = instance.enumerate_physical_devices()?;
         if physical_devices.is_empty() {
-            return Err(Error::Backend("no Vulkan-capable physical devices found".to_string()));
+            return Err(Error::Backend(
+                "no Vulkan-capable physical devices found".to_string(),
+            ));
         }
 
         // Prefer discrete GPU, then integrated, then any.
         let physical_device = physical_devices
             .iter()
             .copied()
-            .min_by_key(|pd| match instance.physical_device_properties(*pd).device_type {
-                vk::PhysicalDeviceType::DISCRETE_GPU => 0,
-                vk::PhysicalDeviceType::INTEGRATED_GPU => 1,
-                _ => 2,
-            })
+            .min_by_key(
+                |pd| match instance.physical_device_properties(*pd).device_type {
+                    vk::PhysicalDeviceType::DISCRETE_GPU => 0,
+                    vk::PhysicalDeviceType::INTEGRATED_GPU => 1,
+                    _ => 2,
+                },
+            )
             .ok_or(Error::Unsupported)?;
 
         Self::from_physical_device(instance, physical_device, surface)
@@ -132,10 +136,8 @@ impl Device {
         }
         .map_err(|e| Error::Backend(format!("failed to create logical device: {:?}", e)))?;
 
-        let graphics_queue =
-            unsafe { device.get_device_queue(queue_family_indices.graphics, 0) };
-        let present_queue =
-            unsafe { device.get_device_queue(queue_family_indices.present, 0) };
+        let graphics_queue = unsafe { device.get_device_queue(queue_family_indices.graphics, 0) };
+        let present_queue = unsafe { device.get_device_queue(queue_family_indices.present, 0) };
 
         Ok(Self {
             physical_device,

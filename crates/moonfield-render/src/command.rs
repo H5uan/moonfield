@@ -45,7 +45,9 @@ impl CommandPool {
         let buffers = unsafe {
             self.device
                 .allocate_command_buffers(&allocate_info)
-                .map_err(|e| Error::Backend(format!("failed to allocate command buffer: {:?}", e)))?
+                .map_err(|e| {
+                    Error::Backend(format!("failed to allocate command buffer: {:?}", e))
+                })?
         };
 
         Ok(CommandBuffer {
@@ -130,7 +132,12 @@ impl CommandBuffer {
     }
 
     /// Bind vertex buffers.
-    pub fn bind_vertex_buffers(&self, first_binding: u32, buffers: &[vk::Buffer], offsets: &[vk::DeviceSize]) {
+    pub fn bind_vertex_buffers(
+        &self,
+        first_binding: u32,
+        buffers: &[vk::Buffer],
+        offsets: &[vk::DeviceSize],
+    ) {
         unsafe {
             self.device
                 .cmd_bind_vertex_buffers(self.buffer, first_binding, buffers, offsets);
@@ -138,7 +145,13 @@ impl CommandBuffer {
     }
 
     /// Draw vertices.
-    pub fn draw(&self, vertex_count: u32, instance_count: u32, first_vertex: u32, first_instance: u32) {
+    pub fn draw(
+        &self,
+        vertex_count: u32,
+        instance_count: u32,
+        first_vertex: u32,
+        first_instance: u32,
+    ) {
         unsafe {
             self.device.cmd_draw(
                 self.buffer,

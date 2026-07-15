@@ -112,8 +112,14 @@ impl GraphicsPipeline {
         let pipelines = unsafe {
             device
                 .raw()
-                .create_graphics_pipelines(vk::PipelineCache::null(), std::slice::from_ref(&pipeline_info), None)
-                .map_err(|e| Error::Backend(format!("failed to create graphics pipeline: {:?}", e)))?
+                .create_graphics_pipelines(
+                    vk::PipelineCache::null(),
+                    std::slice::from_ref(&pipeline_info),
+                    None,
+                )
+                .map_err(|e| {
+                    Error::Backend(format!("failed to create graphics pipeline: {:?}", e))
+                })?
         };
 
         Ok(Self {

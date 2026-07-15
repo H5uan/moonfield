@@ -98,7 +98,11 @@ impl Buffer {
                 .map_memory(self.memory, 0, bytes, vk::MemoryMapFlags::empty())
                 .map_err(|e| Error::Backend(format!("failed to map buffer memory: {:?}", e)))?;
 
-            std::ptr::copy_nonoverlapping(data.as_ptr() as *const u8, ptr as *mut u8, bytes as usize);
+            std::ptr::copy_nonoverlapping(
+                data.as_ptr() as *const u8,
+                ptr as *mut u8,
+                bytes as usize,
+            );
 
             self.device.unmap_memory(self.memory);
         }

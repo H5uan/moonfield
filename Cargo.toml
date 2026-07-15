@@ -12,7 +12,7 @@ moonfield-base = { path = "crates/moonfield-base" }
 moonfield-ecs = { path = "crates/moonfield-ecs" }
 moonfield-script = { path = "crates/moonfield-script" }
 moonfield-script-macros = { path = "crates/moonfield-script-macros" }
-moonfield-lunaris = { path = "crates/moonfield-lunaris" }
+moonfield-render = { path = "crates/moonfield-render" }
 moonfield-log = { path = "crates/moonfield-log" }
 moonfield-window = { path = "crates/moonfield-window" }
 moonfield-winit = { path = "crates/moonfield-winit" }

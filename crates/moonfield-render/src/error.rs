@@ -1,8 +1,8 @@
-//! Lunaris error types.
+//! Render error types.
 
 use std::fmt;
 
-/// Lunaris-specific result type.
+/// Render-specific result type.
 pub type Result<T> = std::result::Result<T, Error>;
 
 /// Errors that can occur in the rendering interface.

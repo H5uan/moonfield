@@ -5,7 +5,7 @@
 //! triangle. It does not require a window or surface.
 
 use ash::vk;
-use moonfield_lunaris::{
+use moonfield_render::{
     Buffer, CommandPool, Compiler, Device, GraphicsPipeline, Instance, RenderPass, ShaderModule,
 };
 

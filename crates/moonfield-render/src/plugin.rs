@@ -1,19 +1,19 @@
-//! Bevy-style plugin for Lunaris.
+//! Bevy-style plugin for the rendering crate.
 //!
-//! Provides a `LunarisPlugin` that registers the core rendering services and
+//! Provides a `RenderPlugin` that registers the core rendering services and
 //! exercises the Vulkan and Slang backends on startup.
 
 use crate::{Compiler, Device, Instance};
 use moonfield_app::{App, Plugin};
-use moonfield_log::{error, info};
 use moonfield_ecs::World;
+use moonfield_log::{error, info};
 
 /// Runtime plugin.
-pub struct LunarisPlugin;
+pub struct RenderPlugin;
 
-impl Plugin for LunarisPlugin {
+impl Plugin for RenderPlugin {
     fn name(&self) -> &str {
-        "Lunaris"
+        "Render"
     }
 
     fn build(&self, app: &mut App) {
@@ -22,7 +22,7 @@ impl Plugin for LunarisPlugin {
             compile_test_shader();
         });
         app.add_shutdown_system(|_world: &mut World| {
-            info!("Lunaris shutdown system");
+            info!("Render shutdown system");
         });
     }
 }
@@ -34,18 +34,21 @@ fn init_vulkan() {
                 let props = device.physical_device();
                 let device_name = unsafe {
                     std::ffi::CStr::from_ptr(
-                        instance.physical_device_properties(props).device_name.as_ptr(),
+                        instance
+                            .physical_device_properties(props)
+                            .device_name
+                            .as_ptr(),
                     )
                     .to_string_lossy()
                 };
-                info!("Lunaris initialized Vulkan on device: {}", device_name);
+                info!("Render initialized Vulkan on device: {}", device_name);
             }
             Err(e) => {
-                error!("Lunaris could not create Vulkan device: {}", e);
+                error!("Render could not create Vulkan device: {}", e);
             }
         },
         Err(e) => {
-            error!("Lunaris could not create Vulkan instance: {}", e);
+            error!("Render could not create Vulkan instance: {}", e);
         }
     }
 }
@@ -68,17 +71,17 @@ VsOutput main(VsInput input)
             match compiler.compile_source_to_spirv("triangle", source, "main") {
                 Ok(bytecode) => {
                     info!(
-                        "Lunaris compiled test Slang shader to {} bytes of SPIR-V",
+                        "Render compiled test Slang shader to {} bytes of SPIR-V",
                         bytecode.len()
                     );
                 }
                 Err(e) => {
-                    error!("Lunaris could not compile test shader: {}", e);
+                    error!("Render could not compile test shader: {}", e);
                 }
             }
         }
         Err(e) => {
-            error!("Lunaris could not create Slang compiler: {}", e);
+            error!("Render could not create Slang compiler: {}", e);
         }
     }
 }

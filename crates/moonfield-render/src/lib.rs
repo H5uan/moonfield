@@ -1,4 +1,4 @@
-//! Lunaris rendering-hardware-interface.
+//! Lunar Mare rendering infrastructure.
 //!
 //! Vulkan RHI implemented on top of `ash`. This crate exposes a safe Rust API
 //! surface over instance, physical device, logical device, and swapchain
@@ -19,15 +19,15 @@ pub mod shader_module;
 pub mod swapchain;
 pub mod sync;
 
+pub use buffer::Buffer;
 pub use command::{CommandBuffer, CommandPool};
 pub use device::{Device, QueueFamilyIndices};
 pub use error::{Error, Result};
-pub use buffer::Buffer;
 pub use framebuffer::Framebuffer;
 pub use headless::HeadlessContext;
 pub use instance::Instance;
 pub use pipeline::GraphicsPipeline;
-pub use plugin::LunarisPlugin;
+pub use plugin::RenderPlugin;
 pub use render_pass::RenderPass;
 pub use shader::Compiler;
 pub use shader_module::ShaderModule;
@@ -38,9 +38,7 @@ use std::ffi::CStr;
 
 /// Common required instance extensions for surface rendering on the current platform.
 pub fn required_instance_extensions() -> Vec<&'static CStr> {
-    let mut extensions = vec![
-        ash::khr::surface::NAME,
-    ];
+    let mut extensions = vec![ash::khr::surface::NAME];
 
     #[cfg(target_os = "windows")]
     extensions.push(ash::khr::win32_surface::NAME);

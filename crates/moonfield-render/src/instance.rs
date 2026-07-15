@@ -20,7 +20,7 @@ impl Instance {
         let entry = unsafe { ash::Entry::load() }?;
 
         let app_name = std::ffi::CString::new("moonfield").unwrap();
-        let engine_name = std::ffi::CString::new("moonfield-lunaris").unwrap();
+        let engine_name = std::ffi::CString::new("Lunar Mare").unwrap();
 
         let app_info = vk::ApplicationInfo::default()
             .application_name(&app_name)
@@ -68,20 +68,29 @@ impl Instance {
     /// Enumerate available physical devices.
     pub fn enumerate_physical_devices(&self) -> Result<Vec<vk::PhysicalDevice>> {
         unsafe {
-            self.instance
-                .enumerate_physical_devices()
-                .map_err(|e| Error::Backend(format!("failed to enumerate physical devices: {:?}", e)))
+            self.instance.enumerate_physical_devices().map_err(|e| {
+                Error::Backend(format!("failed to enumerate physical devices: {:?}", e))
+            })
         }
     }
 
     /// Get properties for a physical device.
-    pub fn physical_device_properties(&self, device: vk::PhysicalDevice) -> vk::PhysicalDeviceProperties {
+    pub fn physical_device_properties(
+        &self,
+        device: vk::PhysicalDevice,
+    ) -> vk::PhysicalDeviceProperties {
         unsafe { self.instance.get_physical_device_properties(device) }
     }
 
     /// Get queue family properties for a physical device.
-    pub fn queue_family_properties(&self, device: vk::PhysicalDevice) -> Vec<vk::QueueFamilyProperties> {
-        unsafe { self.instance.get_physical_device_queue_family_properties(device) }
+    pub fn queue_family_properties(
+        &self,
+        device: vk::PhysicalDevice,
+    ) -> Vec<vk::QueueFamilyProperties> {
+        unsafe {
+            self.instance
+                .get_physical_device_queue_family_properties(device)
+        }
     }
 
     /// Check whether a queue family supports presentation to the given surface.
