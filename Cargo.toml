@@ -10,6 +10,6 @@ edition = "2021"
 moonfield-app = { path = "crates/moonfield-app" }
 moonfield-base = { path = "crates/moonfield-base" }
 moonfield-core = { path = "crates/moonfield-core" }
-moonfield-runtime = { path = "crates/moonfield-runtime" }
+moonfield-script = { path = "crates/moonfield-script" }
 moonfield-lunaris = { path = "crates/moonfield-lunaris" }
 thiserror = "1"

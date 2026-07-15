@@ -10,5 +10,5 @@ path = "src/main.rs"
 [dependencies]
 moonfield-base = { workspace = true }
 moonfield-core = { workspace = true }
-moonfield-runtime = { workspace = true }
+moonfield-script = { workspace = true }
 moonfield-lunaris = { workspace = true }

@@ -1,7 +1,9 @@
-//! Runtime application plugin.
+//! Scripting runtime plugin and module system.
 //!
-//! Provides a `RuntimePlugin` that registers the core runtime services and
-//! lifecycle systems with the application.
+//! Provides a `ScriptPlugin` that registers the script runtime with the
+//! application. The crate is exclusively focused on the script system:
+//! TypeScript/JavaScript execution via V8 or QuickJS, module loading,
+//! hot-reload, and host API bindings.
 
 pub mod script;
 
@@ -14,23 +16,25 @@ use script::{ScriptApi, ScriptRuntime, V8Runtime as Runtime};
 use script::{QuickJsRuntime as Runtime, ScriptApi, ScriptRuntime};
 use std::path::Path;
 
-/// Runtime plugin.
-pub struct RuntimePlugin;
+/// Script system plugin.
+///
+/// Runs the default script (`scripts/record_frame.ts` or `.js`) on startup.
+pub struct ScriptPlugin;
 
-impl Plugin for RuntimePlugin {
+impl Plugin for ScriptPlugin {
     fn name(&self) -> &str {
-        "Runtime"
+        "Script"
     }
 
     fn build(&self, app: &mut App) {
         app.add_startup_system(|_res: &mut Resources| {
-            info!("Runtime startup system");
+            info!("Script plugin startup");
             if let Err(e) = run_default_script() {
                 info!("Failed to run default script: {}", e);
             }
         });
         app.add_shutdown_system(|_res: &mut Resources| {
-            info!("Runtime shutdown system");
+            info!("Script plugin shutdown");
         });
     }
 }
@@ -44,7 +48,7 @@ impl Plugin for RuntimePlugin {
 /// or alongside the `.ts` file). The V8 backend also supports native TS
 /// type stripping via `--strip-types`, so raw `.ts` source can be loaded
 /// directly without preprocessing.
-pub fn run_default_script() -> crate::script::Result<()> {
+pub fn run_default_script() -> script::Result<()> {
     let script_dir = Path::new("scripts");
     let js_path = script_dir.join("record_frame.js");
     let ts_path = script_dir.join("record_frame.ts");

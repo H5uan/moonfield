@@ -1,12 +1,12 @@
 //! Integration tests for the scripting runtime.
 
-use moonfield_runtime::script::{load_script, ModuleRegistry, ScriptApi, ScriptRuntime};
+use moonfield_script::script::{load_script, ModuleRegistry, ScriptApi, ScriptRuntime};
 
 #[cfg(feature = "v8-backend")]
-use moonfield_runtime::script::V8Runtime as Runtime;
+use moonfield_script::script::V8Runtime as Runtime;
 
 #[cfg(feature = "quickjs-backend")]
-use moonfield_runtime::script::QuickJsRuntime as Runtime;
+use moonfield_script::script::QuickJsRuntime as Runtime;
 
 use std::path::PathBuf;
 
@@ -104,7 +104,7 @@ fn v8_module_graph_with_imports() {
 #[test]
 fn transpile_strips_typescript_annotations() {
     let ts = "function main(): void {\n    const x: number = 42;\n    const y = x as number;\n    record_frame();\n}";
-    let js = moonfield_runtime::script::transpile_typescript(ts).expect("transpile");
+    let js = moonfield_script::script::transpile_typescript(ts).expect("transpile");
 
     // Type annotations must be gone.
     assert!(!js.contains(": void"));

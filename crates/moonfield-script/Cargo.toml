@@ -1,5 +1,5 @@
 [package]
-name = "moonfield-runtime"
+name = "moonfield-script"
 version.workspace = true
 edition.workspace = true
 

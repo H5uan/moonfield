@@ -929,7 +929,7 @@ dependencies = [
  "moonfield-base",
  "moonfield-core",
  "moonfield-lunaris",
- "moonfield-runtime",
+ "moonfield-script",
 ]
 
 [[package]]
@@ -963,7 +963,7 @@ dependencies = [
 ]
 
 [[package]]
-name = "moonfield-runtime"
+name = "moonfield-script"
 version = "0.1.0"
 dependencies = [
  "anyhow",
