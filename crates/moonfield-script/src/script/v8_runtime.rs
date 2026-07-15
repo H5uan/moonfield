@@ -7,11 +7,42 @@ use super::{
 use moonfield_log::{error, info, warn};
 use moonfield_render::HeadlessContext;
 use std::collections::HashMap;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::rc::Rc;
 use std::sync::Once;
 
 static V8_INIT: Once = Once::new();
+
+/// Cached V8 startup snapshot containing the console JS shim.
+/// Created once on the first `V8Runtime::new()` call, reused by all
+/// subsequent isolates — avoids re-parsing/re-compiling the console
+/// shim on every isolate creation.
+static SNAPSHOT_BLOB: std::sync::OnceLock<Vec<u8>> = std::sync::OnceLock::new();
+
+/// Create a V8 startup snapshot containing the console JS shim.
+///
+/// The snapshot captures the heap state (including the `console` object
+/// with its JS methods). Native functions (`__mf_log`, host APIs) are
+/// NOT in the snapshot — they must be re-registered after loading.
+fn create_console_snapshot() -> Vec<u8> {
+    let mut isolate = v8::Isolate::snapshot_creator(None, None);
+    {
+        let scope = std::pin::pin!(v8::HandleScope::new(&mut isolate));
+        let scope = &mut scope.init();
+        let context = v8::Context::new(scope, Default::default());
+        let scope = &mut v8::ContextScope::new(scope, context);
+        // Eval console shim so the snapshot includes the console object.
+        let code = v8::String::new(scope, V8Runtime::CONSOLE_SHIM).unwrap();
+        if let Some(script) = v8::Script::compile(scope, code, None) {
+            let _ = script.run(scope);
+        }
+        scope.set_default_context(context);
+    }
+    match isolate.create_blob(v8::FunctionCodeHandling::Clear) {
+        Some(data) => data.to_vec(),
+        None => Vec::new(),
+    }
+}
 
 /// A V8-native host function that operates on raw V8 types.
 ///
@@ -56,24 +87,29 @@ pub struct V8Runtime {
     /// Cached compiled modules for incremental hot reload.
     /// Keyed by canonical module name. Source is stored for change detection.
     compiled_modules: HashMap<String, CachedModule>,
+    /// Cached module namespace for `call_module_export`.
+    module_namespace: Option<v8::Global<v8::Object>>,
 }
 
 impl ScriptRuntime for V8Runtime {
     fn new(api: ScriptApi) -> Result<Self> {
         V8_INIT.call_once(|| {
-            // TypeScript is compiled at build time via `tsc` (see scripts/tsconfig.json).
-            // The runtime loads pre-compiled JavaScript from target/scripts/.
-            // Native type stripping is not yet available in this V8 version.
-
             let platform = v8::new_default_platform(0, false).make_shared();
             v8::V8::initialize_platform(platform);
             v8::V8::initialize();
         });
 
-        // Set heap limits: 4 MB initial, 128 MB max.
-        // This lets V8 plan incremental GC cycles and prevents unbounded growth.
+        // Ensure the console snapshot exists (first call creates it).
+        let snapshot_bytes = SNAPSHOT_BLOB.get_or_init(create_console_snapshot);
+
+        // Set heap limits and use the cached snapshot if available.
         let create_params =
             v8::CreateParams::default().heap_limits(4 * 1024 * 1024, 128 * 1024 * 1024);
+        let create_params = if !snapshot_bytes.is_empty() {
+            create_params.snapshot_blob(v8::StartupData::from(snapshot_bytes.clone()))
+        } else {
+            create_params
+        };
 
         let mut isolate = v8::Isolate::new(create_params);
 
@@ -91,6 +127,7 @@ impl ScriptRuntime for V8Runtime {
             registry: None,
             entry: None,
             compiled_modules: HashMap::new(),
+            module_namespace: None,
         };
         rt.register_direct("record_frame", direct_record_frame);
         rt.register_api()?;
@@ -163,6 +200,77 @@ impl ScriptRuntime for V8Runtime {
             )));
         }
         Ok(())
+    }
+
+    fn call_with_args(&mut self, function: &str, args: &[HostValue]) -> Result<HostValue> {
+        self.isolate.set_idle(false);
+        v8::scope!(let handle_scope, &mut self.isolate);
+        let local_context = v8::Local::new(handle_scope, &self.context);
+        let scope = &mut v8::ContextScope::new(handle_scope, local_context);
+        v8::tc_scope!(let tc, scope);
+
+        let global = local_context.global(tc);
+        let name = v8::String::new(tc, function).unwrap();
+        let value = global
+            .get(tc, name.into())
+            .ok_or_else(|| ScriptError::Runtime(format!("function '{}' not found", function)))?;
+        let func = v8::Local::<v8::Function>::try_from(value)
+            .map_err(|_| ScriptError::Runtime(format!("'{}' is not a function", function)))?;
+
+        let v8_args: Vec<v8::Local<v8::Value>> = args
+            .iter()
+            .map(|a| host_to_v8_value(a.clone(), tc))
+            .collect();
+
+        let recv = v8::undefined(tc);
+        match func.call(tc, recv.into(), &v8_args) {
+            Some(result) => Ok(v8_value_to_host(result, tc)),
+            None => Err(ScriptError::Runtime(format!(
+                "{}: {}",
+                function,
+                v8_exception!(tc)
+            ))),
+        }
+    }
+
+    fn call_module_export(
+        &mut self,
+        function: &str,
+        args: &[HostValue],
+    ) -> Result<HostValue> {
+        let namespace = self
+            .module_namespace
+            .as_ref()
+            .ok_or_else(|| ScriptError::Runtime("no module namespace loaded".into()))?;
+
+        self.isolate.set_idle(false);
+        v8::scope!(let handle_scope, &mut self.isolate);
+        let local_context = v8::Local::new(handle_scope, &self.context);
+        let scope = &mut v8::ContextScope::new(handle_scope, local_context);
+        v8::tc_scope!(let tc, scope);
+
+        let ns = v8::Local::new(tc, namespace);
+        let name = v8::String::new(tc, function).unwrap();
+        let value = ns
+            .get(tc, name.into())
+            .ok_or_else(|| ScriptError::Runtime(format!("export '{}' not found", function)))?;
+        let func = v8::Local::<v8::Function>::try_from(value)
+            .map_err(|_| ScriptError::Runtime(format!("export '{}' is not a function", function)))?;
+
+        let v8_args: Vec<v8::Local<v8::Value>> = args
+            .iter()
+            .map(|a| host_to_v8_value(a.clone(), tc))
+            .collect();
+
+        let recv = v8::undefined(tc);
+        match func.call(tc, recv.into(), &v8_args) {
+            Some(result) => Ok(v8_value_to_host(result, tc)),
+            None => Err(ScriptError::Runtime(format!(
+                "{}: {}",
+                function,
+                v8_exception!(tc)
+            ))),
+        }
     }
 
     fn gc_step(&mut self) {
@@ -260,57 +368,48 @@ impl V8Runtime {
         Self::register_console(scope, local_context)
     }
 
-    /// Register a `console` object with `log`/`info`/`warn`/`error` that forward
-    /// to the host logger, stringifying every argument the way browsers do.
+    /// JS console shim that delegates to `__mf_log(level, msg)`.
+    /// Same approach as QuickJS — enables snapshot serialization (native
+    /// Function callbacks can't be snapshotted, but JS closures can).
+    const CONSOLE_SHIM: &'static str = r#"
+globalThis.console = {
+  log:   function() { __mf_log(0, Array.prototype.map.call(arguments, String).join(" ")); },
+  info:  function() { __mf_log(0, Array.prototype.map.call(arguments, String).join(" ")); },
+  warn:  function() { __mf_log(1, Array.prototype.map.call(arguments, String).join(" ")); },
+  error: function() { __mf_log(2, Array.prototype.map.call(arguments, String).join(" ")); }
+};
+"#;
+
+    /// Register `__mf_log` native function and console JS shim.
+    ///
+    /// If the isolate was created from a snapshot containing the console
+    /// shim, the shim eval is a no-op (overwrites with identical object).
     fn register_console(scope: &mut v8::PinScope, context: v8::Local<v8::Context>) -> Result<()> {
-        let console = v8::Object::new(scope);
         let global = context.global(scope);
 
-        let log = v8::Function::new(
+        // Register native __mf_log that forwards to host logger.
+        let log_fn = v8::Function::new(
             scope,
             |s: &mut v8::PinScope, a: v8::FunctionCallbackArguments, mut r: v8::ReturnValue| {
-                info!("{}", collect_console_args(s, &a));
+                let level = a.get(0).uint32_value(s).unwrap_or(0);
+                let msg = a.get(1).to_rust_string_lossy(s);
+                match level {
+                    0 => info!("{}", msg),
+                    1 => warn!("{}", msg),
+                    _ => error!("{}", msg),
+                }
                 r.set_undefined();
             },
         )
-        .ok_or_else(|| ScriptError::Runtime("failed to build console.log".into()))?;
-        let info_fn = v8::Function::new(
-            scope,
-            |s: &mut v8::PinScope, a: v8::FunctionCallbackArguments, mut r: v8::ReturnValue| {
-                info!("{}", collect_console_args(s, &a));
-                r.set_undefined();
-            },
-        )
-        .ok_or_else(|| ScriptError::Runtime("failed to build console.info".into()))?;
-        let warn_fn = v8::Function::new(
-            scope,
-            |s: &mut v8::PinScope, a: v8::FunctionCallbackArguments, mut r: v8::ReturnValue| {
-                warn!("{}", collect_console_args(s, &a));
-                r.set_undefined();
-            },
-        )
-        .ok_or_else(|| ScriptError::Runtime("failed to build console.warn".into()))?;
-        let err_fn = v8::Function::new(
-            scope,
-            |s: &mut v8::PinScope, a: v8::FunctionCallbackArguments, mut r: v8::ReturnValue| {
-                error!("{}", collect_console_args(s, &a));
-                r.set_undefined();
-            },
-        )
-        .ok_or_else(|| ScriptError::Runtime("failed to build console.error".into()))?;
+        .ok_or_else(|| ScriptError::Runtime("failed to build __mf_log".into()))?;
+        let log_name = v8::String::new(scope, "__mf_log").unwrap();
+        global.set(scope, log_name.into(), log_fn.into());
 
-        for (name, func) in [
-            ("log", log),
-            ("info", info_fn),
-            ("warn", warn_fn),
-            ("error", err_fn),
-        ] {
-            let n = v8::String::new(scope, name).unwrap();
-            console.set(scope, n.into(), func.into());
-        }
-        let cname = v8::String::new(scope, "console").unwrap();
-        global.set(scope, cname.into(), console.into());
-
+        // Eval console shim (idempotent — overwrites if already from snapshot).
+        let code = v8::String::new(scope, Self::CONSOLE_SHIM).unwrap();
+        let script = v8::Script::compile(scope, code, None)
+            .ok_or_else(|| ScriptError::Runtime("failed to compile console shim".into()))?;
+        script.run(scope);
         Ok(())
     }
 }
@@ -454,6 +553,9 @@ impl V8Runtime {
         let namespace_obj = v8::Local::<v8::Object>::try_from(namespace)
             .map_err(|_| ScriptError::Runtime("entry module namespace is not an object".into()))?;
 
+        // Cache the namespace for `call_module_export`.
+        self.module_namespace = Some(v8::Global::new(tc_scope, namespace_obj));
+
         let main_name = v8::String::new(tc_scope, "main").unwrap();
         if let Some(main_val) = namespace_obj.get(tc_scope, main_name.into()) {
             if let Ok(main_func) = v8::Local::<v8::Function>::try_from(main_val) {
@@ -586,6 +688,47 @@ impl HotReloadHandler for V8Runtime {
         }
 
         // Re-instantiate the module graph with the updated registry.
+        self.load_module_graph(Rc::new(registry), &entry)
+    }
+
+    fn on_files_changed(&mut self, paths: &[PathBuf]) -> Result<()> {
+        if paths.is_empty() {
+            return Ok(());
+        }
+
+        // Take the cached registry Rc out to avoid double borrow.
+        let registry_rc = self
+            .registry
+            .take()
+            .ok_or_else(|| ScriptError::Execution("no cached registry for hot reload".into()))?;
+        let entry = self
+            .entry
+            .clone()
+            .ok_or_else(|| ScriptError::Execution("no cached entry for hot reload".into()))?;
+
+        // Regain ownership of the registry.
+        let mut registry = Rc::try_unwrap(registry_rc).unwrap_or_else(|rc| (*rc).clone());
+
+        // Process all changed files: update sources and compute union of
+        // affected modules. This avoids multiple load_module_graph calls
+        // when several files change simultaneously.
+        let mut all_affected = std::collections::HashSet::new();
+        for path in paths {
+            let source = super::load_script(path)?;
+            let module_name = registry
+                .find_by_file_path(path)
+                .unwrap_or_else(|| path.to_str().unwrap_or("").to_string());
+            registry.register(&module_name, source);
+            let affected = registry.transitive_importers(&module_name);
+            all_affected.extend(affected);
+        }
+
+        // Remove all affected modules from the cache in one pass.
+        for name in &all_affected {
+            self.compiled_modules.remove(name);
+        }
+
+        // Single incremental reload for all changes.
         self.load_module_graph(Rc::new(registry), &entry)
     }
 }
@@ -1064,16 +1207,6 @@ fn host_to_v8_value<'s>(
             val
         }
     }
-}
-
-/// Stringify all arguments passed to a `console.*` call, joined by spaces.
-fn collect_console_args(scope: &mut v8::PinScope, args: &v8::FunctionCallbackArguments) -> String {
-    let n = args.length();
-    let mut parts: Vec<String> = Vec::with_capacity(n.max(0) as usize);
-    for i in 0..n {
-        parts.push(args.get(i).to_rust_string_lossy(scope));
-    }
-    parts.join(" ")
 }
 
 /// Extract a human-readable exception (message + location + stack frames) from

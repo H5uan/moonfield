@@ -94,6 +94,30 @@ pub trait ScriptRuntime {
     /// Call a top-level function exported by the loaded script.
     fn call(&mut self, function: &str) -> Result<()>;
 
+    /// Call a function with arguments and return its result.
+    ///
+    /// Default implementation ignores args and delegates to `call`,
+    /// returning `HostValue::Null`.
+    fn call_with_args(&mut self, function: &str, args: &[HostValue]) -> Result<HostValue> {
+        let _ = args;
+        self.call(function)?;
+        Ok(HostValue::Null)
+    }
+
+    /// Call a function exported from the loaded ESModule with arguments.
+    ///
+    /// Unlike `call_with_args` (which looks up globals), this looks up
+    /// functions on the module namespace object.
+    ///
+    /// Default implementation delegates to `call_with_args`.
+    fn call_module_export(
+        &mut self,
+        function: &str,
+        args: &[HostValue],
+    ) -> Result<HostValue> {
+        self.call_with_args(function, args)
+    }
+
     /// Warm up the JIT compiler by running the entry function a few times.
     ///
     /// V8's JIT (Sparkplug/Turbofan) requires multiple executions before
