@@ -1,6 +1,7 @@
 //! Rust APIs exposed to scripts.
 
 use std::collections::HashMap;
+use std::sync::Arc;
 
 use moonfield_render::HeadlessContext;
 
@@ -261,7 +262,11 @@ impl From<Vec<f64>> for HostValue {
 ///
 /// Receives a slice of arguments and returns a value (or an error string).
 /// Backends handle the JS ↔ HostValue marshaling automatically.
-pub type HostFn = fn(&[HostValue]) -> Result<HostValue, String>;
+///
+/// Uses `Arc<dyn Fn>` instead of `fn` pointer so that host functions can
+/// capture state via closures. Register closures with
+/// [`ScriptApi::register_closure`].
+pub type HostFn = Arc<dyn Fn(&[HostValue]) -> Result<HostValue, String>>;
 
 /// Trait for static type-safe host functions.
 ///
@@ -300,8 +305,21 @@ impl ScriptApi {
     /// Register a type-safe function annotated with `#[script_function]`.
     ///
     /// Uses the [`ScriptFunction`] trait to extract the name and call logic.
-    pub fn register_fn<F: ScriptFunction>(&mut self) -> &mut Self {
-        self.functions.push((F::NAME, F::call));
+    pub fn register_fn<F: ScriptFunction + 'static>(&mut self) -> &mut Self {
+        let f: HostFn = Arc::new(F::call);
+        self.functions.push((F::NAME, f));
+        self
+    }
+
+    /// Register a closure as a host function, allowing captured state.
+    ///
+    /// This is the primary entry point for stateful host functions that
+    /// need to access Rust-side resources (e.g. render context, asset store).
+    pub fn register_closure<F>(&mut self, name: &'static str, f: F) -> &mut Self
+    where
+        F: Fn(&[HostValue]) -> Result<HostValue, String> + 'static,
+    {
+        self.functions.push((name, Arc::new(f)));
         self
     }
 

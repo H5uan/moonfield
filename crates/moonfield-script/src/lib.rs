@@ -115,6 +115,7 @@ pub fn run_default_script() -> script::Result<()> {
 #[cfg(all(feature = "v8-backend", not(feature = "quickjs-backend")))]
 pub fn run_script_module(entry: &str) -> crate::script::Result<()> {
     use script::ModuleRegistry;
+    use std::rc::Rc;
 
     let entry_path = Path::new(entry);
     let source = script::load_script(entry_path)?;
@@ -130,5 +131,5 @@ pub fn run_script_module(entry: &str) -> crate::script::Result<()> {
     let mut runtime = Runtime::new(ScriptApi::default())?;
 
     // Load and evaluate the module graph, then call main().
-    runtime.load_module_graph(&registry, &canonical_name)
+    runtime.load_module_graph(Rc::new(registry), &canonical_name)
 }

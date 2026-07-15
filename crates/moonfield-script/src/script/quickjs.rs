@@ -78,6 +78,21 @@ impl ScriptRuntime for QuickJsRuntime {
         Ok(())
     }
 
+    fn call_with_args(&mut self, function: &str, args: &[HostValue]) -> Result<HostValue> {
+        let json_args: Vec<String> = args.iter().map(host_value_to_json).collect();
+        let expr = format!("{}.apply(null, [{}])", function, json_args.join(","));
+        self.context.with(|ctx| {
+            match CaughtError::catch(&ctx, ctx.eval::<Value, _>(&expr)) {
+                Ok(val) => Ok(quickjs_value_to_host(&val)),
+                Err(ce) => Err(ScriptError::Runtime(format!(
+                    "call '{}': {}",
+                    function,
+                    format_caught_error(ce)
+                ))),
+            }
+        })
+    }
+
     fn gc_step(&mut self) {
         // QuickJS uses reference counting with a cycle collector.
         // run_gc triggers the cycle collector — fast for typical heaps.
@@ -90,7 +105,8 @@ impl QuickJsRuntime {
         self.context
             .with(|ctx| {
                 let global = ctx.globals();
-                for &(name, func) in self.api.iter() {
+                for entry in self.api.iter() {
+                    let (name, func) = (*entry.0, entry.1.clone());
                     // Use a non-capturing wrapper to avoid borrow issues with `name`.
                     let wrapper = ApiFuncWrapper { name, func };
                     global.set(
@@ -128,6 +144,54 @@ impl QuickJsRuntime {
 struct ApiFuncWrapper {
     name: &'static str,
     func: super::HostFn,
+}
+
+/// Serialize a HostValue to a JSON string fragment for use in eval expressions.
+fn host_value_to_json(a: &HostValue) -> String {
+    match a {
+        HostValue::Null | HostValue::BytesView { .. } | HostValue::TypedArrayView { .. } => {
+            "null".to_string()
+        }
+        HostValue::Bool(b) => b.to_string(),
+        HostValue::Number(n) => n.to_string(),
+        HostValue::String(s) => serde_json::to_string(s).unwrap_or_else(|_| "\"\"".to_string()),
+        HostValue::ArrayBuffer(buf) => {
+            serde_json::to_string(buf).unwrap_or_else(|_| "[]".to_string())
+        }
+        HostValue::Array(arr) => {
+            let items: Vec<String> = arr.iter().map(host_value_to_json).collect();
+            format!("[{}]", items.join(","))
+        }
+        HostValue::Object(map) => {
+            let entries: Vec<String> = map
+                .iter()
+                .map(|(k, v)| {
+                    format!(
+                        "{}:{}",
+                        serde_json::to_string(k).unwrap_or_else(|_| "\"\"".to_string()),
+                        host_value_to_json(v)
+                    )
+                })
+                .collect();
+            format!("{{{}}}", entries.join(","))
+        }
+        HostValue::TypedArray(ta) => match ta {
+            super::TypedArrayValue::Uint8(buf)
+            | super::TypedArrayValue::Int8(buf) => serde_json::to_string(buf)
+                .unwrap_or_else(|_| "[]".to_string()),
+            super::TypedArrayValue::Uint16(buf)
+            | super::TypedArrayValue::Int16(buf)
+            | super::TypedArrayValue::Uint32(buf)
+            | super::TypedArrayValue::Int32(buf) => {
+                serde_json::to_string(&buf.iter().map(|x| *x as i64).collect::<Vec<_>>())
+                    .unwrap_or_else(|_| "[]".to_string())
+            }
+            super::TypedArrayValue::Float32(buf) => serde_json::to_string(buf)
+                .unwrap_or_else(|_| "[]".to_string()),
+            super::TypedArrayValue::Float64(buf) => serde_json::to_string(buf)
+                .unwrap_or_else(|_| "[]".to_string()),
+        },
+    }
 }
 
 /// Convert a QuickJS `Value` to a `HostValue`.

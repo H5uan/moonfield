@@ -8,6 +8,7 @@ use moonfield_log::{error, info, warn};
 use moonfield_render::HeadlessContext;
 use std::collections::HashMap;
 use std::path::Path;
+use std::rc::Rc;
 use std::sync::Once;
 
 static V8_INIT: Once = Once::new();
@@ -46,7 +47,10 @@ pub struct V8Runtime {
     /// Direct (fast-path) host functions that bypass `HostValue` marshaling.
     direct_fns: Vec<(&'static str, DirectFn)>,
     /// Cached registry for hot reload (populated by `load_module_graph`).
-    registry: Option<super::ModuleRegistry>,
+    /// Stored as `Rc` to avoid cloning all module source strings on every
+    /// hot reload cycle. `on_file_changed` uses `Rc::try_unwrap` to regain
+    /// ownership (cheap, since only one ref exists after `take()`).
+    registry: Option<Rc<super::ModuleRegistry>>,
     /// Cached entry point for hot reload.
     entry: Option<String>,
     /// Cached compiled modules for incremental hot reload.
@@ -326,7 +330,7 @@ impl V8Runtime {
     /// (by `on_file_changed`) are re-compiled.
     pub fn load_module_graph(
         &mut self,
-        registry: &super::ModuleRegistry,
+        registry: Rc<super::ModuleRegistry>,
         entry: &str,
     ) -> Result<()> {
         let order = registry
@@ -460,8 +464,8 @@ impl V8Runtime {
             }
         }
 
-        // Cache the registry and entry for hot reload.
-        self.registry = Some(registry.clone());
+        // Cache the registry (move Rc, no clone) and entry for hot reload.
+        self.registry = Some(registry);
         self.entry = Some(entry.to_string());
 
         Ok(())
@@ -535,8 +539,8 @@ impl V8Runtime {
 
 impl HotReloadHandler for V8Runtime {
     fn on_file_changed(&mut self, changed_path: &Path) -> Result<()> {
-        // Take the cached registry and entry out to avoid double borrow.
-        let mut registry = self
+        // Take the cached registry Rc out to avoid double borrow.
+        let registry_rc = self
             .registry
             .take()
             .ok_or_else(|| ScriptError::Execution("no cached registry for hot reload".into()))?;
@@ -544,6 +548,12 @@ impl HotReloadHandler for V8Runtime {
             .entry
             .clone()
             .ok_or_else(|| ScriptError::Execution("no cached entry for hot reload".into()))?;
+
+        // Regain ownership of the registry. `Rc::try_unwrap` succeeds
+        // (only 1 ref after `take()`), avoiding a full clone of all
+        // module source strings.
+        let mut registry = Rc::try_unwrap(registry_rc)
+            .unwrap_or_else(|rc| (*rc).clone());
 
         // Re-read the changed file.
         let source = super::load_script(changed_path)?;
@@ -569,7 +579,7 @@ impl HotReloadHandler for V8Runtime {
         }
 
         // Re-instantiate the module graph with the updated registry.
-        self.load_module_graph(&registry, &entry)
+        self.load_module_graph(Rc::new(registry), &entry)
     }
 }
 

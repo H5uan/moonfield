@@ -81,7 +81,7 @@ fn v8_module_graph_simple() {
 
     let mut runtime = Runtime::new(ScriptApi::default()).expect("runtime");
     runtime
-        .load_module_graph(&registry, "main")
+        .load_module_graph(std::rc::Rc::new(registry), "main")
         .expect("load_module_graph should succeed");
 }
 
@@ -103,7 +103,7 @@ fn v8_module_graph_with_imports() {
 
     let mut runtime = Runtime::new(ScriptApi::default()).expect("runtime");
     runtime
-        .load_module_graph(&registry, "main")
+        .load_module_graph(std::rc::Rc::new(registry), "main")
         .expect("load_module_graph should succeed");
 }
 
