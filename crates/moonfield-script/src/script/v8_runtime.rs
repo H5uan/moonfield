@@ -1,6 +1,6 @@
 //! V8 backend for the scripting runtime.
 
-use super::{HostFn, Result, ScriptApi, ScriptError, ScriptRuntime};
+use super::{HostFn, HostValue, Result, ScriptApi, ScriptError, ScriptRuntime};
 use moonfield_base::{error, info, warn};
 use std::sync::Once;
 
@@ -130,13 +130,28 @@ impl V8Runtime {
             let data = v8::External::new(scope, ptr);
             let js_name = v8::String::new(scope, entry.0).unwrap();
             let func = v8::Function::builder(
-                |_scope: &mut v8::PinScope,
+                |scope: &mut v8::PinScope,
                  args: v8::FunctionCallbackArguments,
                  mut retval: v8::ReturnValue| {
+                    // Marshal JS arguments → HostValue slice.
+                    let n = args.length() as usize;
+                    let mut host_args: Vec<HostValue> = Vec::with_capacity(n);
+                    for i in 0..n as i32 {
+                        host_args.push(v8_value_to_host(args.get(i), scope));
+                    }
+
                     let external = v8::Local::<v8::External>::try_from(args.data()).unwrap();
                     let entry = unsafe { &*(external.value() as *const (&'static str, HostFn)) };
-                    let ok = (entry.1)().is_ok();
-                    retval.set_bool(ok);
+
+                    // Call the host function.
+                    match (entry.1)(&host_args) {
+                        Ok(ret) => {
+                            retval.set(host_to_v8_value(ret, scope));
+                        }
+                        Err(e) => {
+                            scope.throw_exception(v8::String::new(scope, &e).unwrap().into());
+                        }
+                    }
                 },
             )
             .data(data.into())
@@ -316,6 +331,64 @@ impl V8Runtime {
         }
 
         Ok(())
+    }
+}
+
+/// Convert a V8 `Local<Value>` to a `HostValue`.
+fn v8_value_to_host(value: v8::Local<v8::Value>, scope: &mut v8::PinScope) -> HostValue {
+    if value.is_null_or_undefined() {
+        return HostValue::Null;
+    }
+    if value.is_number() {
+        return HostValue::Number(value.number_value(scope).unwrap_or(0.0));
+    }
+    if value.is_boolean() {
+        return HostValue::Bool(value.is_true());
+    }
+    if value.is_string() {
+        return HostValue::String(value.to_rust_string_lossy(scope));
+    }
+    if value.is_array_buffer() {
+        if let Ok(buf) = v8::Local::<v8::ArrayBuffer>::try_from(value) {
+            let len = buf.byte_length();
+            let mut data = vec![0u8; len];
+            let buf_data = buf.data();
+            if let Some(ptr) = buf_data {
+                unsafe {
+                    std::ptr::copy_nonoverlapping(
+                        ptr.as_ptr() as *const u8,
+                        data.as_mut_ptr(),
+                        len,
+                    );
+                }
+            }
+            return HostValue::ArrayBuffer(data);
+        }
+    }
+    // Fallback: stringify.
+    HostValue::String(value.to_rust_string_lossy(scope))
+}
+
+/// Convert a `HostValue` to a V8 `Local<Value>`.
+fn host_to_v8_value<'s>(value: HostValue, scope: &mut v8::PinScope<'s, '_>) -> v8::Local<'s, v8::Value> {
+    match value {
+        HostValue::Null => v8::null(scope).into(),
+        HostValue::Bool(b) => v8::Boolean::new(scope, b).into(),
+        HostValue::Number(n) => v8::Number::new(scope, n).into(),
+        HostValue::String(s) => v8::String::new(scope, &s).unwrap().into(),
+        HostValue::ArrayBuffer(data) => {
+            let buf = v8::ArrayBuffer::new(scope, data.len());
+            if let Some(ptr) = buf.data() {
+                unsafe {
+                    std::ptr::copy_nonoverlapping(
+                        data.as_ptr(),
+                        ptr.as_ptr() as *mut u8,
+                        data.len(),
+                    );
+                }
+            }
+            buf.into()
+        }
     }
 }
 

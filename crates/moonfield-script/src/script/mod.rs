@@ -26,6 +26,7 @@ pub mod quickjs;
 pub mod v8_runtime;
 
 pub use api::HostFn;
+pub use api::HostValue;
 pub use api::ScriptApi;
 pub use hot_reload::HotReloader;
 pub use module::ModuleRegistry;

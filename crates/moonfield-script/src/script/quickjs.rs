@@ -1,6 +1,6 @@
 //! QuickJS backend for the scripting runtime.
 
-use super::{Result, ScriptApi, ScriptError, ScriptRuntime};
+use super::{HostFn, Result, ScriptApi, ScriptError, ScriptRuntime};
 use moonfield_base::{error, info, warn};
 use rquickjs::function::Func;
 use rquickjs::{CaughtError, Context, Runtime};
@@ -84,7 +84,7 @@ impl QuickJsRuntime {
                     global.set(
                         name,
                         Func::from(move || {
-                            if let Err(e) = func() {
+                            if let Err(e) = func(&[]) {
                                 eprintln!("{} error: {}", name, e);
                             }
                         }),
