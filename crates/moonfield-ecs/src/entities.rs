@@ -1,13 +1,48 @@
 use core::fmt;
 use std::{
+    error::Error,
     num::{NonZeroU32, NonZeroU64},
     u32,
 };
 
+#[derive(Debug, Clone, Eq, PartialEq)]
+pub struct NoSuchEntity;
+
+impl fmt::Display for NoSuchEntity {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.pad("no such entity")
+    }
+}
+
+impl Error for NoSuchEntity {}
+
+#[derive(Copy, Clone)]
+pub(crate) struct Location {
+    pub archetype: u32,
+    pub index: u32,
+}
+
+#[derive(Copy, Clone)]
+pub struct EntityMeta {
+    pub(crate) generation: NonZeroU32,
+    pub(crate) location: Location,
+}
+
+impl EntityMeta {
+    const EMPTY: EntityMeta = Self {
+        generation: match NonZeroU32::new(1) {
+            Some(x) => x,
+            None => unreachable!(),
+        },
+        location: Location {
+            archetype: 0,
+            index: u32::MAX,
+        },
+    };
+}
+
 /// An opaque entity identifier.
 ///
-/// Bevy uses a packed (index, generation) pair; here we keep it simple
-/// with a single `u64` so that equality is cheap and copies are trivial.
 #[derive(Clone, Copy, PartialEq, Eq, Hash)]
 pub struct Entity {
     pub(crate) generation: NonZeroU32,
