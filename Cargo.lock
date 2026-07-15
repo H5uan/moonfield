@@ -1373,6 +1373,7 @@ dependencies = [
  "moonfield-app",
  "moonfield-base",
  "moonfield-lunaris",
+ "moonfield-script-macros",
  "notify",
  "rquickjs",
  "serde_json",
@@ -1384,6 +1385,15 @@ dependencies = [
  "swc_ecma_transforms_typescript",
  "swc_ecma_visit",
  "v8",
+]
+
+[[package]]
+name = "moonfield-script-macros"
+version = "0.1.0"
+dependencies = [
+ "proc-macro2",
+ "quote",
+ "syn",
 ]
 
 [[package]]

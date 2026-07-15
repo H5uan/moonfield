@@ -183,6 +183,19 @@ impl From<Vec<f64>> for HostValue {
 /// Backends handle the JS ↔ HostValue marshaling automatically.
 pub type HostFn = fn(&[HostValue]) -> Result<HostValue, String>;
 
+/// Trait for static type-safe host functions.
+///
+/// Implemented automatically by the `#[script_function]` proc-macro.
+/// Provides a typed bridge between Rust functions and the dynamic
+/// [`HostValue`]-based calling convention.
+pub trait ScriptFunction {
+    /// The name exposed to scripts (e.g. `"record_frame"`).
+    const NAME: &'static str;
+
+    /// Call the function with marshaled arguments.
+    fn call(args: &[HostValue]) -> Result<HostValue, String>;
+}
+
 /// Registry of host functions made available to scripts.
 #[derive(Clone)]
 pub struct ScriptApi {
@@ -204,6 +217,14 @@ impl ScriptApi {
         self
     }
 
+    /// Register a type-safe function annotated with `#[script_function]`.
+    ///
+    /// Uses the [`ScriptFunction`] trait to extract the name and call logic.
+    pub fn register_fn<F: ScriptFunction>(&mut self) -> &mut Self {
+        self.functions.push((F::NAME, F::call));
+        self
+    }
+
     /// Iterate over the registered `(name, function)` entries.
     pub fn iter(&self) -> std::slice::Iter<'_, (&'static str, HostFn)> {
         self.functions.iter()
@@ -213,7 +234,7 @@ impl ScriptApi {
 impl Default for ScriptApi {
     fn default() -> Self {
         let mut api = Self::new();
-        api.register("record_frame", default_record_frame);
+        api.register_fn::<record_frame_Fn>();
         api
     }
 }
@@ -222,10 +243,10 @@ impl Default for ScriptApi {
 ///
 /// Accepts optional `(width: u32, height: u32)` arguments.
 /// Defaults to the headless context's default resolution.
-fn default_record_frame(args: &[HostValue]) -> Result<HostValue, String> {
-    let _width = args.first().and_then(|v| v.as_u32());
-    let _height = args.get(1).and_then(|v| v.as_u32());
+#[moonfield_script_macros::script_function]
+fn record_frame(width: u32, height: u32) -> Result<(), String> {
+    let _ = (width, height);
     let ctx = HeadlessContext::record_frame().map_err(|e| e.to_string())?;
     drop(ctx);
-    Ok(HostValue::Null)
+    Ok(())
 }

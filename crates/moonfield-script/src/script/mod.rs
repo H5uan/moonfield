@@ -28,6 +28,7 @@ pub mod v8_runtime;
 pub use api::HostFn;
 pub use api::HostValue;
 pub use api::ScriptApi;
+pub use api::ScriptFunction;
 pub use api::TypedArrayValue;
 pub use hot_reload::HotReloader;
 pub use module::ModuleRegistry;

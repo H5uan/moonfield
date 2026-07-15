@@ -7,6 +7,7 @@ edition.workspace = true
 moonfield-app = { workspace = true }
 moonfield-base = { workspace = true }
 moonfield-lunaris = { workspace = true }
+moonfield-script-macros = { workspace = true }
 v8 = "150.1.0"
 rquickjs = { version = "0.6", optional = true }
 notify = "6.1"
