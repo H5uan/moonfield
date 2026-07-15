@@ -10,7 +10,8 @@ pub mod script;
 use moonfield_app::prelude::World;
 use moonfield_app::{App, Plugin};
 use moonfield_log::info;
-#[cfg(feature = "v8-backend")]
+
+#[cfg(all(feature = "v8-backend", not(feature = "quickjs-backend")))]
 use script::{ScriptApi, ScriptRuntime, V8Runtime as Runtime};
 
 #[cfg(feature = "quickjs-backend")]
@@ -111,7 +112,7 @@ pub fn run_default_script() -> script::Result<()> {
 /// import { record_frame } from "./record_frame.js";
 /// export function main() { record_frame(); }
 /// ```
-#[cfg(feature = "v8-backend")]
+#[cfg(all(feature = "v8-backend", not(feature = "quickjs-backend")))]
 pub fn run_script_module(entry: &str) -> crate::script::Result<()> {
     use script::ModuleRegistry;
 
