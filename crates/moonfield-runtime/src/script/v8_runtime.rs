@@ -7,6 +7,12 @@ use std::sync::Once;
 static V8_INIT: Once = Once::new();
 
 /// A script runtime backed by V8 (rusty_v8).
+///
+/// Module system: uses a CommonJS-like wrapping approach instead of V8's
+/// native ESModule API. Each module is wrapped in an IIFE that receives
+/// `exports` and `require`, then evaluated in dependency order. This avoids
+/// the complexity of V8's `ResolveModuleCallback` (which cannot capture
+/// state and can't create `Local` handles from `Global` without a scope).
 pub struct V8Runtime {
     isolate: v8::OwnedIsolate,
     context: v8::Global<v8::Context>,
@@ -198,55 +204,116 @@ impl V8Runtime {
 }
 
 impl V8Runtime {
-    /// Load a module using V8's native ESModule API.
+    /// Load a module graph using CommonJS-style wrapping.
     ///
-    /// Compiles, instantiates, and evaluates the module. The module's exports
-    /// become accessible via `get_module_namespace()`. For modules with imports,
-    /// use `load_module_graph()` instead.
-    pub fn load_module(&mut self, name: &str, source: &str) -> Result<()> {
+    /// Each module is transformed to use `__require` and `exports` globals,
+    /// then evaluated in dependency order (topological sort).
+    ///
+    /// After loading, calls the exported `main()` function.
+    pub fn load_module_graph(&mut self, registry: &super::ModuleRegistry, entry: &str) -> Result<()> {
+        let order = registry
+            .order_dependencies(entry)
+            .map_err(|e| ScriptError::Execution(format!("dependency resolution: {}", e)))?;
+
         v8::scope!(let handle_scope, &mut self.isolate);
         let local_context = v8::Local::new(handle_scope, &self.context);
         let scope = &mut v8::ContextScope::new(handle_scope, local_context);
+        let global = local_context.global(scope);
 
-        let name_str = v8::String::new(scope, name).unwrap();
-        let origin = v8::ScriptOrigin::new(
-            scope,
-            name_str.into(),
-            0,
-            0,
-            false,
-            0,
-            None,
-            false,
-            false,
-            true, // is_module: true — compile as ESModule
-            None,
-        );
+        // Create a JS object to hold cached module exports.
+        // We pass it to __require via External data to avoid global scope issues.
+        let cache_obj = v8::Object::new(scope);
+        let cache_global = v8::Global::new(scope, cache_obj);
+        let cache_ptr = Box::into_raw(Box::new(cache_global)) as *mut std::ffi::c_void;
 
-        let code = v8::String::new(scope, source)
-            .ok_or_else(|| ScriptError::Execution("failed to create source string".into()))?;
+        // Define `__require(name)` — returns cached exports.
+        let require_fn = v8::Function::builder(
+            |s: &mut v8::PinScope,
+             args: v8::FunctionCallbackArguments,
+             mut ret: v8::ReturnValue| {
+                let name = args.get(0).to_rust_string_lossy(s);
+                let ext = v8::Local::<v8::External>::try_from(args.data()).unwrap();
+                // SAFETY: the cache_global is kept alive for the duration of this function.
+                let cache = unsafe { &*(ext.value() as *const v8::Global<v8::Object>) };
+                let cache_local = v8::Local::new(s, cache);
+                let key = v8::String::new(s, &name).unwrap();
+                if let Some(val) = cache_local.get(s, key.into()) {
+                    ret.set(val);
+                    return;
+                }
+                let err = format!("module '{}' not found in cache", name);
+                s.throw_exception(v8::String::new(s, &err).unwrap().into());
+            },
+        )
+        .data(v8::External::new(scope, cache_ptr).into())
+        .build(scope)
+        .ok_or_else(|| ScriptError::Runtime("failed to build __require".into()))?;
 
-        let mut src = v8::script_compiler::Source::new(code, Some(&origin));
-        let module = v8::script_compiler::compile_module(scope, &mut src)
-            .ok_or_else(|| ScriptError::Execution("failed to compile module".into()))?;
+        // Evaluate each module in dependency order.
+        for module_name in &order {
+            let info = registry
+                .get(module_name)
+                .ok_or_else(|| ScriptError::Execution(format!("module '{}' not found", module_name)))?;
 
-        // Instantiate: for now, self-contained modules only (no imports).
-        // The resolve callback returns None for any import, which will fail
-        // if the module actually has imports.
-        let instantiated = module.instantiate_module(scope, |_context, _specifier, _attrs, _referrer| {
-            None
-        });
-        if instantiated != Some(true) {
-            // Capture exception before it's lost.
-            return Err(ScriptError::Execution("module instantiation failed".into()));
+            // Create an exports object for this module.
+            let exports = v8::Object::new(scope);
+            let exports_global = v8::Global::new(scope, exports);
+
+            // Set `__require` and `exports` as globals for this module.
+            global.set(scope, v8::String::new(scope, "__require").unwrap().into(), require_fn.into());
+
+            let exp = v8::Local::new(scope, &exports_global);
+            global.set(scope, v8::String::new(scope, "exports").unwrap().into(), exp.into());
+
+            // Wrap the CJS source in an IIFE to scope its declarations.
+            let wrapped = format!(
+                "(function(__require, exports) {{\n{}\n}})(__require, exports);",
+                info.cjs_source
+            );
+            let code = v8::String::new(scope, &wrapped)
+                .ok_or_else(|| ScriptError::Execution("failed to create source string".into()))?;
+            let origin = v8::ScriptOrigin::new(
+                scope,
+                v8::String::new(scope, module_name).unwrap().into(),
+                0, 0, false, 0, None, false, false, false, None,
+            );
+            let script = v8::Script::compile(scope, code, Some(&origin))
+                .ok_or_else(|| ScriptError::Execution("failed to compile module".into()))?;
+            script.run(scope).ok_or_else(|| {
+                ScriptError::Execution(format!("failed to evaluate module '{}'", module_name))
+            })?;
+
+            // Cache the module's exports in __mf_cache.
+            let cache_key = v8::String::new(scope, module_name).unwrap();
+            cache_obj.set(scope, cache_key.into(), exports.into());
         }
 
-        // Evaluate.
-        module.evaluate(scope).ok_or_else(|| {
-            // Use a simple error message since we can't capture the exception
-            // without a TryCatch scope.
-            ScriptError::Execution("module evaluation failed".into())
-        })?;
+        // Clean up globals.
+        let undef: v8::Local<v8::Value> = v8::undefined(scope).into();
+        global.set(scope, v8::String::new(scope, "__require").unwrap().into(), undef);
+        global.set(scope, v8::String::new(scope, "__mf_cache").unwrap().into(), undef);
+        global.set(scope, v8::String::new(scope, "exports").unwrap().into(), undef);
+
+        // Call the entry module's exports.main().
+        let entry_info = registry
+            .get(entry)
+            .ok_or_else(|| ScriptError::Execution(format!("entry '{}' not found", entry)))?;
+        let entry_cache_key = v8::String::new(scope, entry_info.name.as_str()).unwrap();
+        let entry_exports = cache_obj
+            .get(scope, entry_cache_key.into())
+            .ok_or_else(|| ScriptError::Execution("entry module exports not found".into()))?;
+        let entry_obj = v8::Local::<v8::Object>::try_from(entry_exports)
+            .map_err(|_| ScriptError::Runtime("entry exports is not an object".into()))?;
+
+        let main_name = v8::String::new(scope, "main").unwrap();
+        if let Some(main_val) = entry_obj.get(scope, main_name.into()) {
+            if let Ok(main_func) = v8::Local::<v8::Function>::try_from(main_val) {
+                let recv: v8::Local<v8::Value> = v8::undefined(scope).into();
+                main_func.call(scope, recv.into(), &[]).ok_or_else(|| {
+                    ScriptError::Runtime("call to 'main' failed".into())
+                })?;
+            }
+        }
 
         Ok(())
     }

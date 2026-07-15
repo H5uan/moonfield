@@ -57,19 +57,16 @@ pub fn run_default_script() -> crate::script::Result<()> {
     Ok(())
 }
 
-/// Run a script module using the ESModule module system.
+/// Run a script module using the CommonJS-based module system.
 ///
-/// Loads the entry script, resolves its imports, compiles all modules as
-/// ESModules, instantiates the module graph, evaluates it, and extracts
-/// the named export.
-///
-/// This enables scripts to use `import`/`export` syntax.
+/// Each module's `import`/`export` is transformed to `__require`/`exports`
+/// globals, then evaluated in topological dependency order.
 ///
 /// # Example
 ///
 /// ```ts
 /// // scripts/main.ts
-/// import { record_frame } from "./record_frame";
+/// import { record_frame } from "./record_frame.js";
 /// export function main() { record_frame(); }
 /// ```
 #[cfg(feature = "v8-backend")]
@@ -87,14 +84,8 @@ pub fn run_script_module(entry: &str) -> crate::script::Result<()> {
 
     let mut runtime = Runtime::new(ScriptApi::default())?;
 
-    // Compile all modules.
-    for module in registry.iter() {
-        runtime.load_module(&module.name, &module.source)?;
-    }
-
-    // Call the entry point's exported function.
-    runtime.call("main")?;
-    Ok(())
+    // Load and evaluate the module graph, then call main().
+    runtime.load_module_graph(&registry, &canonical_name)
 }
 
 /// Recursively resolve and register all dependencies of a module.
@@ -108,7 +99,6 @@ fn resolve_dependencies(registry: &mut script::ModuleRegistry, name: &str) -> cr
     };
 
     for dep in &deps {
-        // Resolve the specifier.
         let resolved = registry
             .resolve(dep, name)
             .ok_or_else(|| script::ScriptError::Execution(format!(
@@ -117,7 +107,6 @@ fn resolve_dependencies(registry: &mut script::ModuleRegistry, name: &str) -> cr
             )))?;
 
         if !registry.contains(&resolved) {
-            // Load the module source from the filesystem.
             let dep_path = Path::new(&resolved);
             let candidates = [
                 dep_path.with_extension("js"),
@@ -144,7 +133,6 @@ fn resolve_dependencies(registry: &mut script::ModuleRegistry, name: &str) -> cr
                 )));
             }
 
-            // Recurse into dependencies.
             resolve_dependencies(registry, &resolved)?;
         }
     }

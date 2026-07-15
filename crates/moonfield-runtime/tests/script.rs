@@ -1,6 +1,6 @@
 //! Integration tests for the scripting runtime.
 
-use moonfield_runtime::script::{load_script, ScriptApi, ScriptRuntime};
+use moonfield_runtime::script::{load_script, ModuleRegistry, ScriptApi, ScriptRuntime};
 
 #[cfg(feature = "v8-backend")]
 use moonfield_runtime::script::V8Runtime as Runtime;
@@ -60,6 +60,43 @@ fn v8_rejects_raw_typescript() {
         msg.contains("SyntaxError") || msg.contains("Unexpected token"),
         "error should mention syntax error, got: {msg}"
     );
+}
+
+/// V8 backend: load a simple module graph (no imports).
+#[cfg(feature = "v8-backend")]
+#[test]
+fn v8_module_graph_simple() {
+    let mut registry = ModuleRegistry::new();
+    registry.register(
+        "main",
+        "export function main() { console.log('module works'); }".to_string(),
+    );
+
+    let mut runtime = Runtime::new(ScriptApi::default()).expect("runtime");
+    runtime
+        .load_module_graph(&registry, "main")
+        .expect("load_module_graph should succeed");
+}
+
+/// V8 backend: load a module graph with a function import.
+#[cfg(feature = "v8-backend")]
+#[test]
+fn v8_module_graph_with_imports() {
+    let mut registry = ModuleRegistry::new();
+    registry.register(
+        "main",
+        "import { greet } from \"./utils\";\n\
+         export function main() { greet(); }".to_string(),
+    );
+    registry.register(
+        "./utils",
+        "export function greet() { console.log('hello from module!'); }".to_string(),
+    );
+
+    let mut runtime = Runtime::new(ScriptApi::default()).expect("runtime");
+    runtime
+        .load_module_graph(&registry, "main")
+        .expect("load_module_graph should succeed");
 }
 
 /// QuickJS backend needs swc-based transpilation for TypeScript.
