@@ -2,17 +2,17 @@
 
 use super::{HostFn, HostValue, Result, ScriptApi, ScriptError, ScriptRuntime, TypedArrayValue};
 use moonfield_base::{error, info, warn};
+use std::collections::HashMap;
 use std::sync::Once;
 
 static V8_INIT: Once = Once::new();
 
 /// A script runtime backed by V8 (rusty_v8).
 ///
-/// Module system: uses a CommonJS-like wrapping approach instead of V8's
-/// native ESModule API. Each module is wrapped in an IIFE that receives
-/// `exports` and `require`, then evaluated in dependency order. This avoids
-/// the complexity of V8's `ResolveModuleCallback` (which cannot capture
-/// state and can't create `Local` handles from `Global` without a scope).
+/// Module system: uses V8's native ESModule API via `ScriptCompiler::compile_module`
+/// and `Module::instantiate_module2`. The resolve callback is a static method that
+/// reads a `ModuleMap` pointer from the isolate's data slot (set before
+/// `instantiate_module2` and removed after). This pattern follows Deno's approach.
 pub struct V8Runtime {
     isolate: v8::OwnedIsolate,
     context: v8::Global<v8::Context>,
@@ -219,12 +219,13 @@ impl V8Runtime {
 }
 
 impl V8Runtime {
-    /// Load a module graph using CommonJS-style wrapping.
+    /// Load a module graph using V8's native ESModule API.
     ///
-    /// Each module is transformed to use `__require` and `exports` globals,
-    /// then evaluated in dependency order (topological sort).
-    ///
-    /// After loading, calls the exported `main()` function.
+    /// 1. Pre-compiles all modules via `ScriptCompiler::compile_module`.
+    /// 2. Stores compiled `Local<Module>` handles in a `ModuleMap`.
+    /// 3. Stores a `*const ModuleMap` pointer in the isolate slot.
+    /// 4. Calls `Module::instantiate_module2` with a static resolve callback.
+    /// 5. Evaluates the entry module and calls `exports.main()`.
     pub fn load_module_graph(&mut self, registry: &super::ModuleRegistry, entry: &str) -> Result<()> {
         let order = registry
             .order_dependencies(entry)
@@ -233,98 +234,90 @@ impl V8Runtime {
         v8::scope!(let handle_scope, &mut self.isolate);
         let local_context = v8::Local::new(handle_scope, &self.context);
         let scope = &mut v8::ContextScope::new(handle_scope, local_context);
-        let global = local_context.global(scope);
 
-        // Create a JS object to hold cached module exports.
-        // We pass it to __require via External data to avoid global scope issues.
-        let cache_obj = v8::Object::new(scope);
-        let cache_global = v8::Global::new(scope, cache_obj);
-        let cache_ptr = Box::into_raw(Box::new(cache_global)) as *mut std::ffi::c_void;
+        // Step 1: pre-compile all modules.
+        let mut module_map = ModuleMap {
+            modules: HashMap::new(),
+            names: order.clone(),
+        };
 
-        // Define `__require(name)` — returns cached exports.
-        let require_fn = v8::Function::builder(
-            |s: &mut v8::PinScope,
-             args: v8::FunctionCallbackArguments,
-             mut ret: v8::ReturnValue| {
-                let name = args.get(0).to_rust_string_lossy(s);
-                let ext = v8::Local::<v8::External>::try_from(args.data()).unwrap();
-                // SAFETY: the cache_global is kept alive for the duration of this function.
-                let cache = unsafe { &*(ext.value() as *const v8::Global<v8::Object>) };
-                let cache_local = v8::Local::new(s, cache);
-                let key = v8::String::new(s, &name).unwrap();
-                if let Some(val) = cache_local.get(s, key.into()) {
-                    ret.set(val);
-                    return;
-                }
-                let err = format!("module '{}' not found in cache", name);
-                s.throw_exception(v8::String::new(s, &err).unwrap().into());
-            },
-        )
-        .data(v8::External::new(scope, cache_ptr).into())
-        .build(scope)
-        .ok_or_else(|| ScriptError::Runtime("failed to build __require".into()))?;
-
-        // Evaluate each module in dependency order.
         for module_name in &order {
             let info = registry
                 .get(module_name)
                 .ok_or_else(|| ScriptError::Execution(format!("module '{}' not found", module_name)))?;
 
-            // Create an exports object for this module.
-            let exports = v8::Object::new(scope);
-            let exports_global = v8::Global::new(scope, exports);
-
-            // Set `__require` and `exports` as globals for this module.
-            global.set(scope, v8::String::new(scope, "__require").unwrap().into(), require_fn.into());
-
-            let exp = v8::Local::new(scope, &exports_global);
-            global.set(scope, v8::String::new(scope, "exports").unwrap().into(), exp.into());
-
-            // Wrap the CJS source in an IIFE to scope its declarations.
-            let wrapped = format!(
-                "(function(__require, exports) {{\n{}\n}})(__require, exports);",
-                info.cjs_source
-            );
-            let code = v8::String::new(scope, &wrapped)
+            // Use the original ESM source (not the CJS transform) for native modules.
+            let code = v8::String::new(scope, &info.source)
                 .ok_or_else(|| ScriptError::Execution("failed to create source string".into()))?;
             let origin = v8::ScriptOrigin::new(
                 scope,
                 v8::String::new(scope, module_name).unwrap().into(),
-                0, 0, false, 0, None, false, false, false, None,
+                0, 0, false, 0, None, false, false, true,
+                None,
             );
-            let script = v8::Script::compile(scope, code, Some(&origin))
-                .ok_or_else(|| ScriptError::Execution("failed to compile module".into()))?;
-            script.run(scope).ok_or_else(|| {
-                ScriptError::Execution(format!("failed to evaluate module '{}'", module_name))
-            })?;
+            let mut source = v8::script_compiler::Source::new(code, Some(&origin));
+            let module = v8::script_compiler::compile_module(scope, &mut source)
+                .ok_or_else(|| {
+                    let msg = format!("failed to compile module '{}'", module_name);
+                    ScriptError::Execution(msg)
+                })?;
 
-            // Cache the module's exports in __mf_cache.
-            let cache_key = v8::String::new(scope, module_name).unwrap();
-            cache_obj.set(scope, cache_key.into(), exports.into());
+            module_map.modules.insert(
+                module_name.clone(),
+                ModuleEntry {
+                    module: v8::Global::new(scope, module),
+                    namespace: None,
+                },
+            );
         }
 
-        // Clean up globals.
-        let undef: v8::Local<v8::Value> = v8::undefined(scope).into();
-        global.set(scope, v8::String::new(scope, "__require").unwrap().into(), undef);
-        global.set(scope, v8::String::new(scope, "__mf_cache").unwrap().into(), undef);
-        global.set(scope, v8::String::new(scope, "exports").unwrap().into(), undef);
-
-        // Call the entry module's exports.main().
-        let entry_info = registry
-            .get(entry)
+        // Step 2: get the entry module handle.
+        let entry_entry = module_map.modules.get(entry)
             .ok_or_else(|| ScriptError::Execution(format!("entry '{}' not found", entry)))?;
-        let entry_cache_key = v8::String::new(scope, entry_info.name.as_str()).unwrap();
-        let entry_exports = cache_obj
-            .get(scope, entry_cache_key.into())
-            .ok_or_else(|| ScriptError::Execution("entry module exports not found".into()))?;
-        let entry_obj = v8::Local::<v8::Object>::try_from(entry_exports)
-            .map_err(|_| ScriptError::Runtime("entry exports is not an object".into()))?;
+        let entry_module = v8::Local::new(scope, &entry_entry.module);
 
-        let main_name = v8::String::new(scope, "main").unwrap();
-        if let Some(main_val) = entry_obj.get(scope, main_name.into()) {
+        // Step 3: instantiate with isolate slot (Deno pattern).
+        v8::tc_scope!(let tc_scope, scope);
+        tc_scope.set_slot(&module_map as *const ModuleMap);
+
+        let instantiate_result = entry_module.instantiate_module2(
+            tc_scope,
+            Self::module_resolve_callback,
+            Self::module_source_callback,
+        );
+
+        tc_scope.remove_slot::<*const ModuleMap>();
+
+        if instantiate_result.is_none() {
+            let msg = if let Some(exc) = tc_scope.exception() {
+                exc.to_rust_string_lossy(tc_scope)
+            } else {
+                "instantiation failed".to_string()
+            };
+            return Err(ScriptError::Execution(msg));
+        }
+
+        // Step 4: evaluate the entry module.
+        let evaluate_result = entry_module.evaluate(tc_scope);
+        if evaluate_result.is_none() {
+            let msg = if let Some(exc) = tc_scope.exception() {
+                exc.to_rust_string_lossy(tc_scope)
+            } else {
+                "evaluation failed".to_string()
+            };
+            return Err(ScriptError::Execution(msg));
+        }
+
+        // Step 5: call entry module's exports.main().
+        let namespace = entry_module.get_module_namespace();
+        let namespace_obj = v8::Local::<v8::Object>::try_from(namespace)
+            .map_err(|_| ScriptError::Runtime("entry module namespace is not an object".into()))?;
+
+        let main_name = v8::String::new(tc_scope, "main").unwrap();
+        if let Some(main_val) = namespace_obj.get(tc_scope, main_name.into()) {
             if let Ok(main_func) = v8::Local::<v8::Function>::try_from(main_val) {
-                let recv: v8::Local<v8::Value> = v8::undefined(scope).into();
-                main_func.call(scope, recv.into(), &[]).ok_or_else(|| {
+                let recv: v8::Local<v8::Value> = v8::undefined(tc_scope).into();
+                main_func.call(tc_scope, recv.into(), &[]).ok_or_else(|| {
                     ScriptError::Runtime("call to 'main' failed".into())
                 })?;
             }
@@ -332,6 +325,83 @@ impl V8Runtime {
 
         Ok(())
     }
+
+    /// Static resolve callback used by V8 during `Module::instantiate_module2`.
+    /// Reads the `ModuleMap` pointer from the isolate slot, then looks up the
+    /// specifier to return the corresponding compiled module.
+    fn module_resolve_callback<'s>(
+        context: v8::Local<'s, v8::Context>,
+        specifier: v8::Local<'s, v8::String>,
+        _import_attributes: v8::Local<'s, v8::FixedArray>,
+        _referrer: v8::Local<'s, v8::Module>,
+    ) -> Option<v8::Local<'s, v8::Module>> {
+        v8::callback_scope!(unsafe scope, context);
+        let module_map = unsafe {
+            scope.get_slot::<*const ModuleMap>().unwrap().as_ref().unwrap()
+        };
+
+        let specifier_str = specifier.to_rust_string_lossy(scope);
+
+        // Try exact match, then with stripped extension, then with .js/.ts appended.
+        let entry = module_map
+            .modules
+            .get(&specifier_str)
+            .or_else(|| {
+                let stem = specifier_str
+                    .rfind('.')
+                    .map(|dot| specifier_str[..dot].to_string())
+                    .unwrap_or_default();
+                module_map.modules.get(&stem)
+            })
+            .or_else(|| {
+                let with_js = format!("{}.js", specifier_str);
+                module_map.modules.get(&with_js)
+            })
+            .or_else(|| {
+                let with_ts = format!("{}.ts", specifier_str);
+                module_map.modules.get(&with_ts)
+            });
+
+        match entry {
+            Some(e) => {
+                let module = v8::Local::new(scope, &e.module);
+                Some(module)
+            }
+            None => {
+                let msg = format!("cannot resolve module '{}'", specifier_str);
+                let exc = v8::String::new(scope, &msg).unwrap();
+                scope.throw_exception(exc.into());
+                None
+            }
+        }
+    }
+
+    /// Static source callback for host-defined modules (not used, but required
+    /// by `instantiate_module2`).
+    fn module_source_callback<'s>(
+        _context: v8::Local<'s, v8::Context>,
+        _specifier: v8::Local<'s, v8::String>,
+        _import_attributes: v8::Local<'s, v8::FixedArray>,
+        _referrer: v8::Local<'s, v8::Module>,
+    ) -> Option<v8::Local<'s, v8::Object>> {
+        None
+    }
+}
+
+/// A compiled module handle and its exports namespace.
+struct ModuleEntry {
+    module: v8::Global<v8::Module>,
+    #[allow(dead_code)]
+    namespace: Option<v8::Global<v8::Object>>,
+}
+
+/// A map of compiled modules, stored temporarily in the isolate slot during
+/// `instantiate_module2`. Follows Deno's approach: the static resolve callback
+/// retrieves the `*const ModuleMap` from the slot and resolves by name.
+struct ModuleMap {
+    modules: HashMap<String, ModuleEntry>,
+    #[allow(dead_code)]
+    names: Vec<String>,
 }
 
 /// Convert a V8 `Local<Value>` to a `HostValue`.
