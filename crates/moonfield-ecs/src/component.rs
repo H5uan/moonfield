@@ -7,6 +7,7 @@ use crate::Entity;
 ///
 /// Automatically implemented for all `Send + Sync + 'static` types.
 pub trait Component: Send + Sync + 'static {}
+impl<T: Send + Sync + 'static> Component for T {}
 
 /// Dense storage for components of a single type.
 ///
@@ -166,6 +167,3 @@ impl ErasedStorage {
         (self.len_fn)(any)
     }
 }
-
-/// All `Send + Sync + 'static` types are components.
-impl<T: Send + Sync + 'static> Component for T {}

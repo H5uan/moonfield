@@ -2,9 +2,12 @@ use std::any::{Any, TypeId};
 use std::cell::{Ref, RefCell, RefMut};
 use std::collections::HashMap;
 
+mod archetype;
+mod borrow;
 mod commands;
 mod component;
 mod entities;
+mod entity_ref;
 mod query;
 mod resource;
 mod system;
