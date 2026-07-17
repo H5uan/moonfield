@@ -1,5 +1,6 @@
 use core::fmt;
 use std::{
+    cmp,
     error::Error,
     mem,
     num::{NonZeroU32, NonZeroU64},
@@ -162,6 +163,50 @@ pub(crate) struct Entities {
 }
 
 impl Entities {
+    #[inline]
+    pub fn len(&self) -> u32 {
+        self.len
+    }
+
+    pub fn freelist(&self) -> impl ExactSizeIterator<Item = Entity> + '_ {
+        let free = self.free_cursor.load(Ordering::Relaxed);
+        let ids = match usize::try_from(free) {
+            Err(_) => &[],
+            Ok(free) => &self.pending[0..free],
+        };
+        ids.iter().map(|&id| Entity {
+            id,
+            generation: self.meta[id as usize].generation,
+        })
+    }
+
+    pub fn set_freelist(&mut self, freelist: &[Entity]) {
+        #[cfg(debug_assertions)]
+        {
+            for entity in freelist {
+                let Some(meta) = self.meta.get(entity.id as usize) else {
+                    continue;
+                };
+                assert_eq!(
+                    meta.location.index,
+                    u32::MAX,
+                    "freelist addresses live entities"
+                );
+            }
+        }
+        if let Some(max) = freelist.iter().map(|e: &Entity| e.id()).max() {
+            if max as usize >= self.meta.len() {
+                self.meta.resize(max as usize + 1, EntityMeta::EMPTY);
+            }
+        }
+        self.pending.clear();
+        for entity in freelist {
+            self.pending.push(entity.id);
+            self.meta[entity.id as usize].generation = entity.generation;
+        }
+        self.free_cursor = AtomicIsize::new(freelist.len() as isize);
+    }
+
     pub fn reserve_entities(&mut self, count: u32) -> ReserveEntitiesIterator<'_> {
         // range_end is the previous value of free_cursor
         let range_end = self
@@ -311,7 +356,29 @@ impl Entities {
         );
     }
 
-    pub fn flush(&mut self, mut init: impl FnMut(u32, &mut Location)) {}
+    pub fn flush(&mut self, mut init: impl FnMut(u32, &mut Location)) {
+        let free_cursor = *self.free_cursor.get_mut();
+
+        let new_free_cursor = if free_cursor >= 0 {
+            free_cursor as usize
+        } else {
+            let old_meta_len = self.meta.len();
+            let new_meta_len = old_meta_len + -free_cursor as usize;
+            self.meta.resize(new_meta_len, EntityMeta::EMPTY);
+            self.len += -free_cursor as u32;
+            for (id, meta) in self.meta.iter_mut().enumerate().skip(old_meta_len) {
+                init(id as u32, &mut meta.location);
+            }
+
+            *self.free_cursor.get_mut() = 0;
+            0
+        };
+
+        self.len += (self.pending.len() - new_free_cursor) as u32;
+        for id in self.pending.drain(new_free_cursor..) {
+            init(id, &mut self.meta[id as usize].location);
+        }
+    }
 
     pub fn free(&mut self, entity: Entity) -> Result<Location, NoSuchEntity> {
         self.verify_flushed();
@@ -342,6 +409,87 @@ impl Entities {
         let shortfall = additional as isize - freelist_size;
         if shortfall > 0 {
             self.meta.reserve(shortfall as usize);
+        }
+    }
+
+    pub fn contains(&self, entity: Entity) -> bool {
+        match self.meta.get(entity.id as usize) {
+            Some(meta) => {
+                meta.generation == entity.generation && (meta.location.index != u32::MAX)
+                    || self.pending[self.free_cursor.load(Ordering::Relaxed).max(0) as usize..]
+                        .contains(&entity.id)
+            }
+            None => {
+                let free = self.free_cursor.load(Ordering::Relaxed);
+                entity.generation.get() == 1
+                    && free < 0
+                    && (entity.id as isize) < (free.abs() + self.meta.len() as isize)
+            }
+        }
+    }
+
+    pub fn clear(&mut self) {
+        self.meta.clear();
+        self.pending.clear();
+        *self.free_cursor.get_mut() = 0;
+        self.len = 0;
+    }
+
+    pub fn get_mut(&mut self, entity: Entity) -> Result<&mut Location, NoSuchEntity> {
+        let meta = self.meta.get_mut(entity.id as usize).ok_or(NoSuchEntity)?;
+        if meta.generation == entity.generation && meta.location.index != u32::MAX {
+            Ok(&mut meta.location)
+        } else {
+            Err(NoSuchEntity)
+        }
+    }
+
+    pub fn get(&self, entity: Entity) -> Result<Location, NoSuchEntity> {
+        if self.meta.len() <= entity.id as usize {
+            // Check if this could have been obtained from `reserve_entity`
+            let free = self.free_cursor.load(Ordering::Relaxed);
+            if entity.generation.get() == 1
+                && free < 0
+                && (entity.id as isize) < (free.abs() + self.meta.len() as isize)
+            {
+                return Ok(Location {
+                    archetype: 0,
+                    index: u32::MAX,
+                });
+            } else {
+                return Err(NoSuchEntity);
+            }
+        }
+        let meta = &self.meta[entity.id as usize];
+        if meta.generation != entity.generation || meta.location.index == u32::MAX {
+            return Err(NoSuchEntity);
+        }
+        Ok(meta.location)
+    }
+
+    pub unsafe fn resolve_unknown_gen(&self, id: u32) -> Entity {
+        let meta_len = self.meta.len();
+
+        if meta_len > id as usize {
+            let meta = &self.meta[id as usize];
+            Entity {
+                generation: meta.generation,
+                id,
+            }
+        } else {
+            // See if it's pending, but not yet flushed.
+            let free_cursor = self.free_cursor.load(Ordering::Relaxed);
+            let num_pending = cmp::max(-free_cursor, 0) as usize;
+
+            if meta_len + num_pending > id as usize {
+                // Pending entities will have the first generation.
+                Entity {
+                    generation: NonZeroU32::MIN,
+                    id,
+                }
+            } else {
+                panic!("entity id is out of range");
+            }
         }
     }
 }
