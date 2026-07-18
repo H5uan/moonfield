@@ -33,6 +33,13 @@ Host API bindings (`record_frame`, …) live in the binary crate (`crates/moonfi
 
 The runtime supports two scripting backends selected via Cargo features: `v8-backend` (default) and `quickjs-backend`.
 
+## Threading Model
+
+- The script VM (V8 isolate / QuickJS runtime) is `!Send` and lives on the **main thread**, driven from the winit event loop. Scripts exist to call host APIs, and host APIs touch thread-confined resources (winit window, Vulkan device, ECS `World`) — the same reason PuerTS keeps its JsEnv on the game thread.
+- Scripts never own GPU/native objects directly. `record_frame` (headless recording) is a debug-only exception; gameplay-facing host APIs must hand off via a command queue once multi-threaded rendering lands (the logic thread produces render commands, the render thread owns all Vulkan objects).
+- Runaway scripts are interrupted by an execution watchdog (`DEFAULT_EXECUTION_TIMEOUT`, 5 s per top-level call); the runtime stays usable afterwards.
+- For heavy JS-side compute, use one isolate per worker thread with message passing (Worker-style). Never share a runtime across threads, even under locks — the QuickJS backend has no cross-thread support at all.
+
 ## Coding Style & Naming Conventions
 
 - Follow standard `rustfmt` formatting — run `cargo fmt` before committing.
