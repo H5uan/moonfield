@@ -110,6 +110,32 @@ fn loads_typescript_entry_without_precompiled_js() {
     std::fs::remove_dir_all(&dir).ok();
 }
 
+/// The real on-disk flow: an entry importing a sibling module must have the
+/// dependency discovered by `resolve_dependencies`, loaded, registered
+/// under a canonical name, and resolvable by the engine at instantiation.
+#[test]
+fn loads_module_entry_with_relative_import() {
+    let dir = unique_temp_dir("entry_import");
+    let main_path = dir.join("main.js");
+    let utils_path = dir.join("utils.js");
+    std::fs::write(&utils_path, "export function value() { return 7; }").unwrap();
+    std::fs::write(
+        &main_path,
+        "import { value } from \"./utils.js\";\n\
+         export function mainValue() { return value(); }",
+    )
+    .unwrap();
+
+    let mut runtime = Runtime::new(test_api()).expect("runtime");
+    moonfield_script::load_module_entry(&mut runtime, &main_path).expect("load entry with import");
+    let v = runtime
+        .call_module_export("mainValue", &[])
+        .expect("call mainValue");
+    assert_eq!(v.as_f64(), Some(7.0));
+
+    std::fs::remove_dir_all(&dir).ok();
+}
+
 /// V8 backend: load a simple module graph (no imports).
 #[cfg(all(feature = "v8-backend", not(feature = "quickjs-backend")))]
 #[test]
@@ -327,6 +353,52 @@ fn hot_reload_recompiles_changed_module() {
         .call_module_export("mainValue", &[])
         .expect("call after reload");
     assert_eq!(v.as_f64(), Some(2.0));
+
+    std::fs::remove_dir_all(&dir).ok();
+}
+
+/// Hot reload: a changed module that gains a NEW import must have that
+/// dependency discovered, loaded from disk, and registered during the
+/// reload — previously this failed with "module not found".
+#[test]
+fn hot_reload_picks_up_new_import() {
+    let dir = unique_temp_dir("hot_reload_new_import");
+    let main_path = dir.join("main.js");
+    let utils_path = dir.join("utils.js");
+    std::fs::write(&utils_path, "export function value() { return 1; }").unwrap();
+    std::fs::write(&main_path, "export function mainValue() { return 0; }").unwrap();
+
+    let mut registry = ModuleRegistry::new();
+    let main_source = std::fs::read_to_string(&main_path).unwrap();
+    let canonical = registry.register(&main_path.to_string_lossy().replace('\\', "/"), main_source);
+    registry
+        .resolve_dependencies(&canonical)
+        .expect("resolve deps");
+
+    let mut runtime = Runtime::new(test_api()).expect("runtime");
+    runtime
+        .load_module_graph(Rc::new(registry), &canonical)
+        .expect("load_module_graph");
+    let v = runtime
+        .call_module_export("mainValue", &[])
+        .expect("call mainValue");
+    assert_eq!(v.as_f64(), Some(0.0));
+
+    // Edit main.js to import the previously unimported utils.js.
+    std::fs::write(
+        &main_path,
+        "import { value } from \"./utils.js\";\n\
+         export function mainValue() { return value(); }",
+    )
+    .unwrap();
+    runtime
+        .on_files_changed(std::slice::from_ref(&main_path))
+        .expect("hot reload with new import");
+
+    let v = runtime
+        .call_module_export("mainValue", &[])
+        .expect("call after reload");
+    assert_eq!(v.as_f64(), Some(1.0));
 
     std::fs::remove_dir_all(&dir).ok();
 }

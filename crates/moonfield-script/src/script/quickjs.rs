@@ -397,6 +397,7 @@ impl HotReloadHandler for QuickJsRuntime {
 
         // QuickJS re-evaluates the whole bundle (no incremental compiled-module
         // cache like V8): update all changed sources, then re-run the graph.
+        let mut changed_modules = Vec::new();
         let mut result: Result<()> = Ok(());
         for path in paths {
             match super::load_script(path) {
@@ -405,9 +406,23 @@ impl HotReloadHandler for QuickJsRuntime {
                         .find_by_file_path(path)
                         .unwrap_or_else(|| path.to_str().unwrap_or("").to_string());
                     registry.register(&module_name, source);
+                    changed_modules.push(module_name);
                 }
                 Err(e) => {
                     result = Err(e);
+                    break;
+                }
+            }
+        }
+
+        // Changed modules may import files that were never loaded before —
+        // discover and register those now (a no-op when imports are
+        // unchanged). Without this, adding an import during an edit fails
+        // the reload with "module not found".
+        if result.is_ok() {
+            for module_name in &changed_modules {
+                if let Err(e) = registry.resolve_dependencies(module_name) {
+                    result = Err(ScriptError::Execution(e));
                     break;
                 }
             }

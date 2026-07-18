@@ -176,16 +176,23 @@ impl ModuleRegistry {
             let normalized = Self::normalize_path(&resolved);
             let canonical = normalized.to_string_lossy().replace('\\', "/");
 
-            if self.modules.contains_key(&canonical) {
-                return Some(canonical);
-            }
-            let with_js = format!("{}.js", canonical);
-            if self.modules.contains_key(&with_js) {
-                return Some(with_js);
-            }
-            let with_ts = format!("{}.ts", canonical);
-            if self.modules.contains_key(&with_ts) {
-                return Some(with_ts);
+            // Modules are registered under extension-less canonical names,
+            // while source specifiers may or may not carry one — try the
+            // candidate as-is, without extension, and with .js/.ts appended.
+            let without_ext = canonical
+                .rfind('.')
+                .filter(|&dot| !canonical[dot..].contains('/'))
+                .map(|dot| canonical[..dot].to_string());
+            let candidates = [
+                Some(canonical.clone()),
+                without_ext,
+                Some(format!("{}.js", canonical)),
+                Some(format!("{}.ts", canonical)),
+            ];
+            for candidate in candidates.into_iter().flatten() {
+                if self.modules.contains_key(&candidate) {
+                    return Some(candidate);
+                }
             }
         }
 
@@ -279,30 +286,26 @@ impl ModuleRegistry {
         };
 
         for dep in &deps {
-            // Try the in-registry resolve first (fast path).
-            let resolved = self.resolve(dep, name);
+            // Already registered — also breaks dependency cycles.
+            if self.resolve(dep, name).is_some() {
+                continue;
+            }
 
-            if let Some(resolved) = resolved {
-                if !self.contains(&resolved) {
-                    // Found in registry metadata but not yet loaded — find it on disk.
-                    let (_, path) = self
-                        .resolve_full(dep, name)
-                        .ok_or_else(|| format!("cannot resolve '{}' from '{}'", dep, name))?;
-                    let source = Self::load_source(&path)?;
-                    self.register(&resolved, source);
-                    self.resolve_dependencies(&resolved)?;
-                }
-            } else {
-                // Full resolution chain for bare specifiers and node_modules.
-                let (canonical, path) = self
-                    .resolve_full(dep, name)
-                    .ok_or_else(|| format!("cannot resolve '{}' from '{}'", dep, name))?;
+            // Full resolution chain for relative paths, bare specifiers,
+            // and node_modules.
+            let (found, path) = self
+                .resolve_full(dep, name)
+                .ok_or_else(|| format!("cannot resolve '{}' from '{}'", dep, name))?;
 
-                if !self.contains(&canonical) {
-                    let source = Self::load_source(&path)?;
-                    self.register(&canonical, source);
-                    self.resolve_dependencies(&canonical)?;
-                }
+            // `found` may carry an extension while modules are keyed by
+            // extension-less canonical names — canonicalize before checking
+            // membership and recursing, or the same file is registered twice
+            // and the recursion fails with "module not found".
+            let canonical = self.canonicalize(&found);
+            if !self.contains(&canonical) {
+                let source = Self::load_source(&path)?;
+                self.register(&canonical, source);
+                self.resolve_dependencies(&canonical)?;
             }
         }
 
@@ -500,12 +503,28 @@ impl ModuleRegistry {
     ///
     /// Returns module names in evaluation order (dependencies first).
     pub fn order_dependencies(&self, entry: &str) -> Result<Vec<String>, String> {
+        // Pre-resolve every module's imports to canonical names once
+        // (specifiers may carry extensions; registered names do not).
+        let resolved_imports: HashMap<String, Vec<String>> = self
+            .modules
+            .iter()
+            .map(|(name, info)| {
+                let resolved = info
+                    .imports
+                    .iter()
+                    .map(|spec| self.resolve(spec, name).unwrap_or_else(|| spec.clone()))
+                    .collect();
+                (name.clone(), resolved)
+            })
+            .collect();
+
         let mut visited = HashMap::new(); // false = visiting, true = done
         let mut order = Vec::new();
 
         fn visit(
             name: &str,
             modules: &HashMap<String, ModuleInfo>,
+            resolved_imports: &HashMap<String, Vec<String>>,
             visited: &mut HashMap<String, bool>,
             order: &mut Vec<String>,
         ) -> Result<(), String> {
@@ -519,33 +538,14 @@ impl ModuleRegistry {
 
             visited.insert(name.to_string(), false);
 
-            let info = modules
-                .get(name)
-                .ok_or_else(|| format!("module '{}' not found", name))?;
+            if !modules.contains_key(name) {
+                return Err(format!("module '{}' not found", name));
+            }
 
-            // Resolve and visit dependencies.
-            for dep_spec in &info.imports {
-                // Resolve the specifier against the current module's name.
-                let resolved = if dep_spec.starts_with('.') {
-                    let base_dir = Path::new(name).parent().unwrap_or(Path::new("."));
-                    let resolved = ModuleRegistry::normalize_path(&base_dir.join(dep_spec));
-                    let c = resolved.to_string_lossy().replace('\\', "/");
-                    // Try to find it in the module map.
-                    if modules.contains_key(&c) {
-                        c
-                    } else {
-                        let with_js = format!("{}.js", c);
-                        if modules.contains_key(&with_js) {
-                            with_js
-                        } else {
-                            dep_spec.clone()
-                        }
-                    }
-                } else {
-                    dep_spec.clone()
-                };
-
-                visit(&resolved, modules, visited, order)?;
+            if let Some(deps) = resolved_imports.get(name) {
+                for dep in deps {
+                    visit(dep, modules, resolved_imports, visited, order)?;
+                }
             }
 
             visited.insert(name.to_string(), true);
@@ -553,7 +553,13 @@ impl ModuleRegistry {
             Ok(())
         }
 
-        visit(entry, &self.modules, &mut visited, &mut order)?;
+        visit(
+            entry,
+            &self.modules,
+            &resolved_imports,
+            &mut visited,
+            &mut order,
+        )?;
         Ok(order)
     }
 

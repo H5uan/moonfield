@@ -694,6 +694,8 @@ impl V8Runtime {
         // Step 1: compile modules, reusing cached handles where source matches.
         let mut module_map = ModuleMap {
             modules: HashMap::new(),
+            by_hash: HashMap::new(),
+            resolutions: HashMap::new(),
             names: order.clone(),
         };
 
@@ -770,6 +772,30 @@ impl V8Runtime {
             .ok_or_else(|| ScriptError::Execution(format!("entry '{}' not found", entry)))?;
         let entry_module = v8::Local::new(scope, &entry_entry.module);
 
+        // Precompute referrer-aware resolution for the static resolve
+        // callback: source specifiers (e.g. "./utils") are only meaningful
+        // relative to the importing module, and the callback receives the
+        // raw specifier plus the referrer's `Local<Module>` — nothing else.
+        for module_name in &order {
+            let info = registry.get(module_name).ok_or_else(|| {
+                ScriptError::Execution(format!("module '{}' not found", module_name))
+            })?;
+            for spec in &info.imports {
+                let resolved = registry.resolve(spec, module_name).ok_or_else(|| {
+                    ScriptError::Execution(format!(
+                        "cannot resolve '{}' from '{}'",
+                        spec, module_name
+                    ))
+                })?;
+                module_map
+                    .resolutions
+                    .insert((module_name.clone(), spec.clone()), resolved);
+            }
+            let module_entry = module_map.modules.get(module_name).unwrap();
+            let hash = v8::Local::new(scope, &module_entry.module).get_identity_hash();
+            module_map.by_hash.insert(hash, module_name.clone());
+        }
+
         // Step 3: instantiate with isolate slot (Deno pattern).
         v8::tc_scope!(let tc_scope, scope);
         tc_scope.set_slot(&module_map as *const ModuleMap);
@@ -838,13 +864,13 @@ impl V8Runtime {
     }
 
     /// Static resolve callback used by V8 during `Module::instantiate_module2`.
-    /// Reads the `ModuleMap` pointer from the isolate slot, then looks up the
-    /// specifier to return the corresponding compiled module.
+    /// Reads the `ModuleMap` pointer from the isolate slot, then resolves the
+    /// raw specifier against the referrer via the precomputed map.
     fn module_resolve_callback<'s>(
         context: v8::Local<'s, v8::Context>,
         specifier: v8::Local<'s, v8::String>,
         _import_attributes: v8::Local<'s, v8::FixedArray>,
-        _referrer: v8::Local<'s, v8::Module>,
+        referrer: v8::Local<'s, v8::Module>,
     ) -> Option<v8::Local<'s, v8::Module>> {
         v8::callback_scope!(unsafe scope, context);
         let module_map = unsafe {
@@ -857,17 +883,18 @@ impl V8Runtime {
 
         let specifier_str = specifier.to_rust_string_lossy(scope);
 
-        // Try exact match, then with stripped extension, then with .js/.ts appended.
+        // Resolve (importer, specifier) → canonical module; fall back to
+        // direct name matches for absolute specifiers.
         let entry = module_map
-            .modules
-            .get(&specifier_str)
-            .or_else(|| {
-                let stem = specifier_str
-                    .rfind('.')
-                    .map(|dot| specifier_str[..dot].to_string())
-                    .unwrap_or_default();
-                module_map.modules.get(&stem)
+            .by_hash
+            .get(&referrer.get_identity_hash())
+            .and_then(|importer| {
+                module_map
+                    .resolutions
+                    .get(&(importer.clone(), specifier_str.clone()))
             })
+            .and_then(|canonical| module_map.modules.get(canonical))
+            .or_else(|| module_map.modules.get(&specifier_str))
             .or_else(|| {
                 let with_js = format!("{}.js", specifier_str);
                 module_map.modules.get(&with_js)
@@ -959,6 +986,19 @@ impl HotReloadHandler for V8Runtime {
             }
         }
 
+        // Changed modules may import files that were never loaded before —
+        // discover and register those now (a no-op when imports are
+        // unchanged). Without this, adding an import during an edit fails
+        // the reload with "module not found".
+        if result.is_ok() {
+            for module_name in &changed_modules {
+                if let Err(e) = registry.resolve_dependencies(module_name) {
+                    result = Err(ScriptError::Execution(e));
+                    break;
+                }
+            }
+        }
+
         let registry_rc = Rc::new(registry);
         if result.is_ok() {
             // V8 modules are one-shot (can't re-instantiate/re-evaluate), so
@@ -1005,6 +1045,14 @@ struct ModuleEntry {
 /// retrieves the `*const ModuleMap` from the slot and resolves by name.
 struct ModuleMap {
     modules: HashMap<String, ModuleEntry>,
+    /// V8 module identity hash → canonical name, so the resolve callback can
+    /// recover the referrer's name from the `Local<Module>` it is given.
+    by_hash: HashMap<std::num::NonZero<i32>, String>,
+    /// (importer canonical name, raw specifier) → resolved canonical name.
+    /// Raw specifiers in source text (e.g. `"./utils"`) only make sense
+    /// relative to the importing module, so they are pre-resolved when the
+    /// graph is built.
+    resolutions: HashMap<(String, String), String>,
     #[allow(dead_code)]
     names: Vec<String>,
 }
