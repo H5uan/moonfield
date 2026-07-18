@@ -496,9 +496,13 @@ impl Entities {
 
 /// Internal generation-tracking storage.  In a minimal ECS we only track the
 /// next free id and the set of alive ids so that `despawn` works.
+///
+/// Entities are created with generation 1 and stored in `alive` as packed
+/// `Entity::to_bits()`, so all lookups (`free`, `is_alive`, `alive_entities`)
+/// use the same encoding.
 #[derive(Default, Debug)]
 pub(crate) struct EntityId {
-    next: u64,
+    next: u32,
     alive: std::collections::HashSet<u64>,
 }
 
@@ -506,8 +510,12 @@ impl EntityId {
     pub fn alloc(&mut self) -> Entity {
         let id = self.next;
         self.next += 1;
-        self.alive.insert(id);
-        Entity::from_bits(id).unwrap()
+        let entity = Entity {
+            generation: NonZeroU32::MIN,
+            id,
+        };
+        self.alive.insert(entity.to_bits().get());
+        entity
     }
 
     pub fn free(&mut self, entity: Entity) -> bool {
