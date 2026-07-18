@@ -40,6 +40,11 @@ pub fn build_script_api() -> ScriptApi {
 
 /// `record_frame` host function: render one frame with the headless context.
 ///
+/// **Debug/headless tool only** — scripts must not own or drive GPU objects
+/// (see "Threading Model" in AGENTS.md). Gameplay-facing host APIs should
+/// keep GPU work behind the logic-thread/render-thread handoff instead of
+/// following this pattern.
+///
 /// Accepts optional `(width, height)` arguments; defaults to the headless
 /// context's default resolution. The context is built once and reused (see
 /// [`ensure_headless_context`]).
