@@ -27,7 +27,7 @@ use std::cell::RefCell;
 use std::path::{Path, PathBuf};
 use std::rc::Rc;
 use std::sync::Arc;
-use std::time::Instant;
+use std::time::{Duration, Instant};
 
 /// Runtime configuration hook used by [`ScriptPlugin::with_configure`],
 /// invoked right after the runtime is created.
@@ -41,7 +41,11 @@ type ConfigureFn = Arc<dyn Fn(&mut Runtime) + Send + Sync>;
 /// lifecycle hooks:
 ///
 /// - `main()` — called once after the module graph is first evaluated.
-/// - `on_update(dt)` — called every frame with the frame delta in seconds.
+/// - `on_fixed_update(dt)` — called zero or more times per frame with a
+///   fixed delta (default 1/60 s), Godot `_physics_process` style, for
+///   framerate-independent gameplay logic. Runs before `on_update`.
+/// - `on_update(dt)` — called every frame with the frame delta in seconds,
+///   Unreal `Tick` / Godot `_process` style.
 /// - `on_shutdown()` — called once when the app shuts down.
 ///
 /// Missing hooks are skipped silently. Script errors are logged and do not
@@ -62,6 +66,8 @@ pub struct ScriptPlugin {
     configure: Option<ConfigureFn>,
     /// Max JS heap size in bytes; `None` uses the backend default (128 MB).
     memory_limit: Option<usize>,
+    /// Fixed timestep for the `on_fixed_update` hook.
+    fixed_timestep: Duration,
 }
 
 impl Default for ScriptPlugin {
@@ -78,6 +84,7 @@ impl ScriptPlugin {
             entry: None,
             configure: None,
             memory_limit: None,
+            fixed_timestep: Duration::from_secs_f64(1.0 / 60.0),
         }
     }
 
@@ -91,6 +98,18 @@ impl ScriptPlugin {
     /// Cap the JS engine's heap at `bytes` (default: 128 MB).
     pub fn with_memory_limit(mut self, bytes: usize) -> Self {
         self.memory_limit = Some(bytes);
+        self
+    }
+
+    /// Set the fixed timestep for the `on_fixed_update` hook
+    /// (default: 1/60 s, Godot's default physics rate).
+    ///
+    /// # Panics
+    ///
+    /// Panics if `timestep` is zero.
+    pub fn with_fixed_timestep(mut self, timestep: Duration) -> Self {
+        assert!(timestep > Duration::ZERO, "fixed timestep must be > 0");
+        self.fixed_timestep = timestep;
         self
     }
 
@@ -115,8 +134,48 @@ impl ScriptPlugin {
 struct ScriptState {
     runtime: Runtime,
     hot_reloader: Option<HotReloader>,
-    /// Wall-clock of the previous update, used to compute `on_update(dt)`.
+    /// Wall-clock of the previous update, used to compute frame deltas.
     last_frame: Instant,
+    /// Fixed-timestep accumulator feeding `on_fixed_update`.
+    fixed: FixedStepAccumulator,
+}
+
+/// Maximum fixed steps per frame; excess accumulated time is dropped so a
+/// long stall cannot cause a catch-up ("death") spiral.
+const MAX_FIXED_STEPS_PER_FRAME: u32 = 5;
+
+/// Fixed-timestep accumulator driving the `on_fixed_update` hook
+/// (Godot `_physics_process` style): real frame time is collected and
+/// consumed in fixed slices, so gameplay logic runs at a stable rate
+/// regardless of frame rate.
+#[derive(Debug)]
+struct FixedStepAccumulator {
+    timestep: Duration,
+    accumulated: Duration,
+}
+
+impl FixedStepAccumulator {
+    fn new(timestep: Duration) -> Self {
+        Self {
+            timestep,
+            accumulated: Duration::ZERO,
+        }
+    }
+
+    /// Add one frame's elapsed time and return how many fixed steps should
+    /// run this frame (0..=[`MAX_FIXED_STEPS_PER_FRAME`]). When the cap is
+    /// hit the backlog is dropped — running slow beats a catch-up spiral.
+    fn advance(&mut self, frame_time: Duration) -> u32 {
+        self.accumulated += frame_time;
+        let mut steps = (self.accumulated.as_nanos() / self.timestep.as_nanos()) as u32;
+        if steps > MAX_FIXED_STEPS_PER_FRAME {
+            steps = MAX_FIXED_STEPS_PER_FRAME;
+            self.accumulated = Duration::ZERO;
+        } else {
+            self.accumulated -= self.timestep * steps;
+        }
+        steps
+    }
 }
 
 impl Plugin for ScriptPlugin {
@@ -134,6 +193,7 @@ impl Plugin for ScriptPlugin {
         let entry = self.entry.clone();
         let configure = self.configure.clone();
         let memory_limit = self.memory_limit;
+        let fixed_timestep = self.fixed_timestep;
         let slot = state_slot.clone();
         app.add_startup_system(move |_world: &mut World| {
             info!("Script plugin startup");
@@ -179,6 +239,7 @@ impl Plugin for ScriptPlugin {
                 runtime,
                 hot_reloader,
                 last_frame: Instant::now(),
+                fixed: FixedStepAccumulator::new(fixed_timestep),
             });
         });
 
@@ -195,8 +256,25 @@ impl Plugin for ScriptPlugin {
                 }
             }
             let now = Instant::now();
-            let dt = now.duration_since(state.last_frame).as_secs_f64();
+            let frame_time = now.duration_since(state.last_frame);
             state.last_frame = now;
+
+            // Fixed-timestep gameplay hook (Godot `_physics_process` /
+            // Unity `FixedUpdate` style), runs before `on_update`.
+            if state.runtime.has_function("on_fixed_update") {
+                let dt = fixed_timestep.as_secs_f64();
+                for _ in 0..state.fixed.advance(frame_time) {
+                    if let Err(e) = state
+                        .runtime
+                        .call_module_export_unit("on_fixed_update", &[HostValue::Number(dt)])
+                    {
+                        error!("script on_fixed_update failed: {}", e);
+                        break;
+                    }
+                }
+            }
+
+            let dt = frame_time.as_secs_f64();
             if state.runtime.has_function("on_update") {
                 if let Err(e) = state
                     .runtime
@@ -274,4 +352,31 @@ pub fn run_script_module(entry: &str, api: ScriptApi) -> script::Result<()> {
     let mut runtime = Runtime::new(api)?;
     load_module_entry(&mut runtime, Path::new(entry))?;
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn fixed_step_accumulator_slices_frame_time() {
+        let mut acc = FixedStepAccumulator::new(Duration::from_millis(10));
+        assert_eq!(acc.advance(Duration::from_millis(25)), 2); // 5ms carried over
+        assert_eq!(acc.advance(Duration::from_millis(4)), 0); // 9ms total
+        assert_eq!(acc.advance(Duration::from_millis(1)), 1); // 10ms — one step
+        assert_eq!(acc.advance(Duration::ZERO), 0);
+    }
+
+    #[test]
+    fn fixed_step_accumulator_caps_and_drops_backlog() {
+        let mut acc = FixedStepAccumulator::new(Duration::from_millis(10));
+        // A 500ms stall yields far more than the cap: clamp, then drop the
+        // backlog so the next frame starts clean.
+        assert_eq!(
+            acc.advance(Duration::from_millis(500)),
+            MAX_FIXED_STEPS_PER_FRAME
+        );
+        assert_eq!(acc.advance(Duration::ZERO), 0);
+        assert_eq!(acc.advance(Duration::from_millis(10)), 1);
+    }
 }

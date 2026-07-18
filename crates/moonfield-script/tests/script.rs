@@ -491,6 +491,69 @@ fn hot_reload_recovers_after_broken_edit() {
     std::fs::remove_dir_all(&dir).ok();
 }
 
+/// The ScriptPlugin drives `on_fixed_update` with the configured fixed
+/// delta (Godot `_physics_process` style) before `on_update` each frame.
+#[test]
+fn script_plugin_drives_fixed_and_variable_hooks() {
+    let dir = unique_temp_dir("fixed_hook");
+    let entry = dir.join("main.js");
+    std::fs::write(
+        &entry,
+        "export function on_fixed_update(dt) { report('fixed', dt); }\n\
+         export function on_update(dt) { report('update', dt); }",
+    )
+    .unwrap();
+
+    // Count hook invocations through a host function (the plugin's runtime
+    // is not directly reachable from the test).
+    let counts = std::sync::Arc::new(std::sync::Mutex::new((0u32, 0u32, 0.0f64)));
+    let shared = std::sync::Arc::clone(&counts);
+    let mut api = test_api();
+    api.register_closure("report", move |args| {
+        let mut guard = shared.lock().unwrap();
+        match args.first().and_then(|v| v.as_str()) {
+            Some("fixed") => {
+                guard.0 += 1;
+                guard.2 = args.get(1).and_then(|v| v.as_f64()).unwrap_or(0.0);
+            }
+            Some("update") => guard.1 += 1,
+            _ => {}
+        }
+        Ok(HostValue::Null)
+    });
+
+    let mut app = moonfield_app::App::new();
+    app.add_plugin(
+        moonfield_script::ScriptPlugin::new(api)
+            .with_entry(&entry)
+            .with_fixed_timestep(std::time::Duration::from_millis(10)),
+    );
+
+    app.update(); // startup + first frame (tiny dt → likely 0 fixed steps)
+    std::thread::sleep(std::time::Duration::from_millis(35));
+    app.update(); // ~35ms at 10ms/step → 3..=5 fixed steps, 1 update
+
+    {
+        let guard = counts.lock().unwrap();
+        assert!(
+            (3..=5).contains(&guard.0),
+            "expected 3..=5 fixed steps after a 35ms frame, got {}",
+            guard.0
+        );
+        assert!(
+            (guard.2 - 0.010).abs() < 1e-9,
+            "fixed dt must be the configured timestep, got {}",
+            guard.2
+        );
+    }
+
+    app.update();
+    let guard = counts.lock().unwrap();
+    assert_eq!(guard.1, 3, "on_update must run once per frame");
+
+    std::fs::remove_dir_all(&dir).ok();
+}
+
 /// Promises settled during a script call must have their `.then` callbacks
 /// run before the call returns (microtask checkpoint / job queue drain).
 #[test]
