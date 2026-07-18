@@ -21,7 +21,7 @@ use syn::{parse_macro_input, FnArg, ItemFn, Pat, ReturnType, Type};
 /// The annotated function must have the signature:
 /// `fn name(param1: Type1, param2: Type2) -> Result<ReturnType, String>`
 ///
-/// Supported parameter types: `u32`, `f64`, `bool`, `String`, `HostValue`,
+/// Supported parameter types: `u32`, `f64`, `bool`, `String`, `&HostValue`,
 /// and `Option<T>` wrappers of those (mapped to optional TS parameters).
 /// Supported return types: `u32`, `f64`, `bool`, `String`, `HostValue`, `()`, `Vec<u8>`
 ///
@@ -280,12 +280,13 @@ fn extract_param_code(name: &str, ty: &Type, index: usize) -> proc_macro2::Token
                 .and_then(|v| v.as_str().map(|s| s.to_string()))
                 .ok_or_else(|| format!("arg {}: expected string", #index_lit))?;
         },
-        // For HostValue, pass through directly.
+        // For HostValue, pass through by reference (HostValue is not Clone:
+        // its zero-copy view variants borrow the JS engine's backing store,
+        // so the annotated function must take `&HostValue`).
         s if s.contains("HostValue") => quote! {
             let #name_ident = args
                 .get(#index_lit)
-                .cloned()
-                .unwrap_or(::moonfield_script::script::HostValue::Null);
+                .unwrap_or(&::moonfield_script::script::HostValue::Null);
         },
         // Other types: try to clone the HostValue directly.
         _ => quote! {

@@ -199,7 +199,7 @@ impl Plugin for ScriptPlugin {
             if state.runtime.has_function("on_update") {
                 if let Err(e) = state
                     .runtime
-                    .call_module_export("on_update", &[HostValue::Number(dt)])
+                    .call_module_export_unit("on_update", &[HostValue::Number(dt)])
                 {
                     error!("script on_update failed: {}", e);
                 }
@@ -212,7 +212,7 @@ impl Plugin for ScriptPlugin {
             info!("Script plugin shutdown");
             if let Some(state) = slot.borrow_mut().as_mut() {
                 if state.runtime.has_function("on_shutdown") {
-                    if let Err(e) = state.runtime.call_module_export("on_shutdown", &[]) {
+                    if let Err(e) = state.runtime.call_module_export_unit("on_shutdown", &[]) {
                         error!("script on_shutdown failed: {}", e);
                     }
                 }

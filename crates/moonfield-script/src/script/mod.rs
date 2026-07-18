@@ -87,6 +87,24 @@ impl std::error::Error for ScriptError {}
 /// Result type for script operations.
 pub type Result<T> = std::result::Result<T, ScriptError>;
 
+/// Extract a human-readable message from a `catch_unwind` panic payload.
+///
+/// Used by the backends to turn a panicking host function into a JS
+/// exception instead of unwinding across the FFI boundary.
+#[cfg_attr(
+    not(any(feature = "v8-backend", feature = "quickjs-backend")),
+    allow(dead_code)
+)]
+pub(crate) fn panic_payload_message(payload: &(dyn std::any::Any + Send)) -> String {
+    if let Some(s) = payload.downcast_ref::<&str>() {
+        (*s).to_string()
+    } else if let Some(s) = payload.downcast_ref::<String>() {
+        s.clone()
+    } else {
+        "unknown panic".to_string()
+    }
+}
+
 /// Abstraction over a JavaScript engine backend.
 ///
 /// Backends are responsible for creating an execution context, exposing a set
@@ -125,6 +143,18 @@ pub trait ScriptRuntime {
     /// Default implementation delegates to `call_with_args`.
     fn call_module_export(&mut self, function: &str, args: &[HostValue]) -> Result<HostValue> {
         self.call_with_args(function, args)
+    }
+
+    /// Call a function exported from the loaded ESModule, discarding its
+    /// return value.
+    ///
+    /// Use this for fire-and-forget calls (e.g. the per-frame `on_update`
+    /// hook): backends override this to skip marshaling a result the caller
+    /// would throw away anyway.
+    ///
+    /// Default implementation delegates to `call_module_export`.
+    fn call_module_export_unit(&mut self, function: &str, args: &[HostValue]) -> Result<()> {
+        self.call_module_export(function, args).map(|_| ())
     }
 
     /// Check whether a callable named `name` is currently available.

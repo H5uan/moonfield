@@ -56,6 +56,8 @@ pub struct QuickJsRuntime {
     deadline: Rc<RefCell<Option<Instant>>>,
     /// Per-execution time limit armed at every top-level entry point.
     execution_timeout: Duration,
+    /// Last time `run_gc` ran; `gc_step` throttles full collections.
+    last_gc: Instant,
 }
 
 impl ScriptRuntime for QuickJsRuntime {
@@ -119,43 +121,36 @@ impl ScriptRuntime for QuickJsRuntime {
     }
 
     fn gc_step(&mut self) {
-        // QuickJS uses reference counting with a cycle collector.
-        // run_gc triggers the cycle collector — fast for typical heaps.
-        self.runtime.run_gc();
+        // run_gc is a full mark-and-sweep pass — far too expensive to run
+        // every frame. QuickJS's allocator already collects when the GC
+        // threshold is exceeded, so an occasional nudge is enough.
+        if self.last_gc.elapsed() >= Duration::from_millis(100) {
+            self.runtime.run_gc();
+            self.last_gc = Instant::now();
+        }
     }
 
     fn has_function(&mut self, name: &str) -> bool {
-        let name_json = serde_json::to_string(name).unwrap_or_else(|_| "\"\"".to_string());
-        // Check the entry module's exports first, then globals.
-        let expr = format!(
-            "(function() {{ var e = globalThis.__mfEntryExports; \
-             return !!((e && typeof e[{n}] === 'function') || typeof globalThis[{n}] === 'function'); }})()",
-            n = name_json
-        );
-        self.context
-            .with(|ctx| ctx.eval::<bool, _>(expr).unwrap_or(false))
+        self.context.with(|ctx| {
+            let globals = ctx.globals();
+            // Check the entry module's exports first, then globals.
+            let in_exports = globals
+                .get::<_, Object>("__mfEntryExports")
+                .ok()
+                .and_then(|exports| exports.get::<_, Value>(name).ok())
+                .is_some_and(|v| v.is_function());
+            in_exports || globals.get::<_, Value>(name).is_ok_and(|v| v.is_function())
+        })
     }
 
     fn call_module_export(&mut self, function: &str, args: &[HostValue]) -> Result<HostValue> {
-        let _deadline_guard = self.arm();
-        self.context.with(|ctx| {
-            let exports = ctx
-                .globals()
-                .get::<_, Object>("__mfEntryExports")
-                .map_err(|_| ScriptError::Runtime("no module namespace loaded".into()))?;
-            let func = exports
-                .get::<_, Function>(function)
-                .map_err(|_| ScriptError::Runtime(format!("export '{}' not found", function)))?;
-            let js_args = build_args(&ctx, args)?;
-            match CaughtError::catch(&ctx, func.call_arg::<Value>(js_args)) {
-                Ok(val) => Ok(quickjs_value_to_host(&val)),
-                Err(ce) => Err(ScriptError::Runtime(format!(
-                    "module export '{}': {}",
-                    function,
-                    format_caught_error(ce)
-                ))),
-            }
-        })
+        self.call_module_export_impl(function, args, true)
+            .map(|v| v.unwrap_or(HostValue::Null))
+    }
+
+    fn call_module_export_unit(&mut self, function: &str, args: &[HostValue]) -> Result<()> {
+        self.call_module_export_impl(function, args, false)
+            .map(|_| ())
     }
 
     fn load_module_graph(&mut self, registry: Rc<ModuleRegistry>, entry: &str) -> Result<()> {
@@ -227,6 +222,7 @@ impl QuickJsRuntime {
             entry: None,
             deadline,
             execution_timeout: DEFAULT_EXECUTION_TIMEOUT,
+            last_gc: Instant::now(),
         };
         rt.register_api()?;
         Ok(rt)
@@ -247,6 +243,36 @@ impl QuickJsRuntime {
         DeadlineGuard(Rc::clone(&self.deadline))
     }
 
+    /// Shared implementation of `call_module_export` / `call_module_export_unit`.
+    /// When `marshal_result` is false the return value is discarded without
+    /// converting it to a `HostValue`.
+    fn call_module_export_impl(
+        &mut self,
+        function: &str,
+        args: &[HostValue],
+        marshal_result: bool,
+    ) -> Result<Option<HostValue>> {
+        let _deadline_guard = self.arm();
+        self.context.with(|ctx| {
+            let exports = ctx
+                .globals()
+                .get::<_, Object>("__mfEntryExports")
+                .map_err(|_| ScriptError::Runtime("no module namespace loaded".into()))?;
+            let func = exports
+                .get::<_, Function>(function)
+                .map_err(|_| ScriptError::Runtime(format!("export '{}' not found", function)))?;
+            let js_args = build_args(&ctx, args)?;
+            match CaughtError::catch(&ctx, func.call_arg::<Value>(js_args)) {
+                Ok(val) => Ok(marshal_result.then(|| quickjs_value_to_host(&val))),
+                Err(ce) => Err(ScriptError::Runtime(format!(
+                    "module export '{}': {}",
+                    function,
+                    format_caught_error(ce)
+                ))),
+            }
+        })
+    }
+
     fn register_api(&mut self) -> Result<()> {
         self.context
             .with(|ctx| {
@@ -257,16 +283,37 @@ impl QuickJsRuntime {
                     let wrapper = ApiFuncWrapper { name, func };
                     global.set(
                         name,
-                        Func::from(move |args: Rest<Value>| -> rquickjs::Result<()> {
-                            let mut host_args: Vec<HostValue> = Vec::with_capacity(args.0.len());
-                            for arg in args.0.iter() {
-                                host_args.push(quickjs_value_to_host(arg));
-                            }
-                            if let Err(e) = (wrapper.func)(&host_args) {
-                                error!("{} error: {}", wrapper.name, e);
-                            }
-                            Ok(())
-                        }),
+                        Func::from(
+                            move |ctx: Ctx, args: Rest<Value>| -> rquickjs::Result<HostValueJs> {
+                                let mut host_args: Vec<HostValue> =
+                                    Vec::with_capacity(args.0.len());
+                                for arg in args.0.iter() {
+                                    host_args.push(quickjs_value_to_host(arg));
+                                }
+                                // A panicking host function must not unwind
+                                // through the QuickJS C stack — catch it and
+                                // surface it as a JS exception instead.
+                                let result =
+                                    std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                                        (wrapper.func)(&host_args)
+                                    }));
+                                match result {
+                                    Ok(Ok(ret)) => Ok(HostValueJs(ret)),
+                                    Ok(Err(e)) => Err(rquickjs::Exception::throw_message(
+                                        &ctx,
+                                        &format!("{}: {}", wrapper.name, e),
+                                    )),
+                                    Err(payload) => Err(rquickjs::Exception::throw_message(
+                                        &ctx,
+                                        &format!(
+                                            "{} panicked: {}",
+                                            wrapper.name,
+                                            super::panic_payload_message(&payload)
+                                        ),
+                                    )),
+                                }
+                            },
+                        ),
                     )?;
                 }
                 // Host sink for console output: (level, message).
@@ -415,6 +462,18 @@ fn build_module_bundle(registry: &ModuleRegistry, entry: &str) -> Result<String>
          })();\n",
     );
     Ok(bundle)
+}
+
+/// Owned wrapper that converts a host function's return value into a JS
+/// value via [`IntoJs`]. The framework performs the conversion with the
+/// correct `Ctx`, which keeps the host-function closures free of borrowed
+/// lifetimes in their return types.
+struct HostValueJs(HostValue);
+
+impl<'js> IntoJs<'js> for HostValueJs {
+    fn into_js(self, ctx: &Ctx<'js>) -> rquickjs::Result<Value<'js>> {
+        host_value_to_js(ctx, &self.0)
+    }
 }
 
 /// Build a QuickJS argument list from marshaled host values.

@@ -9,7 +9,8 @@ use moonfield_log::{error, info, warn};
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::rc::Rc;
-use std::sync::{Arc, Condvar, Mutex, Once};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+use std::sync::{Arc, Once};
 use std::time::{Duration, Instant};
 
 static V8_INIT: Once = Once::new();
@@ -52,6 +53,16 @@ fn create_console_snapshot() -> Vec<u8> {
 /// `v8_value_to_host` → `HostValue` → typed extraction is measurable.
 pub type DirectFn = fn(&mut v8::PinScope, v8::FunctionCallbackArguments, v8::ReturnValue);
 
+/// A direct (fast-path) host function plus its registration name.
+///
+/// Boxed and referenced through `v8::External` so the (zero-sized,
+/// non-capturing) V8 callback can recover both the function pointer and the
+/// name for error reporting.
+struct DirectFnEntry {
+    name: &'static str,
+    func: DirectFn,
+}
+
 /// A script runtime backed by V8 (rusty_v8).
 ///
 /// Module system: uses V8's native ESModule API via `ScriptCompiler::compile_module`
@@ -83,10 +94,10 @@ pub struct V8Runtime {
     api: Box<ScriptApi>,
     /// Direct (fast-path) host functions that bypass `HostValue` marshaling.
     ///
-    /// Each function pointer is boxed so that `v8::External` pointers handed
-    /// to V8 stay valid even when the vector grows (the heap allocation does
-    /// not move).
-    direct_fns: Vec<(&'static str, Box<DirectFn>)>,
+    /// Each entry is boxed so that `v8::External` pointers handed to V8 stay
+    /// valid even when the vector grows (the heap allocation does not move).
+    #[allow(clippy::vec_box)] // box required for pointer stability, see above
+    direct_fns: Vec<Box<DirectFnEntry>>,
     /// Cached registry for hot reload (populated by `load_module_graph`).
     /// Stored as `Rc` to avoid cloning all module source strings on every
     /// hot reload cycle. `on_file_changed` uses `Rc::try_unwrap` to regain
@@ -99,6 +110,11 @@ pub struct V8Runtime {
     compiled_modules: HashMap<String, CachedModule>,
     /// Cached module namespace for `call_module_export`.
     module_namespace: Option<v8::Global<v8::Object>>,
+    /// Resolved module-export functions, keyed by name. Avoids re-allocating
+    /// the name string and re-walking the namespace object on every call
+    /// (the per-frame `on_update` hot path). Cleared whenever the module
+    /// graph is (re)evaluated or the context is recreated.
+    function_cache: HashMap<String, v8::Global<v8::Function>>,
     /// Per-execution time limit armed at every top-level entry point.
     execution_timeout: Duration,
     /// Source maps for remapping error locations back to TypeScript.
@@ -160,6 +176,7 @@ impl ScriptRuntime for V8Runtime {
         // Handles into the old context are invalid now — drop module state so
         // `has_function`/`call_module_export` can't touch stale globals.
         self.module_namespace = None;
+        self.function_cache.clear();
         self.compiled_modules.clear();
         self.source_maps.clear();
         self.register_api()
@@ -236,47 +253,13 @@ impl ScriptRuntime for V8Runtime {
     }
 
     fn call_module_export(&mut self, function: &str, args: &[HostValue]) -> Result<HostValue> {
-        let namespace = self
-            .module_namespace
-            .as_ref()
-            .ok_or_else(|| ScriptError::Runtime("no module namespace loaded".into()))?;
+        self.call_module_export_impl(function, args, true)
+            .map(|v| v.unwrap_or(HostValue::Null))
+    }
 
-        self.isolate.set_idle(false);
-        // Clear any stale termination from a previously terminated call, then
-        // arm the watchdog so a runaway execution gets interrupted.
-        self.isolate.cancel_terminate_execution();
-        let _watchdog_guard = self.watchdog.arm(self.execution_timeout);
-        v8::scope!(let handle_scope, &mut self.isolate);
-        let local_context = v8::Local::new(handle_scope, &self.context);
-        let scope = &mut v8::ContextScope::new(handle_scope, local_context);
-        v8::tc_scope!(let tc, scope);
-
-        let ns = v8::Local::new(tc, namespace);
-        let name = v8::String::new(tc, function).unwrap();
-        let value = ns
-            .get(tc, name.into())
-            .ok_or_else(|| ScriptError::Runtime(format!("export '{}' not found", function)))?;
-        let func = v8::Local::<v8::Function>::try_from(value).map_err(|_| {
-            ScriptError::Runtime(format!("export '{}' is not a function", function))
-        })?;
-
-        let v8_args: Vec<v8::Local<v8::Value>> =
-            args.iter().map(|a| host_to_v8_value(a, tc)).collect();
-
-        let recv = v8::undefined(tc);
-        match func.call(tc, recv.into(), &v8_args) {
-            Some(result) => {
-                let host = v8_value_to_host(result, tc);
-                // Drain the microtask queue so settled promises run.
-                tc.perform_microtask_checkpoint();
-                Ok(host)
-            }
-            None => Err(ScriptError::Runtime(format!(
-                "{}: {}",
-                function,
-                v8_exception!(tc, &self.source_maps)
-            ))),
-        }
+    fn call_module_export_unit(&mut self, function: &str, args: &[HostValue]) -> Result<()> {
+        self.call_module_export_impl(function, args, false)
+            .map(|_| ())
     }
 
     fn gc_step(&mut self) {
@@ -288,20 +271,39 @@ impl ScriptRuntime for V8Runtime {
     }
 
     fn has_function(&mut self, name: &str) -> bool {
+        // Fast path: previously resolved module export (the per-frame
+        // lifecycle hooks hit this after their first call).
+        if self.function_cache.contains_key(name) {
+            return true;
+        }
         v8::scope!(let handle_scope, &mut self.isolate);
         let local_context = v8::Local::new(handle_scope, &self.context);
         let scope = &mut v8::ContextScope::new(handle_scope, local_context);
-        let key = v8::String::new(scope, name).unwrap();
+        let Some(key) = v8::String::new(scope, name) else {
+            return false;
+        };
         // Prefer the module namespace (entry exports) when a module graph is
         // loaded; otherwise fall back to globals.
         let target = match &self.module_namespace {
             Some(ns) => v8::Local::new(scope, ns),
             None => local_context.global(scope),
         };
-        target
-            .get(scope, key.into())
-            .map(|v| v.is_function())
-            .unwrap_or(false)
+        let Some(value) = target.get(scope, key.into()) else {
+            return false;
+        };
+        if !value.is_function() {
+            return false;
+        }
+        // Cache resolved module exports so subsequent lookups skip the string
+        // allocation and property walk. Globals are not cached — they can be
+        // redefined by later `load()` calls.
+        if self.module_namespace.is_some() {
+            if let Ok(func) = v8::Local::<v8::Function>::try_from(value) {
+                self.function_cache
+                    .insert(name.to_string(), v8::Global::new(scope, func));
+            }
+        }
+        true
     }
 
     fn load_module_graph(
@@ -354,6 +356,7 @@ impl V8Runtime {
             entry: None,
             compiled_modules: HashMap::new(),
             module_namespace: None,
+            function_cache: HashMap::new(),
             watchdog,
             execution_timeout: DEFAULT_EXECUTION_TIMEOUT,
             source_maps: SourceMapCache::new(),
@@ -378,17 +381,17 @@ impl V8Runtime {
     /// same name) and re-installed on every `reload()`. Registering the same
     /// name twice is a no-op.
     pub fn register_direct(&mut self, name: &'static str, func: DirectFn) {
-        if self.direct_fns.iter().any(|(n, _)| *n == name) {
+        if self.direct_fns.iter().any(|e| e.name == name) {
             return;
         }
-        self.direct_fns.push((name, Box::new(func)));
-        let (_, boxed) = self.direct_fns.last().unwrap();
+        self.direct_fns.push(Box::new(DirectFnEntry { name, func }));
+        let entry = self.direct_fns.last().unwrap();
         v8::scope!(let handle_scope, &mut self.isolate);
         let local_context = v8::Local::new(handle_scope, &self.context);
         let scope = &mut v8::ContextScope::new(handle_scope, local_context);
         // The context always exists here (created in `new`), so immediate
         // installation cannot fail in a way worth surfacing — log instead.
-        if let Err(e) = Self::install_direct(scope, local_context, name, boxed) {
+        if let Err(e) = Self::install_direct(scope, local_context, entry) {
             error!("register_direct('{}'): {}", name, e);
         }
     }
@@ -397,29 +400,46 @@ impl V8Runtime {
     fn install_direct(
         scope: &mut v8::PinScope,
         context: v8::Local<v8::Context>,
-        name: &str,
-        func: &DirectFn,
+        entry: &DirectFnEntry,
     ) -> Result<()> {
         let global = context.global(scope);
-        let js_name = v8::String::new(scope, name).unwrap();
-        // The pointer targets the boxed function pointer owned by
-        // `direct_fns`; the box's heap allocation never moves while V8
-        // callbacks are live, even if the vector grows.
-        let ptr = func as *const DirectFn as *mut std::ffi::c_void;
+        let js_name = v8::String::new(scope, entry.name).unwrap();
+        // The pointer targets the boxed entry owned by `direct_fns`; the
+        // box's heap allocation never moves while V8 callbacks are live,
+        // even if the vector grows.
+        let ptr = entry as *const DirectFnEntry as *mut std::ffi::c_void;
         let external = v8::External::new(scope, ptr);
+        // NOTE: the callback must be a non-capturing closure — V8 requires
+        // function callbacks to be zero-sized. All state flows through the
+        // `External` data pointer.
         let js_func = v8::Function::builder(
             |s: &mut v8::PinScope, a: v8::FunctionCallbackArguments, r: v8::ReturnValue| {
-                let external = v8::Local::<v8::External>::try_from(a.data()).unwrap();
-                // Safety: the pointer references a `Box<DirectFn>` owned by
-                // this runtime's `direct_fns`, which outlives the context.
-                let func_ptr: *const DirectFn = external.value() as *const DirectFn;
-                let func: DirectFn = unsafe { *func_ptr };
-                func(s, a, r);
+                let Ok(external) = v8::Local::<v8::External>::try_from(a.data()) else {
+                    return;
+                };
+                // Safety: the pointer references a `Box<DirectFnEntry>` owned
+                // by this runtime's `direct_fns`, which outlives the context.
+                let entry = unsafe { &*(external.value() as *const DirectFnEntry) };
+                // A panic in the host function must not unwind through V8's
+                // C++ frames (that is undefined behavior) — catch it and
+                // surface it as a JS exception instead.
+                if let Err(payload) =
+                    std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| (entry.func)(s, a, r)))
+                {
+                    throw_host_error(
+                        s,
+                        &format!(
+                            "host function '{}' panicked: {}",
+                            entry.name,
+                            super::panic_payload_message(&payload)
+                        ),
+                    );
+                }
             },
         )
         .data(external.into())
         .build(scope)
-        .ok_or_else(|| ScriptError::Runtime(format!("failed to build direct {}", name)))?;
+        .ok_or_else(|| ScriptError::Runtime(format!("failed to build direct {}", entry.name)))?;
         global.set(scope, js_name.into(), js_func.into()).unwrap();
         Ok(())
     }
@@ -431,14 +451,14 @@ impl V8Runtime {
         let global = local_context.global(scope);
 
         // Register direct (fast-path) functions first — no HostValue marshaling.
-        for (name, func) in &self.direct_fns {
-            Self::install_direct(scope, local_context, name, func)?;
+        for entry in &self.direct_fns {
+            Self::install_direct(scope, local_context, entry)?;
         }
 
         // Register regular HostFn-based functions.
         for entry in self.api.iter() {
             // Skip if already registered as a direct function.
-            if self.direct_fns.iter().any(|(n, _)| *n == entry.0) {
+            if self.direct_fns.iter().any(|d| d.name == entry.0) {
                 continue;
             }
 
@@ -450,24 +470,42 @@ impl V8Runtime {
                 |scope: &mut v8::PinScope,
                  args: v8::FunctionCallbackArguments,
                  mut retval: v8::ReturnValue| {
-                    // Marshal JS arguments → HostValue slice.
-                    let n = args.length() as usize;
-                    let mut host_args: Vec<HostValue> = Vec::with_capacity(n);
-                    for i in 0..n as i32 {
-                        host_args.push(v8_value_to_host(args.get(i), scope));
-                    }
-
-                    let external = v8::Local::<v8::External>::try_from(args.data()).unwrap();
+                    let Ok(external) = v8::Local::<v8::External>::try_from(args.data()) else {
+                        return;
+                    };
+                    // Safety: the pointer references an entry of this
+                    // runtime's boxed `ScriptApi` function table, which
+                    // outlives the context.
                     let entry = unsafe { &*(external.value() as *const (&'static str, HostFn)) };
+                    let name = entry.0;
 
-                    // Call the host function.
-                    match (entry.1)(&host_args) {
-                        Ok(ret) => {
+                    // A panic anywhere in arg marshaling or the host function
+                    // must not unwind through V8's C++ frames (that is
+                    // undefined behavior) — catch it and surface it as a JS
+                    // exception instead.
+                    let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                        // Marshal JS arguments → HostValue slice.
+                        let n = args.length() as usize;
+                        let mut host_args: Vec<HostValue> = Vec::with_capacity(n);
+                        for i in 0..n as i32 {
+                            host_args.push(v8_value_to_host(args.get(i), scope));
+                        }
+                        (entry.1)(&host_args)
+                    }));
+
+                    match result {
+                        Ok(Ok(ret)) => {
                             retval.set(host_to_v8_value(&ret, scope));
                         }
-                        Err(e) => {
-                            scope.throw_exception(v8::String::new(scope, &e).unwrap().into());
-                        }
+                        Ok(Err(e)) => throw_host_error(scope, &e),
+                        Err(payload) => throw_host_error(
+                            scope,
+                            &format!(
+                                "host function '{}' panicked: {}",
+                                name,
+                                super::panic_payload_message(&payload)
+                            ),
+                        ),
                     }
                 },
             )
@@ -527,6 +565,70 @@ globalThis.console = {
 }
 
 impl V8Runtime {
+    /// Shared implementation of `call_module_export` / `call_module_export_unit`.
+    ///
+    /// Resolved export functions are cached as `Global<Function>` (keyed by
+    /// name) so the per-frame hot path avoids re-allocating the name string
+    /// and re-walking the namespace object. When `marshal_result` is false
+    /// the return value is discarded without converting it to a `HostValue`.
+    fn call_module_export_impl(
+        &mut self,
+        function: &str,
+        args: &[HostValue],
+        marshal_result: bool,
+    ) -> Result<Option<HostValue>> {
+        if self.module_namespace.is_none() {
+            return Err(ScriptError::Runtime("no module namespace loaded".into()));
+        }
+        self.isolate.set_idle(false);
+        // Clear any stale termination from a previously terminated call, then
+        // arm the watchdog so a runaway execution gets interrupted.
+        self.isolate.cancel_terminate_execution();
+        let _watchdog_guard = self.watchdog.arm(self.execution_timeout);
+        v8::scope!(let handle_scope, &mut self.isolate);
+        let local_context = v8::Local::new(handle_scope, &self.context);
+        let scope = &mut v8::ContextScope::new(handle_scope, local_context);
+        v8::tc_scope!(let tc, scope);
+
+        // Resolve the export, preferring the cached function handle.
+        let func = match self.function_cache.get(function) {
+            Some(cached) => v8::Local::new(tc, cached),
+            None => {
+                let namespace = self.module_namespace.as_ref().unwrap();
+                let ns = v8::Local::new(tc, namespace);
+                let name = v8::String::new(tc, function)
+                    .ok_or_else(|| ScriptError::Runtime("export name too long".into()))?;
+                let value = ns.get(tc, name.into()).ok_or_else(|| {
+                    ScriptError::Runtime(format!("export '{}' not found", function))
+                })?;
+                let func = v8::Local::<v8::Function>::try_from(value).map_err(|_| {
+                    ScriptError::Runtime(format!("export '{}' is not a function", function))
+                })?;
+                self.function_cache
+                    .insert(function.to_string(), v8::Global::new(tc, func));
+                func
+            }
+        };
+
+        let v8_args: Vec<v8::Local<v8::Value>> =
+            args.iter().map(|a| host_to_v8_value(a, tc)).collect();
+
+        let recv = v8::undefined(tc);
+        match func.call(tc, recv.into(), &v8_args) {
+            Some(result) => {
+                let host = marshal_result.then(|| v8_value_to_host(result, tc));
+                // Drain the microtask queue so settled promises run.
+                tc.perform_microtask_checkpoint();
+                Ok(host)
+            }
+            None => Err(ScriptError::Runtime(format!(
+                "{}: {}",
+                function,
+                v8_exception!(tc, &self.source_maps)
+            ))),
+        }
+    }
+
     /// Load a module graph using V8's native ESModule API.
     ///
     /// 1. Compiles modules via `ScriptCompiler::compile_module`, caching
@@ -544,6 +646,11 @@ impl V8Runtime {
         registry: Rc<super::ModuleRegistry>,
         entry: &str,
     ) -> Result<()> {
+        // The graph is about to be re-evaluated: previously resolved export
+        // functions may belong to stale module instances, so drop them and
+        // let calls re-resolve lazily.
+        self.function_cache.clear();
+
         let order = registry
             .order_dependencies(entry)
             .map_err(|e| ScriptError::Execution(format!("dependency resolution: {}", e)))?;
@@ -869,82 +976,74 @@ struct ModuleMap {
     names: Vec<String>,
 }
 
-/// Shared state between the runtime and its watchdog thread.
-struct WatchdogState {
-    /// Deadline of the currently running execution; `None` when idle.
-    deadline: Option<Instant>,
+/// State shared between the runtime and its watchdog thread.
+///
+/// Lock-free on purpose: `arm`/`disarm` run on the script thread at every
+/// top-level entry point (i.e. every frame for `on_update`), so they must
+/// not take a mutex or signal a condvar.
+struct WatchdogShared {
+    /// Monotonic reference point for `deadline_ms`.
+    epoch: Instant,
+    /// Deadline of the currently running execution, in milliseconds since
+    /// `epoch`; `0` means disarmed.
+    deadline_ms: AtomicU64,
     /// Set when the watchdog thread should exit.
-    stop: bool,
+    stop: AtomicBool,
 }
 
-/// Terminates runaway script executions. A dedicated thread watches a
+/// Terminates runaway script executions. A dedicated thread polls the
 /// deadline armed at each top-level entry point; when execution exceeds it,
 /// `terminate_execution` is called on the isolate, failing the JS call with
 /// an exception (which the entry points surface as a `ScriptError`).
 struct ExecutionWatchdog {
-    state: Arc<(Mutex<WatchdogState>, Condvar)>,
+    shared: Arc<WatchdogShared>,
     thread: Option<std::thread::JoinHandle<()>>,
 }
+
+/// How often the watchdog thread checks the deadline. Detection latency is
+/// at most one interval past the deadline — negligible next to the
+/// multi-second timeouts this guards.
+const WATCHDOG_POLL_INTERVAL: Duration = Duration::from_millis(5);
 
 impl ExecutionWatchdog {
     fn new(isolate: &v8::OwnedIsolate) -> Self {
         let handle = isolate.thread_safe_handle();
-        let state = Arc::new((
-            Mutex::new(WatchdogState {
-                deadline: None,
-                stop: false,
-            }),
-            Condvar::new(),
-        ));
-        let thread_state = Arc::clone(&state);
+        let shared = Arc::new(WatchdogShared {
+            epoch: Instant::now(),
+            deadline_ms: AtomicU64::new(0),
+            stop: AtomicBool::new(false),
+        });
+        let thread_shared = Arc::clone(&shared);
         let thread = std::thread::Builder::new()
             .name("v8-script-watchdog".into())
-            .spawn(move || {
-                let (lock, cvar) = &*thread_state;
-                let mut guard = lock.lock().unwrap();
-                loop {
-                    if guard.stop {
-                        break;
-                    }
-                    match guard.deadline {
-                        Some(dl) => {
-                            let now = Instant::now();
-                            if now >= dl {
-                                handle.terminate_execution();
-                                // Wait until disarmed before firing again, so
-                                // a single overrun terminates only once.
-                                while !guard.stop && guard.deadline.is_some() {
-                                    guard = cvar.wait(guard).unwrap();
-                                }
-                            } else {
-                                let (g, _) = cvar.wait_timeout(guard, dl - now).unwrap();
-                                guard = g;
-                            }
-                        }
-                        None => {
-                            guard = cvar.wait(guard).unwrap();
-                        }
-                    }
+            .spawn(move || loop {
+                if thread_shared.stop.load(Ordering::Acquire) {
+                    break;
                 }
+                let deadline = thread_shared.deadline_ms.load(Ordering::Acquire);
+                if deadline != 0 && thread_shared.epoch.elapsed().as_millis() as u64 >= deadline {
+                    handle.terminate_execution();
+                    // Disarm so a single overrun terminates only once; the
+                    // next top-level entry point re-arms.
+                    thread_shared.deadline_ms.store(0, Ordering::Release);
+                }
+                std::thread::sleep(WATCHDOG_POLL_INTERVAL);
             })
             .ok();
-        Self { state, thread }
+        Self { shared, thread }
     }
 
     /// Arm the watchdog for one top-level execution. Disarms on drop.
     fn arm(&self, timeout: Duration) -> ArmGuard<'_> {
-        {
-            let (lock, cvar) = &*self.state;
-            lock.lock().unwrap().deadline = Some(Instant::now() + timeout);
-            cvar.notify_one();
-        }
+        let now_ms = self.shared.epoch.elapsed().as_millis() as u64;
+        // `max(1)` keeps a zero-length timeout distinguishable from "disarmed".
+        let deadline = (now_ms + timeout.as_millis() as u64).max(1);
+        self.shared.deadline_ms.store(deadline, Ordering::Release);
         ArmGuard { watchdog: self }
     }
 
     fn disarm(&self) {
-        let (lock, cvar) = &*self.state;
-        lock.lock().unwrap().deadline = None;
-        cvar.notify_one();
+        self.shared.deadline_ms.store(0, Ordering::Release);
     }
 }
 
@@ -961,13 +1060,7 @@ impl Drop for ArmGuard<'_> {
 
 impl Drop for ExecutionWatchdog {
     fn drop(&mut self) {
-        {
-            let (lock, cvar) = &*self.state;
-            let mut guard = lock.lock().unwrap();
-            guard.stop = true;
-            guard.deadline = None;
-            cvar.notify_one();
-        }
+        self.shared.stop.store(true, Ordering::Release);
         if let Some(thread) = self.thread.take() {
             let _ = thread.join();
         }
@@ -1231,6 +1324,18 @@ fn host_to_v8_value<'s>(
             };
             val
         }
+    }
+}
+
+/// Throw a JS exception carrying `msg`.
+///
+/// `v8::String::new` only fails when the message exceeds V8's maximum string
+/// length; fall back to a static message in that case instead of panicking
+/// inside a callback.
+fn throw_host_error(scope: &mut v8::PinScope, msg: &str) {
+    let exc = v8::String::new(scope, msg).or_else(|| v8::String::new(scope, "host function error"));
+    if let Some(exc) = exc {
+        scope.throw_exception(exc.into());
     }
 }
 

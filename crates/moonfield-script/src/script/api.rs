@@ -7,7 +7,12 @@ use std::sync::Arc;
 ///
 /// Backends marshal between their native JS types and `HostValue` so that
 /// host functions work with a uniform, engine-agnostic type system.
-#[derive(Debug, Clone)]
+///
+/// This type is deliberately not `Clone`: the zero-copy view variants
+/// (`BytesView`, `TypedArrayView`) hold raw pointers into the JS engine's
+/// backing store that dangle as soon as the host call returns, and cloning
+/// would silently duplicate those pointers.
+#[derive(Debug)]
 pub enum HostValue {
     Null,
     Bool(bool),

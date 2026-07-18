@@ -228,6 +228,45 @@ fn has_function_and_lifecycle_hooks() {
         .call_module_export("getTicks", &[])
         .expect("getTicks");
     assert_eq!(v.as_f64(), Some(0.5));
+
+    // The unit (fire-and-forget) variant must drive the hook the same way.
+    runtime
+        .call_module_export_unit("on_update", &[HostValue::Number(0.25)])
+        .expect("on_update unit");
+    let v = runtime
+        .call_module_export("getTicks", &[])
+        .expect("getTicks");
+    assert_eq!(v.as_f64(), Some(0.75));
+}
+
+/// Host function errors and panics must surface as catchable JS exceptions —
+/// errors are thrown, and panics are caught at the FFI boundary instead of
+/// unwinding through the engine's C/C++ frames (which would be UB).
+#[test]
+fn host_fn_failures_surface_as_js_exceptions() {
+    let mut api = test_api();
+    api.register_closure("fail_always", |_| Err("boom".to_string()));
+    api.register_closure("panic_always", |_| panic!("bang"));
+
+    let mut runtime = Runtime::new(api).expect("runtime");
+    runtime
+        .load(
+            "host_err.js",
+            "function tryFail() { try { fail_always(); return 'no-throw'; } catch (e) { return 'caught'; } }\n\
+             function tryPanic() { try { panic_always(); return 'no-throw'; } catch (e) { return 'caught'; } }",
+        )
+        .expect("load");
+
+    let v = runtime.call_with_args("tryFail", &[]).expect("tryFail");
+    assert_eq!(v.as_str(), Some("caught"));
+    let v = runtime.call_with_args("tryPanic", &[]).expect("tryPanic");
+    assert_eq!(v.as_str(), Some("caught"));
+
+    // The runtime stays usable after a host panic.
+    let v = runtime
+        .call_with_args("tryFail", &[])
+        .expect("call after panic");
+    assert_eq!(v.as_str(), Some("caught"));
 }
 
 /// Hot reload: editing a dependency on disk recompiles it and its importers,
