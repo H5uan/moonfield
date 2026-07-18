@@ -44,18 +44,13 @@ pub struct WinitPlugin {
 }
 
 /// Control-flow strategy for the event loop.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum WaitMode {
     /// Poll as fast as possible (no waiting).
     Poll,
     /// Wait for the next event, then wake up.
+    #[default]
     Wait,
-}
-
-impl Default for WaitMode {
-    fn default() -> Self {
-        Self::Wait
-    }
 }
 
 impl Default for WinitPlugin {

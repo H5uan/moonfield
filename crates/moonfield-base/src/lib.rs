@@ -6,14 +6,10 @@ static LOGGING_INITIALIZED: AtomicBool = AtomicBool::new(false);
 
 /// Initialize the engine subsystems.
 pub fn initialize() {
-    LOGGING_INITIALIZED
-        .compare_exchange(false, true, Ordering::SeqCst, Ordering::SeqCst)
-        .is_ok();
+    let _ = LOGGING_INITIALIZED.compare_exchange(false, true, Ordering::SeqCst, Ordering::SeqCst);
 }
 
 /// Shut down the engine subsystems.
 pub fn shutdown() {
-    LOGGING_INITIALIZED
-        .compare_exchange(true, false, Ordering::SeqCst, Ordering::SeqCst)
-        .is_ok();
+    let _ = LOGGING_INITIALIZED.compare_exchange(true, false, Ordering::SeqCst, Ordering::SeqCst);
 }
