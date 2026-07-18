@@ -1,25 +1,22 @@
 //! Module system for the scripting runtime.
 //!
 //! Provides a backend-agnostic [`ModuleRegistry`] that maps module specifiers
-//! to source code, and transforms ESModule syntax (`import`/`export`) into
-//! CommonJS (`require`/`exports`) for evaluation by any JS engine.
+//! to source code and tracks each module's imports (extracted with swc).
 //!
 //! # Module loading strategy
 //!
-//! Instead of using V8's native ESModule API (which requires a complex
-//! `ResolveModuleCallback` that cannot capture state), we transform each
-//! module into a CommonJS-style IIFE:
+//! The V8 backend evaluates the graph with the engine's native ESModule API;
+//! the QuickJS backend transforms each module into a CommonJS-style factory
+//! (`require`/`exports`) and evaluates a single concatenated bundle:
 //!
 //! ```js
-//! function(require, exports) {
+//! function(module, exports) {
 //!   const { foo } = require("./bar");
 //!   exports.main = function() { foo(); };
 //! }
 //! ```
 //!
-//! Modules are evaluated in topological order. The `require` function
-//! resolves specifiers and returns cached exports. This approach works
-//! across both V8 and QuickJS backends.
+//! Modules are evaluated in topological order.
 //!
 //! # Resolution strategy
 //!
@@ -61,6 +58,9 @@ pub struct ModuleInfo {
     pub imports: Vec<String>,
 }
 
+/// Memoized `resolve_full` results, keyed by (specifier, importer).
+type ResolveCache = HashMap<(String, String), Option<(String, PathBuf)>>;
+
 /// A registry of modules keyed by canonical name.
 ///
 /// The registry is populated by the runtime before instantiation. It does not
@@ -70,6 +70,12 @@ pub struct ModuleRegistry {
     modules: HashMap<String, ModuleInfo>,
     base_path: PathBuf,
     search_dirs: Vec<PathBuf>,
+    /// Memoized `resolve_full` probes. Interior mutability keeps the
+    /// resolution APIs `&self`. Cleared when watched files change — a newly
+    /// created file can flip a cached `None`.
+    resolve_cache: std::cell::RefCell<ResolveCache>,
+    /// Memoized `package.json` → `main` field reads.
+    pkg_json_cache: std::cell::RefCell<HashMap<PathBuf, Option<String>>>,
 }
 
 impl Default for ModuleRegistry {
@@ -89,6 +95,8 @@ impl ModuleRegistry {
                 PathBuf::from("scripts"),
                 PathBuf::from("target/scripts"),
             ],
+            resolve_cache: std::cell::RefCell::new(HashMap::new()),
+            pkg_json_cache: std::cell::RefCell::new(HashMap::new()),
         }
     }
 
@@ -106,9 +114,9 @@ impl ModuleRegistry {
 
     /// Register a module by name with its source code.
     ///
-    /// Uses regex-based import extraction (backends don't need AST parsing for this).
-    /// For QuickJS, also transforms ESModule syntax to CommonJS.
-    /// Returns the canonical name.
+    /// Extracts the module's imports with an swc AST parse (backends don't
+    /// need regex heuristics for this). For QuickJS, also transforms
+    /// ESModule syntax to CommonJS. Returns the canonical name.
     pub fn register(&mut self, name: &str, source: String) -> String {
         let canonical = self.canonicalize(name);
         let imports = Self::extract_imports(&source);
@@ -193,7 +201,29 @@ impl ModuleRegistry {
     ///
     /// Uses the registry's configured `search_dirs` for bare specifier resolution.
     /// Returns the resolved canonical name and the file path it was found at.
+    ///
+    /// Results (including failures) are memoized in `resolve_cache` because
+    /// the chain issues several filesystem probes per specifier; call
+    /// [`invalidate_resolution_caches`] when watched files change.
     pub fn resolve_full(&self, specifier: &str, base: &str) -> Option<(String, PathBuf)> {
+        let key = (specifier.to_string(), base.to_string());
+        if let Some(cached) = self.resolve_cache.borrow().get(&key) {
+            return cached.clone();
+        }
+        let result = self.resolve_full_uncached(specifier, base);
+        self.resolve_cache.borrow_mut().insert(key, result.clone());
+        result
+    }
+
+    /// Clear memoized resolution results. Call when watched files change:
+    /// a newly created file can turn a previously cached `None` into a hit.
+    pub fn invalidate_resolution_caches(&self) {
+        self.resolve_cache.borrow_mut().clear();
+        self.pkg_json_cache.borrow_mut().clear();
+    }
+
+    /// Uncached implementation of [`resolve_full`].
+    fn resolve_full_uncached(&self, specifier: &str, base: &str) -> Option<(String, PathBuf)> {
         // 1. Relative specifier: resolve against the base module's directory.
         if specifier.starts_with('.') || specifier.starts_with('/') {
             let base_dir = if specifier.starts_with('/') {
@@ -203,23 +233,19 @@ impl ModuleRegistry {
                 p.to_path_buf()
             };
             let resolved = Self::normalize_path(&base_dir.join(specifier));
-            let dir = resolved.parent();
-            let stem = resolved.file_name().and_then(|n| n.to_str()).unwrap_or("");
-            return Self::resolve_file_or_dir(&resolved, &resolved, stem, dir);
+            return self.resolve_file_or_dir(&resolved);
         }
 
         // 2. Bare specifier: search search_dirs + node_modules walk.
         for search_dir in &self.search_dirs {
             // Check search_dir directly.
             let candidate = search_dir.join(specifier);
-            let dir = candidate.parent();
-            if let Some(result) = Self::resolve_file_or_dir(&candidate, &candidate, specifier, dir)
-            {
+            if let Some(result) = self.resolve_file_or_dir(&candidate) {
                 return Some(result);
             }
 
             // Search node_modules/ under this directory and its ancestors.
-            if let Some(result) = Self::resolve_in_node_modules(specifier, search_dir) {
+            if let Some(result) = self.resolve_in_node_modules(specifier, search_dir) {
                 return Some(result);
             }
         }
@@ -291,11 +317,15 @@ impl ModuleRegistry {
 
     /// Try to resolve `specifier` within `node_modules/` directories,
     /// walking up from `start_dir` to the filesystem root.
-    fn resolve_in_node_modules(specifier: &str, start_dir: &Path) -> Option<(String, PathBuf)> {
+    fn resolve_in_node_modules(
+        &self,
+        specifier: &str,
+        start_dir: &Path,
+    ) -> Option<(String, PathBuf)> {
         let mut current = Some(start_dir);
         while let Some(dir) = current {
             let nm = dir.join("node_modules").join(specifier);
-            if let Some(result) = Self::resolve_file_or_dir(&nm, &nm, specifier, nm.parent()) {
+            if let Some(result) = self.resolve_file_or_dir(&nm) {
                 return Some(result);
             }
             current = dir.parent();
@@ -307,12 +337,7 @@ impl ModuleRegistry {
     /// 1. exact path + `.js` / `.ts` / `.mjs` / `.cjs`
     /// 2. `package.json` → `main` field
     /// 3. `index.js` / `index.ts` / `index.mjs` / `index.cjs`
-    fn resolve_file_or_dir(
-        candidate: &Path,
-        _display_path: &Path,
-        _specifier: &str,
-        _parent_dir: Option<&Path>,
-    ) -> Option<(String, PathBuf)> {
+    fn resolve_file_or_dir(&self, candidate: &Path) -> Option<(String, PathBuf)> {
         // 1. Direct file with extension.
         if candidate.is_file() {
             if let Some(name) = candidate.to_str() {
@@ -334,14 +359,11 @@ impl ModuleRegistry {
             // Check package.json main field.
             let pkg_json = candidate.join("package.json");
             if pkg_json.is_file() {
-                if let Some(main) = Self::read_package_json_main(&pkg_json) {
+                if let Some(main) = self.read_package_json_main(&pkg_json) {
                     let main_path = candidate.join(&main);
                     // Resolve main_path relative to the candidate directory.
                     let resolved = Self::normalize_path(&main_path);
-                    let dir = resolved.parent();
-                    let stem = resolved.file_name().and_then(|n| n.to_str()).unwrap_or("");
-                    if let Some(result) = Self::resolve_file_or_dir(&resolved, &resolved, stem, dir)
-                    {
+                    if let Some(result) = self.resolve_file_or_dir(&resolved) {
                         return Some(result);
                     }
                 }
@@ -360,8 +382,20 @@ impl ModuleRegistry {
         None
     }
 
-    /// Read the `main` field from a `package.json` file.
-    fn read_package_json_main(pkg_json: &Path) -> Option<String> {
+    /// Read the `main` field from a `package.json` file (memoized).
+    fn read_package_json_main(&self, pkg_json: &Path) -> Option<String> {
+        if let Some(cached) = self.pkg_json_cache.borrow().get(pkg_json) {
+            return cached.clone();
+        }
+        let main = Self::read_package_json_main_uncached(pkg_json);
+        self.pkg_json_cache
+            .borrow_mut()
+            .insert(pkg_json.to_path_buf(), main.clone());
+        main
+    }
+
+    /// Read the `main` field from a `package.json` file from disk.
+    fn read_package_json_main_uncached(pkg_json: &Path) -> Option<String> {
         let content = fs::read_to_string(pkg_json).ok()?;
         let parsed: serde_json::Value = serde_json::from_str(&content).ok()?;
         parsed
@@ -418,7 +452,38 @@ impl ModuleRegistry {
     /// incremental hot reload: only these modules need re-compilation
     /// when `target` changes.
     pub fn transitive_importers(&self, target: &str) -> std::collections::HashSet<String> {
-        // Build reverse dependency map: for each module, who imports it?
+        self.transitive_importers_many(std::slice::from_ref(&target.to_string()))
+    }
+
+    /// Compute the affected set for several changed modules at once.
+    ///
+    /// Equivalent to the union of [`transitive_importers`] over `targets`,
+    /// but builds the reverse dependency map only once — call this when a
+    /// hot-reload batch contains multiple changed files.
+    pub fn transitive_importers_many(
+        &self,
+        targets: &[String],
+    ) -> std::collections::HashSet<String> {
+        let reverse_deps = self.reverse_dependencies();
+
+        // BFS from every target to find all transitive importers.
+        let mut affected = std::collections::HashSet::new();
+        let mut queue: std::collections::VecDeque<&str> =
+            targets.iter().map(|s| s.as_str()).collect();
+        while let Some(module) = queue.pop_front() {
+            if affected.insert(module.to_string()) {
+                if let Some(importers) = reverse_deps.get(module) {
+                    for importer in importers {
+                        queue.push_back(importer.as_str());
+                    }
+                }
+            }
+        }
+        affected
+    }
+
+    /// Build the reverse dependency map: for each module, who imports it?
+    fn reverse_dependencies(&self) -> HashMap<String, Vec<String>> {
         let mut reverse_deps: HashMap<String, Vec<String>> = HashMap::new();
         for (name, info) in &self.modules {
             for imp in &info.imports {
@@ -428,21 +493,7 @@ impl ModuleRegistry {
                 }
             }
         }
-
-        // BFS from target to find all transitive importers.
-        let mut affected = std::collections::HashSet::new();
-        let mut queue = std::collections::VecDeque::new();
-        queue.push_back(target.to_string());
-        while let Some(module) = queue.pop_front() {
-            if affected.insert(module.clone()) {
-                if let Some(importers) = reverse_deps.get(&module) {
-                    for importer in importers {
-                        queue.push_back(importer.clone());
-                    }
-                }
-            }
-        }
-        affected
+        reverse_deps
     }
 
     /// Topologically sort modules by dependency order.
@@ -739,6 +790,38 @@ export { baz } from './baz';
         let path = Path::new("a/b/../c/./d");
         let normalized = ModuleRegistry::normalize_path(path);
         assert_eq!(normalized, Path::new("a/c/d"));
+    }
+
+    #[test]
+    fn test_transitive_importers_many() {
+        let mut reg = ModuleRegistry::new();
+        reg.register(
+            "main",
+            "import { x } from \"./a\";\nimport { y } from \"./b\";\nexport function main() {}"
+                .to_string(),
+        );
+        reg.register(
+            "./a",
+            "import { z } from \"./c\";\nexport const x = 1;".to_string(),
+        );
+        reg.register("./b", "export const y = 2;".to_string());
+        reg.register("./c", "export const z = 3;".to_string());
+
+        // One batch from two roots: ./c → ./a → main, ./b → main.
+        let affected = reg.transitive_importers_many(&["./b".to_string(), "./c".to_string()]);
+        assert_eq!(affected.len(), 4);
+        assert!(affected.contains("main"));
+        assert!(affected.contains("./a"));
+        assert!(affected.contains("./b"));
+        assert!(affected.contains("./c"));
+
+        // Equivalent to the union of the per-root queries.
+        let union: std::collections::HashSet<String> = reg
+            .transitive_importers("./b")
+            .into_iter()
+            .chain(reg.transitive_importers("./c"))
+            .collect();
+        assert_eq!(affected, union);
     }
 
     #[test]

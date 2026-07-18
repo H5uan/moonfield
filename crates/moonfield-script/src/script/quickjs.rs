@@ -391,6 +391,10 @@ impl HotReloadHandler for QuickJsRuntime {
             .ok_or_else(|| ScriptError::Execution("no cached entry for hot reload".into()))?;
         let mut registry = Rc::try_unwrap(registry_rc).unwrap_or_else(|rc| (*rc).clone());
 
+        // A created file can turn a previously failed resolution into a
+        // hit — the memoized probes are no longer trustworthy.
+        registry.invalidate_resolution_caches();
+
         // QuickJS re-evaluates the whole bundle (no incremental compiled-module
         // cache like V8): update all changed sources, then re-run the graph.
         let mut result: Result<()> = Ok(());

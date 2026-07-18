@@ -40,7 +40,9 @@ fn create_console_snapshot() -> Vec<u8> {
         }
         scope.set_default_context(context);
     }
-    match isolate.create_blob(v8::FunctionCodeHandling::Clear) {
+    // Keep the shim's compiled code in the snapshot so runtime isolates
+    // don't recompile it on startup.
+    match isolate.create_blob(v8::FunctionCodeHandling::Keep) {
         Some(data) => data.to_vec(),
         None => Vec::new(),
     }
@@ -341,12 +343,14 @@ impl V8Runtime {
         });
 
         // Ensure the console snapshot exists (first call creates it).
-        let snapshot_bytes = SNAPSHOT_BLOB.get_or_init(create_console_snapshot);
+        // The OnceLock lives forever, so the slice can be borrowed as
+        // 'static — no per-isolate copy of the blob.
+        let snapshot_bytes: &'static [u8] = SNAPSHOT_BLOB.get_or_init(create_console_snapshot);
 
         // Set heap limits and use the cached snapshot if available.
         let create_params = v8::CreateParams::default().heap_limits(4 * 1024 * 1024, max_bytes);
         let create_params = if !snapshot_bytes.is_empty() {
-            create_params.snapshot_blob(v8::StartupData::from(snapshot_bytes.clone()))
+            create_params.snapshot_blob(v8::StartupData::from(snapshot_bytes))
         } else {
             create_params
         };
@@ -924,12 +928,17 @@ impl HotReloadHandler for V8Runtime {
         // module source strings.
         let mut registry = Rc::try_unwrap(registry_rc).unwrap_or_else(|rc| (*rc).clone());
 
-        // Process all changed files: update sources and compute the union of
-        // affected modules (changed module + its transitive importers). This
-        // avoids multiple load_module_graph calls when several files change
-        // simultaneously. On a read failure, keep the remaining state intact
-        // so the runtime keeps running the previously evaluated code.
-        let mut all_affected = std::collections::HashSet::new();
+        // A created file can turn a previously failed resolution into a
+        // hit — the memoized probes are no longer trustworthy.
+        registry.invalidate_resolution_caches();
+
+        // Process all changed files: update sources, then compute the union
+        // of affected modules (changed module + its transitive importers)
+        // with a single reverse-dependency pass. This avoids multiple
+        // load_module_graph calls when several files change simultaneously.
+        // On a read failure, keep the remaining state intact so the runtime
+        // keeps running the previously evaluated code.
+        let mut changed_modules = Vec::new();
         let mut result: Result<()> = Ok(());
         for path in paths {
             match super::load_script(path) {
@@ -941,7 +950,7 @@ impl HotReloadHandler for V8Runtime {
                         .find_by_file_path(path)
                         .unwrap_or_else(|| path.to_str().unwrap_or("").to_string());
                     registry.register(&module_name, source);
-                    all_affected.extend(registry.transitive_importers(&module_name));
+                    changed_modules.push(module_name);
                 }
                 Err(e) => {
                     result = Err(e);
@@ -956,6 +965,7 @@ impl HotReloadHandler for V8Runtime {
             // evict the affected set from the cache to force re-compilation;
             // unaffected modules reuse their cached (already evaluated)
             // handles. Then re-instantiate the graph in one pass.
+            let all_affected = registry_rc.transitive_importers_many(&changed_modules);
             for name in &all_affected {
                 self.compiled_modules.remove(name);
             }
