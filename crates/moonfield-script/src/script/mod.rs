@@ -6,18 +6,17 @@
 //!
 //! # TypeScript compilation
 //!
-//! TypeScript is compiled to JavaScript at build time via `tsc` (see
-//! `scripts/tsconfig.json`). The runtime loads pre-compiled `.js` files from
-//! `target/scripts/` or alongside the `.ts` source.
+//! TypeScript is loaded by stripping type annotations with swc at runtime
+//! (see [`transpile_typescript`]), on both backends — no `tsc` step is
+//! required. Note this is *type stripping only*: type-only syntax vanishes,
+//! but TS-only runtime constructs (enums, namespaces, parameter properties)
+//! are not supported.
 //!
-//! The V8 backend requires pre-compiled JS — it cannot load `.ts` sources
-//! directly. The QuickJS backend has no native TS support either, so the
-//! `quickjs-backend` feature enables swc-based transpilation as a runtime
-//! fallback when no pre-compiled `.js` is found.
-//!
-//! When `tsc` emits source maps (`"sourceMap": true` in
-//! `scripts/tsconfig.json`), the V8 backend remaps error locations from the
-//! compiled JS back to the original TS positions (see `source_map`).
+//! For better error locations you can still pre-compile with `tsc` (see
+//! `scripts/tsconfig.json`): [`load_script`] then prefers the pre-compiled
+//! `.js` from `target/scripts/` or alongside the `.ts` source, and the V8
+//! backend remaps error locations back to the original TS positions via
+//! `.js.map` files (see `source_map`).
 
 pub mod api;
 pub mod hot_reload;
@@ -217,18 +216,16 @@ pub trait ScriptRuntime {
     fn gc_step(&mut self) {}
 }
 
-/// Load a script file, resolving TypeScript to pre-compiled JavaScript.
+/// Load a script file, resolving TypeScript to JavaScript.
 ///
 /// Loading strategy:
 /// 1. If the path ends in `.js`, read it directly.
 /// 2. If the path ends in `.ts`:
 ///    - First look for a `.js` file at `target/scripts/<filename>.js`
-///      (build-time tsc output).
+///      (build-time tsc output, keeps `.js.map` source maps usable).
 ///    - If not found, look for a `.js` file alongside the `.ts` file.
-///    - If neither exists and the `quickjs-backend` feature is active,
-///      fall back to swc-based transpilation. Otherwise, return an error
-///      (V8 requires pre-compiled JS, or the `.ts` file must be pre-compiled
-///      via `tsc`; see `scripts/tsconfig.json`).
+///    - Otherwise strip the type annotations with swc
+///      (see [`transpile_typescript`]).
 pub fn load_script<P: AsRef<Path>>(path: P) -> Result<String> {
     let path = path.as_ref();
 
@@ -255,29 +252,17 @@ pub fn load_script<P: AsRef<Path>>(path: P) -> Result<String> {
         }
     }
 
-    // No pre-compiled JS found. QuickJS backend can fall back to swc transpilation;
-    // V8 backend requires pre-compiled JS.
-    #[cfg(feature = "quickjs-backend")]
-    {
-        let source = std::fs::read_to_string(path)
-            .map_err(|e| ScriptError::Execution(format!("failed to read script: {}", e)))?;
-        transpile_typescript(&source)
-    }
-
-    #[cfg(not(feature = "quickjs-backend"))]
-    Err(ScriptError::Execution(format!(
-        "no pre-compiled JavaScript found for '{}'. \
-         TypeScript must be compiled via `tsc` before running. \
-         See `scripts/tsconfig.json`.",
-        path.display()
-    )))
+    // No pre-compiled JS found — strip the type annotations with swc.
+    let source = std::fs::read_to_string(path)
+        .map_err(|e| ScriptError::Execution(format!("failed to read script: {}", e)))?;
+    transpile_typescript(&source)
 }
 
 /// Transpile TypeScript source to JavaScript by stripping type annotations.
 ///
 /// Uses swc's TypeScript strip transform to remove type annotations.
-/// Only available when the `quickjs-backend` feature is active.
-#[cfg(feature = "quickjs-backend")]
+/// Type-only syntax is erased; TS-only runtime constructs (enums,
+/// namespaces, parameter properties) are not supported.
 pub fn transpile_typescript(source: &str) -> Result<String> {
     use swc_common::{sync::Lrc, FileName, Globals, Mark, SourceMap, GLOBALS};
     use swc_ecma_ast::{EsVersion, Module, Pass, Program};

@@ -18,9 +18,10 @@ swc_common = "23"
 swc_ecma_ast = "25"
 swc_ecma_parser = "41"
 
-# swc transforms/codegen — only needed for QuickJS backend (CJS transform + TS stripping)
-swc_ecma_transforms_typescript = { version = "51", optional = true }
-swc_ecma_codegen = { version = "28", optional = true }
+# swc transforms — TS stripping is used by both backends; the CJS transform
+# is only needed for the QuickJS module bundler
+swc_ecma_transforms_typescript = "51"
+swc_ecma_codegen = "28"
 swc_ecma_transforms_module = { version = "51.0.0", optional = true }
 
 [features]
@@ -28,7 +29,5 @@ default = ["v8-backend"]
 v8-backend = []
 quickjs-backend = [
     "dep:rquickjs",
-    "swc_ecma_transforms_typescript",
-    "swc_ecma_codegen",
     "swc_ecma_transforms_module",
 ]

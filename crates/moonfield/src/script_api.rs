@@ -7,6 +7,29 @@
 
 use moonfield_render::HeadlessContext;
 use moonfield_script::script::ScriptApi;
+use std::cell::RefCell;
+
+thread_local! {
+    /// Building the headless context means creating a Vulkan instance and
+    /// device, compiling the shaders, and building the pipeline — far too
+    /// expensive to repeat per call (hot reload re-runs `main()`, and
+    /// scripts may call `record_frame` every frame). It is created lazily
+    /// on first use and reused from then on.
+    static HEADLESS_CONTEXT: RefCell<Option<HeadlessContext>> = const { RefCell::new(None) };
+}
+
+/// Initialize the shared headless context on first use; subsequent calls
+/// are cheap no-ops. A failed first attempt is not cached — the next call
+/// retries.
+fn ensure_headless_context() -> Result<(), String> {
+    HEADLESS_CONTEXT.with(|cell| {
+        let mut slot = cell.borrow_mut();
+        if slot.is_none() {
+            *slot = Some(HeadlessContext::record_frame().map_err(|e| e.to_string())?);
+        }
+        Ok(())
+    })
+}
 
 /// Build the host API exposed to scripts.
 pub fn build_script_api() -> ScriptApi {
@@ -18,13 +41,12 @@ pub fn build_script_api() -> ScriptApi {
 /// `record_frame` host function: render one frame with the headless context.
 ///
 /// Accepts optional `(width, height)` arguments; defaults to the headless
-/// context's default resolution.
+/// context's default resolution. The context is built once and reused (see
+/// [`ensure_headless_context`]).
 #[moonfield_script::script_function]
 fn record_frame(width: Option<u32>, height: Option<u32>) -> Result<(), String> {
     let _ = (width, height);
-    let ctx = HeadlessContext::record_frame().map_err(|e| e.to_string())?;
-    drop(ctx);
-    Ok(())
+    ensure_headless_context()
 }
 
 /// Fast-path `record_frame` that extracts `u32` args directly from V8
@@ -48,13 +70,12 @@ fn direct_record_frame(
         },
     );
 
-    match HeadlessContext::record_frame() {
-        Ok(ctx) => {
-            drop(ctx);
+    match ensure_headless_context() {
+        Ok(()) => {
             retval.set_undefined();
         }
         Err(e) => {
-            scope.throw_exception(v8::String::new(scope, &e.to_string()).unwrap().into());
+            scope.throw_exception(v8::String::new(scope, &e).unwrap().into());
         }
     }
 }

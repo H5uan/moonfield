@@ -155,9 +155,10 @@ impl Plugin for ScriptPlugin {
                 error!("Failed to load script '{}': {}", entry_path.display(), e);
                 return;
             }
-            // Watch the entry's directory for hot reload. Editing `.ts`
-            // sources only takes effect once the pre-compiled `.js` is
-            // refreshed (e.g. via `tsc -w`); editing `.js` reloads directly.
+            // Watch the entry's directory for hot reload. `.ts` sources are
+            // transpiled in-process on (re)load, so edits take effect
+            // directly; a pre-compiled `.js` (e.g. from `tsc`, with source
+            // maps) is preferred when present.
             let watch_dir = entry_path
                 .parent()
                 .filter(|p| !p.as_os_str().is_empty())

@@ -63,6 +63,15 @@ struct DirectFnEntry {
     func: DirectFn,
 }
 
+/// A `HostValue`-marshaling host function plus its registration name.
+///
+/// Boxed for a stable address so the `v8::External` data pointer handed to
+/// V8 can never dangle (same pattern as [`DirectFnEntry`]).
+struct ApiFnEntry {
+    name: &'static str,
+    func: HostFn,
+}
+
 /// A script runtime backed by V8 (rusty_v8).
 ///
 /// Module system: uses V8's native ESModule API via `ScriptCompiler::compile_module`
@@ -89,9 +98,13 @@ pub struct V8Runtime {
     watchdog: ExecutionWatchdog,
     isolate: v8::OwnedIsolate,
     context: v8::Global<v8::Context>,
-    // Boxed so the registry vector's storage is never moved while V8 externals
-    // hold raw pointers into it.
-    api: Box<ScriptApi>,
+    /// Host functions exposed to scripts, one box per entry.
+    ///
+    /// V8 callbacks receive a raw `External` pointer to their entry, so each
+    /// entry is boxed for a stable address — storing plain tuples in the
+    /// `Vec` would let a reallocation dangle every installed callback.
+    #[allow(clippy::vec_box)] // boxes required for pointer stability, see above
+    api_entries: Vec<Box<ApiFnEntry>>,
     /// Direct (fast-path) host functions that bypass `HostValue` marshaling.
     ///
     /// Each entry is boxed so that `v8::External` pointers handed to V8 stay
@@ -347,10 +360,20 @@ impl V8Runtime {
             v8::Global::new(handle_scope, context)
         };
 
+        let api_entries = api
+            .iter()
+            .map(|entry| {
+                Box::new(ApiFnEntry {
+                    name: entry.0,
+                    func: entry.1.clone(),
+                })
+            })
+            .collect();
+
         let mut rt = Self {
             isolate,
             context,
-            api: Box::new(api),
+            api_entries,
             direct_fns: Vec::new(),
             registry: None,
             entry: None,
@@ -456,16 +479,16 @@ impl V8Runtime {
         }
 
         // Register regular HostFn-based functions.
-        for entry in self.api.iter() {
+        for entry in &self.api_entries {
             // Skip if already registered as a direct function.
-            if self.direct_fns.iter().any(|d| d.name == entry.0) {
+            if self.direct_fns.iter().any(|d| d.name == entry.name) {
                 continue;
             }
 
-            // Stable pointer into the boxed registry vector.
-            let ptr = entry as *const (&'static str, HostFn) as *mut std::ffi::c_void;
+            // Stable pointer to the boxed entry (the box never moves).
+            let ptr = &**entry as *const ApiFnEntry as *mut std::ffi::c_void;
             let data = v8::External::new(scope, ptr);
-            let js_name = v8::String::new(scope, entry.0).unwrap();
+            let js_name = v8::String::new(scope, entry.name).unwrap();
             let func = v8::Function::builder(
                 |scope: &mut v8::PinScope,
                  args: v8::FunctionCallbackArguments,
@@ -473,11 +496,11 @@ impl V8Runtime {
                     let Ok(external) = v8::Local::<v8::External>::try_from(args.data()) else {
                         return;
                     };
-                    // Safety: the pointer references an entry of this
-                    // runtime's boxed `ScriptApi` function table, which
-                    // outlives the context.
-                    let entry = unsafe { &*(external.value() as *const (&'static str, HostFn)) };
-                    let name = entry.0;
+                    // Safety: the pointer references a `Box<ApiFnEntry>`
+                    // owned by this runtime's `api_entries`, which outlives
+                    // the context.
+                    let entry = unsafe { &*(external.value() as *const ApiFnEntry) };
+                    let name = entry.name;
 
                     // A panic anywhere in arg marshaling or the host function
                     // must not unwind through V8's C++ frames (that is
@@ -490,7 +513,7 @@ impl V8Runtime {
                         for i in 0..n as i32 {
                             host_args.push(v8_value_to_host(args.get(i), scope));
                         }
-                        (entry.1)(&host_args)
+                        (entry.func)(&host_args)
                     }));
 
                     match result {
@@ -511,7 +534,7 @@ impl V8Runtime {
             )
             .data(data.into())
             .build(scope)
-            .ok_or_else(|| ScriptError::Runtime(format!("failed to build {}", entry.0)))?;
+            .ok_or_else(|| ScriptError::Runtime(format!("failed to build {}", entry.name)))?;
             global.set(scope, js_name.into(), func.into()).unwrap();
         }
 

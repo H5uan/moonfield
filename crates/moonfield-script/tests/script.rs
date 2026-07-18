@@ -71,23 +71,43 @@ fn reload_changes_behavior() {
     runtime.call("main").expect("call reloaded main");
 }
 
-/// V8 backend requires TypeScript to be pre-compiled via tsc.
-/// This test verifies that trying to load a `.ts` source directly gives a
-/// helpful error (the `load_script` function will reject it before reaching V8).
+/// Feeding *raw* TypeScript straight into `runtime.load` (bypassing
+/// `load_script`'s transpilation) must still fail — the engine itself
+/// never learned TS syntax.
 #[cfg(all(feature = "v8-backend", not(feature = "quickjs-backend")))]
 #[test]
-fn v8_rejects_raw_typescript() {
+fn v8_rejects_untranspiled_typescript() {
     let ts = "function main(): void { record_frame(); }";
     let mut runtime = Runtime::new(test_api()).expect("runtime");
     let result = runtime.load("main.ts", ts);
     assert!(result.is_err(), "V8 should reject raw TS source");
     let msg = result.unwrap_err().to_string();
     assert!(
-        msg.contains("SyntaxError")
-            || msg.contains("unexpected token")
-            || msg.contains("pre-compiled"),
-        "error should mention syntax error or pre-compiled requirement, got: {msg}"
+        msg.contains("SyntaxError") || msg.contains("unexpected token"),
+        "error should mention a syntax error, got: {msg}"
     );
+}
+
+/// A `.ts` entry with no pre-compiled `.js` alongside is transpiled
+/// in-process (swc) and runs on both backends — no `tsc` step needed.
+#[test]
+fn loads_typescript_entry_without_precompiled_js() {
+    let dir = unique_temp_dir("ts_entry");
+    let ts_path = dir.join("main.ts");
+    std::fs::write(
+        &ts_path,
+        "export function value(): number { const n: number = 42; return n; }",
+    )
+    .unwrap();
+
+    let mut runtime = Runtime::new(test_api()).expect("runtime");
+    moonfield_script::load_module_entry(&mut runtime, &ts_path).expect("load ts entry");
+    let v = runtime
+        .call_module_export("value", &[])
+        .expect("call value");
+    assert_eq!(v.as_f64(), Some(42.0));
+
+    std::fs::remove_dir_all(&dir).ok();
 }
 
 /// V8 backend: load a simple module graph (no imports).
@@ -128,8 +148,8 @@ fn v8_module_graph_with_imports() {
         .expect("load_module_graph should succeed");
 }
 
-/// QuickJS backend needs swc-based transpilation for TypeScript.
-#[cfg(feature = "quickjs-backend")]
+/// swc strips TypeScript type annotations (the transform `load_script`
+/// falls back to on both backends when no pre-compiled `.js` exists).
 #[test]
 fn transpile_strips_typescript_annotations() {
     let ts = "function main(): void {\n    const x: number = 42;\n    const y = x as number;\n    record_frame();\n}";
@@ -311,6 +331,49 @@ fn hot_reload_recompiles_changed_module() {
     std::fs::remove_dir_all(&dir).ok();
 }
 
+/// Hot reload: editing a `.ts` file re-transpiles it in-process and the new
+/// behavior is observable immediately — no `tsc -w` step required.
+#[test]
+fn hot_reload_transpiles_changed_typescript() {
+    let dir = unique_temp_dir("hot_reload_ts");
+    let utils_path = dir.join("utils.ts");
+    std::fs::write(&utils_path, "export function value(): number { return 1; }").unwrap();
+
+    let mut registry = ModuleRegistry::new();
+    registry.register(
+        "main",
+        "import { value } from \"./utils\";\n\
+         export function mainValue() { return value(); }"
+            .to_string(),
+    );
+    // Initial registration goes through the same transpile path as the loader.
+    let utils_js = load_script(&utils_path).expect("transpile utils.ts");
+    registry.register("./utils", utils_js);
+
+    let mut runtime = Runtime::new(test_api()).expect("runtime");
+    runtime
+        .load_module_graph(Rc::new(registry), "main")
+        .expect("load_module_graph");
+
+    let v = runtime
+        .call_module_export("mainValue", &[])
+        .expect("call mainValue");
+    assert_eq!(v.as_f64(), Some(1.0));
+
+    // Edit the TypeScript source on disk and trigger a hot reload.
+    std::fs::write(&utils_path, "export function value(): number { return 2; }").unwrap();
+    runtime
+        .on_files_changed(std::slice::from_ref(&utils_path))
+        .expect("hot reload");
+
+    let v = runtime
+        .call_module_export("mainValue", &[])
+        .expect("call after reload");
+    assert_eq!(v.as_f64(), Some(2.0));
+
+    std::fs::remove_dir_all(&dir).ok();
+}
+
 /// Hot reload: a broken edit must fail without killing the runtime — the
 /// previously evaluated code stays callable, and a later fix reloads fine.
 #[test]
@@ -357,10 +420,9 @@ fn hot_reload_recovers_after_broken_edit() {
 }
 
 /// Promises settled during a script call must have their `.then` callbacks
-/// run before the call returns (microtask checkpoint).
-#[cfg(all(feature = "v8-backend", not(feature = "quickjs-backend")))]
+/// run before the call returns (microtask checkpoint / job queue drain).
 #[test]
-fn v8_microtasks_run_after_call() {
+fn microtasks_run_after_call() {
     let mut runtime = Runtime::new(test_api()).expect("runtime");
     runtime
         .load(

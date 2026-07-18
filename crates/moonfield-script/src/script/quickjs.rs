@@ -67,13 +67,17 @@ impl ScriptRuntime for QuickJsRuntime {
 
     fn load(&mut self, _name: &str, source: &str) -> Result<()> {
         let _deadline_guard = self.arm();
-        self.context.with(
-            |ctx| match CaughtError::catch(&ctx, ctx.eval::<(), _>(source)) {
-                Ok(()) => Ok(()),
-                Err(ce) => Err(ScriptError::Execution(format_caught_error(ce))),
-            },
-        )?;
-        Ok(())
+        let result =
+            self.context.with(
+                |ctx| match CaughtError::catch(&ctx, ctx.eval::<(), _>(source)) {
+                    Ok(()) => Ok(()),
+                    Err(ce) => Err(ScriptError::Execution(format_caught_error(ce))),
+                },
+            );
+        if result.is_ok() {
+            self.drain_microtasks();
+        }
+        result
     }
 
     fn reload(&mut self) -> Result<()> {
@@ -84,7 +88,7 @@ impl ScriptRuntime for QuickJsRuntime {
 
     fn call(&mut self, function: &str) -> Result<()> {
         let _deadline_guard = self.arm();
-        self.context.with(|ctx| {
+        let result = self.context.with(|ctx| {
             let func = ctx
                 .globals()
                 .get::<_, Function>(function)
@@ -97,13 +101,16 @@ impl ScriptRuntime for QuickJsRuntime {
                     format_caught_error(ce)
                 ))),
             }
-        })?;
-        Ok(())
+        });
+        if result.is_ok() {
+            self.drain_microtasks();
+        }
+        result
     }
 
     fn call_with_args(&mut self, function: &str, args: &[HostValue]) -> Result<HostValue> {
         let _deadline_guard = self.arm();
-        self.context.with(|ctx| {
+        let result = self.context.with(|ctx| {
             let func = ctx
                 .globals()
                 .get::<_, Function>(function)
@@ -117,7 +124,11 @@ impl ScriptRuntime for QuickJsRuntime {
                     format_caught_error(ce)
                 ))),
             }
-        })
+        });
+        if result.is_ok() {
+            self.drain_microtasks();
+        }
+        result
     }
 
     fn gc_step(&mut self) {
@@ -178,6 +189,9 @@ impl ScriptRuntime for QuickJsRuntime {
                 Err(ce) => Err(ScriptError::Runtime(format_caught_error(ce))),
             },
         )?;
+        // Pump the job queue so module-level promises and `main()`'s
+        // microtasks settle before we cache the graph.
+        self.drain_microtasks();
 
         self.registry = Some(registry);
         self.entry = Some(entry.to_string());
@@ -243,6 +257,21 @@ impl QuickJsRuntime {
         DeadlineGuard(Rc::clone(&self.deadline))
     }
 
+    /// Drain the microtask queue so promises settled by the preceding call
+    /// (`.then` callbacks, async continuations) run before returning.
+    /// QuickJS never runs jobs implicitly — the embedder must pump them.
+    /// Job exceptions are logged and draining continues, so one bad job
+    /// cannot starve the rest.
+    fn drain_microtasks(&self) {
+        loop {
+            match self.runtime.execute_pending_job() {
+                Ok(true) => {}
+                Ok(false) => break,
+                Err(e) => error!("script microtask job failed: {:?}", e),
+            }
+        }
+    }
+
     /// Shared implementation of `call_module_export` / `call_module_export_unit`.
     /// When `marshal_result` is false the return value is discarded without
     /// converting it to a `HostValue`.
@@ -253,7 +282,7 @@ impl QuickJsRuntime {
         marshal_result: bool,
     ) -> Result<Option<HostValue>> {
         let _deadline_guard = self.arm();
-        self.context.with(|ctx| {
+        let result = self.context.with(|ctx| {
             let exports = ctx
                 .globals()
                 .get::<_, Object>("__mfEntryExports")
@@ -270,7 +299,11 @@ impl QuickJsRuntime {
                     format_caught_error(ce)
                 ))),
             }
-        })
+        });
+        if result.is_ok() {
+            self.drain_microtasks();
+        }
+        result
     }
 
     fn register_api(&mut self) -> Result<()> {
