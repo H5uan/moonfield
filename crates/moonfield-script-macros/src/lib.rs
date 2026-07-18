@@ -14,7 +14,9 @@
 
 use proc_macro::TokenStream;
 use quote::quote;
-use syn::{parse_macro_input, FnArg, ItemFn, Pat, ReturnType, Type};
+use syn::{
+    parse_macro_input, FnArg, GenericArgument, ItemFn, Pat, PathArguments, ReturnType, Type,
+};
 
 /// Attribute macro that generates static type-safe bindings for a host function.
 ///
@@ -122,9 +124,7 @@ pub fn script_function(_attr: TokenStream, item: TokenStream) -> TokenStream {
     let ts_params: Vec<String> = params
         .iter()
         .map(|p| {
-            let ty = &p.ty;
-            let ty_str = normalize_ty(&quote!(#ty).to_string());
-            let (ts_ty, optional) = rust_type_to_ts(&ty_str);
+            let (ts_ty, optional) = rust_type_to_ts(&p.ty);
             if optional {
                 format!("{}?: {}", p.name, ts_ty)
             } else {
@@ -134,10 +134,7 @@ pub fn script_function(_attr: TokenStream, item: TokenStream) -> TokenStream {
         .collect();
     let ts_ret = match &func.sig.output {
         ReturnType::Default => "void".to_string(),
-        ReturnType::Type(_, ty) => {
-            let ty_str = quote!(#ty).to_string();
-            return_type_to_ts(&ty_str).to_string()
-        }
+        ReturnType::Type(_, ty) => return_type_to_ts(ty),
     };
     let ts_sig = format!(
         "declare function {}({}): {};",
@@ -184,46 +181,78 @@ fn normalize_ty(ty_str: &str) -> String {
     ty_str.split_whitespace().collect()
 }
 
-/// Map a Rust type string to a TypeScript type string.
+/// Map a Rust type to a TypeScript type string.
 ///
 /// Returns the TypeScript type and whether the parameter is optional
-/// (`Option<T>` maps to an optional TS parameter).
-fn rust_type_to_ts(ty_str: &str) -> (&'static str, bool) {
-    if let Some(inner) = ty_str
-        .strip_prefix("Option<")
-        .and_then(|s| s.strip_suffix('>'))
-    {
-        return (rust_type_to_ts(inner).0, true);
+/// (`Option<T>` maps to an optional TS parameter). The type is parsed
+/// structurally via `syn`, so nested generics like `Vec<f32>` or
+/// `Option<Vec<u8>>` map faithfully instead of degrading to `any`.
+fn rust_type_to_ts(ty: &Type) -> (String, bool) {
+    match ty {
+        Type::Reference(r) => rust_type_to_ts(&r.elem),
+        Type::Tuple(t) if t.elems.is_empty() => ("void".to_string(), false),
+        Type::Path(tp) => {
+            let Some(seg) = tp.path.segments.last() else {
+                return ("any".to_string(), false);
+            };
+            match seg.ident.to_string().as_str() {
+                "Option" => (
+                    inner_angle_type(seg)
+                        .map(|inner| rust_type_to_ts(inner).0)
+                        .unwrap_or_else(|| "any".to_string()),
+                    true,
+                ),
+                "Vec" => match inner_angle_type(seg) {
+                    Some(inner) if is_type_named(inner, "u8") => ("Uint8Array".to_string(), false),
+                    Some(inner) => (format!("{}[]", rust_type_to_ts(inner).0), false),
+                    None => ("any[]".to_string(), false),
+                },
+                "u32" | "i32" | "u64" | "i64" | "usize" | "isize" | "f32" | "f64" => {
+                    ("number".to_string(), false)
+                }
+                "bool" => ("boolean".to_string(), false),
+                "String" | "str" => ("string".to_string(), false),
+                _ => ("any".to_string(), false),
+            }
+        }
+        _ => ("any".to_string(), false),
     }
-    let ts = match ty_str.trim_start_matches('&') {
-        "u32" | "i32" | "u64" | "i64" | "usize" | "isize" | "f32" | "f64" => "number",
-        "bool" => "boolean",
-        "String" | "str" | "&str" => "string",
-        "Vec<u8>" => "Uint8Array",
-        _ => "any",
-    };
-    (ts, false)
 }
 
-/// Map a return type string to a TypeScript return type.
-fn return_type_to_ts(ty_str: &str) -> &'static str {
-    let ty_str = ty_str.trim();
-    if ty_str.contains("Result") {
-        if ty_str.contains("()") {
-            "void"
-        } else if ty_str.contains("bool") {
-            "boolean"
-        } else if ty_str.contains("String") && !ty_str.contains("Vec<u8>") {
-            "string"
-        } else if ty_str.contains("Vec<u8>") {
-            "Uint8Array"
-        } else {
-            "any"
+/// Map a function's return type to a TypeScript return type.
+///
+/// `Result<T, E>` (the `#[script_function]` contract) maps to the TS type
+/// of `T`; `()` maps to `void`; anything else maps via [`rust_type_to_ts`].
+fn return_type_to_ts(ty: &Type) -> String {
+    if let Type::Path(tp) = ty {
+        if let Some(seg) = tp.path.segments.last() {
+            if seg.ident == "Result" {
+                if let Some(inner) = inner_angle_type(seg) {
+                    return rust_type_to_ts(inner).0;
+                }
+            }
         }
-    } else if ty_str == "()" {
-        "void"
+    }
+    rust_type_to_ts(ty).0
+}
+
+/// Extract the first generic type argument of a path segment
+/// (e.g. `T` in `Foo<T, E>`).
+fn inner_angle_type(seg: &syn::PathSegment) -> Option<&Type> {
+    if let PathArguments::AngleBracketed(args) = &seg.arguments {
+        if let Some(GenericArgument::Type(t)) = args.args.first() {
+            return Some(t);
+        }
+    }
+    None
+}
+
+/// Check whether a type is a simple path ending in `name` (e.g. `u8`).
+fn is_type_named(ty: &Type, name: &str) -> bool {
+    if let Type::Path(tp) = ty {
+        tp.path.segments.last().is_some_and(|s| s.ident == name)
     } else {
-        "any"
+        false
     }
 }
 
@@ -295,5 +324,76 @@ fn extract_param_code(name: &str, ty: &Type, index: usize) -> proc_macro2::Token
                 .and_then(|v| v.as_u32().map(|n| n as #ty))
                 .ok_or_else(|| format!("arg {}: type mismatch", #index_lit))?;
         },
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn ts(ty: &str) -> (String, bool) {
+        rust_type_to_ts(&syn::parse_str::<Type>(ty).unwrap())
+    }
+
+    fn ret(ty: &str) -> String {
+        return_type_to_ts(&syn::parse_str::<Type>(ty).unwrap())
+    }
+
+    #[test]
+    fn primitives_map_to_ts() {
+        assert_eq!(ts("u32"), ("number".to_string(), false));
+        assert_eq!(ts("i64"), ("number".to_string(), false));
+        assert_eq!(ts("f64"), ("number".to_string(), false));
+        assert_eq!(ts("bool"), ("boolean".to_string(), false));
+        assert_eq!(ts("String"), ("string".to_string(), false));
+        assert_eq!(ts("&str"), ("string".to_string(), false));
+    }
+
+    #[test]
+    fn option_marks_parameter_optional() {
+        assert_eq!(ts("Option<u32>"), ("number".to_string(), true));
+        assert_eq!(ts("Option<String>"), ("string".to_string(), true));
+        assert_eq!(ts("Option<Vec<u8>>"), ("Uint8Array".to_string(), true));
+    }
+
+    #[test]
+    fn vec_maps_to_typed_or_plain_arrays() {
+        assert_eq!(ts("Vec<u8>"), ("Uint8Array".to_string(), false));
+        assert_eq!(ts("Vec<f32>"), ("number[]".to_string(), false));
+        assert_eq!(ts("Vec<String>"), ("string[]".to_string(), false));
+    }
+
+    #[test]
+    fn unit_maps_to_void() {
+        assert_eq!(ts("()"), ("void".to_string(), false));
+    }
+
+    #[test]
+    fn unknown_types_fall_back_to_any() {
+        assert_eq!(ts("MyStruct"), ("any".to_string(), false));
+        assert_eq!(ts("HostValue"), ("any".to_string(), false));
+        assert_eq!(
+            ts("std::collections::HashMap<String, u32>"),
+            ("any".to_string(), false)
+        );
+    }
+
+    #[test]
+    fn result_unwraps_ok_type() {
+        assert_eq!(ret("Result<f64, String>"), "number");
+        assert_eq!(ret("Result<bool, String>"), "boolean");
+        assert_eq!(ret("Result<String, String>"), "string");
+        assert_eq!(ret("Result<(), String>"), "void");
+        assert_eq!(ret("Result<Vec<u8>, String>"), "Uint8Array");
+        assert_eq!(ret("Result<Vec<f32>, String>"), "number[]");
+        // Previously these degraded to `any` via string heuristics.
+        assert_eq!(ret("std::result::Result<f64, String>"), "number");
+    }
+
+    #[test]
+    fn plain_return_types_map_directly() {
+        assert_eq!(ret("f64"), "number");
+        assert_eq!(ret("()"), "void");
+        assert_eq!(ret("MyStruct"), "any");
     }
 }
