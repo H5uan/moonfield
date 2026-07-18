@@ -12,11 +12,13 @@ crates/
   moonfield-app/      # Bevy-style App/Plugin framework (Plugin, PluginGroup, App, Resources)
   moonfield-base/     # Shared base types and utilities
   moonfield-render/   # Lunar Mare — Vulkan RHI (ash-based): device, swapchain, pipeline, shaders, headless recording
-  moonfield-script/   # Scripting runtime with v8 and QuickJS backends, hot reload (src/script/)
+  moonfield-script/   # Scripting runtime with v8 and QuickJS backends, ES modules, hot reload (src/script/)
   moonfield-window/   # Abstract windowing types (Window resource, RawHandleWrapper), no backend deps
   moonfield-winit/    # Windowing backend (winit), bridges winit Window → moonfield-window resources
-scripts/              # TypeScript helper scripts (e.g. record_frame.ts)
+scripts/              # TypeScript helper scripts (e.g. record_frame.ts); moonfield.d.ts is auto-generated
 ```
+
+Host API bindings (`record_frame`, …) live in the binary crate (`crates/moonfield/src/script_api.rs`) as the composition root — `moonfield-script` itself has no engine-layer dependencies. `scripts/moonfield.d.ts` is generated from the registered `ScriptApi` and kept in sync by a unit test.
 
 ## Build, Test, and Development Commands
 

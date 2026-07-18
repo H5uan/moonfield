@@ -4,28 +4,120 @@
 //! application. The crate is exclusively focused on the script system:
 //! TypeScript/JavaScript execution via V8 or QuickJS, module loading,
 //! hot-reload, and host API bindings.
+//!
+//! Host functions are provided by the embedding application (see
+//! [`ScriptApi`]); this crate deliberately has no engine-layer dependencies.
 
 pub mod script;
 
+pub use moonfield_script_macros::script_function;
+
 use moonfield_app::prelude::World;
 use moonfield_app::{App, Plugin};
-use moonfield_log::info;
+use moonfield_log::{error, info, warn};
 
 #[cfg(all(feature = "v8-backend", not(feature = "quickjs-backend")))]
-use script::{ScriptApi, ScriptRuntime, V8Runtime as Runtime};
+pub use script::V8Runtime as Runtime;
 
 #[cfg(feature = "quickjs-backend")]
-use script::{QuickJsRuntime as Runtime, ScriptApi, ScriptRuntime};
+pub use script::QuickJsRuntime as Runtime;
+
+use script::{HostValue, HotReloader, ScriptApi, ScriptRuntime};
 use std::cell::RefCell;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::rc::Rc;
+use std::sync::Arc;
+use std::time::Instant;
+
+/// Runtime configuration hook used by [`ScriptPlugin::with_configure`],
+/// invoked right after the runtime is created.
+type ConfigureFn = Arc<dyn Fn(&mut Runtime) + Send + Sync>;
 
 /// Script system plugin.
 ///
-/// Runs the default script (`scripts/record_frame.ts` or `.js`) on startup.
-/// The runtime is kept alive across frames so that `gc_step()` can be called
-/// each frame for incremental GC control.
-pub struct ScriptPlugin;
+/// Loads an entry script (default `scripts/record_frame.js`, falling back to
+/// `.ts`) as an ESModule graph on startup, watches the entry's directory for
+/// changes and hot-reloads affected modules, and drives optional script-side
+/// lifecycle hooks:
+///
+/// - `main()` — called once after the module graph is first evaluated.
+/// - `on_update(dt)` — called every frame with the frame delta in seconds.
+/// - `on_shutdown()` — called once when the app shuts down.
+///
+/// Missing hooks are skipped silently. Script errors are logged and do not
+/// take down the app; a failed hot reload keeps the previously evaluated
+/// code running.
+///
+/// The runtime is kept alive across frames in an `Rc<RefCell<_>>` (the
+/// runtimes are `!Send`, so they cannot be World resources) so that
+/// incremental GC and hot reload can run each frame.
+pub struct ScriptPlugin {
+    /// Host functions exposed to scripts, built by the embedding application.
+    api: ScriptApi,
+    /// Entry script path; defaults to `scripts/record_frame.js` / `.ts`.
+    entry: Option<PathBuf>,
+    /// Extra runtime configuration hook (e.g. registering V8 direct
+    /// functions). Runs right after the runtime is created, before the entry
+    /// module is loaded.
+    configure: Option<ConfigureFn>,
+    /// Max JS heap size in bytes; `None` uses the backend default (128 MB).
+    memory_limit: Option<usize>,
+}
+
+impl Default for ScriptPlugin {
+    fn default() -> Self {
+        Self::new(ScriptApi::default())
+    }
+}
+
+impl ScriptPlugin {
+    /// Create a plugin that exposes `api` to scripts.
+    pub fn new(api: ScriptApi) -> Self {
+        Self {
+            api,
+            entry: None,
+            configure: None,
+            memory_limit: None,
+        }
+    }
+
+    /// Override the entry script path (default: `scripts/record_frame.js`
+    /// falling back to `scripts/record_frame.ts`).
+    pub fn with_entry(mut self, entry: impl Into<PathBuf>) -> Self {
+        self.entry = Some(entry.into());
+        self
+    }
+
+    /// Cap the JS engine's heap at `bytes` (default: 128 MB).
+    pub fn with_memory_limit(mut self, bytes: usize) -> Self {
+        self.memory_limit = Some(bytes);
+        self
+    }
+
+    /// Add a hook that runs right after the script runtime is created, e.g.
+    /// to register backend-specific fast-path host functions:
+    ///
+    /// ```ignore
+    /// ScriptPlugin::new(api).with_configure(|rt| {
+    ///     rt.register_direct("record_frame", direct_record_frame);
+    /// });
+    /// ```
+    pub fn with_configure(
+        mut self,
+        configure: impl Fn(&mut Runtime) + Send + Sync + 'static,
+    ) -> Self {
+        self.configure = Some(Arc::new(configure));
+        self
+    }
+}
+
+/// Per-app script runtime state shared by the plugin's systems.
+struct ScriptState {
+    runtime: Runtime,
+    hot_reloader: Option<HotReloader>,
+    /// Wall-clock of the previous update, used to compute `on_update(dt)`.
+    last_frame: Instant,
+}
 
 impl Plugin for ScriptPlugin {
     fn name(&self) -> &str {
@@ -33,77 +125,120 @@ impl Plugin for ScriptPlugin {
     }
 
     fn build(&self, app: &mut App) {
-        // V8Runtime is !Send + !Sync, so it can't be a World resource.
-        // Use Rc<RefCell<Option<Runtime>>> — the update system only
-        // requires FnMut + 'static (no Send).
-        let runtime_slot: Rc<RefCell<Option<Runtime>>> = Rc::new(RefCell::new(None));
+        // Runtimes are !Send + !Sync, so they can't be World resources.
+        // Use Rc<RefCell<Option<ScriptState>>> — the systems only require
+        // FnMut + 'static (no Send).
+        let state_slot: Rc<RefCell<Option<ScriptState>>> = Rc::new(RefCell::new(None));
 
-        let slot = runtime_slot.clone();
+        let api = self.api.clone();
+        let entry = self.entry.clone();
+        let configure = self.configure.clone();
+        let memory_limit = self.memory_limit;
+        let slot = state_slot.clone();
         app.add_startup_system(move |_world: &mut World| {
             info!("Script plugin startup");
-            match Runtime::new(ScriptApi::default()) {
-                Ok(mut runtime) => {
-                    let script_dir = Path::new("scripts");
-                    let js_path = script_dir.join("record_frame.js");
-                    let ts_path = script_dir.join("record_frame.ts");
-                    let script_path = if js_path.exists() { js_path } else { ts_path };
-                    match script::load_script(&script_path) {
-                        Ok(source) => {
-                            let _ = runtime.load(script_path.to_string_lossy().as_ref(), &source);
-                            let _ = runtime.warmup("main");
-                            let _ = runtime.call("main");
-                        }
-                        Err(e) => info!("Failed to load script: {}", e),
-                    }
-                    *slot.borrow_mut() = Some(runtime);
+            let mut runtime = match Runtime::new_with_memory_limit(
+                api,
+                memory_limit.unwrap_or(script::DEFAULT_MAX_HEAP_BYTES),
+            ) {
+                Ok(rt) => rt,
+                Err(e) => {
+                    error!("Failed to create script runtime: {}", e);
+                    return;
                 }
-                Err(e) => info!("Failed to create script runtime: {}", e),
+            };
+            if let Some(configure) = &configure {
+                configure(&mut runtime);
             }
+            let entry_path = entry.unwrap_or_else(default_script_path);
+            if let Err(e) = load_module_entry(&mut runtime, &entry_path) {
+                error!("Failed to load script '{}': {}", entry_path.display(), e);
+                return;
+            }
+            // Watch the entry's directory for hot reload. Editing `.ts`
+            // sources only takes effect once the pre-compiled `.js` is
+            // refreshed (e.g. via `tsc -w`); editing `.js` reloads directly.
+            let watch_dir = entry_path
+                .parent()
+                .filter(|p| !p.as_os_str().is_empty())
+                .unwrap_or(Path::new("."))
+                .to_path_buf();
+            let hot_reloader = match HotReloader::new(&watch_dir) {
+                Ok(reloader) => Some(reloader),
+                Err(e) => {
+                    warn!(
+                        "Hot reload disabled (cannot watch '{}'): {}",
+                        watch_dir.display(),
+                        e
+                    );
+                    None
+                }
+            };
+            *slot.borrow_mut() = Some(ScriptState {
+                runtime,
+                hot_reloader,
+                last_frame: Instant::now(),
+            });
         });
 
-        let slot = runtime_slot.clone();
+        let slot = state_slot.clone();
         app.add_update_system(move |_world: &mut World| {
-            if let Some(rt) = slot.borrow_mut().as_mut() {
-                rt.gc_step();
+            let mut slot = slot.borrow_mut();
+            let Some(state) = slot.as_mut() else {
+                return true;
+            };
+            state.runtime.gc_step();
+            if let Some(reloader) = state.hot_reloader.as_mut() {
+                if let Err(e) = reloader.poll(&mut state.runtime) {
+                    error!("Hot reload failed: {}", e);
+                }
+            }
+            let now = Instant::now();
+            let dt = now.duration_since(state.last_frame).as_secs_f64();
+            state.last_frame = now;
+            if state.runtime.has_function("on_update") {
+                if let Err(e) = state
+                    .runtime
+                    .call_module_export("on_update", &[HostValue::Number(dt)])
+                {
+                    error!("script on_update failed: {}", e);
+                }
             }
             true
         });
 
-        let slot = runtime_slot;
+        let slot = state_slot;
         app.add_shutdown_system(move |_world: &mut World| {
             info!("Script plugin shutdown");
+            if let Some(state) = slot.borrow_mut().as_mut() {
+                if state.runtime.has_function("on_shutdown") {
+                    if let Err(e) = state.runtime.call_module_export("on_shutdown", &[]) {
+                        error!("script on_shutdown failed: {}", e);
+                    }
+                }
+            }
             *slot.borrow_mut() = None;
         });
     }
 }
 
-/// Run the default script entry point.
-///
-/// Loads `scripts/record_frame.js` (or `.ts`), registers host APIs, and calls
-/// the top-level `main()` function if it exists.
-///
-/// TypeScript is loaded as pre-compiled JavaScript (from `target/scripts/`
-/// or alongside the `.ts` file). The V8 backend requires pre-compiled JS;
-/// the QuickJS backend can fall back to swc-based transpilation at runtime.
-pub fn run_default_script() -> script::Result<()> {
+/// Resolve the default entry script: `scripts/record_frame.js` if present,
+/// else `scripts/record_frame.ts`.
+fn default_script_path() -> PathBuf {
     let script_dir = Path::new("scripts");
     let js_path = script_dir.join("record_frame.js");
-    let ts_path = script_dir.join("record_frame.ts");
-    let script_path = if js_path.exists() { js_path } else { ts_path };
-
-    let source = script::load_script(&script_path)?;
-    let mut runtime = Runtime::new(ScriptApi::default())?;
-    runtime.load(script_path.to_string_lossy().as_ref(), &source)?;
-    // Warm up JIT so the first frame-loop iteration runs compiled code.
-    let _ = runtime.warmup("main");
-    let _ = runtime.call("main");
-    Ok(())
+    if js_path.exists() {
+        js_path
+    } else {
+        script_dir.join("record_frame.ts")
+    }
 }
 
-/// Run a script module using the ESModule module system.
+/// Load an entry script as an ESModule graph: register it, resolve all
+/// transitive dependencies from disk, then compile/instantiate/evaluate the
+/// graph and call the entry's `main()` export if present.
 ///
-/// Resolves all transitive dependencies, then loads and evaluates the module
-/// graph via V8's native ESModule API.
+/// Returns the canonical entry name.
 ///
 /// # Example
 ///
@@ -112,24 +247,30 @@ pub fn run_default_script() -> script::Result<()> {
 /// import { record_frame } from "./record_frame.js";
 /// export function main() { record_frame(); }
 /// ```
-#[cfg(all(feature = "v8-backend", not(feature = "quickjs-backend")))]
-pub fn run_script_module(entry: &str) -> crate::script::Result<()> {
+pub fn load_module_entry(runtime: &mut Runtime, entry_path: &Path) -> script::Result<String> {
     use script::ModuleRegistry;
-    use std::rc::Rc;
 
-    let entry_path = Path::new(entry);
+    let entry_str = entry_path.to_string_lossy().replace('\\', "/");
     let source = script::load_script(entry_path)?;
 
     let mut registry = ModuleRegistry::new();
-    let canonical_name = registry.register(entry, source);
+    let canonical_name = registry.register(&entry_str, source);
 
     // Resolve and register all transitive dependencies.
     registry
         .resolve_dependencies(&canonical_name)
-        .map_err(|e| script::ScriptError::Execution(e))?;
-
-    let mut runtime = Runtime::new(ScriptApi::default())?;
+        .map_err(script::ScriptError::Execution)?;
 
     // Load and evaluate the module graph, then call main().
-    runtime.load_module_graph(Rc::new(registry), &canonical_name)
+    runtime.load_module_graph(Rc::new(registry), &canonical_name)?;
+    Ok(canonical_name)
+}
+
+/// Run a script module entry point to completion using the module system.
+///
+/// Convenience wrapper around [`load_module_entry`] for one-shot usage.
+pub fn run_script_module(entry: &str, api: ScriptApi) -> script::Result<()> {
+    let mut runtime = Runtime::new(api)?;
+    load_module_entry(&mut runtime, Path::new(entry))?;
+    Ok(())
 }

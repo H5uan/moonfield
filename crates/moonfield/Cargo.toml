@@ -7,6 +7,11 @@ edition.workspace = true
 name = "moonfield"
 path = "src/main.rs"
 
+[features]
+default = ["v8-backend"]
+v8-backend = ["moonfield-script/v8-backend", "dep:v8"]
+quickjs-backend = ["moonfield-script/quickjs-backend"]
+
 [dependencies]
 moonfield-app = { workspace = true }
 moonfield-base = { workspace = true }
@@ -14,3 +19,4 @@ moonfield-log = { workspace = true }
 moonfield-script = { workspace = true }
 moonfield-render = { workspace = true }
 moonfield-winit = { workspace = true }
+v8 = { version = "150.1.0", optional = true }

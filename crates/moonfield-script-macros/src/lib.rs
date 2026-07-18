@@ -21,8 +21,12 @@ use syn::{parse_macro_input, FnArg, ItemFn, Pat, ReturnType, Type};
 /// The annotated function must have the signature:
 /// `fn name(param1: Type1, param2: Type2) -> Result<ReturnType, String>`
 ///
-/// Supported parameter types: `u32`, `f64`, `bool`, `String`, `HostValue`
+/// Supported parameter types: `u32`, `f64`, `bool`, `String`, `HostValue`,
+/// and `Option<T>` wrappers of those (mapped to optional TS parameters).
 /// Supported return types: `u32`, `f64`, `bool`, `String`, `HostValue`, `()`, `Vec<u8>`
+///
+/// The macro can be used in any crate that depends on `moonfield-script`;
+/// generated code refers to types via absolute `::moonfield_script::script` paths.
 #[proc_macro_attribute]
 pub fn script_function(_attr: TokenStream, item: TokenStream) -> TokenStream {
     let func = parse_macro_input!(item as ItemFn);
@@ -82,7 +86,7 @@ pub fn script_function(_attr: TokenStream, item: TokenStream) -> TokenStream {
     // Determine the return type conversion.
     let ret_conversion = match &func.sig.output {
         ReturnType::Default => {
-            quote! { Ok(HostValue::Null) }
+            quote! { Ok(::moonfield_script::script::HostValue::Null) }
         }
         ReturnType::Type(_, ty) => {
             let ty_str = quote!(#ty).to_string();
@@ -91,21 +95,21 @@ pub fn script_function(_attr: TokenStream, item: TokenStream) -> TokenStream {
                 if inner_is_unit {
                     quote! {
                         match #fn_name(#(#param_names),*) {
-                            Ok(()) => Ok(HostValue::Null),
+                            Ok(()) => Ok(::moonfield_script::script::HostValue::Null),
                             Err(e) => Err(e.to_string()),
                         }
                     }
                 } else {
                     quote! {
                         match #fn_name(#(#param_names),*) {
-                            Ok(val) => Ok(HostValue::from(val)),
+                            Ok(val) => Ok(::moonfield_script::script::HostValue::from(val)),
                             Err(e) => Err(e.to_string()),
                         }
                     }
                 }
             } else {
                 quote! {
-                    Ok(HostValue::from(#fn_name(#(#param_names),*)))
+                    Ok(::moonfield_script::script::HostValue::from(#fn_name(#(#param_names),*)))
                 }
             }
         }
@@ -118,8 +122,14 @@ pub fn script_function(_attr: TokenStream, item: TokenStream) -> TokenStream {
     let ts_params: Vec<String> = params
         .iter()
         .map(|p| {
-            let ty_str = quote!(#(&p.ty)).to_string();
-            format!("{}: {}", p.name, rust_type_to_ts(&ty_str))
+            let ty = &p.ty;
+            let ty_str = normalize_ty(&quote!(#ty).to_string());
+            let (ts_ty, optional) = rust_type_to_ts(&ty_str);
+            if optional {
+                format!("{}?: {}", p.name, ts_ty)
+            } else {
+                format!("{}: {}", p.name, ts_ty)
+            }
         })
         .collect();
     let ts_ret = match &func.sig.output {
@@ -146,10 +156,10 @@ pub fn script_function(_attr: TokenStream, item: TokenStream) -> TokenStream {
         #[doc(hidden)]
         #vis struct #struct_name;
 
-        impl crate::script::ScriptFunction for #struct_name {
+        impl ::moonfield_script::script::ScriptFunction for #struct_name {
             const NAME: &'static str = #fn_name_str;
 
-            fn call(args: &[crate::script::HostValue]) -> Result<crate::script::HostValue, String> {
+            fn call(args: &[::moonfield_script::script::HostValue]) -> Result<::moonfield_script::script::HostValue, String> {
                 #(#extractions)*
                 #ret_conversion
             }
@@ -168,16 +178,31 @@ struct ParamInfo {
     ty: Type,
 }
 
+/// Normalize a stringified Rust type by removing all whitespace, so that
+/// e.g. `Option < u32 >` and `Option<u32>` compare equal.
+fn normalize_ty(ty_str: &str) -> String {
+    ty_str.split_whitespace().collect()
+}
+
 /// Map a Rust type string to a TypeScript type string.
-fn rust_type_to_ts(ty_str: &str) -> &str {
-    let ty_str = ty_str.trim_start_matches("& ").to_string();
-    match ty_str.as_str() {
+///
+/// Returns the TypeScript type and whether the parameter is optional
+/// (`Option<T>` maps to an optional TS parameter).
+fn rust_type_to_ts(ty_str: &str) -> (&'static str, bool) {
+    if let Some(inner) = ty_str
+        .strip_prefix("Option<")
+        .and_then(|s| s.strip_suffix('>'))
+    {
+        return (rust_type_to_ts(inner).0, true);
+    }
+    let ts = match ty_str.trim_start_matches('&') {
         "u32" | "i32" | "u64" | "i64" | "usize" | "isize" | "f32" | "f64" => "number",
         "bool" => "boolean",
-        "String" | "&str" => "string",
+        "String" | "str" | "&str" => "string",
         "Vec<u8>" => "Uint8Array",
         _ => "any",
-    }
+    };
+    (ts, false)
 }
 
 /// Map a return type string to a TypeScript return type.
@@ -207,9 +232,27 @@ fn extract_param_code(name: &str, ty: &Type, index: usize) -> proc_macro2::Token
     let name_ident = syn::Ident::new(name, proc_macro2::Span::call_site());
     let index_lit = index;
 
-    let ty_str = quote!(#ty).to_string();
-    // Strip leading "& " if present (e.g., `&str` → `str`).
-    let ty_str = ty_str.trim_start_matches("& ").to_string();
+    let ty_str = normalize_ty(&quote!(#ty).to_string());
+    let ty_str = ty_str.trim_start_matches('&').to_string();
+
+    // `Option<T>` parameters are optional: a missing or mistyped argument
+    // yields `None` instead of an error.
+    if let Some(inner) = ty_str
+        .strip_prefix("Option<")
+        .and_then(|s| s.strip_suffix('>'))
+    {
+        let extraction = match inner {
+            "u32" | "u64" | "usize" => quote! { |v| v.as_u32().map(|n| n as _) },
+            "i32" | "i64" | "isize" => quote! { |v| v.as_u32().map(|n| n as _) },
+            "f64" | "f32" => quote! { |v| v.as_f64().map(|n| n as _) },
+            "bool" => quote! { |v| v.as_bool() },
+            "String" | "str" => quote! { |v| v.as_str().map(|s| s.to_string()) },
+            _ => quote! { |_| Option::None },
+        };
+        return quote! {
+            let #name_ident: #ty = args.get(#index_lit).and_then(#extraction);
+        };
+    }
 
     // Match common types to generate appropriate extraction code.
     match ty_str.as_str() {
@@ -242,7 +285,7 @@ fn extract_param_code(name: &str, ty: &Type, index: usize) -> proc_macro2::Token
             let #name_ident = args
                 .get(#index_lit)
                 .cloned()
-                .unwrap_or(moonfield_script::script::HostValue::Null);
+                .unwrap_or(::moonfield_script::script::HostValue::Null);
         },
         // Other types: try to clone the HostValue directly.
         _ => quote! {

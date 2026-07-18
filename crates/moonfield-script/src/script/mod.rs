@@ -10,14 +10,21 @@
 //! `scripts/tsconfig.json`). The runtime loads pre-compiled `.js` files from
 //! `target/scripts/` or alongside the `.ts` source.
 //!
-//! For the V8 backend, V8's native `--strip-types` flag also allows loading
-//! `.ts` files directly at runtime — no preprocessing needed. QuickJS has no
-//! native TS support, so the `quickjs-backend` feature optionally enables
-//! swc-based transpilation as a fallback.
+//! The V8 backend requires pre-compiled JS — it cannot load `.ts` sources
+//! directly. The QuickJS backend has no native TS support either, so the
+//! `quickjs-backend` feature enables swc-based transpilation as a runtime
+//! fallback when no pre-compiled `.js` is found.
+//!
+//! When `tsc` emits source maps (`"sourceMap": true` in
+//! `scripts/tsconfig.json`), the V8 backend remaps error locations from the
+//! compiled JS back to the original TS positions (see `source_map`).
 
 pub mod api;
 pub mod hot_reload;
 pub mod module;
+
+#[cfg(feature = "v8-backend")]
+pub(crate) mod source_map;
 
 #[cfg(feature = "quickjs-backend")]
 pub mod quickjs;
@@ -42,6 +49,12 @@ pub use quickjs::QuickJsRuntime;
 pub use v8_runtime::V8Runtime;
 
 use std::path::{Path, PathBuf};
+
+/// Default maximum JS heap size (both backends).
+pub const DEFAULT_MAX_HEAP_BYTES: usize = 128 * 1024 * 1024;
+
+/// Default per-execution timeout for top-level script calls (both backends).
+pub const DEFAULT_EXECUTION_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(5);
 
 /// Errors that can occur in the scripting layer.
 #[derive(Debug)]
@@ -110,19 +123,49 @@ pub trait ScriptRuntime {
     /// functions on the module namespace object.
     ///
     /// Default implementation delegates to `call_with_args`.
-    fn call_module_export(
-        &mut self,
-        function: &str,
-        args: &[HostValue],
-    ) -> Result<HostValue> {
+    fn call_module_export(&mut self, function: &str, args: &[HostValue]) -> Result<HostValue> {
         self.call_with_args(function, args)
+    }
+
+    /// Check whether a callable named `name` is currently available.
+    ///
+    /// Backends check the entry module's exports first (when a module graph
+    /// is loaded) and fall back to globals. Used to invoke optional
+    /// script-side lifecycle hooks (`on_update`, `on_shutdown`) without
+    /// producing errors when the script does not define them.
+    ///
+    /// Default implementation returns `false`.
+    fn has_function(&mut self, name: &str) -> bool {
+        let _ = name;
+        false
+    }
+
+    /// Load and evaluate an ESModule graph from a resolved registry.
+    ///
+    /// `registry` must already contain the entry module and all of its
+    /// transitive dependencies (see [`ModuleRegistry::resolve_dependencies`]).
+    /// After evaluation, the entry module's `main()` export is called if
+    /// present, and the registry is cached for hot reload.
+    ///
+    /// The default implementation reports the backend as not supporting
+    /// module graphs.
+    fn load_module_graph(
+        &mut self,
+        registry: std::rc::Rc<ModuleRegistry>,
+        entry: &str,
+    ) -> Result<()> {
+        let _ = (registry, entry);
+        Err(ScriptError::BackendNotAvailable(
+            "module graph loading".into(),
+        ))
     }
 
     /// Warm up the JIT compiler by running the entry function a few times.
     ///
     /// V8's JIT (Sparkplug/Turbofan) requires multiple executions before
-    /// compiling hot paths. Calling this after loading the script ensures
-    /// the frame loop runs compiled code from the first frame.
+    /// compiling hot paths. **This executes the function, side effects and
+    /// all** — only use it when running the entry point several times is
+    /// acceptable, or when the function is side-effect free.
     ///
     /// Default implementation is a no-op for engines without JIT (QuickJS).
     fn warmup(&mut self, function: &str) -> Result<()> {
@@ -149,13 +192,13 @@ pub trait ScriptRuntime {
 /// Loading strategy:
 /// 1. If the path ends in `.js`, read it directly.
 /// 2. If the path ends in `.ts`:
-///    a. First look for a `.js` file at `target/scripts/<filename>.js`
-///       (build-time tsc output).
-///    b. If not found, look for a `.js` file alongside the `.ts` file.
-///    c. If neither exists and the `quickjs-backend` feature is active,
-///       fall back to swc-based transpilation. Otherwise, return an error
-///       (V8 requires pre-compiled JS, or the `.ts` file must be pre-compiled
-///       via `tsc`; see `scripts/tsconfig.json`).
+///    - First look for a `.js` file at `target/scripts/<filename>.js`
+///      (build-time tsc output).
+///    - If not found, look for a `.js` file alongside the `.ts` file.
+///    - If neither exists and the `quickjs-backend` feature is active,
+///      fall back to swc-based transpilation. Otherwise, return an error
+///      (V8 requires pre-compiled JS, or the `.ts` file must be pre-compiled
+///      via `tsc`; see `scripts/tsconfig.json`).
 pub fn load_script<P: AsRef<Path>>(path: P) -> Result<String> {
     let path = path.as_ref();
 
@@ -188,7 +231,7 @@ pub fn load_script<P: AsRef<Path>>(path: P) -> Result<String> {
     {
         let source = std::fs::read_to_string(path)
             .map_err(|e| ScriptError::Execution(format!("failed to read script: {}", e)))?;
-        return transpile_typescript(&source);
+        transpile_typescript(&source)
     }
 
     #[cfg(not(feature = "quickjs-backend"))]

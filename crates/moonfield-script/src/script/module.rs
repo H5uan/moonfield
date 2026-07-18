@@ -373,6 +373,11 @@ impl ModuleRegistry {
     /// Find the canonical name of the module that corresponds to the given
     /// file path. Used by hot reload to match absolute file-watcher paths
     /// to relative canonical names in the registry.
+    ///
+    /// Same-named modules in different directories (e.g. `foo/utils.ts` vs
+    /// `bar/utils.ts`) are disambiguated by picking the longest matching
+    /// module name; equal-length ties resolve lexicographically for
+    /// determinism.
     pub fn find_by_file_path(&self, path: &Path) -> Option<String> {
         let path_str = path.to_string_lossy().replace('\\', "/");
         // Strip file extension to get the path stem.
@@ -381,15 +386,31 @@ impl ModuleRegistry {
             _ => &path_str,
         };
 
+        let mut best: Option<&ModuleInfo> = None;
         for info in self.modules.values() {
-            let name = &info.name;
-            // Normalize: strip "./" prefix.
-            let normalized = name.strip_prefix("./").unwrap_or(name);
-            if path_stem.ends_with(normalized) || normalized == path_stem {
-                return Some(info.name.clone());
+            let name = info.name.strip_prefix("./").unwrap_or(&info.name);
+            // Exact match, or suffix match at a path-segment boundary (so
+            // `myutils` never matches a module named `utils`).
+            let matches = path_stem == name
+                || (path_stem.len() > name.len()
+                    && path_stem.ends_with(name)
+                    && path_stem.as_bytes()[path_stem.len() - name.len() - 1] == b'/');
+            if !matches {
+                continue;
+            }
+            let dominates = match best {
+                None => true,
+                Some(b) => {
+                    let best_name = b.name.strip_prefix("./").unwrap_or(&b.name);
+                    name.len() > best_name.len()
+                        || (name.len() == best_name.len() && name < best_name)
+                }
+            };
+            if dominates {
+                best = Some(info);
             }
         }
-        None
+        best.map(|info| info.name.clone())
     }
 
     /// Compute the set of modules that transitively import `target`
@@ -431,9 +452,9 @@ impl ModuleRegistry {
         let mut visited = HashMap::new(); // false = visiting, true = done
         let mut order = Vec::new();
 
-        fn visit<'a>(
+        fn visit(
             name: &str,
-            modules: &'a HashMap<String, ModuleInfo>,
+            modules: &HashMap<String, ModuleInfo>,
             visited: &mut HashMap<String, bool>,
             order: &mut Vec<String>,
         ) -> Result<(), String> {
@@ -488,7 +509,7 @@ impl ModuleRegistry {
     /// Canonicalize a module name: strip file extension, normalize path.
     fn canonicalize(&self, name: &str) -> String {
         let name = name.replace('\\', "/");
-        let stem = if let Some(dot) = name.rfind('.') {
+        if let Some(dot) = name.rfind('.') {
             if name[dot..].contains('/') {
                 name.clone()
             } else {
@@ -496,8 +517,7 @@ impl ModuleRegistry {
             }
         } else {
             name
-        };
-        stem
+        }
     }
 
     /// Normalize a path, removing `.` and `..` components.
@@ -719,5 +739,24 @@ export { baz } from './baz';
         let path = Path::new("a/b/../c/./d");
         let normalized = ModuleRegistry::normalize_path(path);
         assert_eq!(normalized, Path::new("a/c/d"));
+    }
+
+    #[test]
+    fn test_find_by_file_path_prefers_longest_match() {
+        let mut reg = ModuleRegistry::new();
+        reg.register("./utils", "export const x = 1;".to_string());
+        reg.register("scripts/foo/utils", "export const y = 2;".to_string());
+
+        // An absolute watcher path matching both suffixes must resolve to the
+        // deeper (more specific) module.
+        let found = reg.find_by_file_path(Path::new("/work/project/scripts/foo/utils.js"));
+        assert_eq!(found, Some("scripts/foo/utils".to_string()));
+
+        let found = reg.find_by_file_path(Path::new("/work/project/utils.js"));
+        assert_eq!(found, Some("./utils".to_string()));
+
+        // Segment-boundary check: `myutils` must not match module `utils`.
+        let found = reg.find_by_file_path(Path::new("/work/project/myutils.js"));
+        assert_eq!(found, None);
     }
 }
