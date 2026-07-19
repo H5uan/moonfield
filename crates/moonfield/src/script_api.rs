@@ -9,7 +9,8 @@ use moonfield_render::HeadlessContext;
 use moonfield_script::input::{register_input_api, SharedInputState};
 use moonfield_script::register_window_api;
 use moonfield_script::script::ScriptApi;
-use moonfield_window::WindowControl;
+use moonfield_script::time::{register_time_api, SharedTimeState};
+use moonfield_window::{SharedWindow, WindowControl, WindowRequests};
 use std::cell::RefCell;
 
 thread_local! {
@@ -41,11 +42,18 @@ fn ensure_headless_context(width: u32, height: u32) -> Result<(), String> {
 }
 
 /// Build the host API exposed to scripts.
-pub fn build_script_api(input: &SharedInputState, window_control: &WindowControl) -> ScriptApi {
+pub fn build_script_api(
+    input: &SharedInputState,
+    time: &SharedTimeState,
+    window_control: &WindowControl,
+    window: &SharedWindow,
+    window_requests: &WindowRequests,
+) -> ScriptApi {
     let mut api = ScriptApi::new();
     api.register_fn::<record_frame_Fn>();
     register_input_api(&mut api, input);
-    register_window_api(&mut api, window_control);
+    register_time_api(&mut api, time);
+    register_window_api(&mut api, window_control, window, window_requests);
     api
 }
 
@@ -96,9 +104,39 @@ fn direct_record_frame(
     }
 }
 
+/// Fast-path `record_frame` that extracts `u32` args directly from QuickJS
+/// values, bypassing the `HostValue` marshaling chain.
+#[cfg(feature = "quickjs-backend")]
+fn direct_record_frame(
+    ctx: rquickjs::Ctx,
+    args: rquickjs::function::Rest<rquickjs::Value>,
+) -> rquickjs::Result<()> {
+    let width = args
+        .0
+        .first()
+        .and_then(|v| v.as_int())
+        .map(|i| i.max(0) as u32)
+        .unwrap_or(DEFAULT_WIDTH);
+    let height = args
+        .0
+        .get(1)
+        .and_then(|v| v.as_int())
+        .map(|i| i.max(0) as u32)
+        .unwrap_or(DEFAULT_HEIGHT);
+
+    ensure_headless_context(width, height)
+        .map_err(|e| rquickjs::Exception::throw_message(&ctx, &e))?;
+    Ok(())
+}
+
 /// Install backend-specific fast-path host functions on a freshly created
 /// script runtime.
 #[cfg(all(feature = "v8-backend", not(feature = "quickjs-backend")))]
+pub fn configure_runtime(rt: &mut moonfield_script::Runtime) {
+    rt.register_direct("record_frame", direct_record_frame);
+}
+
+#[cfg(feature = "quickjs-backend")]
 pub fn configure_runtime(rt: &mut moonfield_script::Runtime) {
     rt.register_direct("record_frame", direct_record_frame);
 }
@@ -113,7 +151,10 @@ mod tests {
     fn dts_matches_registered_api() {
         let api = build_script_api(
             &moonfield_script::new_shared_input(),
+            &moonfield_script::new_shared_time(),
             &WindowControl::default(),
+            &moonfield_window::new_shared_window(),
+            &WindowRequests::default(),
         );
         let generated = api.generate_dts();
         let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))

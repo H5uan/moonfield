@@ -12,10 +12,21 @@
 //! `app_set_auto_exit_on_close(false)` to receive `close_requested` events
 //! instead, then call `app_exit()` when actually ready to quit.
 
-use moonfield_window::{WindowControl, WindowEventKind};
+use moonfield_window::{SharedWindow, WindowControl, WindowEventKind, WindowRequests};
 use std::collections::HashMap;
+use std::sync::{Arc, MutexGuard};
 
 use crate::script::{HostValue, ScriptApi};
+
+/// Lock the shared window handle, tolerating a poisoned mutex.
+fn lock_window(window: &SharedWindow) -> MutexGuard<'_, moonfield_window::Window> {
+    window.lock().unwrap_or_else(|e| e.into_inner())
+}
+
+/// Pack two numbers as a `[x, y]` array.
+fn pair(x: f64, y: f64) -> HostValue {
+    HostValue::Array(vec![HostValue::Number(x), HostValue::Number(y)])
+}
 
 /// Marshal a [`WindowEventKind`] into a `HostValue::Object` for the
 /// `on_window_event(event)` script hook.
@@ -43,11 +54,18 @@ pub fn window_event_to_host(event: &WindowEventKind) -> HostValue {
     HostValue::Object(map)
 }
 
-/// Register the built-in `app_*` window-control host functions.
+/// Register the built-in `app_*` window-control host functions plus
+/// `window_size` / `window_set_title`.
 ///
-/// These only touch the shared [`WindowControl`] signals — no engine-layer
-/// dependencies, so they live here rather than in the composition root.
-pub fn register_window_api(api: &mut ScriptApi, control: &WindowControl) {
+/// These only touch the shared [`WindowControl`] signals and [`SharedWindow`]
+/// handle — no engine-layer dependencies, so they live here rather than in the
+/// composition root.
+pub fn register_window_api(
+    api: &mut ScriptApi,
+    control: &WindowControl,
+    window: &SharedWindow,
+    window_requests: &WindowRequests,
+) {
     {
         let control = control.clone();
         api.register_closure("app_exit", move |_args| {
@@ -68,6 +86,26 @@ pub fn register_window_api(api: &mut ScriptApi, control: &WindowControl) {
         });
         api.declare("declare function app_set_auto_exit_on_close(enabled: boolean): void;");
     }
+    {
+        let handle = Arc::clone(window);
+        api.register_closure("window_size", move |_args| {
+            let w = lock_window(&handle);
+            Ok(pair(w.width as f64, w.height as f64))
+        });
+        api.declare("declare function window_size(): [number, number];");
+    }
+    {
+        let requests = window_requests.clone();
+        api.register_closure("window_set_title", move |args| {
+            let title = args
+                .first()
+                .and_then(|v| v.as_str())
+                .ok_or_else(|| "arg 0: expected string".to_string())?;
+            requests.request_title(title.to_string());
+            Ok(HostValue::Null)
+        });
+        api.declare("declare function window_set_title(title: string): void;");
+    }
 }
 
 #[cfg(test)]
@@ -77,8 +115,10 @@ mod tests {
     #[test]
     fn window_control_roundtrip_through_host_fns() {
         let control = WindowControl::default();
+        let window = moonfield_window::new_shared_window();
+        let requests = WindowRequests::default();
         let mut api = ScriptApi::new();
-        register_window_api(&mut api, &control);
+        register_window_api(&mut api, &control, &window, &requests);
 
         let mut fns: HashMap<&str, &crate::script::HostFn> = HashMap::new();
         for entry in api.iter() {
@@ -95,7 +135,24 @@ mod tests {
         fns["app_exit"](&[]).unwrap();
         assert!(control.exit_requested());
 
+        // Window size reflects the shared handle.
+        {
+            let mut w = window.lock().unwrap();
+            w.width = 1024;
+            w.height = 768;
+        }
+        let size = fns["window_size"](&[]).unwrap();
+        let arr = size.as_array().unwrap();
+        assert_eq!(arr[0].as_f64(), Some(1024.0));
+        assert_eq!(arr[1].as_f64(), Some(768.0));
+
+        // Title request is queued for the backend.
+        assert!(requests.take_title().is_none());
+        fns["window_set_title"](&[HostValue::String("Test".to_string())]).unwrap();
+        assert_eq!(requests.take_title(), Some("Test".to_string()));
+
         // Arg validation.
         assert!(fns["app_set_auto_exit_on_close"](&[HostValue::Number(1.0)]).is_err());
+        assert!(fns["window_set_title"](&[HostValue::Number(1.0)]).is_err());
     }
 }

@@ -1380,6 +1380,7 @@ dependencies = [
  "moonfield-script",
  "moonfield-window",
  "moonfield-winit",
+ "rquickjs",
  "v8",
 ]
 

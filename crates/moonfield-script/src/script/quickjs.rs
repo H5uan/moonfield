@@ -44,6 +44,15 @@ globalThis.console = {
 /// Hot reload: re-evaluates the full bundle on file change (QuickJS has no
 /// incremental compiled-module cache like V8). Runtime JS state is reset on
 /// every reload.
+/// A direct (fast-path) host function plus its registration name.
+///
+/// Stored as a function pointer so it can be re-installed on reload without
+/// depending on a capturing closure.
+struct DirectFnEntry {
+    name: &'static str,
+    func: fn(Ctx, Rest<Value>) -> rquickjs::Result<()>,
+}
+
 pub struct QuickJsRuntime {
     runtime: Runtime,
     context: Context,
@@ -59,6 +68,12 @@ pub struct QuickJsRuntime {
     execution_timeout: Duration,
     /// Last time `run_gc` ran; `gc_step` throttles full collections.
     last_gc: Instant,
+    /// Direct (fast-path) host functions that bypass `HostValue` marshaling.
+    /// Each entry is boxed so the vector can grow without moving existing
+    /// entries (not strictly required for function pointers, but keeps the
+    /// pattern consistent with the V8 backend).
+    #[allow(clippy::vec_box)] // box required for pointer stability, see above
+    direct_fns: Vec<Box<DirectFnEntry>>,
 }
 
 impl ScriptRuntime for QuickJsRuntime {
@@ -238,9 +253,40 @@ impl QuickJsRuntime {
             deadline,
             execution_timeout: DEFAULT_EXECUTION_TIMEOUT,
             last_gc: Instant::now(),
+            direct_fns: Vec::new(),
         };
         rt.register_api()?;
         Ok(rt)
+    }
+
+    /// Register a fast-path host function that operates on QuickJS values
+    /// directly, bypassing the `HostValue` marshaling layer.
+    ///
+    /// The binding is installed into the current context immediately
+    /// (overwriting any `HostFn` binding with the same name) and re-installed
+    /// on every `reload()`.
+    pub fn register_direct(
+        &mut self,
+        name: &'static str,
+        func: fn(Ctx, Rest<Value>) -> rquickjs::Result<()>,
+    ) {
+        if self.direct_fns.iter().any(|e| e.name == name) {
+            return;
+        }
+        self.direct_fns.push(Box::new(DirectFnEntry { name, func }));
+        let entry = self.direct_fns.last().unwrap();
+        self.context
+            .with(|ctx| Self::install_direct(&ctx, entry))
+            .unwrap_or_else(|e: rquickjs::Error| {
+                error!("register_direct('{}'): {:?}", name, e);
+            });
+    }
+
+    /// Install one direct-function binding into the context's global object.
+    fn install_direct(ctx: &Ctx, entry: &DirectFnEntry) -> rquickjs::Result<()> {
+        let global = ctx.globals();
+        global.set(entry.name, Func::from(entry.func))?;
+        Ok(())
     }
 
     /// Set the per-execution time limit for top-level script calls.
@@ -311,8 +357,21 @@ impl QuickJsRuntime {
         self.context
             .with(|ctx| {
                 let global = ctx.globals();
+
+                // Register direct (fast-path) functions first — no HostValue marshaling.
+                for entry in &self.direct_fns {
+                    Self::install_direct(&ctx, entry)?;
+                }
+
+                // Names shadowed by a direct function, so regular HostFn entries skip them.
+                let direct_names: std::collections::HashSet<&str> =
+                    self.direct_fns.iter().map(|e| e.name).collect();
+
                 for entry in self.api.iter() {
                     let (name, func) = (entry.0, entry.1.clone());
+                    if direct_names.contains(name) {
+                        continue;
+                    }
                     // Use a non-capturing wrapper to avoid borrow issues with `name`.
                     let wrapper = ApiFuncWrapper { name, func };
                     global.set(

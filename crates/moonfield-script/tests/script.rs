@@ -887,6 +887,8 @@ fn window_events_and_exit_control_end_to_end() {
     let sink = std::sync::Arc::clone(&reports);
     let input = moonfield_script::new_shared_input();
     let control = moonfield_window::WindowControl::default();
+    let window = moonfield_window::new_shared_window();
+    let window_requests = moonfield_window::WindowRequests::default();
     let mut api = test_api();
     api.register_closure("report", move |args| {
         sink.lock()
@@ -895,7 +897,7 @@ fn window_events_and_exit_control_end_to_end() {
         Ok(HostValue::Null)
     });
     moonfield_script::register_input_api(&mut api, &input);
-    moonfield_script::register_window_api(&mut api, &control);
+    moonfield_script::register_window_api(&mut api, &control, &window, &window_requests);
 
     let mut app = moonfield_app::App::new();
     app.insert_resource(moonfield_window::WindowEvents::default());

@@ -6,7 +6,8 @@
 use moonfield_app::{App, Plugin};
 use moonfield_log::error;
 use moonfield_window::{
-    InputEvent, InputState, RawHandleWrapper, WindowControl, WindowEventKind, WindowEvents,
+    CursorMode, InputEvent, InputState, RawHandleWrapper, SharedWindow, Window, WindowControl,
+    WindowEventKind, WindowEvents, WindowRequests,
 };
 use raw_window_handle::{HasDisplayHandle, HasWindowHandle};
 use std::collections::HashMap;
@@ -17,7 +18,7 @@ use winit::{
     event::{ElementState, MouseButton, MouseScrollDelta, WindowEvent},
     event_loop::{ActiveEventLoop, ControlFlow, EventLoop},
     keyboard::{KeyCode, PhysicalKey},
-    window::{Window, WindowAttributes, WindowId},
+    window::{CursorGrabMode, Window as WinitWindowHandle, WindowAttributes, WindowId},
 };
 
 /// Plugin that creates a winit window and runs the winit event loop.
@@ -48,6 +49,10 @@ pub struct WinitPlugin {
     pub wait_mode: WaitMode,
     /// Window control signals shared with scripts (exit policy).
     pub window_control: WindowControl,
+    /// Shared window state read by host functions.
+    pub window_state: SharedWindow,
+    /// Pending window mutation requests from host functions.
+    pub window_requests: WindowRequests,
 }
 
 /// Control-flow strategy for the event loop.
@@ -68,6 +73,8 @@ impl Default for WinitPlugin {
             height: 600,
             wait_mode: WaitMode::Wait,
             window_control: WindowControl::default(),
+            window_state: moonfield_window::new_shared_window(),
+            window_requests: WindowRequests::default(),
         }
     }
 }
@@ -79,6 +86,16 @@ impl WinitPlugin {
         self.window_control = window_control;
         self
     }
+
+    pub fn with_window_state(mut self, window_state: SharedWindow) -> Self {
+        self.window_state = window_state;
+        self
+    }
+
+    pub fn with_window_requests(mut self, window_requests: WindowRequests) -> Self {
+        self.window_requests = window_requests;
+        self
+    }
 }
 
 /// A resource holding the raw winit [`Window`].
@@ -86,7 +103,7 @@ impl WinitPlugin {
 /// Other plugins (e.g. `moonfield-render`) can access this resource to create
 /// a Vulkan surface from the window handle via `raw-window-handle`.
 #[derive(Clone)]
-pub struct WinitWindow(pub Arc<Window>);
+pub struct WinitWindow(pub Arc<WinitWindowHandle>);
 
 /// Internal configuration resource stored by [`WinitPlugin`].
 pub struct WindowConfig {
@@ -96,6 +113,10 @@ pub struct WindowConfig {
     pub wait_mode: WaitMode,
     /// Window control signals shared with scripts (exit policy).
     pub window_control: WindowControl,
+    /// Shared window state read by host functions.
+    pub window_state: SharedWindow,
+    /// Pending window mutation requests from host functions.
+    pub window_requests: WindowRequests,
 }
 
 impl Plugin for WinitPlugin {
@@ -106,9 +127,13 @@ impl Plugin for WinitPlugin {
             height: self.height,
             wait_mode: self.wait_mode,
             window_control: self.window_control.clone(),
+            window_state: self.window_state.clone(),
+            window_requests: self.window_requests.clone(),
         });
         app.insert_resource(InputState::default());
         app.insert_resource(WindowEvents::default());
+        app.insert_resource(self.window_state.clone());
+        app.insert_resource(self.window_requests.clone());
     }
 
     fn finish(&self, app: &mut App) {
@@ -135,6 +160,8 @@ pub fn winit_runner(app: &mut App) {
             height: c.height,
             wait_mode: c.wait_mode,
             window_control: c.window_control.clone(),
+            window_state: c.window_state.clone(),
+            window_requests: c.window_requests.clone(),
         })
         .unwrap_or(WindowConfig {
             title: "Moonfield".to_string(),
@@ -142,6 +169,8 @@ pub fn winit_runner(app: &mut App) {
             height: 600,
             wait_mode: WaitMode::Wait,
             window_control: WindowControl::default(),
+            window_state: moonfield_window::new_shared_window(),
+            window_requests: WindowRequests::default(),
         });
 
     let mut handler = WinitHandler {
@@ -161,7 +190,7 @@ pub fn winit_runner(app: &mut App) {
 /// Bridge between winit's [`ApplicationHandler`] and moonfield's [`App`].
 struct WinitHandler<'a> {
     app: &'a mut App,
-    window: Option<Arc<Window>>,
+    window: Option<Arc<WinitWindowHandle>>,
     config: WindowConfig,
     /// Last cursor position, used to compute motion deltas.
     last_cursor: Option<(f64, f64)>,
@@ -186,11 +215,19 @@ impl ApplicationHandler for WinitHandler<'_> {
                 self.app.insert_resource(WinitWindow(window.clone()));
 
                 // — Create the abstract moonfield Window resource —
-                self.app.insert_resource(moonfield_window::Window {
+                self.app.insert_resource(Window {
                     title: self.config.title.clone(),
                     width: self.config.width,
                     height: self.config.height,
                 });
+
+                // — Mirror the initial window into the shared handle used by scripts —
+                if let Some(shared) = self.app.get_resource_mut::<SharedWindow>() {
+                    let mut w = shared.lock().unwrap_or_else(|e| e.into_inner());
+                    w.title = self.config.title.clone();
+                    w.width = self.config.width;
+                    w.height = self.config.height;
+                }
 
                 // — Create raw handle wrapper for surface creation —
                 match (
@@ -256,6 +293,9 @@ impl ApplicationHandler for WinitHandler<'_> {
             }
             WindowEvent::CursorMoved { position, .. } => {
                 let pos = (position.x, position.y);
+                if let Some(mut input) = self.app.get_resource_mut::<InputState>() {
+                    input.set_mouse_position(pos);
+                }
                 let (dx, dy) = self
                     .last_cursor
                     .map(|last| (pos.0 - last.0, pos.1 - last.1))
@@ -300,9 +340,15 @@ impl ApplicationHandler for WinitHandler<'_> {
                     });
                 }
                 // Update the abstract Window resource with the new size.
-                if let Some(mut win) = self.app.get_resource_mut::<moonfield_window::Window>() {
+                if let Some(mut win) = self.app.get_resource_mut::<Window>() {
                     win.width = size.width;
                     win.height = size.height;
+                }
+                // Keep the shared script-facing handle in sync.
+                if let Some(shared) = self.app.get_resource_mut::<SharedWindow>() {
+                    let mut w = shared.lock().unwrap_or_else(|e| e.into_inner());
+                    w.width = size.width;
+                    w.height = size.height;
                 }
                 // Rebuild raw handles when the window is resized (the handles
                 // themselves are still valid, but the size is updated above).
@@ -336,6 +382,35 @@ impl ApplicationHandler for WinitHandler<'_> {
             WaitMode::Poll => event_loop.set_control_flow(ControlFlow::Poll),
             WaitMode::Wait => event_loop.set_control_flow(ControlFlow::Wait),
         }
+
+        // Apply pending window mutation requests before the app update sees the
+        // window state.
+        if let Some(window) = &self.window {
+            if let Some(title) = self.config.window_requests.take_title() {
+                window.set_title(&title);
+                if let Some(shared) = self.app.get_resource_mut::<SharedWindow>() {
+                    shared.lock().unwrap_or_else(|e| e.into_inner()).title = title.clone();
+                }
+                if let Some(mut win) = self.app.get_resource_mut::<Window>() {
+                    win.title = title;
+                }
+            }
+            if let Some(mode) = self.config.window_requests.take_cursor_mode() {
+                let (grab, visible) = match mode {
+                    CursorMode::Normal => (CursorGrabMode::None, true),
+                    CursorMode::Hidden => (CursorGrabMode::None, false),
+                    CursorMode::Locked => (CursorGrabMode::Locked, false),
+                };
+                if let Err(e) = window.set_cursor_grab(grab) {
+                    error!("failed to set cursor grab mode: {e}");
+                }
+                window.set_cursor_visible(visible);
+                if let Some(mut input) = self.app.get_resource_mut::<InputState>() {
+                    input.set_cursor_mode(mode);
+                }
+            }
+        }
+
         self.app.update();
         // The frame's input has been consumed — clear frame-scoped state.
         if let Some(mut input) = self.app.get_resource_mut::<InputState>() {

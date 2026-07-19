@@ -14,7 +14,7 @@
 //!
 //! A focus loss clears both views, mirroring the world's `InputState`.
 
-use moonfield_window::{InputEvent, InputState};
+use moonfield_window::{CursorMode, InputEvent, InputState};
 use std::collections::{HashMap, HashSet};
 use std::sync::{Arc, Mutex, MutexGuard};
 
@@ -36,6 +36,8 @@ pub struct ScriptInputState {
     step_just_released_buttons: HashSet<String>,
     mouse_delta: (f64, f64),
     mouse_scroll: (f64, f64),
+    mouse_position: (f64, f64),
+    cursor_mode: CursorMode,
     /// Named action → bound key/button codes, registered from scripts via
     /// `input_bind_action`.
     actions: HashMap<String, Vec<String>>,
@@ -82,6 +84,8 @@ impl ScriptInputState {
             .extend(input.just_released_buttons().iter().cloned());
         self.mouse_delta = input.mouse_delta();
         self.mouse_scroll = input.mouse_scroll();
+        self.mouse_position = input.mouse_position();
+        self.cursor_mode = input.cursor_mode();
     }
 
     /// Mark the start of a fixed-step hook (`just_pressed` queries switch
@@ -176,6 +180,16 @@ impl ScriptInputState {
     /// Scroll accumulated this frame, in lines.
     pub fn mouse_scroll(&self) -> (f64, f64) {
         self.mouse_scroll
+    }
+
+    /// Last reported absolute cursor position, in logical pixels.
+    pub fn mouse_position(&self) -> (f64, f64) {
+        self.mouse_position
+    }
+
+    /// Current cursor visibility / grab mode.
+    pub fn cursor_mode(&self) -> CursorMode {
+        self.cursor_mode
     }
 
     /// Bind a named action to a set of key/button codes (replaces any
@@ -401,6 +415,30 @@ pub fn register_input_api(api: &mut ScriptApi, input: &SharedInputState) {
         |s, _| {
             let (x, y) = s.mouse_scroll();
             Ok(pair(x, y))
+        },
+    );
+    reg_query(
+        api,
+        input,
+        "input_mouse_position",
+        "declare function input_mouse_position(): [number, number];",
+        |s, _| {
+            let (x, y) = s.mouse_position();
+            Ok(pair(x, y))
+        },
+    );
+    reg_query(
+        api,
+        input,
+        "input_cursor_mode",
+        "declare function input_cursor_mode(): \"normal\" | \"hidden\" | \"locked\";",
+        |s, _| {
+            let mode = match s.cursor_mode() {
+                CursorMode::Normal => "normal",
+                CursorMode::Hidden => "hidden",
+                CursorMode::Locked => "locked",
+            };
+            Ok(HostValue::String(mode.to_string()))
         },
     );
     reg_query(

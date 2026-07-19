@@ -12,6 +12,18 @@
 
 use std::collections::HashSet;
 
+/// Cursor visibility / grab mode.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum CursorMode {
+    /// Normal visible cursor.
+    #[default]
+    Normal,
+    /// Cursor is hidden but not constrained.
+    Hidden,
+    /// Cursor is hidden and locked to the window center.
+    Locked,
+}
+
 /// A single input event, translated from the windowing backend's OS event.
 ///
 /// Key and button codes are strings matching winit's `KeyCode` /
@@ -61,6 +73,10 @@ pub struct InputState {
     mouse_delta: (f64, f64),
     /// Scroll accumulated this frame, in lines.
     mouse_scroll: (f64, f64),
+    /// Last reported absolute cursor position, in logical pixels.
+    mouse_position: (f64, f64),
+    /// Current cursor visibility/grab mode.
+    cursor_mode: CursorMode,
 }
 
 impl InputState {
@@ -165,6 +181,26 @@ impl InputState {
     /// Scroll accumulated this frame, in lines.
     pub fn mouse_scroll(&self) -> (f64, f64) {
         self.mouse_scroll
+    }
+
+    /// Set the absolute cursor position, in logical pixels.
+    pub fn set_mouse_position(&mut self, position: (f64, f64)) {
+        self.mouse_position = position;
+    }
+
+    /// Last reported absolute cursor position, in logical pixels.
+    pub fn mouse_position(&self) -> (f64, f64) {
+        self.mouse_position
+    }
+
+    /// Set the cursor visibility / grab mode.
+    pub fn set_cursor_mode(&mut self, mode: CursorMode) {
+        self.cursor_mode = mode;
+    }
+
+    /// Current cursor visibility / grab mode.
+    pub fn cursor_mode(&self) -> CursorMode {
+        self.cursor_mode
     }
 }
 

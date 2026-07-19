@@ -10,10 +10,12 @@
 
 pub mod input;
 pub mod script;
+pub mod time;
 pub mod window;
 
 pub use input::{new_shared_input, register_input_api, ScriptInputState, SharedInputState};
 pub use moonfield_script_macros::script_function;
+pub use time::{new_shared_time, register_time_api, ScriptTimeState, SharedTimeState};
 pub use window::register_window_api;
 
 use moonfield_app::prelude::World;
@@ -90,6 +92,9 @@ pub struct ScriptPlugin {
     /// the plugin creates its own handle (input polling then reflects only
     /// what this plugin mirrors).
     input: Option<Arc<Mutex<ScriptInputState>>>,
+    /// Time state shared with the `time_*` / `frame_count` host functions.
+    /// When unset, the plugin creates its own handle.
+    time: Option<SharedTimeState>,
 }
 
 impl Default for ScriptPlugin {
@@ -108,6 +113,7 @@ impl ScriptPlugin {
             memory_limit: None,
             fixed_timestep: Duration::from_secs_f64(1.0 / 60.0),
             input: None,
+            time: None,
         }
     }
 
@@ -143,6 +149,15 @@ impl ScriptPlugin {
     /// frame.
     pub fn with_input_state(mut self, input: Arc<Mutex<ScriptInputState>>) -> Self {
         self.input = Some(input);
+        self
+    }
+
+    /// Share the [`ScriptTimeState`] handle that the `time_*` / `frame_count`
+    /// host functions read. The composition root creates one handle,
+    /// registers the host functions with it, and passes the same handle here
+    /// so the plugin can advance the frame counter each frame.
+    pub fn with_time_state(mut self, time: SharedTimeState) -> Self {
+        self.time = Some(time);
         self
     }
 
@@ -182,6 +197,8 @@ struct ScriptState {
     /// Input state shared with the `input_*` host functions; mirrored from
     /// the world's `InputState` resource each frame.
     input: Arc<Mutex<ScriptInputState>>,
+    /// Time state shared with the `time_*` / `frame_count` host functions.
+    time: SharedTimeState,
     /// Throttle for repeated hook errors, so a per-frame hook that keeps
     /// failing cannot flood the log.
     error_log: HookErrorLog,
@@ -191,6 +208,11 @@ struct ScriptState {
 /// host function must not permanently break input polling.
 fn lock_input(input: &Arc<Mutex<ScriptInputState>>) -> std::sync::MutexGuard<'_, ScriptInputState> {
     input.lock().unwrap_or_else(|e| e.into_inner())
+}
+
+/// Lock the shared time state, tolerating a poisoned mutex.
+fn lock_time(time: &SharedTimeState) -> std::sync::MutexGuard<'_, ScriptTimeState> {
+    time.lock().unwrap_or_else(|e| e.into_inner())
 }
 
 /// Hot-reload handler used while the entry module graph is not loaded
@@ -361,7 +383,9 @@ impl Plugin for ScriptPlugin {
         // FnMut + 'static (no Send).
         let state_slot: Rc<RefCell<Option<ScriptState>>> = Rc::new(RefCell::new(None));
 
-        let api = self.api.clone();
+        let mut api = self.api.clone();
+        let time = self.time.clone().unwrap_or_else(new_shared_time);
+        register_time_api(&mut api, &time);
         let entry = self.entry.clone();
         let configure = self.configure.clone();
         let memory_limit = self.memory_limit;
@@ -371,8 +395,11 @@ impl Plugin for ScriptPlugin {
             .clone()
             .unwrap_or_else(|| Arc::new(Mutex::new(ScriptInputState::default())));
         let slot = state_slot.clone();
+        let startup_time = Arc::clone(&time);
         app.add_startup_system(move |_world: &mut World| {
             info!("Script plugin startup");
+            let startup = Instant::now();
+            lock_time(&startup_time).set_startup(startup);
             let mut runtime = match Runtime::new_with_memory_limit(
                 api,
                 memory_limit.unwrap_or(script::DEFAULT_MAX_HEAP_BYTES),
@@ -422,9 +449,10 @@ impl Plugin for ScriptPlugin {
                 hot_reloader,
                 entry_path,
                 entry_loaded,
-                last_frame: Instant::now(),
+                last_frame: startup,
                 fixed: FixedStepAccumulator::new(fixed_timestep),
                 input,
+                time,
                 error_log: HookErrorLog::default(),
             });
         });
@@ -472,6 +500,7 @@ impl Plugin for ScriptPlugin {
             let now = Instant::now();
             let frame_time = now.duration_since(state.last_frame);
             state.last_frame = now;
+            lock_time(&state.time).increment_frame();
 
             // Input phase: mirror the world's InputState into the shared
             // script-facing state, then replay this frame's events to the
