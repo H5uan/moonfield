@@ -9,13 +9,14 @@ use moonfield_window::{
     InputEvent, InputState, RawHandleWrapper, WindowControl, WindowEventKind, WindowEvents,
 };
 use raw_window_handle::{HasDisplayHandle, HasWindowHandle};
+use std::collections::HashMap;
 use std::sync::Arc;
 use winit::{
     application::ApplicationHandler,
     dpi::LogicalSize,
-    event::{ElementState, MouseScrollDelta, WindowEvent},
+    event::{ElementState, MouseButton, MouseScrollDelta, WindowEvent},
     event_loop::{ActiveEventLoop, ControlFlow, EventLoop},
-    keyboard::PhysicalKey,
+    keyboard::{KeyCode, PhysicalKey},
     window::{Window, WindowAttributes, WindowId},
 };
 
@@ -148,6 +149,8 @@ pub fn winit_runner(app: &mut App) {
         window: None,
         config,
         last_cursor: None,
+        key_names: HashMap::new(),
+        button_names: HashMap::new(),
     };
 
     if let Err(e) = event_loop.run_app(&mut handler) {
@@ -162,6 +165,11 @@ struct WinitHandler<'a> {
     config: WindowConfig,
     /// Last cursor position, used to compute motion deltas.
     last_cursor: Option<(f64, f64)>,
+    /// Interned key/button debug names, so repeated events for the same
+    /// key reuse one cached `String` instead of re-running
+    /// `format!("{:?}", ..)` on every OS event.
+    key_names: HashMap<KeyCode, String>,
+    button_names: HashMap<MouseButton, String>,
 }
 
 impl ApplicationHandler for WinitHandler<'_> {
@@ -222,7 +230,11 @@ impl ApplicationHandler for WinitHandler<'_> {
                 if event.repeat {
                     None
                 } else if let PhysicalKey::Code(code) = event.physical_key {
-                    let code = format!("{:?}", code);
+                    let code = self
+                        .key_names
+                        .entry(code)
+                        .or_insert_with(|| format!("{:?}", code))
+                        .clone();
                     Some(match event.state {
                         ElementState::Pressed => InputEvent::KeyPressed { code },
                         ElementState::Released => InputEvent::KeyReleased { code },
@@ -232,7 +244,11 @@ impl ApplicationHandler for WinitHandler<'_> {
                 }
             }
             WindowEvent::MouseInput { state, button, .. } => {
-                let button = format!("{:?}", button);
+                let button = self
+                    .button_names
+                    .entry(*button)
+                    .or_insert_with(|| format!("{:?}", button))
+                    .clone();
                 Some(match state {
                     ElementState::Pressed => InputEvent::MouseButtonPressed { button },
                     ElementState::Released => InputEvent::MouseButtonReleased { button },

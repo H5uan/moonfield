@@ -1455,6 +1455,7 @@ dependencies = [
 name = "moonfield-script-macros"
 version = "0.1.0"
 dependencies = [
+ "moonfield-script",
  "proc-macro2",
  "quote",
  "syn",

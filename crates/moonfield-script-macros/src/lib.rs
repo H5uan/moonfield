@@ -24,7 +24,11 @@ use syn::{
 /// `fn name(param1: Type1, param2: Type2) -> Result<ReturnType, String>`
 ///
 /// Supported parameter types: `u32`, `f64`, `bool`, `String`, `&HostValue`,
-/// and `Option<T>` wrappers of those (mapped to optional TS parameters).
+/// other integers (`u8`, `u16`, `u64`, `usize`, `i8`, `i16`, `i32`, `i64`,
+/// `isize`) narrowed from JS numbers with a range check, `f32`, `Vec<u8>`
+/// (from the typed-array/bytes representation), numeric `Vec<T>` (from the
+/// array representation), and `Option<T>` wrappers of those (mapped to
+/// optional TS parameters).
 /// Supported return types: `u32`, `f64`, `bool`, `String`, `HostValue`, `()`, `Vec<u8>`
 ///
 /// The macro can be used in any crate that depends on `moonfield-script`;
@@ -271,15 +275,27 @@ fn extract_param_code(name: &str, ty: &Type, index: usize) -> proc_macro2::Token
         .and_then(|s| s.strip_suffix('>'))
     {
         let extraction = match inner {
-            "u32" | "u64" | "usize" => quote! { |v| v.as_u32().map(|n| n as _) },
-            "i32" | "i64" | "isize" => quote! { |v| v.as_u32().map(|n| n as _) },
+            "u32" => quote! { |v| v.as_u32().map(|n| n as _) },
+            "u8" | "u16" | "u64" | "usize" => int_extraction_closure(inner),
+            "i8" | "i16" | "i32" | "i64" | "isize" => int_extraction_closure(inner),
             "f64" | "f32" => quote! { |v| v.as_f64().map(|n| n as _) },
             "bool" => quote! { |v| v.as_bool() },
             "String" | "str" => quote! { |v| v.as_str().map(|s| s.to_string()) },
-            _ => quote! { |_| Option::None },
+            _ => numeric_vec_extraction(inner).unwrap_or_else(|| quote! { |_| Option::None }),
         };
         return quote! {
             let #name_ident: #ty = args.get(#index_lit).and_then(#extraction);
+        };
+    }
+
+    // `Vec<u8>` extracts from the typed-array/bytes representation; other
+    // numeric `Vec<T>` from the array representation.
+    if let Some(extraction) = numeric_vec_extraction(&ty_str) {
+        return quote! {
+            let #name_ident: #ty = args
+                .get(#index_lit)
+                .and_then(#extraction)
+                .ok_or_else(|| format!("arg {}: expected {}", #index_lit, #ty_str))?;
         };
     }
 
@@ -309,6 +325,39 @@ fn extract_param_code(name: &str, ty: &Type, index: usize) -> proc_macro2::Token
                 .and_then(|v| v.as_str().map(|s| s.to_string()))
                 .ok_or_else(|| format!("arg {}: expected string", #index_lit))?;
         },
+        // Signed and wider unsigned integers narrow from HostValue's f64
+        // number with a range check: negative and large values extract
+        // correctly, and out-of-range or fractional values fail with a clear
+        // error instead of silently truncating or flipping sign.
+        "u8" | "u16" | "u64" | "usize" | "i8" | "i16" | "i32" | "i64" | "isize" => {
+            let ty_ident = syn::Ident::new(&ty_str, proc_macro2::Span::call_site());
+            quote! {
+                let #name_ident = match args.get(#index_lit).and_then(|v| v.as_f64()) {
+                    Some(n)
+                        if n.fract() == 0.0
+                            && n >= #ty_ident::MIN as f64
+                            && n <= #ty_ident::MAX as f64 =>
+                    {
+                        n as #ty_ident
+                    }
+                    Some(n) => {
+                        return Err(format!(
+                            "arg {}: value {} does not fit in {}",
+                            #index_lit, n, #ty_str
+                        ));
+                    }
+                    None => {
+                        return Err(format!("arg {}: expected {}", #index_lit, #ty_str));
+                    }
+                };
+            }
+        }
+        "f32" => quote! {
+            let #name_ident = args
+                .get(#index_lit)
+                .and_then(|v| v.as_f64().map(|n| n as f32))
+                .ok_or_else(|| format!("arg {}: expected f32", #index_lit))?;
+        },
         // For HostValue, pass through by reference (HostValue is not Clone:
         // its zero-copy view variants borrow the JS engine's backing store,
         // so the annotated function must take `&HostValue`).
@@ -325,6 +374,48 @@ fn extract_param_code(name: &str, ty: &Type, index: usize) -> proc_macro2::Token
                 .ok_or_else(|| format!("arg {}: type mismatch", #index_lit))?;
         },
     }
+}
+
+/// Closure `|v| -> Option<T>` extracting an integer of type `ty` from
+/// HostValue's f64 number representation. Fractional and out-of-range
+/// values yield `None` instead of silently truncating or flipping sign.
+fn int_extraction_closure(ty: &str) -> proc_macro2::TokenStream {
+    let ty_ident = syn::Ident::new(ty, proc_macro2::Span::call_site());
+    quote! {
+        |v| v.as_f64().and_then(|n| {
+            if n.fract() == 0.0 && n >= #ty_ident::MIN as f64 && n <= #ty_ident::MAX as f64 {
+                Some(n as #ty_ident)
+            } else {
+                None
+            }
+        })
+    }
+}
+
+/// Closure `|v| -> Option<Vec<T>>` extracting a `Vec<u8>` from the
+/// typed-array/bytes representation (`as_bytes`) or a numeric `Vec<T>` from
+/// the array representation (`as_array`, converting each element — one bad
+/// element fails the whole extraction). Returns `None` for non-vector and
+/// unsupported element types.
+fn numeric_vec_extraction(ty: &str) -> Option<proc_macro2::TokenStream> {
+    let elem = ty.strip_prefix("Vec<")?.strip_suffix('>')?;
+    if elem == "u8" {
+        return Some(quote! { |v| v.as_bytes().map(|b| b.to_vec()) });
+    }
+    let elem_extraction = match elem {
+        "u32" => quote! { |v| v.as_u32() },
+        "u16" | "u64" | "usize" | "i8" | "i16" | "i32" | "i64" | "isize" => {
+            int_extraction_closure(elem)
+        }
+        "f32" => quote! { |v| v.as_f64().map(|n| n as f32) },
+        "f64" => quote! { |v| v.as_f64() },
+        _ => return None,
+    };
+    Some(quote! {
+        |v| v
+            .as_array()
+            .and_then(|arr| arr.iter().map(#elem_extraction).collect::<Option<Vec<_>>>())
+    })
 }
 
 #[cfg(test)]

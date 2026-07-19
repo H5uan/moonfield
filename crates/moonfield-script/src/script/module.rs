@@ -53,6 +53,10 @@ pub struct ModuleInfo {
     /// The JavaScript source code (already transpiled if needed).
     pub source: String,
     /// Transformed CommonJS source (with `import`/`export` replaced).
+    /// Only built for the QuickJS backend, whose bundler evaluates CJS
+    /// factories; the V8 backend evaluates native ESM and never reads
+    /// this, so the duplicate source is not stored there.
+    #[cfg(feature = "quickjs-backend")]
     pub cjs_source: String,
     /// List of module specifiers this module imports.
     pub imports: Vec<String>,
@@ -120,26 +124,19 @@ impl ModuleRegistry {
     pub fn register(&mut self, name: &str, source: String) -> String {
         let canonical = self.canonicalize(name);
         let imports = Self::extract_imports(&source);
-        let cjs_source = self.transform_to_cjs(&source);
+        #[cfg(feature = "quickjs-backend")]
+        let cjs_source = Self::transform_to_cjs_ast(&source);
         self.modules.insert(
             canonical.clone(),
             ModuleInfo {
                 name: canonical.clone(),
                 source,
+                #[cfg(feature = "quickjs-backend")]
                 cjs_source,
                 imports,
             },
         );
         canonical
-    }
-
-    /// Transform source to CommonJS, if the QuickJS backend is active.
-    /// For V8 backend, returns the source as-is (native ESM support).
-    fn transform_to_cjs(&self, source: &str) -> String {
-        #[cfg(feature = "quickjs-backend")]
-        return Self::transform_to_cjs_ast(source);
-        #[cfg(not(feature = "quickjs-backend"))]
-        source.to_string()
     }
 
     /// Get a module's info by canonical name.
@@ -337,9 +334,12 @@ impl ModuleRegistry {
     }
 
     /// Given a candidate path, try these in order:
-    /// 1. exact path + `.js` / `.ts` / `.mjs` / `.cjs`
+    /// 1. exact path + `.ts` / `.js` / `.mjs` / `.cjs`
     /// 2. `package.json` → `main` field
-    /// 3. `index.js` / `index.ts` / `index.mjs` / `index.cjs`
+    /// 3. `index.ts` / `index.js` / `index.mjs` / `index.cjs`
+    ///
+    /// `.ts` wins over `.js`: an extension-less import must resolve to the
+    /// `.ts` source of truth, never to stale build output alongside it.
     fn resolve_file_or_dir(&self, candidate: &Path) -> Option<(String, PathBuf)> {
         // 1. Direct file with extension.
         if candidate.is_file() {
@@ -349,7 +349,7 @@ impl ModuleRegistry {
         }
 
         // 2. Try adding extensions.
-        for ext in &["js", "ts", "mjs", "cjs"] {
+        for ext in &["ts", "js", "mjs", "cjs"] {
             let with_ext = candidate.with_extension(ext);
             if with_ext.is_file() {
                 let name = with_ext.to_string_lossy().replace('\\', "/");
@@ -373,7 +373,7 @@ impl ModuleRegistry {
             }
 
             // Check index files.
-            for ext in &["js", "ts", "mjs", "cjs"] {
+            for ext in &["ts", "js", "mjs", "cjs"] {
                 let index = candidate.join(format!("index.{}", ext));
                 if index.is_file() {
                     let name = index.to_string_lossy().replace('\\', "/");

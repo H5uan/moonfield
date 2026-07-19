@@ -46,16 +46,21 @@ impl ScriptInputState {
     /// Mirror this frame's state from the world resource. Step-latched
     /// edges are merged in and persist until a fixed step consumes them.
     pub fn sync_frame(&mut self, input: &InputState) {
-        self.pressed_keys.clone_from(input.pressed_keys());
-        self.pressed_buttons.clone_from(input.pressed_buttons());
-        self.frame_just_pressed_keys
-            .clone_from(input.just_pressed_keys());
-        self.frame_just_released_keys
-            .clone_from(input.just_released_keys());
-        self.frame_just_pressed_buttons
-            .clone_from(input.just_pressed_buttons());
-        self.frame_just_released_buttons
-            .clone_from(input.just_released_buttons());
+        sync_set(&mut self.pressed_keys, input.pressed_keys());
+        sync_set(&mut self.pressed_buttons, input.pressed_buttons());
+        sync_set(&mut self.frame_just_pressed_keys, input.just_pressed_keys());
+        sync_set(
+            &mut self.frame_just_released_keys,
+            input.just_released_keys(),
+        );
+        sync_set(
+            &mut self.frame_just_pressed_buttons,
+            input.just_pressed_buttons(),
+        );
+        sync_set(
+            &mut self.frame_just_released_buttons,
+            input.just_released_buttons(),
+        );
         self.step_just_pressed_keys
             .extend(input.just_pressed_keys().iter().cloned());
         self.step_just_released_keys
@@ -210,13 +215,26 @@ impl ScriptInputState {
     }
 }
 
+/// Replace `dst` with a copy of `src`, skipping the clone when both are
+/// already equal — held keys persist across frames, so re-cloning the same
+/// `String`s every frame would be pure churn. (`clone_from` already reuses
+/// the set's allocation; this also avoids re-cloning the elements.)
+fn sync_set(dst: &mut HashSet<String>, src: &HashSet<String>) {
+    if dst != src {
+        dst.clone_from(src);
+    }
+}
+
 /// Marshal an [`InputEvent`] into a `HostValue::Object` for the
 /// `on_input(event)` script hook.
 pub fn input_event_to_host(event: &InputEvent) -> HostValue {
     fn s(v: &str) -> HostValue {
         HostValue::String(v.to_string())
     }
-    let mut map = HashMap::new();
+    // Three entries is the largest payload (`mouse_motion`); pre-size so
+    // high-frequency events (cursor moves fire per OS event) don't grow
+    // the map repeatedly.
+    let mut map = HashMap::with_capacity(3);
     match event {
         InputEvent::KeyPressed { code } => {
             map.insert("type".to_string(), s("key_pressed"));
@@ -267,7 +285,7 @@ fn lock(input: &SharedInputState) -> MutexGuard<'_, ScriptInputState> {
 }
 
 /// Extract a string argument.
-fn arg_str<'a>(args: &'a [HostValue], i: usize) -> Result<&'a str, String> {
+fn arg_str(args: &[HostValue], i: usize) -> Result<&str, String> {
     args.get(i)
         .and_then(|v| v.as_str())
         .ok_or_else(|| format!("arg {}: expected string", i))

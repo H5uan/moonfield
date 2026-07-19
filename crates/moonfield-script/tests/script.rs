@@ -491,6 +491,179 @@ fn hot_reload_recovers_after_broken_edit() {
     std::fs::remove_dir_all(&dir).ok();
 }
 
+/// A `.ts` file is always transpiled from its own source: a stale
+/// pre-compiled `.js` sitting next to it must never shadow it — neither on
+/// the initial load nor on hot reload.
+#[test]
+fn ts_entry_ignores_stale_sibling_js() {
+    let dir = unique_temp_dir("stale_sibling_js");
+    let ts_path = dir.join("main.ts");
+    std::fs::write(&ts_path, "export function value(): number { return 2; }").unwrap();
+    // Stale tsc output from before the edit — must NOT be loaded.
+    std::fs::write(dir.join("main.js"), "export function value() { return 1; }").unwrap();
+
+    let mut runtime = Runtime::new(test_api()).expect("runtime");
+    moonfield_script::load_module_entry(&mut runtime, &ts_path).expect("load ts entry");
+    let v = runtime
+        .call_module_export("value", &[])
+        .expect("call value");
+    assert_eq!(
+        v.as_f64(),
+        Some(2.0),
+        "stale sibling .js must not shadow the .ts source"
+    );
+
+    // Editing the .ts hot-reloads the NEW source, not the stale .js.
+    std::fs::write(&ts_path, "export function value(): number { return 3; }").unwrap();
+    runtime
+        .on_files_changed(std::slice::from_ref(&ts_path))
+        .expect("hot reload");
+    let v = runtime
+        .call_module_export("value", &[])
+        .expect("call after reload");
+    assert_eq!(v.as_f64(), Some(3.0));
+
+    std::fs::remove_dir_all(&dir).ok();
+}
+
+/// An extension-less import (`"./utils"`) with BOTH a fresh `.ts` and a
+/// stale `.js` sibling on disk resolves to the `.ts` — on the initial load
+/// and on hot reload, where a change event on the stale `.js` reloads the
+/// shadowing `.ts` instead of resurrecting the stale code.
+#[test]
+fn extensionless_import_prefers_ts_over_stale_js() {
+    let dir = unique_temp_dir("extensionless_ts_wins");
+    let main_path = dir.join("main.ts");
+    let ts_path = dir.join("utils.ts");
+    let js_path = dir.join("utils.js");
+    std::fs::write(&ts_path, "export function value(): number { return 2; }").unwrap();
+    // Stale tsc output from before the edit — must NOT be loaded.
+    std::fs::write(&js_path, "export function value() { return 1; }").unwrap();
+    std::fs::write(
+        &main_path,
+        "import { value } from \"./utils\";\n\
+         export function mainValue() { return value(); }",
+    )
+    .unwrap();
+
+    let mut runtime = Runtime::new(test_api()).expect("runtime");
+    moonfield_script::load_module_entry(&mut runtime, &main_path).expect("load entry");
+    let v = runtime
+        .call_module_export("mainValue", &[])
+        .expect("call mainValue");
+    assert_eq!(
+        v.as_f64(),
+        Some(2.0),
+        "extension-less import must resolve the .ts, not the stale .js"
+    );
+
+    // A change event on the stale .js reloads the shadowing .ts — the edit
+    // to the .js must not resurrect it.
+    std::fs::write(&js_path, "export function value() { return 3; }").unwrap();
+    runtime
+        .on_files_changed(std::slice::from_ref(&js_path))
+        .expect("hot reload from shadowed .js event");
+    let v = runtime
+        .call_module_export("mainValue", &[])
+        .expect("call after .js event");
+    assert_eq!(
+        v.as_f64(),
+        Some(2.0),
+        "shadowed .js change must reload the .ts source of truth"
+    );
+
+    // Editing the .ts itself hot-reloads the new source as usual.
+    std::fs::write(&ts_path, "export function value(): number { return 4; }").unwrap();
+    runtime
+        .on_files_changed(std::slice::from_ref(&ts_path))
+        .expect("hot reload from .ts event");
+    let v = runtime
+        .call_module_export("mainValue", &[])
+        .expect("call after .ts event");
+    assert_eq!(v.as_f64(), Some(4.0));
+
+    std::fs::remove_dir_all(&dir).ok();
+}
+
+/// A `.js` module with no `.ts` sibling keeps working unchanged: the
+/// extension-less import resolves to it and it hot-reloads normally.
+#[test]
+fn extensionless_import_js_only_resolves_and_hot_reloads() {
+    let dir = unique_temp_dir("extensionless_js_only");
+    let main_path = dir.join("main.js");
+    let js_path = dir.join("utils.js");
+    std::fs::write(&js_path, "export function value() { return 1; }").unwrap();
+    std::fs::write(
+        &main_path,
+        "import { value } from \"./utils\";\n\
+         export function mainValue() { return value(); }",
+    )
+    .unwrap();
+
+    let mut runtime = Runtime::new(test_api()).expect("runtime");
+    moonfield_script::load_module_entry(&mut runtime, &main_path).expect("load entry");
+    let v = runtime
+        .call_module_export("mainValue", &[])
+        .expect("call mainValue");
+    assert_eq!(v.as_f64(), Some(1.0));
+
+    std::fs::write(&js_path, "export function value() { return 2; }").unwrap();
+    runtime
+        .on_files_changed(std::slice::from_ref(&js_path))
+        .expect("hot reload");
+    let v = runtime
+        .call_module_export("mainValue", &[])
+        .expect("call after reload");
+    assert_eq!(v.as_f64(), Some(2.0));
+
+    std::fs::remove_dir_all(&dir).ok();
+}
+
+/// A syntax error in the entry at startup must not kill scripting: the
+/// plugin still installs its runtime state and file watcher, and fixing
+/// the file on disk retries the initial load — the script's hooks become
+/// callable without restarting the app.
+#[test]
+fn startup_load_failure_recovers_via_hot_reload() {
+    let dir = unique_temp_dir("startup_recovery");
+    let entry = dir.join("main.ts");
+    std::fs::write(&entry, "export function broken( { not valid").unwrap();
+
+    let reports = std::sync::Arc::new(std::sync::Mutex::new(Vec::<String>::new()));
+    let sink = std::sync::Arc::clone(&reports);
+    let mut api = test_api();
+    api.register_closure("report", move |args| {
+        sink.lock()
+            .unwrap()
+            .push(args[0].as_str().unwrap_or("").to_string());
+        Ok(HostValue::Null)
+    });
+
+    let mut app = moonfield_app::App::new();
+    app.add_plugin(moonfield_script::ScriptPlugin::new(api).with_entry(&entry));
+
+    // Startup: the entry fails to load, but the plugin must stay alive.
+    app.update();
+    assert!(reports.lock().unwrap().is_empty());
+
+    // Fix the file; the resulting file event drives a retry of the initial
+    // load. Watcher delivery is asynchronous, so poll frames until it lands.
+    std::fs::write(&entry, "export function on_update(dt) { report('alive'); }").unwrap();
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
+    while reports.lock().unwrap().is_empty() && std::time::Instant::now() < deadline {
+        std::thread::sleep(std::time::Duration::from_millis(20));
+        app.update();
+    }
+
+    assert_eq!(
+        reports.lock().unwrap().last().map(String::as_str),
+        Some("alive"),
+        "fixed entry should load via hot reload and run on_update"
+    );
+
+    std::fs::remove_dir_all(&dir).ok();
+}
+
 /// The ScriptPlugin drives `on_fixed_update` with the configured fixed
 /// delta (Godot `_physics_process` style) before `on_update` each frame.
 #[test]
@@ -827,4 +1000,98 @@ fn call_with_args_preserves_special_values() {
         )
         .expect("sumBytes");
     assert_eq!(v.as_f64(), Some(10.0));
+}
+
+/// Cyclic or pathologically deep values passed to a host function must not
+/// crash the process: argument marshaling caps the recursion depth and
+/// degrades over-deep containers to a placeholder instead of overflowing
+/// the Rust stack (which no `catch_unwind` can stop).
+#[test]
+fn cyclic_values_do_not_crash_host_calls() {
+    let seen = std::sync::Arc::new(std::sync::Mutex::new(String::new()));
+    let sink = std::sync::Arc::clone(&seen);
+    let mut api = test_api();
+    api.register_closure("take_any", move |args| {
+        *sink.lock().unwrap() = format!("{:?}", args[0]);
+        Ok(HostValue::Null)
+    });
+
+    let mut runtime = Runtime::new(api).expect("runtime");
+    runtime
+        .load(
+            "cyclic.js",
+            "function cyclicObject() { const o = { a: 1 }; o.self = o; take_any(o); }\n\
+             function cyclicArray() { const a = [1]; a.push(a); take_any(a); }\n\
+             function deep() {\n\
+                 let v = 0;\n\
+                 for (let i = 0; i < 100; i++) v = [v];\n\
+                 take_any(v);\n\
+             }\n\
+             function ok() { return 7; }",
+        )
+        .expect("load");
+
+    for case in ["cyclicObject", "cyclicArray", "deep"] {
+        seen.lock().unwrap().clear();
+        runtime.call(case).expect(case);
+        assert!(
+            seen.lock().unwrap().contains("[max depth exceeded]"),
+            "{case}: over-deep value must degrade to a placeholder"
+        );
+    }
+
+    // The runtime stays usable afterwards.
+    let v = runtime.call_with_args("ok", &[]).expect("call after");
+    assert_eq!(v.as_f64(), Some(7.0));
+}
+
+/// Typed arrays crossing the JS→host boundary must arrive as typed arrays —
+/// the QuickJS backend previously degraded a `Float32Array` argument to a
+/// generic object with "0".."n" index keys (the V8 backend always had its
+/// zero-copy branch). Mirrors `call_with_args_preserves_special_values`
+/// in the opposite direction.
+#[test]
+fn typed_arrays_roundtrip_js_to_host() {
+    let mut api = test_api();
+    api.register_closure("sum_f32", |args| {
+        let slice = args
+            .first()
+            .and_then(|v| v.as_f32_slice())
+            .ok_or_else(|| "expected a Float32Array".to_string())?;
+        Ok(HostValue::Number(slice.iter().map(|v| *v as f64).sum()))
+    });
+    api.register_closure("sum_bytes", |args| {
+        let bytes = args
+            .first()
+            .and_then(|v| v.as_bytes())
+            .ok_or_else(|| "expected a Uint8Array".to_string())?;
+        Ok(HostValue::Number(bytes.iter().map(|b| *b as f64).sum()))
+    });
+    api.register_closure("echo_f32", |args| {
+        let slice = args
+            .first()
+            .and_then(|v| v.as_f32_slice())
+            .ok_or_else(|| "expected a Float32Array".to_string())?;
+        Ok(HostValue::from(slice.to_vec()))
+    });
+
+    let mut runtime = Runtime::new(api).expect("runtime");
+    runtime
+        .load(
+            "typed_arrays.js",
+            "function sumF32() { return sum_f32(new Float32Array([1.5, 2.5, 3])); }\n\
+             function sumU8() { return sum_bytes(new Uint8Array([1, 2, 3, 4])); }\n\
+             function roundtripF32() {\n\
+                 const echoed = echo_f32(new Float32Array([1.5, 2.5, 3]));\n\
+                 let s = 0;\n\
+                 for (const x of echoed) s += x;\n\
+                 return s;\n\
+             }",
+        )
+        .expect("load");
+
+    for (case, want) in [("sumF32", 7.0), ("sumU8", 10.0), ("roundtripF32", 7.0)] {
+        let v = runtime.call_with_args(case, &[]).expect(case);
+        assert_eq!(v.as_f64(), Some(want), "{case}");
+    }
 }

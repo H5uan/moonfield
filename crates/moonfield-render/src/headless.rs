@@ -4,7 +4,7 @@
 //! simple Slang shaders, creates a graphics pipeline and vertex buffer, and
 //! records a command buffer that draws a triangle.
 
-use crate::error::Result;
+use crate::error::{Error, Result};
 use crate::{
     Buffer, CommandBuffer, CommandPool, Compiler, Device, GraphicsPipeline, Instance, RenderPass,
     ShaderModule,
@@ -30,6 +30,8 @@ pub struct HeadlessContext {
     device: Device,
     #[allow(dead_code)]
     instance: Instance,
+    /// Not a Vulkan object, so its drop position is irrelevant.
+    extent: vk::Extent2D,
 }
 
 #[repr(C)]
@@ -40,11 +42,21 @@ struct Vertex {
 }
 
 impl HeadlessContext {
-    /// Create a headless context and record one frame into a command buffer.
+    /// Create a headless context and record one frame into a command buffer,
+    /// with a static viewport/scissor of `width`×`height`.
     ///
     /// The command buffer is owned by the returned context and is ready to be
     /// submitted to the graphics queue.
-    pub fn record_frame() -> Result<Self> {
+    pub fn record_frame(width: u32, height: u32) -> Result<Self> {
+        if width == 0 || height == 0 {
+            return Err(Error::Validation(format!(
+                "record_frame dimensions must be non-zero, got {}x{}",
+                width, height
+            )));
+        }
+
+        let extent = vk::Extent2D { width, height };
+
         let instance = Instance::new_headless()?;
         let device = Device::new(&instance, None)?;
 
@@ -76,11 +88,6 @@ impl HeadlessContext {
             .location(1)
             .format(vk::Format::R32G32B32_SFLOAT)
             .offset(std::mem::size_of::<[f32; 3]>() as u32);
-
-        let extent = vk::Extent2D {
-            width: 800,
-            height: 600,
-        };
 
         let pipeline = GraphicsPipeline::new(
             &device,
@@ -133,7 +140,13 @@ impl HeadlessContext {
             vertex_buffer,
             command_pool,
             command_buffer,
+            extent,
         })
+    }
+
+    /// The `(width, height)` extent this context was recorded with.
+    pub fn extent(&self) -> (u32, u32) {
+        (self.extent.width, self.extent.height)
     }
 }
 
@@ -179,3 +192,24 @@ PsOutput main(PsInput input)
     return output;
 }
 "#;
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// The requested resolution is used for the recorded frame's
+    /// viewport/scissor extent. Needs a Vulkan device, like the
+    /// `headless_triangle` integration test.
+    #[test]
+    fn test_record_frame_uses_requested_extent() {
+        let ctx = HeadlessContext::record_frame(320, 240).expect("headless context");
+        assert_eq!(ctx.extent(), (320, 240));
+    }
+
+    /// Zero dimensions are rejected before any Vulkan objects are created.
+    #[test]
+    fn test_record_frame_rejects_zero_dimensions() {
+        assert!(HeadlessContext::record_frame(0, 600).is_err());
+        assert!(HeadlessContext::record_frame(800, 0).is_err());
+    }
+}

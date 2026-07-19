@@ -17,18 +17,24 @@ thread_local! {
     /// device, compiling the shaders, and building the pipeline — far too
     /// expensive to repeat per call (hot reload re-runs `main()`, and
     /// scripts may call `record_frame` every frame). It is created lazily
-    /// on first use and reused from then on.
+    /// on first use and reused from then on, re-created only when the
+    /// requested resolution changes.
     static HEADLESS_CONTEXT: RefCell<Option<HeadlessContext>> = const { RefCell::new(None) };
 }
 
+/// Default resolution when a script calls `record_frame` without arguments.
+const DEFAULT_WIDTH: u32 = 800;
+const DEFAULT_HEIGHT: u32 = 600;
+
 /// Initialize the shared headless context on first use; subsequent calls
-/// are cheap no-ops. A failed first attempt is not cached — the next call
+/// with the same resolution are cheap no-ops, and a different resolution
+/// re-creates the context. A failed attempt is not cached — the next call
 /// retries.
-fn ensure_headless_context() -> Result<(), String> {
+fn ensure_headless_context(width: u32, height: u32) -> Result<(), String> {
     HEADLESS_CONTEXT.with(|cell| {
         let mut slot = cell.borrow_mut();
-        if slot.is_none() {
-            *slot = Some(HeadlessContext::record_frame().map_err(|e| e.to_string())?);
+        if slot.as_ref().map(HeadlessContext::extent) != Some((width, height)) {
+            *slot = Some(HeadlessContext::record_frame(width, height).map_err(|e| e.to_string())?);
         }
         Ok(())
     })
@@ -50,13 +56,15 @@ pub fn build_script_api(input: &SharedInputState, window_control: &WindowControl
 /// keep GPU work behind the logic-thread/render-thread handoff instead of
 /// following this pattern.
 ///
-/// Accepts optional `(width, height)` arguments; defaults to the headless
-/// context's default resolution. The context is built once and reused (see
-/// [`ensure_headless_context`]).
+/// Accepts optional `(width, height)` arguments, defaulting to 800×600.
+/// The context is built once and reused, or re-built when the requested
+/// resolution changes (see [`ensure_headless_context`]).
 #[moonfield_script::script_function]
 fn record_frame(width: Option<u32>, height: Option<u32>) -> Result<(), String> {
-    let _ = (width, height);
-    ensure_headless_context()
+    ensure_headless_context(
+        width.unwrap_or(DEFAULT_WIDTH),
+        height.unwrap_or(DEFAULT_HEIGHT),
+    )
 }
 
 /// Fast-path `record_frame` that extracts `u32` args directly from V8
@@ -67,20 +75,18 @@ fn direct_record_frame(
     args: v8::FunctionCallbackArguments,
     mut retval: v8::ReturnValue,
 ) {
-    let _ = (
-        if args.length() >= 1 {
-            args.get(0).uint32_value(scope).unwrap_or(0)
-        } else {
-            0
-        },
-        if args.length() >= 2 {
-            args.get(1).uint32_value(scope).unwrap_or(0)
-        } else {
-            0
-        },
-    );
+    let width = if args.length() >= 1 {
+        args.get(0).uint32_value(scope).unwrap_or(0)
+    } else {
+        DEFAULT_WIDTH
+    };
+    let height = if args.length() >= 2 {
+        args.get(1).uint32_value(scope).unwrap_or(0)
+    } else {
+        DEFAULT_HEIGHT
+    };
 
-    match ensure_headless_context() {
+    match ensure_headless_context(width, height) {
         Ok(()) => {
             retval.set_undefined();
         }

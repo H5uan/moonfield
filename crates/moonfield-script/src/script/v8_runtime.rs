@@ -3,7 +3,7 @@
 use super::source_map::SourceMapCache;
 use super::{
     HostFn, HostValue, HotReloadHandler, Result, ScriptApi, ScriptError, ScriptRuntime,
-    TypedArrayElement, TypedArrayValue, DEFAULT_EXECUTION_TIMEOUT,
+    TypedArrayElement, TypedArrayValue, DEFAULT_EXECUTION_TIMEOUT, MAX_HOST_VALUE_DEPTH,
 };
 use moonfield_log::{error, info, warn};
 use std::collections::HashMap;
@@ -968,13 +968,16 @@ impl HotReloadHandler for V8Runtime {
         let mut changed_modules = Vec::new();
         let mut result: Result<()> = Ok(());
         for path in paths {
-            match super::load_script(path) {
+            // A `.js` shadowed by a `.ts` sibling reloads the `.ts` source
+            // of truth instead — stale build output must never win.
+            let path = super::reload_source_path(path);
+            match super::load_script(&path) {
                 Ok(source) => {
                     // The file watcher reports absolute paths, but the
                     // registry uses relative canonical names; `register`
                     // canonicalizes the fallback.
                     let module_name = registry
-                        .find_by_file_path(path)
+                        .find_by_file_path(&path)
                         .unwrap_or_else(|| path.to_str().unwrap_or("").to_string());
                     registry.register(&module_name, source);
                     changed_modules.push(module_name);
@@ -1191,6 +1194,17 @@ macro_rules! host_typed_array_to_v8 {
 
 /// Convert a V8 `Local<Value>` to a `HostValue`.
 fn v8_value_to_host(value: v8::Local<v8::Value>, scope: &mut v8::PinScope) -> HostValue {
+    v8_value_to_host_at(value, scope, 0)
+}
+
+/// Depth-limited conversion: containers nested past [`MAX_HOST_VALUE_DEPTH`]
+/// degrade to a placeholder instead of recursing further, so a cyclic or
+/// pathologically deep value cannot overflow the Rust stack.
+fn v8_value_to_host_at(
+    value: v8::Local<v8::Value>,
+    scope: &mut v8::PinScope,
+    depth: usize,
+) -> HostValue {
     if value.is_null_or_undefined() {
         return HostValue::Null;
     }
@@ -1246,12 +1260,15 @@ fn v8_value_to_host(value: v8::Local<v8::Value>, scope: &mut v8::PinScope) -> Ho
 
     // Array
     if value.is_array() {
+        if depth >= MAX_HOST_VALUE_DEPTH {
+            return HostValue::String("[max depth exceeded]".to_string());
+        }
         if let Ok(arr) = v8::Local::<v8::Array>::try_from(value) {
             let len = arr.length() as usize;
             let mut items = Vec::with_capacity(len);
             for i in 0..len {
                 if let Some(item) = arr.get_index(scope, i as u32) {
-                    items.push(v8_value_to_host(item, scope));
+                    items.push(v8_value_to_host_at(item, scope, depth + 1));
                 }
             }
             return HostValue::Array(items);
@@ -1260,6 +1277,9 @@ fn v8_value_to_host(value: v8::Local<v8::Value>, scope: &mut v8::PinScope) -> Ho
 
     // Object
     if value.is_object() {
+        if depth >= MAX_HOST_VALUE_DEPTH {
+            return HostValue::String("[max depth exceeded]".to_string());
+        }
         if let Ok(obj) = v8::Local::<v8::Object>::try_from(value) {
             let mut map = std::collections::HashMap::new();
             let names = obj.get_own_property_names(scope, Default::default());
@@ -1267,10 +1287,11 @@ fn v8_value_to_host(value: v8::Local<v8::Value>, scope: &mut v8::PinScope) -> Ho
                 let len = names.length() as usize;
                 for i in 0..len {
                     if let Some(key_val) = names.get_index(scope, i as u32) {
+                        // Look the property up with the original V8 key; the
+                        // Rust string is only needed as the HashMap key.
                         let key_str = key_val.to_rust_string_lossy(scope);
-                        let key = v8::String::new(scope, &key_str).unwrap();
-                        if let Some(val) = obj.get(scope, key.into()) {
-                            map.insert(key_str, v8_value_to_host(val, scope));
+                        if let Some(val) = obj.get(scope, key_val) {
+                            map.insert(key_str, v8_value_to_host_at(val, scope, depth + 1));
                         }
                     }
                 }

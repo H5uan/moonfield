@@ -26,8 +26,9 @@ pub use script::V8Runtime as Runtime;
 #[cfg(feature = "quickjs-backend")]
 pub use script::QuickJsRuntime as Runtime;
 
-use script::{HostValue, HotReloader, ScriptApi, ScriptRuntime};
+use script::{HostValue, HotReloadHandler, HotReloader, ScriptApi, ScriptRuntime};
 use std::cell::RefCell;
+use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::rc::Rc;
 use std::sync::{Arc, Mutex};
@@ -39,8 +40,8 @@ type ConfigureFn = Arc<dyn Fn(&mut Runtime) + Send + Sync>;
 
 /// Script system plugin.
 ///
-/// Loads an entry script (default `scripts/record_frame.js`, falling back to
-/// `.ts`) as an ESModule graph on startup, watches the entry's directory for
+/// Loads an entry script (default `scripts/record_frame.ts`, falling back to
+/// `.js`) as an ESModule graph on startup, watches the entry's directory for
 /// changes and hot-reloads affected modules, and drives optional script-side
 /// lifecycle hooks:
 ///
@@ -59,7 +60,12 @@ type ConfigureFn = Arc<dyn Fn(&mut Runtime) + Send + Sync>;
 ///
 /// Missing hooks are skipped silently. Script errors are logged and do not
 /// take down the app; a failed hot reload keeps the previously evaluated
-/// code running.
+/// code running, and a failed initial load is retried on the next file
+/// change (the runtime and file watcher stay installed). Repeated hook
+/// failures are throttled — the first few are logged in full, then a
+/// periodic summary reports the count — so one buggy per-frame hook cannot
+/// flood the log; the throttle resets when the hook succeeds or after a
+/// successful hot reload.
 ///
 /// The runtime is kept alive across frames in an `Rc<RefCell<_>>` (the
 /// runtimes are `!Send`, so they cannot be World resources) so that
@@ -67,7 +73,7 @@ type ConfigureFn = Arc<dyn Fn(&mut Runtime) + Send + Sync>;
 pub struct ScriptPlugin {
     /// Host functions exposed to scripts, built by the embedding application.
     api: ScriptApi,
-    /// Entry script path; defaults to `scripts/record_frame.js` / `.ts`.
+    /// Entry script path; defaults to `scripts/record_frame.ts` / `.js`.
     entry: Option<PathBuf>,
     /// Extra runtime configuration hook (e.g. registering V8 direct
     /// functions). Runs right after the runtime is created, before the entry
@@ -102,8 +108,8 @@ impl ScriptPlugin {
         }
     }
 
-    /// Override the entry script path (default: `scripts/record_frame.js`
-    /// falling back to `scripts/record_frame.ts`).
+    /// Override the entry script path (default: `scripts/record_frame.ts`
+    /// falling back to `scripts/record_frame.js`).
     pub fn with_entry(mut self, entry: impl Into<PathBuf>) -> Self {
         self.entry = Some(entry.into());
         self
@@ -158,6 +164,14 @@ impl ScriptPlugin {
 struct ScriptState {
     runtime: Runtime,
     hot_reloader: Option<HotReloader>,
+    /// Entry script path, kept so a failed initial load can be retried
+    /// when a watched file changes.
+    entry_path: PathBuf,
+    /// Whether the entry module graph is currently loaded. False after a
+    /// failed startup load until a hot-reload retry succeeds; while false,
+    /// file changes retry the full entry load (the runtime has no cached
+    /// registry to reload incrementally from).
+    entry_loaded: bool,
     /// Wall-clock of the previous update, used to compute frame deltas.
     last_frame: Instant,
     /// Fixed-timestep accumulator feeding `on_fixed_update`.
@@ -165,12 +179,69 @@ struct ScriptState {
     /// Input state shared with the `input_*` host functions; mirrored from
     /// the world's `InputState` resource each frame.
     input: Arc<Mutex<ScriptInputState>>,
+    /// Throttle for repeated hook errors, so a per-frame hook that keeps
+    /// failing cannot flood the log.
+    error_log: HookErrorLog,
 }
 
 /// Lock the shared input state, tolerating a poisoned mutex — a panicking
 /// host function must not permanently break input polling.
 fn lock_input(input: &Arc<Mutex<ScriptInputState>>) -> std::sync::MutexGuard<'_, ScriptInputState> {
     input.lock().unwrap_or_else(|e| e.into_inner())
+}
+
+/// Hot-reload handler used while the entry module graph is not loaded
+/// (i.e. the initial startup load failed): any script file change retries
+/// the full entry load. After the first successful load the plugin
+/// delegates to the runtime's own incremental [`HotReloadHandler`].
+struct EntryLoadRetry<'a> {
+    runtime: &'a mut Runtime,
+    entry_path: &'a Path,
+    /// Set once the retried load succeeds, so the plugin can switch to
+    /// incremental reloads.
+    succeeded: bool,
+}
+
+impl HotReloadHandler for EntryLoadRetry<'_> {
+    fn on_file_changed(&mut self, changed_path: &Path) -> script::Result<()> {
+        self.on_files_changed(std::slice::from_ref(&changed_path.to_path_buf()))
+    }
+
+    fn on_files_changed(&mut self, paths: &[PathBuf]) -> script::Result<()> {
+        if paths.is_empty() {
+            return Ok(());
+        }
+        info!(
+            "Retrying script entry '{}' after file change",
+            self.entry_path.display()
+        );
+        load_module_entry(self.runtime, self.entry_path)?;
+        self.succeeded = true;
+        Ok(())
+    }
+}
+
+/// Hot-reload handler delegating to the runtime's own incremental handler
+/// while recording whether a reload actually ran, so the plugin can reset
+/// the hook error throttles (freshly loaded code gets a clean slate).
+struct ReloadReset<'a> {
+    runtime: &'a mut Runtime,
+    /// Set once a reload batch completed successfully.
+    reloaded: bool,
+}
+
+impl HotReloadHandler for ReloadReset<'_> {
+    fn on_file_changed(&mut self, changed_path: &Path) -> script::Result<()> {
+        self.runtime.on_file_changed(changed_path)?;
+        self.reloaded = true;
+        Ok(())
+    }
+
+    fn on_files_changed(&mut self, paths: &[PathBuf]) -> script::Result<()> {
+        self.runtime.on_files_changed(paths)?;
+        self.reloaded = true;
+        Ok(())
+    }
 }
 
 /// Maximum fixed steps per frame; excess accumulated time is dropped so a
@@ -211,6 +282,71 @@ impl FixedStepAccumulator {
     }
 }
 
+/// Consecutive hook failures logged in full before throttling kicks in.
+const HOOK_ERROR_FULL_LOGS: u64 = 3;
+/// Once throttled, a summary line is logged every this many failures.
+const HOOK_ERROR_SUMMARY_EVERY: u64 = 300;
+
+/// How a hook failure should be logged.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum HookErrorVerdict {
+    /// Log the full error.
+    Full,
+    /// Log a one-line summary carrying the total consecutive failure count.
+    Summary(u64),
+    /// Suppress this occurrence.
+    Suppress,
+}
+
+/// Throttles repeated hook errors so a per-frame hook that keeps failing
+/// cannot flood the log: the first few consecutive failures are logged in
+/// full, afterwards a periodic summary reports the count. A hook success
+/// resets its counter, and a successful hot reload resets all of them —
+/// freshly loaded code gets a clean slate.
+#[derive(Debug, Default)]
+struct HookErrorLog {
+    /// Consecutive failure count per hook.
+    failures: HashMap<&'static str, u64>,
+}
+
+impl HookErrorLog {
+    /// Record a hook failure and decide how it should be logged.
+    fn fail(&mut self, hook: &'static str) -> HookErrorVerdict {
+        let count = self.failures.entry(hook).or_insert(0);
+        *count += 1;
+        let count = *count;
+        if count <= HOOK_ERROR_FULL_LOGS {
+            HookErrorVerdict::Full
+        } else if count.is_multiple_of(HOOK_ERROR_SUMMARY_EVERY) {
+            HookErrorVerdict::Summary(count)
+        } else {
+            HookErrorVerdict::Suppress
+        }
+    }
+
+    /// Record and log a hook failure according to the throttle.
+    fn log_failure(&mut self, hook: &'static str, error: &str) {
+        match self.fail(hook) {
+            HookErrorVerdict::Full => error!("script {} failed: {}", hook, error),
+            HookErrorVerdict::Summary(count) => error!(
+                "script {} still failing ({} consecutive failures); latest: {}",
+                hook, count, error
+            ),
+            HookErrorVerdict::Suppress => {}
+        }
+    }
+
+    /// Reset one hook's throttle (the hook succeeded).
+    fn reset(&mut self, hook: &'static str) {
+        self.failures.remove(&hook);
+    }
+
+    /// Reset all throttles (a successful hot reload brought in fresh code).
+    fn reset_all(&mut self) {
+        self.failures.clear();
+    }
+}
+
 impl Plugin for ScriptPlugin {
     fn name(&self) -> &str {
         "Script"
@@ -248,14 +384,20 @@ impl Plugin for ScriptPlugin {
                 configure(&mut runtime);
             }
             let entry_path = entry.unwrap_or_else(default_script_path);
-            if let Err(e) = load_module_entry(&mut runtime, &entry_path) {
-                error!("Failed to load script '{}': {}", entry_path.display(), e);
-                return;
-            }
+            // A failed initial load (e.g. one syntax error) must not kill
+            // scripting: the state is installed below regardless, and the
+            // hot-reload path retries the entry load on the next file
+            // change (see `EntryLoadRetry`).
+            let entry_loaded = match load_module_entry(&mut runtime, &entry_path) {
+                Ok(_) => true,
+                Err(e) => {
+                    error!("Failed to load script '{}': {}", entry_path.display(), e);
+                    false
+                }
+            };
             // Watch the entry's directory for hot reload. `.ts` sources are
             // transpiled in-process on (re)load, so edits take effect
-            // directly; a pre-compiled `.js` (e.g. from `tsc`, with source
-            // maps) is preferred when present.
+            // directly.
             let watch_dir = entry_path
                 .parent()
                 .filter(|p| !p.as_os_str().is_empty())
@@ -275,9 +417,12 @@ impl Plugin for ScriptPlugin {
             *slot.borrow_mut() = Some(ScriptState {
                 runtime,
                 hot_reloader,
+                entry_path,
+                entry_loaded,
                 last_frame: Instant::now(),
                 fixed: FixedStepAccumulator::new(fixed_timestep),
                 input,
+                error_log: HookErrorLog::default(),
             });
         });
 
@@ -289,7 +434,35 @@ impl Plugin for ScriptPlugin {
             };
             state.runtime.gc_step();
             if let Some(reloader) = state.hot_reloader.as_mut() {
-                if let Err(e) = reloader.poll(&mut state.runtime) {
+                // While the entry graph is missing (failed startup load),
+                // any file change retries the full entry load; otherwise
+                // the runtime reloads the changed modules incrementally.
+                // A successful reload resets the hook error throttles —
+                // freshly loaded code gets a clean slate.
+                let result = if state.entry_loaded {
+                    let mut reload = ReloadReset {
+                        runtime: &mut state.runtime,
+                        reloaded: false,
+                    };
+                    let result = reloader.poll(&mut reload);
+                    if reload.reloaded {
+                        state.error_log.reset_all();
+                    }
+                    result
+                } else {
+                    let mut retry = EntryLoadRetry {
+                        runtime: &mut state.runtime,
+                        entry_path: &state.entry_path,
+                        succeeded: false,
+                    };
+                    let result = reloader.poll(&mut retry);
+                    state.entry_loaded = retry.succeeded;
+                    if retry.succeeded {
+                        state.error_log.reset_all();
+                    }
+                    result
+                };
+                if let Err(e) = result {
                     error!("Hot reload failed: {}", e);
                 }
             }
@@ -300,20 +473,20 @@ impl Plugin for ScriptPlugin {
             // Input phase: mirror the world's InputState into the shared
             // script-facing state, then replay this frame's events to the
             // `on_input` hook (before any fixed steps — "input first, then
-            // simulation", as in Unreal/Godot/Bevy).
-            let events: Vec<moonfield_window::InputEvent> =
-                if let Some(input) = world.get_resource::<moonfield_window::InputState>() {
-                    lock_input(&state.input).sync_frame(&input);
-                    input.events().to_vec()
-                } else {
-                    Vec::new()
-                };
-            if state.runtime.has_function("on_input") {
-                for event in &events {
-                    let arg = input::input_event_to_host(event);
-                    if let Err(e) = state.runtime.call_module_export_unit("on_input", &[arg]) {
-                        error!("script on_input failed: {}", e);
-                        break;
+            // simulation", as in Unreal/Godot/Bevy). Events are iterated by
+            // reference (no per-frame clone) and only when the hook exists.
+            if let Some(input) = world.get_resource::<moonfield_window::InputState>() {
+                lock_input(&state.input).sync_frame(&input);
+                if state.runtime.has_function("on_input") {
+                    for event in input.events() {
+                        let arg = input::input_event_to_host(event);
+                        match state.runtime.call_module_export_unit("on_input", &[arg]) {
+                            Ok(()) => state.error_log.reset("on_input"),
+                            Err(e) => {
+                                state.error_log.log_failure("on_input", &e.to_string());
+                                break;
+                            }
+                        }
                     }
                 }
             }
@@ -321,21 +494,22 @@ impl Plugin for ScriptPlugin {
             // Window lifecycle events (close/resize/focus) — a separate
             // channel from gameplay input, also replayed before any fixed
             // steps.
-            let window_events: Vec<moonfield_window::WindowEventKind> =
-                if let Some(events) = world.get_resource::<moonfield_window::WindowEvents>() {
-                    events.events().to_vec()
-                } else {
-                    Vec::new()
-                };
-            if state.runtime.has_function("on_window_event") {
-                for event in &window_events {
-                    let arg = window::window_event_to_host(event);
-                    if let Err(e) = state
-                        .runtime
-                        .call_module_export_unit("on_window_event", &[arg])
-                    {
-                        error!("script on_window_event failed: {}", e);
-                        break;
+            if let Some(events) = world.get_resource::<moonfield_window::WindowEvents>() {
+                if state.runtime.has_function("on_window_event") {
+                    for event in events.events() {
+                        let arg = window::window_event_to_host(event);
+                        match state
+                            .runtime
+                            .call_module_export_unit("on_window_event", &[arg])
+                        {
+                            Ok(()) => state.error_log.reset("on_window_event"),
+                            Err(e) => {
+                                state
+                                    .error_log
+                                    .log_failure("on_window_event", &e.to_string());
+                                break;
+                            }
+                        }
                     }
                 }
             }
@@ -346,25 +520,33 @@ impl Plugin for ScriptPlugin {
                 let dt = fixed_timestep.as_secs_f64();
                 for _ in 0..state.fixed.advance(frame_time) {
                     lock_input(&state.input).begin_fixed_step();
-                    if let Err(e) = state
+                    match state
                         .runtime
                         .call_module_export_unit("on_fixed_update", &[HostValue::Number(dt)])
                     {
-                        error!("script on_fixed_update failed: {}", e);
-                        lock_input(&state.input).cancel_fixed_step();
-                        break;
+                        Ok(()) => {
+                            state.error_log.reset("on_fixed_update");
+                            lock_input(&state.input).end_fixed_step();
+                        }
+                        Err(e) => {
+                            state
+                                .error_log
+                                .log_failure("on_fixed_update", &e.to_string());
+                            lock_input(&state.input).cancel_fixed_step();
+                            break;
+                        }
                     }
-                    lock_input(&state.input).end_fixed_step();
                 }
             }
 
             let dt = frame_time.as_secs_f64();
             if state.runtime.has_function("on_update") {
-                if let Err(e) = state
+                match state
                     .runtime
                     .call_module_export_unit("on_update", &[HostValue::Number(dt)])
                 {
-                    error!("script on_update failed: {}", e);
+                    Ok(()) => state.error_log.reset("on_update"),
+                    Err(e) => state.error_log.log_failure("on_update", &e.to_string()),
                 }
             }
             true
@@ -385,15 +567,16 @@ impl Plugin for ScriptPlugin {
     }
 }
 
-/// Resolve the default entry script: `scripts/record_frame.js` if present,
-/// else `scripts/record_frame.ts`.
+/// Resolve the default entry script: `scripts/record_frame.ts` if present,
+/// else `scripts/record_frame.js`. The `.ts` source wins when both exist —
+/// a checked-in or stale compiled `.js` must never shadow it.
 fn default_script_path() -> PathBuf {
     let script_dir = Path::new("scripts");
-    let js_path = script_dir.join("record_frame.js");
-    if js_path.exists() {
-        js_path
+    let ts_path = script_dir.join("record_frame.ts");
+    if ts_path.exists() {
+        ts_path
     } else {
-        script_dir.join("record_frame.ts")
+        script_dir.join("record_frame.js")
     }
 }
 
@@ -442,6 +625,46 @@ pub fn run_script_module(entry: &str, api: ScriptApi) -> script::Result<()> {
 mod tests {
     use super::*;
 
+    /// A failed initial entry load (e.g. a syntax error) must not be
+    /// permanent: the retry handler the plugin wires into hot reload picks
+    /// up the fixed file and its exports become callable.
+    #[test]
+    fn failed_initial_load_retries_on_file_change() {
+        let dir = std::env::temp_dir().join(format!(
+            "moonfield_script_test_entry_retry_{}",
+            std::process::id()
+        ));
+        std::fs::create_dir_all(&dir).expect("create temp dir");
+        let entry = dir.join("main.ts");
+        std::fs::write(&entry, "export function value( { not valid").unwrap();
+
+        let mut runtime = Runtime::new(ScriptApi::default()).expect("runtime");
+        // The startup load fails — previously the plugin gave up here and
+        // never installed the runtime or the file watcher.
+        assert!(load_module_entry(&mut runtime, &entry).is_err());
+        assert!(!runtime.has_function("value"));
+
+        // Fix the file, then drive the same retry path the plugin's
+        // hot-reload polling uses while the entry is not loaded.
+        std::fs::write(&entry, "export function value(): number { return 42; }").unwrap();
+        let mut retry = EntryLoadRetry {
+            runtime: &mut runtime,
+            entry_path: &entry,
+            succeeded: false,
+        };
+        retry
+            .on_files_changed(std::slice::from_ref(&entry))
+            .expect("retry after fix");
+        assert!(retry.succeeded);
+        assert!(runtime.has_function("value"));
+        let v = runtime
+            .call_module_export("value", &[])
+            .expect("call value");
+        assert_eq!(v.as_f64(), Some(42.0));
+
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
     #[test]
     fn fixed_step_accumulator_slices_frame_time() {
         let mut acc = FixedStepAccumulator::new(Duration::from_millis(10));
@@ -462,5 +685,44 @@ mod tests {
         );
         assert_eq!(acc.advance(Duration::ZERO), 0);
         assert_eq!(acc.advance(Duration::from_millis(10)), 1);
+    }
+
+    #[test]
+    fn hook_error_log_throttles_repeated_failures() {
+        let mut log = HookErrorLog::default();
+        // The first failures are logged in full.
+        for _ in 0..HOOK_ERROR_FULL_LOGS {
+            assert_eq!(log.fail("on_update"), HookErrorVerdict::Full);
+        }
+        // Then suppressed until the periodic summary kicks in.
+        for _ in HOOK_ERROR_FULL_LOGS..(HOOK_ERROR_SUMMARY_EVERY - 1) {
+            assert_eq!(log.fail("on_update"), HookErrorVerdict::Suppress);
+        }
+        assert_eq!(
+            log.fail("on_update"),
+            HookErrorVerdict::Summary(HOOK_ERROR_SUMMARY_EVERY)
+        );
+        // Hooks are throttled independently.
+        assert_eq!(log.fail("on_fixed_update"), HookErrorVerdict::Full);
+    }
+
+    #[test]
+    fn hook_error_log_resets_on_success_and_hot_reload() {
+        let mut log = HookErrorLog::default();
+        for _ in 0..=HOOK_ERROR_FULL_LOGS {
+            log.fail("on_update");
+        }
+        assert_eq!(log.fail("on_update"), HookErrorVerdict::Suppress);
+        // A success resets that hook: the next failure is full again.
+        log.reset("on_update");
+        assert_eq!(log.fail("on_update"), HookErrorVerdict::Full);
+        // A hot reload resets every hook.
+        for _ in 0..=HOOK_ERROR_FULL_LOGS {
+            log.fail("on_fixed_update");
+        }
+        log.reset_all();
+        assert_eq!(log.fail("on_fixed_update"), HookErrorVerdict::Full);
+        // Resetting a hook that never failed is a no-op.
+        log.reset("on_input");
     }
 }

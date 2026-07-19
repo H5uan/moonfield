@@ -3,6 +3,7 @@
 use super::{
     HostValue, HotReloadHandler, ModuleRegistry, Result, ScriptApi, ScriptError, ScriptRuntime,
     TypedArrayElement, TypedArrayValue, DEFAULT_EXECUTION_TIMEOUT, DEFAULT_MAX_HEAP_BYTES,
+    MAX_HOST_VALUE_DEPTH,
 };
 use moonfield_log::{error, info, warn};
 use rquickjs::function::{Args, Func, Rest};
@@ -400,10 +401,13 @@ impl HotReloadHandler for QuickJsRuntime {
         let mut changed_modules = Vec::new();
         let mut result: Result<()> = Ok(());
         for path in paths {
-            match super::load_script(path) {
+            // A `.js` shadowed by a `.ts` sibling reloads the `.ts` source
+            // of truth instead — stale build output must never win.
+            let path = super::reload_source_path(path);
+            match super::load_script(&path) {
                 Ok(source) => {
                     let module_name = registry
-                        .find_by_file_path(path)
+                        .find_by_file_path(&path)
                         .unwrap_or_else(|| path.to_str().unwrap_or("").to_string());
                     registry.register(&module_name, source);
                     changed_modules.push(module_name);
@@ -549,6 +553,25 @@ macro_rules! typed_array_view_to_js {
     }};
 }
 
+/// Copy a QuickJS typed array of the given element type into an owned
+/// `HostValue::TypedArray`. (No zero-copy view like the V8 backend: rquickjs
+/// ties the backing-store borrow to the value.) A detached buffer yields an
+/// empty array.
+macro_rules! quickjs_typed_array_to_host {
+    ($obj:expr, $ty:ty, $variant:ident) => {
+        if let Some(ta) = $obj.as_typed_array::<$ty>() {
+            let items = match ta.as_bytes() {
+                Some(bytes) => bytes
+                    .chunks_exact(std::mem::size_of::<$ty>())
+                    .map(|c| <$ty>::from_ne_bytes(c.try_into().unwrap()))
+                    .collect(),
+                None => Vec::new(),
+            };
+            return HostValue::TypedArray(TypedArrayValue::$variant(items));
+        }
+    };
+}
+
 /// Convert a `HostValue` to a QuickJS `Value`, preserving types faithfully
 /// (NaN/Infinity, typed arrays) — unlike the old JSON-string round-trip,
 /// which mangled non-finite floats and degraded typed arrays to plain arrays.
@@ -606,6 +629,13 @@ fn host_value_to_js<'js>(ctx: &Ctx<'js>, value: &HostValue) -> rquickjs::Result<
 
 /// Convert a QuickJS `Value` to a `HostValue`.
 fn quickjs_value_to_host(value: &Value) -> HostValue {
+    quickjs_value_to_host_at(value, 0)
+}
+
+/// Depth-limited conversion: containers nested past [`MAX_HOST_VALUE_DEPTH`]
+/// degrade to a placeholder instead of recursing further, so a cyclic or
+/// pathologically deep value cannot overflow the Rust stack.
+fn quickjs_value_to_host_at(value: &Value, depth: usize) -> HostValue {
     if value.is_undefined() || value.is_null() {
         return HostValue::Null;
     }
@@ -623,18 +653,36 @@ fn quickjs_value_to_host(value: &Value) -> HostValue {
             return HostValue::String(s);
         }
     }
+    // Typed arrays — checked before the generic object branch below, which
+    // would otherwise degrade them to a map of "0".."n" index keys.
+    if let Some(obj) = value.as_object() {
+        quickjs_typed_array_to_host!(obj, u8, Uint8);
+        quickjs_typed_array_to_host!(obj, i8, Int8);
+        quickjs_typed_array_to_host!(obj, u16, Uint16);
+        quickjs_typed_array_to_host!(obj, i16, Int16);
+        quickjs_typed_array_to_host!(obj, u32, Uint32);
+        quickjs_typed_array_to_host!(obj, i32, Int32);
+        quickjs_typed_array_to_host!(obj, f32, Float32);
+        quickjs_typed_array_to_host!(obj, f64, Float64);
+    }
     if let Some(arr) = value.as_array() {
+        if depth >= MAX_HOST_VALUE_DEPTH {
+            return HostValue::String("[max depth exceeded]".to_string());
+        }
         let mut items = Vec::new();
         for item in arr.iter().flatten() {
-            items.push(quickjs_value_to_host(&item));
+            items.push(quickjs_value_to_host_at(&item, depth + 1));
         }
         return HostValue::Array(items);
     }
     if let Some(obj) = value.as_object() {
+        if depth >= MAX_HOST_VALUE_DEPTH {
+            return HostValue::String("[max depth exceeded]".to_string());
+        }
         let mut map = std::collections::HashMap::new();
         for key in obj.keys::<String>().flatten() {
             if let Ok(val) = obj.get::<_, Value>(&key) {
-                map.insert(key, quickjs_value_to_host(&val));
+                map.insert(key, quickjs_value_to_host_at(&val, depth + 1));
             }
         }
         return HostValue::Object(map);

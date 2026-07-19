@@ -12,11 +12,12 @@
 //! but TS-only runtime constructs (enums, namespaces, parameter properties)
 //! are not supported.
 //!
-//! For better error locations you can still pre-compile with `tsc` (see
-//! `scripts/tsconfig.json`): [`load_script`] then prefers the pre-compiled
-//! `.js` from `target/scripts/` or alongside the `.ts` source, and the V8
-//! backend remaps error locations back to the original TS positions via
-//! `.js.map` files (see `source_map`).
+//! A requested `.ts` file is always transpiled from its own source — a
+//! pre-compiled `.js` (e.g. `tsc` output in `target/scripts/` or alongside
+//! the `.ts`) is never substituted for it, so editing the `.ts` can never
+//! (re)load stale build output. Plain `.js` files are still read directly,
+//! and the V8 backend remaps their error locations back to the original TS
+//! positions via sibling `.js.map` files (see `source_map`).
 
 pub mod api;
 pub mod hot_reload;
@@ -53,7 +54,21 @@ use std::path::{Path, PathBuf};
 pub const DEFAULT_MAX_HEAP_BYTES: usize = 128 * 1024 * 1024;
 
 /// Default per-execution timeout for top-level script calls (both backends).
+///
+/// The watchdog interrupts *JavaScript* execution only: V8's
+/// `terminate_execution` takes effect at JS interrupt checks and QuickJS's
+/// interrupt handler runs between bytecodes. A script blocked inside a host
+/// function's native call (e.g. a Vulkan driver call like `record_frame`)
+/// is past the watchdog's reach — it hangs the main thread past any
+/// timeout.
 pub const DEFAULT_EXECUTION_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(5);
+
+/// Maximum nesting depth when converting a JS value to a [`HostValue`]
+/// (both backends). A cyclic value has unbounded depth — without a cap the
+/// conversion recurses until the Rust stack overflows (a process abort that
+/// `catch_unwind` cannot stop). Containers deeper than this degrade to a
+/// stringified placeholder instead.
+pub(crate) const MAX_HOST_VALUE_DEPTH: usize = 64;
 
 /// Errors that can occur in the scripting layer.
 #[derive(Debug)]
@@ -219,43 +234,42 @@ pub trait ScriptRuntime {
 /// Load a script file, resolving TypeScript to JavaScript.
 ///
 /// Loading strategy:
-/// 1. If the path ends in `.js`, read it directly.
-/// 2. If the path ends in `.ts`:
-///    - First look for a `.js` file at `target/scripts/<filename>.js`
-///      (build-time tsc output, keeps `.js.map` source maps usable).
-///    - If not found, look for a `.js` file alongside the `.ts` file.
-///    - Otherwise strip the type annotations with swc
-///      (see [`transpile_typescript`]).
+/// 1. If the path ends in `.ts`, read it and strip the type annotations
+///    with swc (see [`transpile_typescript`]). The `.ts` source is the
+///    single source of truth — a pre-compiled `.js` (e.g. stale `tsc`
+///    output in `target/scripts/` or alongside the file) is never
+///    substituted for it.
+/// 2. Otherwise (`.js` etc.), read the file directly.
 pub fn load_script<P: AsRef<Path>>(path: P) -> Result<String> {
     let path = path.as_ref();
-
-    // For .js files, load directly.
-    if path.extension().and_then(|e| e.to_str()) != Some("ts") {
-        return std::fs::read_to_string(path)
-            .map_err(|e| ScriptError::Execution(format!("failed to read script: {}", e)));
-    }
-
-    // Try pre-compiled JS from tsc build output (target/scripts/).
-    let ts_filename = path.file_name().and_then(|n| n.to_str()).unwrap_or("");
-    let js_filename = ts_filename.replace(".ts", ".js");
-
-    // Try target/scripts/ relative to project root.
-    let js_paths = [
-        PathBuf::from("target/scripts").join(&js_filename),
-        path.with_extension("js"),
-    ];
-
-    for js_path in &js_paths {
-        if js_path.exists() {
-            return std::fs::read_to_string(js_path)
-                .map_err(|e| ScriptError::Execution(format!("failed to read script: {}", e)));
-        }
-    }
-
-    // No pre-compiled JS found — strip the type annotations with swc.
     let source = std::fs::read_to_string(path)
         .map_err(|e| ScriptError::Execution(format!("failed to read script: {}", e)))?;
-    transpile_typescript(&source)
+    if path.extension().and_then(|e| e.to_str()) == Some("ts") {
+        transpile_typescript(&source)
+    } else {
+        Ok(source)
+    }
+}
+
+/// Map a changed file to the source of truth a hot reload should read.
+///
+/// `.ts` is the single source of truth: when a changed `.js` has a `.ts`
+/// sibling, the `.ts` shadows it (the `.js` is stale build output), so the
+/// event reloads the `.ts` instead — editing the `.js` can never resurrect
+/// stale code. A `.js` without a `.ts` sibling, and any other file,
+/// reloads from its own path.
+#[cfg_attr(
+    not(any(feature = "v8-backend", feature = "quickjs-backend")),
+    allow(dead_code)
+)]
+pub(crate) fn reload_source_path(path: &Path) -> PathBuf {
+    if path.extension().and_then(|e| e.to_str()) == Some("js") {
+        let ts_sibling = path.with_extension("ts");
+        if ts_sibling.is_file() {
+            return ts_sibling;
+        }
+    }
+    path.to_path_buf()
 }
 
 /// Transpile TypeScript source to JavaScript by stripping type annotations.
