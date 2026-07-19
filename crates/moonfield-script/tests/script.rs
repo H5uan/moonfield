@@ -1151,3 +1151,183 @@ fn typed_arrays_roundtrip_js_to_host() {
         assert_eq!(v.as_f64(), Some(want), "{case}");
     }
 }
+
+/// Time API returns wall-clock seconds, startup elapsed seconds, and a
+/// monotonically increasing frame counter.
+#[test]
+fn time_api_reports_now_startup_and_frame_count() {
+    let dir = unique_temp_dir("time_api");
+    let entry = dir.join("main.js");
+    std::fs::write(
+        &entry,
+        "export function on_update(dt) {\n\
+         report(JSON.stringify({\n\
+             now: time_now(),\n\
+             since: time_since_startup(),\n\
+             frame: frame_count()\n\
+         }));\n\
+     }",
+    )
+    .unwrap();
+
+    let reports = std::sync::Arc::new(std::sync::Mutex::new(Vec::<String>::new()));
+    let sink = std::sync::Arc::clone(&reports);
+    let time = moonfield_script::new_shared_time();
+    let mut api = test_api();
+    moonfield_script::register_time_api(&mut api, &time);
+    api.register_closure("report", move |args| {
+        sink.lock()
+            .unwrap()
+            .push(args[0].as_str().unwrap_or("").to_string());
+        Ok(HostValue::Null)
+    });
+
+    let mut app = moonfield_app::App::new();
+    app.add_plugin(
+        moonfield_script::ScriptPlugin::new(api)
+            .with_entry(&entry)
+            .with_time_state(time),
+    );
+
+    app.update();
+    {
+        let guard = reports.lock().unwrap();
+        let first = guard.last().expect("first report");
+        let parsed: serde_json::Value = serde_json::from_str(first).expect("valid JSON");
+        assert!(
+            parsed["now"].as_f64().unwrap_or(0.0) > 1_700_000_000.0,
+            "now is unix epoch"
+        );
+        assert!(
+            parsed["since"].as_f64().unwrap_or(-1.0) >= 0.0,
+            "since startup >= 0"
+        );
+        assert_eq!(parsed["frame"].as_u64(), Some(1), "first update is frame 1");
+    }
+
+    app.update();
+    {
+        let guard = reports.lock().unwrap();
+        let second = guard.last().expect("second report");
+        let parsed: serde_json::Value = serde_json::from_str(second).expect("valid JSON");
+        assert_eq!(
+            parsed["frame"].as_u64(),
+            Some(2),
+            "second update is frame 2"
+        );
+    }
+
+    std::fs::remove_dir_all(&dir).ok();
+}
+
+/// Mouse position and cursor mode are mirrored from the world's `InputState`
+/// into the script-facing shared state.
+#[test]
+fn input_mouse_position_and_cursor_mode_are_polled() {
+    let dir = unique_temp_dir("input_mouse");
+    let entry = dir.join("main.js");
+    std::fs::write(
+        &entry,
+        "export function on_update(dt) {\n\
+         const pos = input_mouse_position();\n\
+         report(pos[0] + ',' + pos[1] + ',' + input_cursor_mode());\n\
+     }",
+    )
+    .unwrap();
+
+    let reports = std::sync::Arc::new(std::sync::Mutex::new(Vec::<String>::new()));
+    let sink = std::sync::Arc::clone(&reports);
+    let input = moonfield_script::new_shared_input();
+    let mut api = test_api();
+    moonfield_script::register_input_api(&mut api, &input);
+    api.register_closure("report", move |args| {
+        sink.lock()
+            .unwrap()
+            .push(args[0].as_str().unwrap_or("").to_string());
+        Ok(HostValue::Null)
+    });
+
+    let mut app = moonfield_app::App::new();
+    app.insert_resource(moonfield_window::InputState::default());
+    app.add_plugin(
+        moonfield_script::ScriptPlugin::new(api)
+            .with_entry(&entry)
+            .with_input_state(input),
+    );
+
+    {
+        let mut res = app
+            .world_mut()
+            .get_resource_mut::<moonfield_window::InputState>()
+            .unwrap();
+        res.set_mouse_position((123.5, 456.0));
+        res.set_cursor_mode(moonfield_window::CursorMode::Hidden);
+    }
+    app.update();
+
+    assert_eq!(
+        reports.lock().unwrap().last().unwrap(),
+        "123.5,456,hidden",
+        "mouse position and cursor mode are polled"
+    );
+
+    std::fs::remove_dir_all(&dir).ok();
+}
+
+/// Window size is read from the shared window handle, and title / cursor-mode
+/// mutations are queued for the backend.
+#[test]
+fn window_size_title_and_cursor_mode_roundtrip() {
+    let dir = unique_temp_dir("window_api");
+    let entry = dir.join("main.js");
+    std::fs::write(
+        &entry,
+        "export function main() {\n\
+         window_set_title('Test Title');\n\
+         window_set_cursor_mode('locked');\n\
+     }\n\
+     export function on_update(dt) {\n\
+         const size = window_size();\n\
+         report(size[0] + 'x' + size[1]);\n\
+     }",
+    )
+    .unwrap();
+
+    let reports = std::sync::Arc::new(std::sync::Mutex::new(Vec::<String>::new()));
+    let sink = std::sync::Arc::clone(&reports);
+    let control = moonfield_window::WindowControl::default();
+    let window = moonfield_window::new_shared_window();
+    let requests = moonfield_window::WindowRequests::default();
+    let mut api = test_api();
+    moonfield_script::register_window_api(&mut api, &control, &window, &requests);
+    api.register_closure("report", move |args| {
+        sink.lock()
+            .unwrap()
+            .push(args[0].as_str().unwrap_or("").to_string());
+        Ok(HostValue::Null)
+    });
+
+    {
+        let mut w = window.lock().unwrap();
+        w.width = 640;
+        w.height = 480;
+    }
+
+    let mut app = moonfield_app::App::new();
+    app.add_plugin(moonfield_script::ScriptPlugin::new(api).with_entry(&entry));
+
+    app.update();
+
+    assert_eq!(
+        reports.lock().unwrap().last().unwrap(),
+        "640x480",
+        "window_size reports shared handle"
+    );
+    assert_eq!(requests.take_title(), Some("Test Title".to_string()));
+    assert_eq!(
+        requests.take_cursor_mode(),
+        Some(moonfield_window::CursorMode::Locked)
+    );
+
+    std::fs::remove_dir_all(&dir).ok();
+}

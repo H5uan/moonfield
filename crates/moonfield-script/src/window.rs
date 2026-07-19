@@ -106,6 +106,26 @@ pub fn register_window_api(
         });
         api.declare("declare function window_set_title(title: string): void;");
     }
+    {
+        let requests = window_requests.clone();
+        api.register_closure("window_set_cursor_mode", move |args| {
+            let mode = args
+                .first()
+                .and_then(|v| v.as_str())
+                .ok_or_else(|| "arg 0: expected string".to_string())?;
+            let mode = match mode {
+                "normal" => moonfield_window::CursorMode::Normal,
+                "hidden" => moonfield_window::CursorMode::Hidden,
+                "locked" => moonfield_window::CursorMode::Locked,
+                _ => return Err("arg 0: expected 'normal', 'hidden' or 'locked'".to_string()),
+            };
+            requests.request_cursor_mode(mode);
+            Ok(HostValue::Null)
+        });
+        api.declare(
+            "declare function window_set_cursor_mode(mode: \"normal\" | \"hidden\" | \"locked\"): void;",
+        );
+    }
 }
 
 #[cfg(test)]
@@ -150,6 +170,17 @@ mod tests {
         assert!(requests.take_title().is_none());
         fns["window_set_title"](&[HostValue::String("Test".to_string())]).unwrap();
         assert_eq!(requests.take_title(), Some("Test".to_string()));
+
+        // Cursor-mode request is queued for the backend.
+        assert!(requests.take_cursor_mode().is_none());
+        fns["window_set_cursor_mode"](&[HostValue::String("locked".to_string())]).unwrap();
+        assert_eq!(
+            requests.take_cursor_mode(),
+            Some(moonfield_window::CursorMode::Locked)
+        );
+        assert!(
+            fns["window_set_cursor_mode"](&[HostValue::String("invalid".to_string())]).is_err()
+        );
 
         // Arg validation.
         assert!(fns["app_set_auto_exit_on_close"](&[HostValue::Number(1.0)]).is_err());

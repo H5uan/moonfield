@@ -54,3 +54,4 @@ declare function app_exit(): void;
 declare function app_set_auto_exit_on_close(enabled: boolean): void;
 declare function window_size(): [number, number];
 declare function window_set_title(title: string): void;
+declare function window_set_cursor_mode(mode: "normal" | "hidden" | "locked"): void;
