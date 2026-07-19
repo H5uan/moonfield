@@ -16,7 +16,7 @@ sourcemap = "9"
 
 # swc parser/AST — always available for module import analysis (both backends)
 swc_common = "24"
-swc_ecma_ast = "25"
+swc_ecma_ast = "26"
 swc_ecma_parser = "41"
 
 # swc transforms — TS stripping is used by both backends; the CJS transform
