@@ -756,15 +756,18 @@ fn script_plugin_drives_fixed_and_variable_hooks() {
             .with_fixed_timestep(std::time::Duration::from_millis(10)),
     );
 
+    // The plugin's frame delta brackets this sleep, so at least 3 fixed
+    // steps are guaranteed. CI runners can oversleep arbitrarily (or add
+    // startup time to the delta), so no upper bound is asserted.
     app.update(); // startup + first frame (tiny dt → likely 0 fixed steps)
     std::thread::sleep(std::time::Duration::from_millis(35));
-    app.update(); // ~35ms at 10ms/step → 3..=5 fixed steps, 1 update
+    app.update(); // ~35ms at 10ms/step → ≥3 fixed steps, 1 update
 
     {
         let guard = counts.lock().unwrap();
         assert!(
-            (3..=5).contains(&guard.0),
-            "expected 3..=5 fixed steps after a 35ms frame, got {}",
+            guard.0 >= 3,
+            "expected at least 3 fixed steps after a 35ms frame, got {}",
             guard.0
         );
         assert!(
