@@ -13,7 +13,7 @@ crates/
   moonfield-base/     # Shared base types and utilities
   moonfield-render/   # Lunar Mare — Vulkan RHI (ash-based): device, swapchain, pipeline, shaders, headless recording
   moonfield-script/   # Scripting runtime with v8 and QuickJS backends, ES modules, hot reload (src/script/), input polling API (src/input.rs)
-  moonfield-window/   # Abstract windowing types (Window resource, RawHandleWrapper, InputState/InputEvent), no backend deps
+  moonfield-window/   # Abstract windowing types (Window resource, RawHandleWrapper, InputState/InputEvent, WindowEvents/WindowControl), no backend deps
   moonfield-winit/    # Windowing backend (winit), bridges winit Window → moonfield-window resources
 scripts/              # TypeScript helper scripts (e.g. record_frame.ts); moonfield.d.ts is auto-generated
 ```
@@ -21,6 +21,8 @@ scripts/              # TypeScript helper scripts (e.g. record_frame.ts); moonfi
 Host API bindings that touch engine layers (`record_frame`, …) live in the binary crate (`crates/moonfield/src/script_api.rs`) as the composition root — `moonfield-script` itself has no engine-layer dependencies. Bindings that only read script-owned state (the `input_*` polling API) are built into `moonfield-script` (`input::register_input_api`) and shared via an `Arc<Mutex<ScriptInputState>>` handle (`ScriptPlugin::with_input_state`). `scripts/moonfield.d.ts` is generated from the registered `ScriptApi` and kept in sync by a unit test.
 
 Input flows: `moonfield-winit` translates winit events into the `InputState` world resource (frame-latched; cleared each frame after the update) → the script plugin mirrors it into the shared `ScriptInputState`, replays events to the `on_input` hook, and drives `on_fixed_update`/`on_update`. `just_pressed` is frame-scoped in `on_update` and fixed-step-scoped in `on_fixed_update` (delivered to exactly one step, never lost across frames).
+
+Window lifecycle events (`close_requested`/`resized`/`focus_*`) travel on a separate channel — the `WindowEvents` world resource → the `on_window_event` hook. Exit policy mirrors Godot's `auto_accept_quit`: `CloseRequested` exits immediately by default; scripts call `app_set_auto_exit_on_close(false)` to take over and later `app_exit()` (signals via the shared `WindowControl`).
 
 ## Build, Test, and Development Commands
 

@@ -10,9 +10,11 @@
 
 pub mod input;
 pub mod script;
+pub mod window;
 
 pub use input::{new_shared_input, register_input_api, ScriptInputState, SharedInputState};
 pub use moonfield_script_macros::script_function;
+pub use window::register_window_api;
 
 use moonfield_app::prelude::World;
 use moonfield_app::{App, Plugin};
@@ -45,6 +47,9 @@ type ConfigureFn = Arc<dyn Fn(&mut Runtime) + Send + Sync>;
 /// - `main()` — called once after the module graph is first evaluated.
 /// - `on_input(event)` — called once per input event at the start of each
 ///   frame, Godot `_unhandled_input` style. Runs before `on_fixed_update`.
+/// - `on_window_event(event)` — called once per window lifecycle event
+///   (`close_requested`, `resized`, `focus_gained`, `focus_lost`), after
+///   `on_input`. See [`window`] for the exit policy.
 /// - `on_fixed_update(dt)` — called zero or more times per frame with a
 ///   fixed delta (default 1/60 s), Godot `_physics_process` style, for
 ///   framerate-independent gameplay logic. Runs before `on_update`.
@@ -308,6 +313,28 @@ impl Plugin for ScriptPlugin {
                     let arg = input::input_event_to_host(event);
                     if let Err(e) = state.runtime.call_module_export_unit("on_input", &[arg]) {
                         error!("script on_input failed: {}", e);
+                        break;
+                    }
+                }
+            }
+
+            // Window lifecycle events (close/resize/focus) — a separate
+            // channel from gameplay input, also replayed before any fixed
+            // steps.
+            let window_events: Vec<moonfield_window::WindowEventKind> =
+                if let Some(events) = world.get_resource::<moonfield_window::WindowEvents>() {
+                    events.events().to_vec()
+                } else {
+                    Vec::new()
+                };
+            if state.runtime.has_function("on_window_event") {
+                for event in &window_events {
+                    let arg = window::window_event_to_host(event);
+                    if let Err(e) = state
+                        .runtime
+                        .call_module_export_unit("on_window_event", &[arg])
+                    {
+                        error!("script on_window_event failed: {}", e);
                         break;
                     }
                 }

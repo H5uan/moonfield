@@ -637,6 +637,77 @@ fn input_hooks_and_polling_end_to_end() {
     std::fs::remove_dir_all(&dir).ok();
 }
 
+/// Window lifecycle events travel on their own channel to the
+/// `on_window_event` hook, and the `app_*` control functions drive the
+/// shared exit policy (Godot's `auto_accept_quit` model).
+#[test]
+fn window_events_and_exit_control_end_to_end() {
+    let dir = unique_temp_dir("window_events");
+    let entry = dir.join("main.js");
+    std::fs::write(
+        &entry,
+        "let seen = [];\n\
+         export function main() { app_set_auto_exit_on_close(false); }\n\
+         export function on_window_event(e) {\n\
+             seen.push(e.type + (e.width ? ':' + e.width + 'x' + e.height : ''));\n\
+             if (e.type === 'close_requested') app_exit();\n\
+         }\n\
+         export function on_update(dt) { report(seen.join('|')); }",
+    )
+    .unwrap();
+
+    let reports = std::sync::Arc::new(std::sync::Mutex::new(Vec::<String>::new()));
+    let sink = std::sync::Arc::clone(&reports);
+    let input = moonfield_script::new_shared_input();
+    let control = moonfield_window::WindowControl::default();
+    let mut api = test_api();
+    api.register_closure("report", move |args| {
+        sink.lock()
+            .unwrap()
+            .push(args[0].as_str().unwrap_or("").to_string());
+        Ok(HostValue::Null)
+    });
+    moonfield_script::register_input_api(&mut api, &input);
+    moonfield_script::register_window_api(&mut api, &control);
+
+    let mut app = moonfield_app::App::new();
+    app.insert_resource(moonfield_window::WindowEvents::default());
+    app.add_plugin(
+        moonfield_script::ScriptPlugin::new(api)
+            .with_entry(&entry)
+            .with_input_state(input),
+    );
+
+    // Startup runs main(): the script takes over close handling.
+    app.update();
+    assert!(!control.auto_exit_on_close());
+    assert!(!control.exit_requested());
+
+    // Queue lifecycle events and run a frame.
+    {
+        let mut res = app
+            .world_mut()
+            .get_resource_mut::<moonfield_window::WindowEvents>()
+            .unwrap();
+        res.push(moonfield_window::WindowEventKind::Resized {
+            width: 1024,
+            height: 768,
+        });
+        res.push(moonfield_window::WindowEventKind::FocusGained);
+        res.push(moonfield_window::WindowEventKind::CloseRequested);
+    }
+    app.update();
+
+    assert_eq!(
+        reports.lock().unwrap().last().unwrap(),
+        "resized:1024x768|focus_gained|close_requested"
+    );
+    // The close hook decided to quit.
+    assert!(control.exit_requested());
+
+    std::fs::remove_dir_all(&dir).ok();
+}
+
 /// Promises settled during a script call must have their `.then` callbacks
 /// run before the call returns (microtask checkpoint / job queue drain).
 #[test]

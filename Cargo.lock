@@ -1378,6 +1378,7 @@ dependencies = [
  "moonfield-log",
  "moonfield-render",
  "moonfield-script",
+ "moonfield-window",
  "moonfield-winit",
  "v8",
 ]

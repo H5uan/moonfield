@@ -8,8 +8,10 @@
 use moonfield_app::App;
 use raw_window_handle::{RawDisplayHandle, RawWindowHandle};
 
+pub mod events;
 pub mod input;
 
+pub use events::{WindowControl, WindowEventKind, WindowEvents};
 pub use input::{InputEvent, InputState};
 
 /// Plugin that registers the default [`Window`] resource.

@@ -5,7 +5,9 @@
 
 use moonfield_app::{App, Plugin};
 use moonfield_log::error;
-use moonfield_window::{InputEvent, InputState, RawHandleWrapper};
+use moonfield_window::{
+    InputEvent, InputState, RawHandleWrapper, WindowControl, WindowEventKind, WindowEvents,
+};
 use raw_window_handle::{HasDisplayHandle, HasWindowHandle};
 use std::sync::Arc;
 use winit::{
@@ -43,6 +45,8 @@ pub struct WinitPlugin {
     pub height: u32,
     /// Whether to poll or wait for events.
     pub wait_mode: WaitMode,
+    /// Window control signals shared with scripts (exit policy).
+    pub window_control: WindowControl,
 }
 
 /// Control-flow strategy for the event loop.
@@ -62,7 +66,17 @@ impl Default for WinitPlugin {
             width: 800,
             height: 600,
             wait_mode: WaitMode::Wait,
+            window_control: WindowControl::default(),
         }
+    }
+}
+
+/// Share the [`WindowControl`] handle with the event loop (and, via the
+/// composition root, with scripts).
+impl WinitPlugin {
+    pub fn with_window_control(mut self, window_control: WindowControl) -> Self {
+        self.window_control = window_control;
+        self
     }
 }
 
@@ -79,6 +93,8 @@ pub struct WindowConfig {
     pub width: u32,
     pub height: u32,
     pub wait_mode: WaitMode,
+    /// Window control signals shared with scripts (exit policy).
+    pub window_control: WindowControl,
 }
 
 impl Plugin for WinitPlugin {
@@ -88,8 +104,10 @@ impl Plugin for WinitPlugin {
             width: self.width,
             height: self.height,
             wait_mode: self.wait_mode,
+            window_control: self.window_control.clone(),
         });
         app.insert_resource(InputState::default());
+        app.insert_resource(WindowEvents::default());
     }
 
     fn finish(&self, app: &mut App) {
@@ -115,12 +133,14 @@ pub fn winit_runner(app: &mut App) {
             width: c.width,
             height: c.height,
             wait_mode: c.wait_mode,
+            window_control: c.window_control.clone(),
         })
         .unwrap_or(WindowConfig {
             title: "Moonfield".to_string(),
             width: 800,
             height: 600,
             wait_mode: WaitMode::Wait,
+            window_control: WindowControl::default(),
         });
 
     let mut handler = WinitHandler {
@@ -246,9 +266,23 @@ impl ApplicationHandler for WinitHandler<'_> {
 
         match event {
             WindowEvent::CloseRequested => {
-                event_loop.exit();
+                if let Some(mut events) = self.app.get_resource_mut::<WindowEvents>() {
+                    events.push(WindowEventKind::CloseRequested);
+                }
+                // Godot's auto_accept_quit: exit immediately unless scripts
+                // have taken over close handling via
+                // `app_set_auto_exit_on_close(false)`.
+                if self.config.window_control.auto_exit_on_close() {
+                    event_loop.exit();
+                }
             }
             WindowEvent::Resized(size) => {
+                if let Some(mut events) = self.app.get_resource_mut::<WindowEvents>() {
+                    events.push(WindowEventKind::Resized {
+                        width: size.width,
+                        height: size.height,
+                    });
+                }
                 // Update the abstract Window resource with the new size.
                 if let Some(mut win) = self.app.get_resource_mut::<moonfield_window::Window>() {
                     win.width = size.width;
@@ -271,6 +305,15 @@ impl ApplicationHandler for WinitHandler<'_> {
                     }
                 }
             }
+            WindowEvent::Focused(focused) => {
+                if let Some(mut events) = self.app.get_resource_mut::<WindowEvents>() {
+                    events.push(if focused {
+                        WindowEventKind::FocusGained
+                    } else {
+                        WindowEventKind::FocusLost
+                    });
+                }
+            }
             _ => {}
         }
     }
@@ -284,6 +327,13 @@ impl ApplicationHandler for WinitHandler<'_> {
         // The frame's input has been consumed — clear frame-scoped state.
         if let Some(mut input) = self.app.get_resource_mut::<InputState>() {
             input.end_frame();
+        }
+        if let Some(mut events) = self.app.get_resource_mut::<WindowEvents>() {
+            events.end_frame();
+        }
+        // A script asked us to quit via `app_exit()`.
+        if self.config.window_control.exit_requested() {
+            event_loop.exit();
         }
     }
 }

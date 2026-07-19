@@ -22,3 +22,5 @@ declare function input_is_action_just_pressed(name: string): boolean;
 declare function input_get_axis(negative: string, positive: string): number;
 declare function input_get_vector(xNegative: string, xPositive: string, yNegative: string, yPositive: string): [number, number];
 declare function input_bind_action(name: string, codes: string[]): void;
+declare function app_exit(): void;
+declare function app_set_auto_exit_on_close(enabled: boolean): void;
