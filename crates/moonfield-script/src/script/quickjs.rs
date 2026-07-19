@@ -755,15 +755,13 @@ fn quickjs_value_to_host_at(value: &Value, depth: usize) -> HostValue {
     HostValue::String(format!("{:?}", value))
 }
 
-/// Turn a caught QuickJS error into a human-readable string with message,
-/// location, and (if present) stack trace.
+/// Turn a caught QuickJS error into a human-readable string with message
+/// and (if present) stack trace. The stack trace already carries source
+/// locations, so no separate file/line extraction is needed.
 fn format_caught_error<'js>(ce: CaughtError<'js>) -> String {
     match ce {
         CaughtError::Exception(e) => {
             let mut s = e.message().unwrap_or_else(|| "exception".to_string());
-            if let (Some(file), Some(line)) = (e.file(), e.line()) {
-                s.push_str(&format!("\n  at {}:{}", file, line));
-            }
             if let Some(stack) = e.stack() {
                 let stack = stack.trim();
                 if !stack.is_empty() {

@@ -17,13 +17,13 @@ sourcemap = "9"
 # swc parser/AST — always available for module import analysis (both backends)
 swc_common = "24"
 swc_ecma_ast = "26"
-swc_ecma_parser = "41"
+swc_ecma_parser = "42"
 
 # swc transforms — TS stripping is used by both backends; the CJS transform
 # is only needed for the QuickJS module bundler
-swc_ecma_transforms_typescript = "51"
-swc_ecma_codegen = "28"
-swc_ecma_transforms_module = { version = "51.0.0", optional = true }
+swc_ecma_transforms_typescript = "52"
+swc_ecma_codegen = "29"
+swc_ecma_transforms_module = { version = "52.0.0", optional = true }
 
 [features]
 default = ["v8-backend"]
