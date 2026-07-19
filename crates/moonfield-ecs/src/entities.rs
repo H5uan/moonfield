@@ -3,10 +3,10 @@ use std::{
     cmp,
     error::Error,
     mem,
-    num::{NonZeroU32, NonZeroU64},
+    num::NonZeroU32,
+    num::NonZeroU64,
     ops::Range,
     sync::atomic::{AtomicIsize, Ordering},
-    u32,
 };
 
 #[derive(Debug, Clone, Eq, PartialEq)]
@@ -111,7 +111,7 @@ impl Iterator for ReserveEntitiesIterator<'_> {
             .map(|&id| Entity {
                 // use ids from the free list
                 generation: self.meta[id as usize].generation,
-                id: id,
+                id,
             })
             .or_else(|| {
                 // use new ids
@@ -388,8 +388,8 @@ impl Entities {
             return Err(NoSuchEntity);
         }
 
-        meta.generation = NonZeroU32::new(u32::from(meta.generation).wrapping_add(1))
-            .unwrap_or_else(|| NonZeroU32::MIN);
+        meta.generation =
+            NonZeroU32::new(u32::from(meta.generation).wrapping_add(1)).unwrap_or(NonZeroU32::MIN);
 
         let loc = mem::replace(&mut meta.location, EntityMeta::EMPTY.location);
 

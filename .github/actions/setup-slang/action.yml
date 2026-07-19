@@ -38,10 +38,13 @@ runs:
     - name: Download and extract Slang
       if: steps.cache.outputs.cache-hit != 'true'
       shell: bash
+      # Extract from within the workspace: GNU tar on Windows treats
+      # drive-letter paths ("D:\...") as remote "host:path" names.
       run: |
         curl -fSL --retry 3 -o /tmp/slang-archive "${{ steps.archive.outputs.url }}"
-        mkdir -p "$GITHUB_WORKSPACE/.slang"
-        tar -xzf /tmp/slang-archive -C "$GITHUB_WORKSPACE/.slang"
+        cd "$GITHUB_WORKSPACE"
+        mkdir -p .slang
+        tar -xzf /tmp/slang-archive -C .slang
 
     - name: Export environment
       shell: bash

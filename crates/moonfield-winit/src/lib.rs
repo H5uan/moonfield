@@ -307,17 +307,14 @@ impl ApplicationHandler for WinitHandler<'_> {
                 // Rebuild raw handles when the window is resized (the handles
                 // themselves are still valid, but the size is updated above).
                 if let Some(window) = &self.window {
-                    match (
+                    if let (Ok(w_handle), Ok(d_handle)) = (
                         window.as_ref().window_handle(),
                         window.as_ref().display_handle(),
                     ) {
-                        (Ok(w_handle), Ok(d_handle)) => {
-                            self.app.insert_resource(RawHandleWrapper {
-                                window_handle: w_handle.into(),
-                                display_handle: d_handle.into(),
-                            });
-                        }
-                        _ => {}
+                        self.app.insert_resource(RawHandleWrapper {
+                            window_handle: w_handle.into(),
+                            display_handle: d_handle.into(),
+                        });
                     }
                 }
             }

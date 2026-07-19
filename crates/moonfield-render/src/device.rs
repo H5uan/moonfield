@@ -3,7 +3,7 @@
 use crate::error::{Error, Result};
 use crate::instance::Instance;
 use ash::vk;
-use std::ffi::CStr;
+use std::ffi::{c_char, CStr};
 
 const DEVICE_EXTENSIONS: &[&CStr] = &[ash::khr::swapchain::NAME];
 
@@ -117,10 +117,8 @@ impl Device {
             })
             .collect();
 
-        let device_extension_names: Vec<*const i8> = DEVICE_EXTENSIONS
-            .iter()
-            .map(|name| name.as_ptr() as *const i8)
-            .collect();
+        let device_extension_names: Vec<*const c_char> =
+            DEVICE_EXTENSIONS.iter().map(|name| name.as_ptr()).collect();
 
         let features = vk::PhysicalDeviceFeatures::default();
 

@@ -2,6 +2,10 @@ use crate::{Plugin, PluginGroup};
 use moonfield_ecs::{IntoSystem, System, World};
 use std::collections::HashSet;
 
+type StartupFn = Box<dyn FnOnce(&mut World)>;
+type ShutdownFn = Box<dyn FnOnce(&mut World)>;
+type UpdateFn = Box<dyn FnMut(&mut World) -> bool>;
+
 /// Errors that can occur while adding a [`Plugin`] to an [`App`].
 #[derive(Debug, PartialEq, Eq, thiserror::Error)]
 pub enum AppError {
@@ -20,9 +24,9 @@ pub struct App {
     plugin_names: HashSet<String>,
     runner: Box<dyn FnMut(&mut App)>,
     world: World,
-    startup_fns: Vec<Box<dyn FnOnce(&mut World)>>,
-    shutdown_fns: Vec<Box<dyn FnOnce(&mut World)>>,
-    update_fns: Vec<Box<dyn FnMut(&mut World) -> bool>>,
+    startup_fns: Vec<StartupFn>,
+    shutdown_fns: Vec<ShutdownFn>,
+    update_fns: Vec<UpdateFn>,
     initialized: bool,
 }
 
