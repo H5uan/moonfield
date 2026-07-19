@@ -170,9 +170,12 @@ mod tests {
         }
         let on_disk = std::fs::read_to_string(&path)
             .unwrap_or_else(|e| panic!("failed to read {}: {}", path.display(), e));
+        // Normalize line endings so the test passes regardless of git's
+        // `core.autocrlf` setting on Windows.
+        let normalize = |s: &str| s.replace("\r\n", "\n");
         assert_eq!(
-            generated.trim_end(),
-            on_disk.trim_end(),
+            normalize(generated.trim_end()),
+            normalize(on_disk.trim_end()),
             "scripts/moonfield.d.ts is out of sync; regenerate it from ScriptApi::generate_dts()"
         );
     }
