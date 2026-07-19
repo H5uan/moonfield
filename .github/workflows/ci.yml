@@ -1,0 +1,114 @@
+name: CI
+
+on:
+  push:
+    branches: [master]
+  pull_request:
+  workflow_dispatch:
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  CARGO_TERM_COLOR: always
+  CARGO_NET_RETRY: "10"
+
+jobs:
+  fmt:
+    name: rustfmt
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt
+
+      - name: Check formatting
+        run: cargo fmt --all -- --check
+
+  clippy:
+    name: clippy (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, windows-latest, macos-latest]
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy
+
+      - name: Install libclang (Linux)
+        if: runner.os == 'Linux'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y libclang-dev
+
+      - name: Set LIBCLANG_PATH (Windows)
+        if: runner.os == 'Windows'
+        run: echo "LIBCLANG_PATH=C:\Program Files\LLVM\bin" >> "$env:GITHUB_ENV"
+
+      - uses: ./.github/actions/setup-slang
+
+      - uses: Swatinem/rust-cache@v2
+
+      - name: Clippy (v8 backend)
+        run: cargo clippy --workspace --all-targets --locked -- -D warnings
+
+      - name: Clippy (quickjs backend)
+        run: cargo clippy -p moonfield -p moonfield-script --all-targets --no-default-features --features quickjs-backend --locked -- -D warnings
+
+  test:
+    name: test ${{ matrix.backend }} (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, windows-latest, macos-latest]
+        backend: [v8, quickjs]
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: dtolnay/rust-toolchain@stable
+
+      - name: Install Linux dependencies
+        if: runner.os == 'Linux'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y libclang-dev libvulkan1 mesa-vulkan-drivers vulkan-tools
+
+      - name: Set LIBCLANG_PATH (Windows)
+        if: runner.os == 'Windows'
+        run: echo "LIBCLANG_PATH=C:\Program Files\LLVM\bin" >> "$env:GITHUB_ENV"
+
+      - uses: ./.github/actions/setup-slang
+
+      - uses: Swatinem/rust-cache@v2
+
+      - name: Vulkan driver info (Linux)
+        if: runner.os == 'Linux'
+        run: vulkaninfo --summary || true
+
+      - name: Run tests (v8 backend)
+        if: matrix.backend == 'v8'
+        run: cargo test --workspace --locked
+
+      - name: Run tests (quickjs backend)
+        if: matrix.backend == 'quickjs'
+        run: cargo test -p moonfield -p moonfield-script --no-default-features --features quickjs-backend --locked
+
+  ci-result:
+    name: CI result
+    needs: [fmt, clippy, test]
+    if: always()
+    runs-on: ubuntu-latest
+    steps:
+      - name: Verify all jobs succeeded
+        env:
+          NEEDS: ${{ toJSON(needs) }}
+        run: |
+          echo "$NEEDS" | jq -e 'to_entries | all(.value.result == "success")' > /dev/null

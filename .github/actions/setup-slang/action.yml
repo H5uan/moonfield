@@ -1,0 +1,72 @@
+name: Setup Slang
+description: >-
+  Download prebuilt Slang compiler binaries for the current runner and export
+  SLANG_DIR (plus the runtime library search path) for the shader-slang-sys
+  build script.
+inputs:
+  version:
+    description: Slang release version (without the leading "v")
+    required: false
+    default: "2026.12"
+runs:
+  using: composite
+  steps:
+    - name: Resolve archive URL
+      id: archive
+      shell: bash
+      # .tar.gz everywhere: GNU tar (Git Bash on Windows runners) cannot
+      # extract the .zip variants.
+      run: |
+        case "${{ runner.os }}-${{ runner.arch }}" in
+          Linux-X64)    asset="slang-${{ inputs.version }}-linux-x86_64.tar.gz" ;;
+          macOS-ARM64)  asset="slang-${{ inputs.version }}-macos-aarch64.tar.gz" ;;
+          Windows-X64)  asset="slang-${{ inputs.version }}-windows-x86_64.tar.gz" ;;
+          *)
+            echo "unsupported runner: ${{ runner.os }}-${{ runner.arch }}" >&2
+            exit 1
+            ;;
+        esac
+        echo "url=https://github.com/shader-slang/slang/releases/download/v${{ inputs.version }}/${asset}" >> "$GITHUB_OUTPUT"
+
+    - name: Cache Slang
+      id: cache
+      uses: actions/cache@v4
+      with:
+        path: ${{ github.workspace }}/.slang
+        key: slang-${{ inputs.version }}-${{ runner.os }}-${{ runner.arch }}
+
+    - name: Download and extract Slang
+      if: steps.cache.outputs.cache-hit != 'true'
+      shell: bash
+      run: |
+        curl -fSL --retry 3 -o /tmp/slang-archive "${{ steps.archive.outputs.url }}"
+        mkdir -p "$GITHUB_WORKSPACE/.slang"
+        tar -xzf /tmp/slang-archive -C "$GITHUB_WORKSPACE/.slang"
+
+    - name: Export environment
+      shell: bash
+      run: |
+        SLANG_DIR="$GITHUB_WORKSPACE/.slang"
+        echo "SLANG_DIR=$SLANG_DIR" >> "$GITHUB_ENV"
+        case "${{ runner.os }}" in
+          Windows)
+            # slang.dll must be resolvable when test binaries start.
+            echo "$SLANG_DIR/bin" >> "$GITHUB_PATH"
+            ;;
+          Linux)
+            echo "LD_LIBRARY_PATH=$SLANG_DIR/lib${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}" >> "$GITHUB_ENV"
+            ;;
+          macOS)
+            echo "DYLD_LIBRARY_PATH=$SLANG_DIR/lib${DYLD_LIBRARY_PATH:+:$DYLD_LIBRARY_PATH}" >> "$GITHUB_ENV"
+            ;;
+        esac
+
+    - name: Verify installation
+      shell: bash
+      run: |
+        header="$GITHUB_WORKSPACE/.slang/include/slang.h"
+        if [ ! -f "$header" ]; then
+          echo "slang header not found at $header" >&2
+          ls -R "$GITHUB_WORKSPACE/.slang" >&2
+          exit 1
+        fi

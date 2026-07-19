@@ -37,6 +37,22 @@ Window lifecycle events (`close_requested`/`resized`/`focus_*`) travel on a sepa
 
 The runtime supports two scripting backends selected via Cargo features: `v8-backend` (default) and `quickjs-backend`.
 
+External native dependencies:
+
+- **Slang** — `shader-slang-sys` (via `moonfield-render`) links the Slang compiler dynamically. Set `SLANG_DIR` (a prebuilt [Slang release](https://github.com/shader-slang/slang/releases) with `include/`, `lib/`, `bin/`) or install a recent Vulkan SDK (`VULKAN_SDK` is used as a fallback). The Slang shared library must also be on the runtime library path (`PATH` on Windows, `LD_LIBRARY_PATH` on Linux, `DYLD_LIBRARY_PATH` on macOS) when running binaries/tests.
+- **libclang** — required by `bindgen` (used by `shader-slang-sys` and `v8`).
+- The `v8` crate downloads a prebuilt static library automatically on `x86_64-pc-windows-msvc`, `x86_64-unknown-linux-gnu`, and `aarch64-apple-darwin`.
+
+## Continuous Integration
+
+GitHub Actions (`.github/workflows/ci.yml`) runs on pushes to `master` and on PRs, across `ubuntu-latest`, `windows-latest`, and `macos-latest` (Apple Silicon):
+
+- `rustfmt` — `cargo fmt --all -- --check`.
+- `clippy` — `cargo clippy --workspace --all-targets -- -D warnings` for both scripting backends, on all three platforms.
+- `test` — `cargo test --workspace` (v8 backend) and `cargo test -p moonfield -p moonfield-script --no-default-features --features quickjs-backend` (QuickJS backend) on all three platforms.
+
+The `.github/actions/setup-slang` composite action downloads a pinned Slang release and exports `SLANG_DIR` plus the runtime library path. On Linux, CI installs `mesa-vulkan-drivers` (lavapipe) so GPU-dependent tests (`headless_triangle`, `record_frame` extent) run for real; on Windows/macOS they skip gracefully when no Vulkan driver is present.
+
 ## Threading Model
 
 - The script VM (V8 isolate / QuickJS runtime) is `!Send` and lives on the **main thread**, driven from the winit event loop. Scripts exist to call host APIs, and host APIs touch thread-confined resources (winit window, Vulkan device, ECS `World`) — the same reason PuerTS keeps its JsEnv on the game thread.
