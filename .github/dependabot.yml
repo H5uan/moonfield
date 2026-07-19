@@ -9,6 +9,13 @@ updates:
       include: "scope"
     labels:
       - "dependencies"
+    groups:
+      # swc crates are released in lockstep and must move together —
+      # bumping one alone leaves two swc_common versions in the tree
+      # and breaks the build (cf. the swc_ecma_ast 26 incident).
+      swc:
+        patterns:
+          - "swc*"
   - package-ecosystem: "github-actions"
     directory: "/"
     schedule:
