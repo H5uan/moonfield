@@ -1436,6 +1436,7 @@ dependencies = [
  "moonfield-app",
  "moonfield-log",
  "moonfield-script-macros",
+ "moonfield-window",
  "notify",
  "rquickjs",
  "serde_json",

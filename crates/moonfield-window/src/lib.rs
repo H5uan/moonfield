@@ -2,10 +2,15 @@
 //!
 //! This crate defines the [`Window`] resource and [`RawHandleWrapper`] that
 //! other crates (render, winit, etc.) use to communicate about windows
-//! without depending on a specific windowing backend.
+//! without depending on a specific windowing backend, plus the
+//! backend-agnostic [`InputState`] resource and [`InputEvent`] types.
 
 use moonfield_app::App;
 use raw_window_handle::{RawDisplayHandle, RawWindowHandle};
+
+pub mod input;
+
+pub use input::{InputEvent, InputState};
 
 /// Plugin that registers the default [`Window`] resource.
 ///

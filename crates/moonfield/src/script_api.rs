@@ -6,6 +6,7 @@
 //! keeps that crate free of engine-layer dependencies.
 
 use moonfield_render::HeadlessContext;
+use moonfield_script::input::{register_input_api, SharedInputState};
 use moonfield_script::script::ScriptApi;
 use std::cell::RefCell;
 
@@ -32,9 +33,10 @@ fn ensure_headless_context() -> Result<(), String> {
 }
 
 /// Build the host API exposed to scripts.
-pub fn build_script_api() -> ScriptApi {
+pub fn build_script_api(input: &SharedInputState) -> ScriptApi {
     let mut api = ScriptApi::new();
     api.register_fn::<record_frame_Fn>();
+    register_input_api(&mut api, input);
     api
 }
 
@@ -100,7 +102,7 @@ mod tests {
     /// generates, so IDE autocomplete never drifts from the real bindings.
     #[test]
     fn dts_matches_registered_api() {
-        let api = build_script_api();
+        let api = build_script_api(&moonfield_script::new_shared_input());
         let generated = api.generate_dts();
         let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
             .join("..")

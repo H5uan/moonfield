@@ -9,3 +9,16 @@ declare const console: {
 };
 
 declare function record_frame(width?: number, height?: number): void;
+declare function input_is_key_pressed(code: string): boolean;
+declare function input_is_key_just_pressed(code: string): boolean;
+declare function input_is_key_just_released(code: string): boolean;
+declare function input_is_mouse_button_pressed(button: string): boolean;
+declare function input_is_mouse_button_just_pressed(button: string): boolean;
+declare function input_is_mouse_button_just_released(button: string): boolean;
+declare function input_mouse_delta(): [number, number];
+declare function input_mouse_scroll(): [number, number];
+declare function input_is_action_pressed(name: string): boolean;
+declare function input_is_action_just_pressed(name: string): boolean;
+declare function input_get_axis(negative: string, positive: string): number;
+declare function input_get_vector(xNegative: string, xPositive: string, yNegative: string, yPositive: string): [number, number];
+declare function input_bind_action(name: string, codes: string[]): void;

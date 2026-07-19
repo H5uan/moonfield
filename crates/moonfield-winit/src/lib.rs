@@ -5,13 +5,15 @@
 
 use moonfield_app::{App, Plugin};
 use moonfield_log::error;
-use moonfield_window::RawHandleWrapper;
+use moonfield_window::{InputEvent, InputState, RawHandleWrapper};
 use raw_window_handle::{HasDisplayHandle, HasWindowHandle};
 use std::sync::Arc;
 use winit::{
     application::ApplicationHandler,
     dpi::LogicalSize,
+    event::{ElementState, MouseScrollDelta, WindowEvent},
     event_loop::{ActiveEventLoop, ControlFlow, EventLoop},
+    keyboard::PhysicalKey,
     window::{Window, WindowAttributes, WindowId},
 };
 
@@ -87,6 +89,7 @@ impl Plugin for WinitPlugin {
             height: self.height,
             wait_mode: self.wait_mode,
         });
+        app.insert_resource(InputState::default());
     }
 
     fn finish(&self, app: &mut App) {
@@ -124,6 +127,7 @@ pub fn winit_runner(app: &mut App) {
         app,
         window: None,
         config,
+        last_cursor: None,
     };
 
     if let Err(e) = event_loop.run_app(&mut handler) {
@@ -136,6 +140,8 @@ struct WinitHandler<'a> {
     app: &'a mut App,
     window: Option<Arc<Window>>,
     config: WindowConfig,
+    /// Last cursor position, used to compute motion deltas.
+    last_cursor: Option<(f64, f64)>,
 }
 
 impl ApplicationHandler for WinitHandler<'_> {
@@ -187,13 +193,62 @@ impl ApplicationHandler for WinitHandler<'_> {
         &mut self,
         event_loop: &ActiveEventLoop,
         _window_id: WindowId,
-        event: winit::event::WindowEvent,
+        event: WindowEvent,
     ) {
+        // Translate input events into the shared InputState resource
+        // (consumed during the next app update).
+        let input_event = match &event {
+            WindowEvent::KeyboardInput { event, .. } => {
+                if event.repeat {
+                    None
+                } else if let PhysicalKey::Code(code) = event.physical_key {
+                    let code = format!("{:?}", code);
+                    Some(match event.state {
+                        ElementState::Pressed => InputEvent::KeyPressed { code },
+                        ElementState::Released => InputEvent::KeyReleased { code },
+                    })
+                } else {
+                    None
+                }
+            }
+            WindowEvent::MouseInput { state, button, .. } => {
+                let button = format!("{:?}", button);
+                Some(match state {
+                    ElementState::Pressed => InputEvent::MouseButtonPressed { button },
+                    ElementState::Released => InputEvent::MouseButtonReleased { button },
+                })
+            }
+            WindowEvent::CursorMoved { position, .. } => {
+                let pos = (position.x, position.y);
+                let (dx, dy) = self
+                    .last_cursor
+                    .map(|last| (pos.0 - last.0, pos.1 - last.1))
+                    .unwrap_or((0.0, 0.0));
+                self.last_cursor = Some(pos);
+                Some(InputEvent::MouseMotion { dx, dy })
+            }
+            WindowEvent::MouseWheel { delta, .. } => {
+                let (dx, dy) = match delta {
+                    MouseScrollDelta::LineDelta(x, y) => (*x as f64, *y as f64),
+                    // Convert pixel deltas (precision touchpads) at ~16px/line.
+                    MouseScrollDelta::PixelDelta(pos) => (pos.x / 16.0, pos.y / 16.0),
+                };
+                Some(InputEvent::MouseWheel { dx, dy })
+            }
+            WindowEvent::Focused(false) => Some(InputEvent::FocusLost),
+            _ => None,
+        };
+        if let Some(event) = input_event {
+            if let Some(mut input) = self.app.get_resource_mut::<InputState>() {
+                input.apply_event(event);
+            }
+        }
+
         match event {
-            winit::event::WindowEvent::CloseRequested => {
+            WindowEvent::CloseRequested => {
                 event_loop.exit();
             }
-            winit::event::WindowEvent::Resized(size) => {
+            WindowEvent::Resized(size) => {
                 // Update the abstract Window resource with the new size.
                 if let Some(mut win) = self.app.get_resource_mut::<moonfield_window::Window>() {
                     win.width = size.width;
@@ -226,5 +281,9 @@ impl ApplicationHandler for WinitHandler<'_> {
             WaitMode::Wait => event_loop.set_control_flow(ControlFlow::Wait),
         }
         self.app.update();
+        // The frame's input has been consumed — clear frame-scoped state.
+        if let Some(mut input) = self.app.get_resource_mut::<InputState>() {
+            input.end_frame();
+        }
     }
 }

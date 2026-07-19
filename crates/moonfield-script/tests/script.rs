@@ -554,6 +554,89 @@ fn script_plugin_drives_fixed_and_variable_hooks() {
     std::fs::remove_dir_all(&dir).ok();
 }
 
+/// End-to-end input flow: winit-side `InputState` events feed the
+/// `on_input` hook and the `input_*` polling API, with `just_pressed`
+/// delivered to exactly one fixed step (the Bevy-#6183 pitfall, solved
+/// structurally by the step-latched edge view).
+#[test]
+fn input_hooks_and_polling_end_to_end() {
+    let dir = unique_temp_dir("input_e2e");
+    let entry = dir.join("main.js");
+    std::fs::write(
+        &entry,
+        "let fixedJP = 0, updateJP = 0, actionJP = 0, held = 0, events = [];\n\
+         export function main() { input_bind_action('jump', ['Space']); }\n\
+         export function on_input(e) { events.push(e.type + ':' + (e.code || '')); }\n\
+         export function on_fixed_update(dt) {\n\
+             if (input_is_key_just_pressed('Space')) fixedJP++;\n\
+             if (input_is_action_just_pressed('jump')) actionJP++;\n\
+         }\n\
+         export function on_update(dt) {\n\
+             if (input_is_key_just_pressed('Space')) updateJP++;\n\
+             if (input_is_key_pressed('Space')) held++;\n\
+             report([fixedJP, updateJP, actionJP, held, events.join('|')].join(','));\n\
+         }",
+    )
+    .unwrap();
+
+    let reports = std::sync::Arc::new(std::sync::Mutex::new(Vec::<String>::new()));
+    let sink = std::sync::Arc::clone(&reports);
+    let input = moonfield_script::new_shared_input();
+    let mut api = test_api();
+    api.register_closure("report", move |args| {
+        sink.lock()
+            .unwrap()
+            .push(args[0].as_str().unwrap_or("").to_string());
+        Ok(HostValue::Null)
+    });
+    moonfield_script::register_input_api(&mut api, &input);
+
+    let mut app = moonfield_app::App::new();
+    app.insert_resource(moonfield_window::InputState::default());
+    app.add_plugin(
+        moonfield_script::ScriptPlugin::new(api)
+            .with_entry(&entry)
+            .with_input_state(input)
+            .with_fixed_timestep(std::time::Duration::from_millis(10)),
+    );
+
+    // Frame 1: startup + a plain frame (no input).
+    app.update();
+
+    // Press Space and give the next frame real time so several fixed
+    // steps run within it.
+    {
+        let mut res = app
+            .world_mut()
+            .get_resource_mut::<moonfield_window::InputState>()
+            .unwrap();
+        res.apply_event(moonfield_window::InputEvent::KeyPressed {
+            code: "Space".into(),
+        });
+    }
+    std::thread::sleep(std::time::Duration::from_millis(35));
+    app.update(); // frame 2: on_input replay, N fixed steps, one update
+                  // Mirror the backend's frame boundary (winit's about_to_wait).
+    app.world_mut()
+        .get_resource_mut::<moonfield_window::InputState>()
+        .unwrap()
+        .end_frame();
+
+    // Frame 3: no new events, more fixed steps.
+    std::thread::sleep(std::time::Duration::from_millis(35));
+    app.update();
+
+    let guard = reports.lock().unwrap();
+    let last = guard.last().expect("a report from on_update");
+    // fixedJP=1 (exactly one fixed step saw the edge, not N),
+    // updateJP=1 (frame-scoped edge, cleared after the frame),
+    // actionJP=1, held=2 (held across both frames),
+    // one replayed event.
+    assert_eq!(last, "1,1,1,2,key_pressed:Space", "reports: {:?}", *guard);
+
+    std::fs::remove_dir_all(&dir).ok();
+}
+
 /// Promises settled during a script call must have their `.then` callbacks
 /// run before the call returns (microtask checkpoint / job queue drain).
 #[test]

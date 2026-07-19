@@ -24,7 +24,8 @@ fn main() {
     app.add_systems(print_fps);
 
     // 脚本系统：host API 在 script_api 模块组装（组合根模式）
-    let plugin = ScriptPlugin::new(script_api::build_script_api());
+    let input = moonfield_script::new_shared_input();
+    let plugin = ScriptPlugin::new(script_api::build_script_api(&input)).with_input_state(input);
     #[cfg(all(feature = "v8-backend", not(feature = "quickjs-backend")))]
     let plugin = plugin.with_configure(script_api::configure_runtime);
     app.add_plugin(plugin);

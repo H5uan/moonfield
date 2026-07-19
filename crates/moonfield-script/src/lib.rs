@@ -8,8 +8,10 @@
 //! Host functions are provided by the embedding application (see
 //! [`ScriptApi`]); this crate deliberately has no engine-layer dependencies.
 
+pub mod input;
 pub mod script;
 
+pub use input::{new_shared_input, register_input_api, ScriptInputState, SharedInputState};
 pub use moonfield_script_macros::script_function;
 
 use moonfield_app::prelude::World;
@@ -26,7 +28,7 @@ use script::{HostValue, HotReloader, ScriptApi, ScriptRuntime};
 use std::cell::RefCell;
 use std::path::{Path, PathBuf};
 use std::rc::Rc;
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
 /// Runtime configuration hook used by [`ScriptPlugin::with_configure`],
@@ -41,6 +43,8 @@ type ConfigureFn = Arc<dyn Fn(&mut Runtime) + Send + Sync>;
 /// lifecycle hooks:
 ///
 /// - `main()` — called once after the module graph is first evaluated.
+/// - `on_input(event)` — called once per input event at the start of each
+///   frame, Godot `_unhandled_input` style. Runs before `on_fixed_update`.
 /// - `on_fixed_update(dt)` — called zero or more times per frame with a
 ///   fixed delta (default 1/60 s), Godot `_physics_process` style, for
 ///   framerate-independent gameplay logic. Runs before `on_update`.
@@ -68,6 +72,10 @@ pub struct ScriptPlugin {
     memory_limit: Option<usize>,
     /// Fixed timestep for the `on_fixed_update` hook.
     fixed_timestep: Duration,
+    /// Input state shared with the `input_*` host functions. When unset,
+    /// the plugin creates its own handle (input polling then reflects only
+    /// what this plugin mirrors).
+    input: Option<Arc<Mutex<ScriptInputState>>>,
 }
 
 impl Default for ScriptPlugin {
@@ -85,6 +93,7 @@ impl ScriptPlugin {
             configure: None,
             memory_limit: None,
             fixed_timestep: Duration::from_secs_f64(1.0 / 60.0),
+            input: None,
         }
     }
 
@@ -113,6 +122,16 @@ impl ScriptPlugin {
         self
     }
 
+    /// Share the [`ScriptInputState`] handle that the `input_*` host
+    /// functions read. The composition root creates one handle, registers
+    /// the host functions with it, and passes the same handle here so the
+    /// plugin can mirror the world's `InputState` resource into it each
+    /// frame.
+    pub fn with_input_state(mut self, input: Arc<Mutex<ScriptInputState>>) -> Self {
+        self.input = Some(input);
+        self
+    }
+
     /// Add a hook that runs right after the script runtime is created, e.g.
     /// to register backend-specific fast-path host functions:
     ///
@@ -138,6 +157,15 @@ struct ScriptState {
     last_frame: Instant,
     /// Fixed-timestep accumulator feeding `on_fixed_update`.
     fixed: FixedStepAccumulator,
+    /// Input state shared with the `input_*` host functions; mirrored from
+    /// the world's `InputState` resource each frame.
+    input: Arc<Mutex<ScriptInputState>>,
+}
+
+/// Lock the shared input state, tolerating a poisoned mutex — a panicking
+/// host function must not permanently break input polling.
+fn lock_input(input: &Arc<Mutex<ScriptInputState>>) -> std::sync::MutexGuard<'_, ScriptInputState> {
+    input.lock().unwrap_or_else(|e| e.into_inner())
 }
 
 /// Maximum fixed steps per frame; excess accumulated time is dropped so a
@@ -194,6 +222,10 @@ impl Plugin for ScriptPlugin {
         let configure = self.configure.clone();
         let memory_limit = self.memory_limit;
         let fixed_timestep = self.fixed_timestep;
+        let input = self
+            .input
+            .clone()
+            .unwrap_or_else(|| Arc::new(Mutex::new(ScriptInputState::default())));
         let slot = state_slot.clone();
         app.add_startup_system(move |_world: &mut World| {
             info!("Script plugin startup");
@@ -240,11 +272,12 @@ impl Plugin for ScriptPlugin {
                 hot_reloader,
                 last_frame: Instant::now(),
                 fixed: FixedStepAccumulator::new(fixed_timestep),
+                input,
             });
         });
 
         let slot = state_slot.clone();
-        app.add_update_system(move |_world: &mut World| {
+        app.add_update_system(move |world: &mut World| {
             let mut slot = slot.borrow_mut();
             let Some(state) = slot.as_mut() else {
                 return true;
@@ -259,18 +292,42 @@ impl Plugin for ScriptPlugin {
             let frame_time = now.duration_since(state.last_frame);
             state.last_frame = now;
 
+            // Input phase: mirror the world's InputState into the shared
+            // script-facing state, then replay this frame's events to the
+            // `on_input` hook (before any fixed steps — "input first, then
+            // simulation", as in Unreal/Godot/Bevy).
+            let events: Vec<moonfield_window::InputEvent> =
+                if let Some(input) = world.get_resource::<moonfield_window::InputState>() {
+                    lock_input(&state.input).sync_frame(&input);
+                    input.events().to_vec()
+                } else {
+                    Vec::new()
+                };
+            if state.runtime.has_function("on_input") {
+                for event in &events {
+                    let arg = input::input_event_to_host(event);
+                    if let Err(e) = state.runtime.call_module_export_unit("on_input", &[arg]) {
+                        error!("script on_input failed: {}", e);
+                        break;
+                    }
+                }
+            }
+
             // Fixed-timestep gameplay hook (Godot `_physics_process` /
             // Unity `FixedUpdate` style), runs before `on_update`.
             if state.runtime.has_function("on_fixed_update") {
                 let dt = fixed_timestep.as_secs_f64();
                 for _ in 0..state.fixed.advance(frame_time) {
+                    lock_input(&state.input).begin_fixed_step();
                     if let Err(e) = state
                         .runtime
                         .call_module_export_unit("on_fixed_update", &[HostValue::Number(dt)])
                     {
                         error!("script on_fixed_update failed: {}", e);
+                        lock_input(&state.input).cancel_fixed_step();
                         break;
                     }
+                    lock_input(&state.input).end_fixed_step();
                 }
             }
 
