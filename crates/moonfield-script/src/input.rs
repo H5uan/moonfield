@@ -11,6 +11,8 @@
 //!   used by `on_fixed_update` (Godot's "physics tick" scope). A press is
 //!   reported to exactly one fixed step, never duplicated across steps in
 //!   one frame, and never lost when a frame runs zero steps.
+//!
+//! A focus loss clears both views, mirroring the world's `InputState`.
 
 use moonfield_window::{InputEvent, InputState};
 use std::collections::{HashMap, HashSet};
@@ -46,6 +48,15 @@ impl ScriptInputState {
     /// Mirror this frame's state from the world resource. Step-latched
     /// edges are merged in and persist until a fixed step consumes them.
     pub fn sync_frame(&mut self, input: &InputState) {
+        // A focus loss wiped the world's pressed/edge sets (so keys can't
+        // get stuck); the step-latched edges must follow, or a press
+        // latched before the focus loss would surface in a later step.
+        if input.events().contains(&InputEvent::FocusLost) {
+            self.step_just_pressed_keys.clear();
+            self.step_just_released_keys.clear();
+            self.step_just_pressed_buttons.clear();
+            self.step_just_released_buttons.clear();
+        }
         sync_set(&mut self.pressed_keys, input.pressed_keys());
         sync_set(&mut self.pressed_buttons, input.pressed_buttons());
         sync_set(&mut self.frame_just_pressed_keys, input.just_pressed_keys());
@@ -483,6 +494,34 @@ mod tests {
 
         input.begin_fixed_step();
         assert!(!input.is_just_pressed("Space"));
+        input.end_fixed_step();
+    }
+
+    #[test]
+    fn focus_lost_clears_step_latched_edges() {
+        let mut world_input = InputState::default();
+        press(&mut world_input, "Space");
+
+        let mut input = ScriptInputState::default();
+        input.sync_frame(&world_input);
+        assert!(input.step_just_pressed_keys.contains("Space"));
+
+        // Focus is lost before any fixed step ran: the world wipes its
+        // edge sets, and the step-latched edges must follow.
+        let mut next_frame = InputState::default();
+        next_frame.apply_event(InputEvent::FocusLost);
+        input.sync_frame(&next_frame);
+
+        input.begin_fixed_step();
+        assert!(!input.is_key_just_pressed("Space"));
+        input.end_fixed_step();
+
+        // An edge arriving after the focus loss still latches normally.
+        let mut frame = InputState::default();
+        press(&mut frame, "Enter");
+        input.sync_frame(&frame);
+        input.begin_fixed_step();
+        assert!(input.is_key_just_pressed("Enter"));
         input.end_fixed_step();
     }
 

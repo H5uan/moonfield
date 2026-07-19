@@ -491,6 +491,60 @@ fn hot_reload_recovers_after_broken_edit() {
     std::fs::remove_dir_all(&dir).ok();
 }
 
+/// Hot reload: deleting a module file must surface as an error (the file
+/// no longer reads) instead of silently keeping its last code — the
+/// watcher forwards removals, and the backend reports the failed read
+/// while the previously evaluated code keeps running.
+#[test]
+fn hot_reload_surfaces_deleted_module() {
+    let dir = unique_temp_dir("hot_reload_delete");
+    let utils_path = dir.join("utils.js");
+    std::fs::write(&utils_path, "export function value() { return 1; }").unwrap();
+
+    let mut registry = ModuleRegistry::new();
+    registry.register(
+        "main",
+        "import { value } from \"./utils\";\n\
+         export function mainValue() { return value(); }"
+            .to_string(),
+    );
+    let utils_source = std::fs::read_to_string(&utils_path).unwrap();
+    registry.register("./utils", utils_source);
+
+    let mut runtime = Runtime::new(test_api()).expect("runtime");
+    runtime
+        .load_module_graph(Rc::new(registry), "main")
+        .expect("load_module_graph");
+
+    // Delete the dependency and trigger a hot reload: the reload must
+    // fail loudly, not keep the stale code running silently.
+    std::fs::remove_file(&utils_path).unwrap();
+    let result = runtime.on_files_changed(std::slice::from_ref(&utils_path));
+    let err = result.expect_err("deleting a module file must surface an error");
+    assert!(
+        err.to_string().contains("failed to read script"),
+        "error should report the unreadable file, got: {err}"
+    );
+
+    // The previously evaluated code is still alive, and recreating the
+    // file recovers through the same path the pending-retry uses.
+    let v = runtime
+        .call_module_export("mainValue", &[])
+        .expect("old code still callable");
+    assert_eq!(v.as_f64(), Some(1.0));
+
+    std::fs::write(&utils_path, "export function value() { return 2; }").unwrap();
+    runtime
+        .on_files_changed(std::slice::from_ref(&utils_path))
+        .expect("reload after recreate");
+    let v = runtime
+        .call_module_export("mainValue", &[])
+        .expect("call after recreate");
+    assert_eq!(v.as_f64(), Some(2.0));
+
+    std::fs::remove_dir_all(&dir).ok();
+}
+
 /// A `.ts` file is always transpiled from its own source: a stale
 /// pre-compiled `.js` sitting next to it must never shadow it — neither on
 /// the initial load nor on hot reload.

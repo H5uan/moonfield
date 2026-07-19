@@ -121,6 +121,12 @@ mod tests {
             .join("..")
             .join("scripts")
             .join("moonfield.d.ts");
+        // Regenerate the checked-in file with:
+        // `MOONFIELD_UPDATE_DTS=1 cargo test -p moonfield dts`.
+        if std::env::var_os("MOONFIELD_UPDATE_DTS").is_some() {
+            std::fs::write(&path, &generated)
+                .unwrap_or_else(|e| panic!("failed to write {}: {}", path.display(), e));
+        }
         let on_disk = std::fs::read_to_string(&path)
             .unwrap_or_else(|e| panic!("failed to read {}: {}", path.display(), e));
         assert_eq!(

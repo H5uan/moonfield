@@ -237,6 +237,39 @@ impl From<Vec<f64>> for HostValue {
     }
 }
 
+/// TypeScript declarations for the script lifecycle hooks and the event
+/// payloads passed to `on_input` / `on_window_event` (the hook set is
+/// documented on `ScriptPlugin`). Emitted verbatim by
+/// [`ScriptApi::generate_dts`]. The event shapes must match
+/// [`crate::input::input_event_to_host`] and
+/// [`crate::window::window_event_to_host`] — the tests in this module
+/// assert that every payload key those builders produce appears here.
+const HOOKS_DTS: &str = concat!(
+    "// Script lifecycle hooks — all optional; missing hooks are skipped.\n",
+    "type MfInputEvent =\n",
+    "    | { type: \"key_pressed\"; code: string }\n",
+    "    | { type: \"key_released\"; code: string }\n",
+    "    | { type: \"mouse_button_pressed\"; button: string }\n",
+    "    | { type: \"mouse_button_released\"; button: string }\n",
+    "    | { type: \"mouse_motion\"; dx: number; dy: number }\n",
+    "    | { type: \"mouse_wheel\"; dx: number; dy: number }\n",
+    "    | { type: \"focus_lost\" };\n",
+    "\n",
+    "type MfWindowEvent =\n",
+    "    | { type: \"close_requested\" }\n",
+    "    | { type: \"resized\"; width: number; height: number }\n",
+    "    | { type: \"focus_gained\" }\n",
+    "    | { type: \"focus_lost\" };\n",
+    "\n",
+    "declare function main(): void;\n",
+    "declare function on_update(dt: number): void;\n",
+    "declare function on_fixed_update(dt: number): void;\n",
+    "declare function on_input(e: MfInputEvent): void;\n",
+    "declare function on_window_event(e: MfWindowEvent): void;\n",
+    "declare function on_shutdown(): void;\n",
+    "\n",
+);
+
 /// A host function exposed to scripts.
 ///
 /// Receives a slice of arguments and returns a value (or an error string).
@@ -351,6 +384,9 @@ impl ScriptApi {
             "    error(...args: unknown[]): void;\n",
             "};\n\n",
         ));
+        // Lifecycle hooks and their event payload types — fixed runtime
+        // surface like the console shim above.
+        s.push_str(HOOKS_DTS);
         for decl in &self.ts_declarations {
             s.push_str(decl);
             s.push('\n');
@@ -370,5 +406,117 @@ impl Default for ScriptApi {
     /// keeping this crate free of engine-layer dependencies.
     fn default() -> Self {
         Self::new()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::input::input_event_to_host;
+    use crate::window::window_event_to_host;
+    use moonfield_window::{InputEvent, WindowEventKind};
+
+    /// Every payload key the event builders can produce must show up in the
+    /// generated declarations, so `HOOKS_DTS` cannot silently drift from the
+    /// marshaling code (substring checks — no parser needed).
+    #[test]
+    fn test_dts_covers_event_payloads() {
+        let dts = ScriptApi::new().generate_dts();
+
+        let input_events = [
+            InputEvent::KeyPressed {
+                code: "KeyW".to_string(),
+            },
+            InputEvent::KeyReleased {
+                code: "KeyW".to_string(),
+            },
+            InputEvent::MouseButtonPressed {
+                button: "Left".to_string(),
+            },
+            InputEvent::MouseButtonReleased {
+                button: "Left".to_string(),
+            },
+            InputEvent::MouseMotion { dx: 1.0, dy: 2.0 },
+            InputEvent::MouseWheel { dx: 0.0, dy: -1.0 },
+            InputEvent::FocusLost,
+        ];
+        for event in &input_events {
+            // Exhaustive on purpose: a new variant fails to compile until
+            // `HOOKS_DTS` and this list are extended.
+            match event {
+                InputEvent::KeyPressed { .. }
+                | InputEvent::KeyReleased { .. }
+                | InputEvent::MouseButtonPressed { .. }
+                | InputEvent::MouseButtonReleased { .. }
+                | InputEvent::MouseMotion { .. }
+                | InputEvent::MouseWheel { .. }
+                | InputEvent::FocusLost => {}
+            }
+            assert_payload_covered(&dts, input_event_to_host(event));
+        }
+
+        let window_events = [
+            WindowEventKind::CloseRequested,
+            WindowEventKind::Resized {
+                width: 800,
+                height: 600,
+            },
+            WindowEventKind::FocusGained,
+            WindowEventKind::FocusLost,
+        ];
+        for event in &window_events {
+            match event {
+                WindowEventKind::CloseRequested
+                | WindowEventKind::Resized { .. }
+                | WindowEventKind::FocusGained
+                | WindowEventKind::FocusLost => {}
+            }
+            assert_payload_covered(&dts, window_event_to_host(event));
+        }
+    }
+
+    /// Assert the payload's `type` discriminator value and every key of the
+    /// marshaled object appear in the generated declarations.
+    fn assert_payload_covered(dts: &str, payload: HostValue) {
+        let HostValue::Object(map) = payload else {
+            panic!("event payload must be an object");
+        };
+        let type_value = map
+            .get("type")
+            .and_then(HostValue::as_str)
+            .expect("payload has a string `type` discriminator");
+        assert!(
+            dts.contains(&format!("\"{}\"", type_value)),
+            "d.ts is missing event type `{}`",
+            type_value
+        );
+        for key in map.keys() {
+            assert!(
+                dts.contains(&format!("{}:", key)),
+                "d.ts is missing payload key `{}` for event `{}`",
+                key,
+                type_value
+            );
+        }
+    }
+
+    /// The generated declarations cover every script lifecycle hook.
+    #[test]
+    fn test_dts_declares_lifecycle_hooks() {
+        let dts = ScriptApi::new().generate_dts();
+        for hook in [
+            "main",
+            "on_update",
+            "on_fixed_update",
+            "on_input",
+            "on_window_event",
+            "on_shutdown",
+        ] {
+            assert!(
+                dts.contains(&format!("declare function {}(", hook)),
+                "d.ts is missing hook `{}`",
+                hook
+            );
+        }
     }
 }

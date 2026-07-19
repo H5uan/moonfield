@@ -8,6 +8,29 @@ declare const console: {
     error(...args: unknown[]): void;
 };
 
+// Script lifecycle hooks — all optional; missing hooks are skipped.
+type MfInputEvent =
+    | { type: "key_pressed"; code: string }
+    | { type: "key_released"; code: string }
+    | { type: "mouse_button_pressed"; button: string }
+    | { type: "mouse_button_released"; button: string }
+    | { type: "mouse_motion"; dx: number; dy: number }
+    | { type: "mouse_wheel"; dx: number; dy: number }
+    | { type: "focus_lost" };
+
+type MfWindowEvent =
+    | { type: "close_requested" }
+    | { type: "resized"; width: number; height: number }
+    | { type: "focus_gained" }
+    | { type: "focus_lost" };
+
+declare function main(): void;
+declare function on_update(dt: number): void;
+declare function on_fixed_update(dt: number): void;
+declare function on_input(e: MfInputEvent): void;
+declare function on_window_event(e: MfWindowEvent): void;
+declare function on_shutdown(): void;
+
 declare function record_frame(width?: number, height?: number): void;
 declare function input_is_key_pressed(code: string): boolean;
 declare function input_is_key_just_pressed(code: string): boolean;

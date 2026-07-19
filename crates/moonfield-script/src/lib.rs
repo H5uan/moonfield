@@ -60,8 +60,11 @@ type ConfigureFn = Arc<dyn Fn(&mut Runtime) + Send + Sync>;
 ///
 /// Missing hooks are skipped silently. Script errors are logged and do not
 /// take down the app; a failed hot reload keeps the previously evaluated
-/// code running, and a failed initial load is retried on the next file
-/// change (the runtime and file watcher stay installed). Repeated hook
+/// code running and the failed batch stays pending — later updates retry it
+/// (throttled) so a mid-write partial save recovers without another edit,
+/// and removing a module file surfaces as a reload error rather than going
+/// silent. A failed initial load is retried on the next file change (the
+/// runtime and file watcher stay installed). Repeated hook
 /// failures are throttled — the first few are logged in full, then a
 /// periodic summary reports the count — so one buggy per-frame hook cannot
 /// flood the log; the throttle resets when the hook succeeds or after a
