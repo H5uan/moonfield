@@ -3,12 +3,15 @@
 use std::collections::HashMap;
 use std::sync::Arc;
 
-use moonfield_render::HeadlessContext;
-
 /// A value that can be passed between scripts and host functions.
 ///
 /// Backends marshal between their native JS types and `HostValue` so that
 /// host functions work with a uniform, engine-agnostic type system.
+///
+/// This type is deliberately not `Clone`: the zero-copy view variants
+/// (`BytesView`, `TypedArrayView`) hold raw pointers into the JS engine's
+/// backing store that dangle as soon as the host call returns, and cloning
+/// would silently duplicate those pointers.
 #[derive(Debug)]
 pub enum HostValue {
     Null,
@@ -50,30 +53,6 @@ pub enum TypedArrayElement {
     Int32,
     Float32,
     Float64,
-}
-
-impl Clone for HostValue {
-    fn clone(&self) -> Self {
-        match self {
-            HostValue::Null => HostValue::Null,
-            HostValue::Bool(b) => HostValue::Bool(*b),
-            HostValue::Number(n) => HostValue::Number(*n),
-            HostValue::String(s) => HostValue::String(s.clone()),
-            HostValue::ArrayBuffer(buf) => HostValue::ArrayBuffer(buf.clone()),
-            HostValue::Object(map) => HostValue::Object(map.clone()),
-            HostValue::Array(arr) => HostValue::Array(arr.clone()),
-            HostValue::TypedArray(ta) => HostValue::TypedArray(ta.clone()),
-            HostValue::BytesView { data, len } => HostValue::BytesView {
-                data: *data,
-                len: *len,
-            },
-            HostValue::TypedArrayView { data, len, element } => HostValue::TypedArrayView {
-                data: *data,
-                len: *len,
-                element: *element,
-            },
-        }
-    }
 }
 
 /// Represents a JavaScript typed array with its element type and data.
@@ -258,6 +237,39 @@ impl From<Vec<f64>> for HostValue {
     }
 }
 
+/// TypeScript declarations for the script lifecycle hooks and the event
+/// payloads passed to `on_input` / `on_window_event` (the hook set is
+/// documented on `ScriptPlugin`). Emitted verbatim by
+/// [`ScriptApi::generate_dts`]. The event shapes must match
+/// [`crate::input::input_event_to_host`] and
+/// [`crate::window::window_event_to_host`] — the tests in this module
+/// assert that every payload key those builders produce appears here.
+const HOOKS_DTS: &str = concat!(
+    "// Script lifecycle hooks — all optional; missing hooks are skipped.\n",
+    "type MfInputEvent =\n",
+    "    | { type: \"key_pressed\"; code: string }\n",
+    "    | { type: \"key_released\"; code: string }\n",
+    "    | { type: \"mouse_button_pressed\"; button: string }\n",
+    "    | { type: \"mouse_button_released\"; button: string }\n",
+    "    | { type: \"mouse_motion\"; dx: number; dy: number }\n",
+    "    | { type: \"mouse_wheel\"; dx: number; dy: number }\n",
+    "    | { type: \"focus_lost\" };\n",
+    "\n",
+    "type MfWindowEvent =\n",
+    "    | { type: \"close_requested\" }\n",
+    "    | { type: \"resized\"; width: number; height: number }\n",
+    "    | { type: \"focus_gained\" }\n",
+    "    | { type: \"focus_lost\" };\n",
+    "\n",
+    "declare function main(): void;\n",
+    "declare function on_update(dt: number): void;\n",
+    "declare function on_fixed_update(dt: number): void;\n",
+    "declare function on_input(e: MfInputEvent): void;\n",
+    "declare function on_window_event(e: MfWindowEvent): void;\n",
+    "declare function on_shutdown(): void;\n",
+    "\n",
+);
+
 /// A host function exposed to scripts.
 ///
 /// Receives a slice of arguments and returns a value (or an error string).
@@ -266,7 +278,10 @@ impl From<Vec<f64>> for HostValue {
 /// Uses `Arc<dyn Fn>` instead of `fn` pointer so that host functions can
 /// capture state via closures. Register closures with
 /// [`ScriptApi::register_closure`].
-pub type HostFn = Arc<dyn Fn(&[HostValue]) -> Result<HostValue, String>>;
+///
+/// `Send + Sync` is required so that a [`ScriptApi`] can be carried inside
+/// plugins (which must be `Send + Sync`) and shared across engine threads.
+pub type HostFn = Arc<dyn Fn(&[HostValue]) -> Result<HostValue, String> + Send + Sync>;
 
 /// Trait for static type-safe host functions.
 ///
@@ -289,6 +304,10 @@ pub trait ScriptFunction {
 }
 
 /// Registry of host functions made available to scripts.
+///
+/// Host functions run on the calling (main) thread. Keep them
+/// gameplay-facing — state in, result out — and never hand GPU/native
+/// objects to scripts (see "Threading Model" in AGENTS.md).
 #[derive(Clone)]
 pub struct ScriptApi {
     functions: Vec<(&'static str, HostFn)>,
@@ -329,9 +348,11 @@ impl ScriptApi {
     ///
     /// This is the primary entry point for stateful host functions that
     /// need to access Rust-side resources (e.g. render context, asset store).
+    /// The closure must be `Send + Sync`; use thread-safe primitives
+    /// (`Arc<Mutex<_>>`, channels) for captured state.
     pub fn register_closure<F>(&mut self, name: &'static str, f: F) -> &mut Self
     where
-        F: Fn(&[HostValue]) -> Result<HostValue, String> + 'static,
+        F: Fn(&[HostValue]) -> Result<HostValue, String> + Send + Sync + 'static,
     {
         self.functions.push((name, Arc::new(f)));
         self
@@ -348,7 +369,24 @@ impl ScriptApi {
     /// host functions. Write the output to `scripts/moonfield.d.ts` for IDE
     /// autocomplete support.
     pub fn generate_dts(&self) -> String {
-        let mut s = String::from("// Auto-generated by moonfield ScriptApi::generate_dts()\n\n");
+        let mut s = String::from(
+            "/// <reference no-default-lib=\"true\"/>\n\
+             // Auto-generated by moonfield ScriptApi::generate_dts() -- do not edit\n\n",
+        );
+        // The runtime's built-in console shim (see CONSOLE_SHIM in the
+        // backends) — declared here because `no-default-lib` hides the
+        // DOM/console lib types.
+        s.push_str(concat!(
+            "declare const console: {\n",
+            "    log(...args: unknown[]): void;\n",
+            "    info(...args: unknown[]): void;\n",
+            "    warn(...args: unknown[]): void;\n",
+            "    error(...args: unknown[]): void;\n",
+            "};\n\n",
+        ));
+        // Lifecycle hooks and their event payload types — fixed runtime
+        // surface like the console shim above.
+        s.push_str(HOOKS_DTS);
         for decl in &self.ts_declarations {
             s.push_str(decl);
             s.push('\n');
@@ -363,21 +401,122 @@ impl ScriptApi {
 }
 
 impl Default for ScriptApi {
+    /// An empty registry. Host functions are provided by the embedding
+    /// application (e.g. the `moonfield` binary registers `record_frame`),
+    /// keeping this crate free of engine-layer dependencies.
     fn default() -> Self {
-        let mut api = Self::new();
-        api.register_fn::<record_frame_Fn>();
-        api
+        Self::new()
     }
 }
 
-/// Default `record_frame` host function.
-///
-/// Accepts optional `(width: u32, height: u32)` arguments.
-/// Defaults to the headless context's default resolution.
-#[moonfield_script_macros::script_function]
-fn record_frame(width: u32, height: u32) -> Result<(), String> {
-    let _ = (width, height);
-    let ctx = HeadlessContext::record_frame().map_err(|e| e.to_string())?;
-    drop(ctx);
-    Ok(())
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::input::input_event_to_host;
+    use crate::window::window_event_to_host;
+    use moonfield_window::{InputEvent, WindowEventKind};
+
+    /// Every payload key the event builders can produce must show up in the
+    /// generated declarations, so `HOOKS_DTS` cannot silently drift from the
+    /// marshaling code (substring checks — no parser needed).
+    #[test]
+    fn test_dts_covers_event_payloads() {
+        let dts = ScriptApi::new().generate_dts();
+
+        let input_events = [
+            InputEvent::KeyPressed {
+                code: "KeyW".to_string(),
+            },
+            InputEvent::KeyReleased {
+                code: "KeyW".to_string(),
+            },
+            InputEvent::MouseButtonPressed {
+                button: "Left".to_string(),
+            },
+            InputEvent::MouseButtonReleased {
+                button: "Left".to_string(),
+            },
+            InputEvent::MouseMotion { dx: 1.0, dy: 2.0 },
+            InputEvent::MouseWheel { dx: 0.0, dy: -1.0 },
+            InputEvent::FocusLost,
+        ];
+        for event in &input_events {
+            // Exhaustive on purpose: a new variant fails to compile until
+            // `HOOKS_DTS` and this list are extended.
+            match event {
+                InputEvent::KeyPressed { .. }
+                | InputEvent::KeyReleased { .. }
+                | InputEvent::MouseButtonPressed { .. }
+                | InputEvent::MouseButtonReleased { .. }
+                | InputEvent::MouseMotion { .. }
+                | InputEvent::MouseWheel { .. }
+                | InputEvent::FocusLost => {}
+            }
+            assert_payload_covered(&dts, input_event_to_host(event));
+        }
+
+        let window_events = [
+            WindowEventKind::CloseRequested,
+            WindowEventKind::Resized {
+                width: 800,
+                height: 600,
+            },
+            WindowEventKind::FocusGained,
+            WindowEventKind::FocusLost,
+        ];
+        for event in &window_events {
+            match event {
+                WindowEventKind::CloseRequested
+                | WindowEventKind::Resized { .. }
+                | WindowEventKind::FocusGained
+                | WindowEventKind::FocusLost => {}
+            }
+            assert_payload_covered(&dts, window_event_to_host(event));
+        }
+    }
+
+    /// Assert the payload's `type` discriminator value and every key of the
+    /// marshaled object appear in the generated declarations.
+    fn assert_payload_covered(dts: &str, payload: HostValue) {
+        let HostValue::Object(map) = payload else {
+            panic!("event payload must be an object");
+        };
+        let type_value = map
+            .get("type")
+            .and_then(HostValue::as_str)
+            .expect("payload has a string `type` discriminator");
+        assert!(
+            dts.contains(&format!("\"{}\"", type_value)),
+            "d.ts is missing event type `{}`",
+            type_value
+        );
+        for key in map.keys() {
+            assert!(
+                dts.contains(&format!("{}:", key)),
+                "d.ts is missing payload key `{}` for event `{}`",
+                key,
+                type_value
+            );
+        }
+    }
+
+    /// The generated declarations cover every script lifecycle hook.
+    #[test]
+    fn test_dts_declares_lifecycle_hooks() {
+        let dts = ScriptApi::new().generate_dts();
+        for hook in [
+            "main",
+            "on_update",
+            "on_fixed_update",
+            "on_input",
+            "on_window_event",
+            "on_shutdown",
+        ] {
+            assert!(
+                dts.contains(&format!("declare function {}(", hook)),
+                "d.ts is missing hook `{}`",
+                hook
+            );
+        }
+    }
 }

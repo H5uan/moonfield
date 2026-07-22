@@ -14,7 +14,7 @@ impl ShaderModule {
     /// Create a shader module from SPIR-V bytecode.
     pub fn from_spirv(device: &Device, bytecode: &[u8]) -> Result<Self> {
         // SPIR-V bytecode is an array of 32-bit words; the byte slice length must be a multiple of 4.
-        if bytecode.len() % 4 != 0 {
+        if !bytecode.len().is_multiple_of(4) {
             return Err(Error::Validation(
                 "SPIR-V bytecode length must be a multiple of 4".to_string(),
             ));

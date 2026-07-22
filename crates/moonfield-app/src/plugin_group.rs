@@ -79,6 +79,7 @@ impl PluginGroupBuilder {
     /// Adds a plugin to the end of the group.
     ///
     /// If the plugin was already present, it is moved to the end.
+    #[allow(clippy::should_implement_trait)] // Bevy-style `PluginGroup::add`, not `std::ops::Add`.
     pub fn add<T: Plugin>(mut self, plugin: T) -> Self {
         let id = TypeId::of::<T>();
         self.order.retain(|&existing| existing != id);

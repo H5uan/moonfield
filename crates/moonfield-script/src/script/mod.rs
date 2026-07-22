@@ -6,18 +6,25 @@
 //!
 //! # TypeScript compilation
 //!
-//! TypeScript is compiled to JavaScript at build time via `tsc` (see
-//! `scripts/tsconfig.json`). The runtime loads pre-compiled `.js` files from
-//! `target/scripts/` or alongside the `.ts` source.
+//! TypeScript is loaded by stripping type annotations with swc at runtime
+//! (see [`transpile_typescript`]), on both backends — no `tsc` step is
+//! required. Note this is *type stripping only*: type-only syntax vanishes,
+//! but TS-only runtime constructs (enums, namespaces, parameter properties)
+//! are not supported.
 //!
-//! For the V8 backend, V8's native `--strip-types` flag also allows loading
-//! `.ts` files directly at runtime — no preprocessing needed. QuickJS has no
-//! native TS support, so the `quickjs-backend` feature optionally enables
-//! swc-based transpilation as a fallback.
+//! A requested `.ts` file is always transpiled from its own source — a
+//! pre-compiled `.js` (e.g. `tsc` output in `target/scripts/` or alongside
+//! the `.ts`) is never substituted for it, so editing the `.ts` can never
+//! (re)load stale build output. Plain `.js` files are still read directly,
+//! and the V8 backend remaps their error locations back to the original TS
+//! positions via sibling `.js.map` files (see `source_map`).
 
 pub mod api;
 pub mod hot_reload;
 pub mod module;
+
+#[cfg(feature = "v8-backend")]
+pub(crate) mod source_map;
 
 #[cfg(feature = "quickjs-backend")]
 pub mod quickjs;
@@ -42,6 +49,26 @@ pub use quickjs::QuickJsRuntime;
 pub use v8_runtime::V8Runtime;
 
 use std::path::{Path, PathBuf};
+
+/// Default maximum JS heap size (both backends).
+pub const DEFAULT_MAX_HEAP_BYTES: usize = 128 * 1024 * 1024;
+
+/// Default per-execution timeout for top-level script calls (both backends).
+///
+/// The watchdog interrupts *JavaScript* execution only: V8's
+/// `terminate_execution` takes effect at JS interrupt checks and QuickJS's
+/// interrupt handler runs between bytecodes. A script blocked inside a host
+/// function's native call (e.g. a Vulkan driver call like `record_frame`)
+/// is past the watchdog's reach — it hangs the main thread past any
+/// timeout.
+pub const DEFAULT_EXECUTION_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(5);
+
+/// Maximum nesting depth when converting a JS value to a [`HostValue`]
+/// (both backends). A cyclic value has unbounded depth — without a cap the
+/// conversion recurses until the Rust stack overflows (a process abort that
+/// `catch_unwind` cannot stop). Containers deeper than this degrade to a
+/// stringified placeholder instead.
+pub(crate) const MAX_HOST_VALUE_DEPTH: usize = 64;
 
 /// Errors that can occur in the scripting layer.
 #[derive(Debug)]
@@ -73,6 +100,24 @@ impl std::error::Error for ScriptError {}
 
 /// Result type for script operations.
 pub type Result<T> = std::result::Result<T, ScriptError>;
+
+/// Extract a human-readable message from a `catch_unwind` panic payload.
+///
+/// Used by the backends to turn a panicking host function into a JS
+/// exception instead of unwinding across the FFI boundary.
+#[cfg_attr(
+    not(any(feature = "v8-backend", feature = "quickjs-backend")),
+    allow(dead_code)
+)]
+pub(crate) fn panic_payload_message(payload: &(dyn std::any::Any + Send)) -> String {
+    if let Some(s) = payload.downcast_ref::<&str>() {
+        (*s).to_string()
+    } else if let Some(s) = payload.downcast_ref::<String>() {
+        s.clone()
+    } else {
+        "unknown panic".to_string()
+    }
+}
 
 /// Abstraction over a JavaScript engine backend.
 ///
@@ -110,19 +155,61 @@ pub trait ScriptRuntime {
     /// functions on the module namespace object.
     ///
     /// Default implementation delegates to `call_with_args`.
-    fn call_module_export(
-        &mut self,
-        function: &str,
-        args: &[HostValue],
-    ) -> Result<HostValue> {
+    fn call_module_export(&mut self, function: &str, args: &[HostValue]) -> Result<HostValue> {
         self.call_with_args(function, args)
+    }
+
+    /// Call a function exported from the loaded ESModule, discarding its
+    /// return value.
+    ///
+    /// Use this for fire-and-forget calls (e.g. the per-frame `on_update`
+    /// hook): backends override this to skip marshaling a result the caller
+    /// would throw away anyway.
+    ///
+    /// Default implementation delegates to `call_module_export`.
+    fn call_module_export_unit(&mut self, function: &str, args: &[HostValue]) -> Result<()> {
+        self.call_module_export(function, args).map(|_| ())
+    }
+
+    /// Check whether a callable named `name` is currently available.
+    ///
+    /// Backends check the entry module's exports first (when a module graph
+    /// is loaded) and fall back to globals. Used to invoke optional
+    /// script-side lifecycle hooks (`on_update`, `on_shutdown`) without
+    /// producing errors when the script does not define them.
+    ///
+    /// Default implementation returns `false`.
+    fn has_function(&mut self, name: &str) -> bool {
+        let _ = name;
+        false
+    }
+
+    /// Load and evaluate an ESModule graph from a resolved registry.
+    ///
+    /// `registry` must already contain the entry module and all of its
+    /// transitive dependencies (see [`ModuleRegistry::resolve_dependencies`]).
+    /// After evaluation, the entry module's `main()` export is called if
+    /// present, and the registry is cached for hot reload.
+    ///
+    /// The default implementation reports the backend as not supporting
+    /// module graphs.
+    fn load_module_graph(
+        &mut self,
+        registry: std::rc::Rc<ModuleRegistry>,
+        entry: &str,
+    ) -> Result<()> {
+        let _ = (registry, entry);
+        Err(ScriptError::BackendNotAvailable(
+            "module graph loading".into(),
+        ))
     }
 
     /// Warm up the JIT compiler by running the entry function a few times.
     ///
     /// V8's JIT (Sparkplug/Turbofan) requires multiple executions before
-    /// compiling hot paths. Calling this after loading the script ensures
-    /// the frame loop runs compiled code from the first frame.
+    /// compiling hot paths. **This executes the function, side effects and
+    /// all** — only use it when running the entry point several times is
+    /// acceptable, or when the function is side-effect free.
     ///
     /// Default implementation is a no-op for engines without JIT (QuickJS).
     fn warmup(&mut self, function: &str) -> Result<()> {
@@ -144,67 +231,52 @@ pub trait ScriptRuntime {
     fn gc_step(&mut self) {}
 }
 
-/// Load a script file, resolving TypeScript to pre-compiled JavaScript.
+/// Load a script file, resolving TypeScript to JavaScript.
 ///
 /// Loading strategy:
-/// 1. If the path ends in `.js`, read it directly.
-/// 2. If the path ends in `.ts`:
-///    a. First look for a `.js` file at `target/scripts/<filename>.js`
-///       (build-time tsc output).
-///    b. If not found, look for a `.js` file alongside the `.ts` file.
-///    c. If neither exists and the `quickjs-backend` feature is active,
-///       fall back to swc-based transpilation. Otherwise, return an error
-///       (V8 requires pre-compiled JS, or the `.ts` file must be pre-compiled
-///       via `tsc`; see `scripts/tsconfig.json`).
+/// 1. If the path ends in `.ts`, read it and strip the type annotations
+///    with swc (see [`transpile_typescript`]). The `.ts` source is the
+///    single source of truth — a pre-compiled `.js` (e.g. stale `tsc`
+///    output in `target/scripts/` or alongside the file) is never
+///    substituted for it.
+/// 2. Otherwise (`.js` etc.), read the file directly.
 pub fn load_script<P: AsRef<Path>>(path: P) -> Result<String> {
     let path = path.as_ref();
-
-    // For .js files, load directly.
-    if path.extension().and_then(|e| e.to_str()) != Some("ts") {
-        return std::fs::read_to_string(path)
-            .map_err(|e| ScriptError::Execution(format!("failed to read script: {}", e)));
+    let source = std::fs::read_to_string(path)
+        .map_err(|e| ScriptError::Execution(format!("failed to read script: {}", e)))?;
+    if path.extension().and_then(|e| e.to_str()) == Some("ts") {
+        transpile_typescript(&source)
+    } else {
+        Ok(source)
     }
+}
 
-    // Try pre-compiled JS from tsc build output (target/scripts/).
-    let ts_filename = path.file_name().and_then(|n| n.to_str()).unwrap_or("");
-    let js_filename = ts_filename.replace(".ts", ".js");
-
-    // Try target/scripts/ relative to project root.
-    let js_paths = [
-        PathBuf::from("target/scripts").join(&js_filename),
-        path.with_extension("js"),
-    ];
-
-    for js_path in &js_paths {
-        if js_path.exists() {
-            return std::fs::read_to_string(js_path)
-                .map_err(|e| ScriptError::Execution(format!("failed to read script: {}", e)));
+/// Map a changed file to the source of truth a hot reload should read.
+///
+/// `.ts` is the single source of truth: when a changed `.js` has a `.ts`
+/// sibling, the `.ts` shadows it (the `.js` is stale build output), so the
+/// event reloads the `.ts` instead — editing the `.js` can never resurrect
+/// stale code. A `.js` without a `.ts` sibling, and any other file,
+/// reloads from its own path.
+#[cfg_attr(
+    not(any(feature = "v8-backend", feature = "quickjs-backend")),
+    allow(dead_code)
+)]
+pub(crate) fn reload_source_path(path: &Path) -> PathBuf {
+    if path.extension().and_then(|e| e.to_str()) == Some("js") {
+        let ts_sibling = path.with_extension("ts");
+        if ts_sibling.is_file() {
+            return ts_sibling;
         }
     }
-
-    // No pre-compiled JS found. QuickJS backend can fall back to swc transpilation;
-    // V8 backend requires pre-compiled JS.
-    #[cfg(feature = "quickjs-backend")]
-    {
-        let source = std::fs::read_to_string(path)
-            .map_err(|e| ScriptError::Execution(format!("failed to read script: {}", e)))?;
-        return transpile_typescript(&source);
-    }
-
-    #[cfg(not(feature = "quickjs-backend"))]
-    Err(ScriptError::Execution(format!(
-        "no pre-compiled JavaScript found for '{}'. \
-         TypeScript must be compiled via `tsc` before running. \
-         See `scripts/tsconfig.json`.",
-        path.display()
-    )))
+    path.to_path_buf()
 }
 
 /// Transpile TypeScript source to JavaScript by stripping type annotations.
 ///
 /// Uses swc's TypeScript strip transform to remove type annotations.
-/// Only available when the `quickjs-backend` feature is active.
-#[cfg(feature = "quickjs-backend")]
+/// Type-only syntax is erased; TS-only runtime constructs (enums,
+/// namespaces, parameter properties) are not supported.
 pub fn transpile_typescript(source: &str) -> Result<String> {
     use swc_common::{sync::Lrc, FileName, Globals, Mark, SourceMap, GLOBALS};
     use swc_ecma_ast::{EsVersion, Module, Pass, Program};

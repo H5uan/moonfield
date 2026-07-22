@@ -3,10 +3,10 @@ use std::{
     cmp,
     error::Error,
     mem,
-    num::{NonZeroU32, NonZeroU64},
+    num::NonZeroU32,
+    num::NonZeroU64,
     ops::Range,
     sync::atomic::{AtomicIsize, Ordering},
-    u32,
 };
 
 /// An error type for when an entity with a particular ID does not exist.
@@ -146,7 +146,7 @@ impl Iterator for ReserveEntitiesIterator<'_> {
             .map(|&id| Entity {
                 // use ids from the free list
                 generation: self.meta[id as usize].generation,
-                id: id,
+                id,
             })
             .or_else(|| {
                 // use new ids
@@ -475,8 +475,8 @@ impl Entities {
             return Err(NoSuchEntity);
         }
 
-        meta.generation = NonZeroU32::new(u32::from(meta.generation).wrapping_add(1))
-            .unwrap_or_else(|| NonZeroU32::MIN);
+        meta.generation =
+            NonZeroU32::new(u32::from(meta.generation).wrapping_add(1)).unwrap_or(NonZeroU32::MIN);
 
         let loc = mem::replace(&mut meta.location, EntityMeta::EMPTY.location);
 
@@ -583,9 +583,13 @@ impl Entities {
 
 /// Internal generation-tracking storage.  In a minimal ECS we only track the
 /// next free id and the set of alive ids so that `despawn` works.
+///
+/// Entities are created with generation 1 and stored in `alive` as packed
+/// `Entity::to_bits()`, so all lookups (`free`, `is_alive`, `alive_entities`)
+/// use the same encoding.
 #[derive(Default, Debug)]
 pub(crate) struct EntityId {
-    next: u64,
+    next: u32,
     alive: std::collections::HashSet<u64>,
 }
 
@@ -593,8 +597,12 @@ impl EntityId {
     pub fn alloc(&mut self) -> Entity {
         let id = self.next;
         self.next += 1;
-        self.alive.insert(id);
-        Entity::from_bits(id).unwrap()
+        let entity = Entity {
+            generation: NonZeroU32::MIN,
+            id,
+        };
+        self.alive.insert(entity.to_bits().get());
+        entity
     }
 
     pub fn free(&mut self, entity: Entity) -> bool {

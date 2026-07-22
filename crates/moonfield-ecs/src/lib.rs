@@ -1,3 +1,8 @@
+// The ECS crate is under active construction. Much of the archetype/borrow/
+// entity-allocation scaffolding is present but not yet wired into the public API.
+#![allow(dead_code)]
+#![allow(clippy::type_complexity)]
+
 use std::any::{Any, TypeId};
 use std::cell::{Ref, RefCell, RefMut};
 use std::collections::HashMap;
@@ -110,7 +115,7 @@ mod tests {
         world.spawn((Position { x: 1.0, y: 2.0 },));
         world.spawn2(Position { x: 3.0, y: 4.0 }, Velocity { x: 0.5, y: 0.5 });
 
-        let positions: Vec<_> = world.query::<&Position>().map(|p| p.clone()).collect();
+        let positions: Vec<_> = world.query::<&Position>().cloned().collect();
         assert_eq!(
             positions,
             vec![Position { x: 1.0, y: 2.0 }, Position { x: 3.0, y: 4.0 }]
@@ -122,7 +127,7 @@ mod tests {
         let mut world = World::new();
         world.spawn2(Position { x: 1.0, y: 2.0 }, Velocity { x: 1.0, y: 0.0 });
 
-        for (mut pos, vel) in world.query_mut::<(&mut Position, &Velocity)>() {
+        for (pos, vel) in world.query_mut::<(&mut Position, &Velocity)>() {
             pos.x += vel.x;
             pos.y += vel.y;
         }
@@ -152,7 +157,7 @@ mod tests {
         }
         world.apply_commands();
 
-        let pos: Vec<_> = world.query::<&Position>().map(|p| p.clone()).collect();
+        let pos: Vec<_> = world.query::<&Position>().cloned().collect();
         assert_eq!(pos, vec![Position { x: 10.0, y: 20.0 }]);
 
         // despawn via command
@@ -170,7 +175,7 @@ mod tests {
     #[test]
     fn system_runs_on_world() {
         fn update_positions(world: &mut World) {
-            for (mut pos, vel) in world.query_mut::<(&mut Position, &Velocity)>() {
+            for (pos, vel) in world.query_mut::<(&mut Position, &Velocity)>() {
                 pos.x += vel.x;
                 pos.y += vel.y;
             }

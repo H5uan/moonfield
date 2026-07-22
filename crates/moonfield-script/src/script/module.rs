@@ -1,25 +1,22 @@
 //! Module system for the scripting runtime.
 //!
 //! Provides a backend-agnostic [`ModuleRegistry`] that maps module specifiers
-//! to source code, and transforms ESModule syntax (`import`/`export`) into
-//! CommonJS (`require`/`exports`) for evaluation by any JS engine.
+//! to source code and tracks each module's imports (extracted with swc).
 //!
 //! # Module loading strategy
 //!
-//! Instead of using V8's native ESModule API (which requires a complex
-//! `ResolveModuleCallback` that cannot capture state), we transform each
-//! module into a CommonJS-style IIFE:
+//! The V8 backend evaluates the graph with the engine's native ESModule API;
+//! the QuickJS backend transforms each module into a CommonJS-style factory
+//! (`require`/`exports`) and evaluates a single concatenated bundle:
 //!
 //! ```js
-//! function(require, exports) {
+//! function(module, exports) {
 //!   const { foo } = require("./bar");
 //!   exports.main = function() { foo(); };
 //! }
 //! ```
 //!
-//! Modules are evaluated in topological order. The `require` function
-//! resolves specifiers and returns cached exports. This approach works
-//! across both V8 and QuickJS backends.
+//! Modules are evaluated in topological order.
 //!
 //! # Resolution strategy
 //!
@@ -56,10 +53,17 @@ pub struct ModuleInfo {
     /// The JavaScript source code (already transpiled if needed).
     pub source: String,
     /// Transformed CommonJS source (with `import`/`export` replaced).
+    /// Only built for the QuickJS backend, whose bundler evaluates CJS
+    /// factories; the V8 backend evaluates native ESM and never reads
+    /// this, so the duplicate source is not stored there.
+    #[cfg(feature = "quickjs-backend")]
     pub cjs_source: String,
     /// List of module specifiers this module imports.
     pub imports: Vec<String>,
 }
+
+/// Memoized `resolve_full` results, keyed by (specifier, importer).
+type ResolveCache = HashMap<(String, String), Option<(String, PathBuf)>>;
 
 /// A registry of modules keyed by canonical name.
 ///
@@ -70,6 +74,12 @@ pub struct ModuleRegistry {
     modules: HashMap<String, ModuleInfo>,
     base_path: PathBuf,
     search_dirs: Vec<PathBuf>,
+    /// Memoized `resolve_full` probes. Interior mutability keeps the
+    /// resolution APIs `&self`. Cleared when watched files change — a newly
+    /// created file can flip a cached `None`.
+    resolve_cache: std::cell::RefCell<ResolveCache>,
+    /// Memoized `package.json` → `main` field reads.
+    pkg_json_cache: std::cell::RefCell<HashMap<PathBuf, Option<String>>>,
 }
 
 impl Default for ModuleRegistry {
@@ -89,6 +99,8 @@ impl ModuleRegistry {
                 PathBuf::from("scripts"),
                 PathBuf::from("target/scripts"),
             ],
+            resolve_cache: std::cell::RefCell::new(HashMap::new()),
+            pkg_json_cache: std::cell::RefCell::new(HashMap::new()),
         }
     }
 
@@ -106,32 +118,25 @@ impl ModuleRegistry {
 
     /// Register a module by name with its source code.
     ///
-    /// Uses regex-based import extraction (backends don't need AST parsing for this).
-    /// For QuickJS, also transforms ESModule syntax to CommonJS.
-    /// Returns the canonical name.
+    /// Extracts the module's imports with an swc AST parse (backends don't
+    /// need regex heuristics for this). For QuickJS, also transforms
+    /// ESModule syntax to CommonJS. Returns the canonical name.
     pub fn register(&mut self, name: &str, source: String) -> String {
         let canonical = self.canonicalize(name);
         let imports = Self::extract_imports(&source);
-        let cjs_source = self.transform_to_cjs(&source);
+        #[cfg(feature = "quickjs-backend")]
+        let cjs_source = Self::transform_to_cjs_ast(&source);
         self.modules.insert(
             canonical.clone(),
             ModuleInfo {
                 name: canonical.clone(),
                 source,
+                #[cfg(feature = "quickjs-backend")]
                 cjs_source,
                 imports,
             },
         );
         canonical
-    }
-
-    /// Transform source to CommonJS, if the QuickJS backend is active.
-    /// For V8 backend, returns the source as-is (native ESM support).
-    fn transform_to_cjs(&self, source: &str) -> String {
-        #[cfg(feature = "quickjs-backend")]
-        return Self::transform_to_cjs_ast(source);
-        #[cfg(not(feature = "quickjs-backend"))]
-        source.to_string()
     }
 
     /// Get a module's info by canonical name.
@@ -168,16 +173,23 @@ impl ModuleRegistry {
             let normalized = Self::normalize_path(&resolved);
             let canonical = normalized.to_string_lossy().replace('\\', "/");
 
-            if self.modules.contains_key(&canonical) {
-                return Some(canonical);
-            }
-            let with_js = format!("{}.js", canonical);
-            if self.modules.contains_key(&with_js) {
-                return Some(with_js);
-            }
-            let with_ts = format!("{}.ts", canonical);
-            if self.modules.contains_key(&with_ts) {
-                return Some(with_ts);
+            // Modules are registered under extension-less canonical names,
+            // while source specifiers may or may not carry one — try the
+            // candidate as-is, without extension, and with .js/.ts appended.
+            let without_ext = canonical
+                .rfind('.')
+                .filter(|&dot| !canonical[dot..].contains('/'))
+                .map(|dot| canonical[..dot].to_string());
+            let candidates = [
+                Some(canonical.clone()),
+                without_ext,
+                Some(format!("{}.js", canonical)),
+                Some(format!("{}.ts", canonical)),
+            ];
+            for candidate in candidates.into_iter().flatten() {
+                if self.modules.contains_key(&candidate) {
+                    return Some(candidate);
+                }
             }
         }
 
@@ -193,7 +205,29 @@ impl ModuleRegistry {
     ///
     /// Uses the registry's configured `search_dirs` for bare specifier resolution.
     /// Returns the resolved canonical name and the file path it was found at.
+    ///
+    /// Results (including failures) are memoized in `resolve_cache` because
+    /// the chain issues several filesystem probes per specifier; call
+    /// [`invalidate_resolution_caches`] when watched files change.
     pub fn resolve_full(&self, specifier: &str, base: &str) -> Option<(String, PathBuf)> {
+        let key = (specifier.to_string(), base.to_string());
+        if let Some(cached) = self.resolve_cache.borrow().get(&key) {
+            return cached.clone();
+        }
+        let result = self.resolve_full_uncached(specifier, base);
+        self.resolve_cache.borrow_mut().insert(key, result.clone());
+        result
+    }
+
+    /// Clear memoized resolution results. Call when watched files change:
+    /// a newly created file can turn a previously cached `None` into a hit.
+    pub fn invalidate_resolution_caches(&self) {
+        self.resolve_cache.borrow_mut().clear();
+        self.pkg_json_cache.borrow_mut().clear();
+    }
+
+    /// Uncached implementation of [`resolve_full`].
+    fn resolve_full_uncached(&self, specifier: &str, base: &str) -> Option<(String, PathBuf)> {
         // 1. Relative specifier: resolve against the base module's directory.
         if specifier.starts_with('.') || specifier.starts_with('/') {
             let base_dir = if specifier.starts_with('/') {
@@ -203,23 +237,19 @@ impl ModuleRegistry {
                 p.to_path_buf()
             };
             let resolved = Self::normalize_path(&base_dir.join(specifier));
-            let dir = resolved.parent();
-            let stem = resolved.file_name().and_then(|n| n.to_str()).unwrap_or("");
-            return Self::resolve_file_or_dir(&resolved, &resolved, stem, dir);
+            return self.resolve_file_or_dir(&resolved);
         }
 
         // 2. Bare specifier: search search_dirs + node_modules walk.
         for search_dir in &self.search_dirs {
             // Check search_dir directly.
             let candidate = search_dir.join(specifier);
-            let dir = candidate.parent();
-            if let Some(result) = Self::resolve_file_or_dir(&candidate, &candidate, specifier, dir)
-            {
+            if let Some(result) = self.resolve_file_or_dir(&candidate) {
                 return Some(result);
             }
 
             // Search node_modules/ under this directory and its ancestors.
-            if let Some(result) = Self::resolve_in_node_modules(specifier, search_dir) {
+            if let Some(result) = self.resolve_in_node_modules(specifier, search_dir) {
                 return Some(result);
             }
         }
@@ -253,30 +283,26 @@ impl ModuleRegistry {
         };
 
         for dep in &deps {
-            // Try the in-registry resolve first (fast path).
-            let resolved = self.resolve(dep, name);
+            // Already registered — also breaks dependency cycles.
+            if self.resolve(dep, name).is_some() {
+                continue;
+            }
 
-            if let Some(resolved) = resolved {
-                if !self.contains(&resolved) {
-                    // Found in registry metadata but not yet loaded — find it on disk.
-                    let (_, path) = self
-                        .resolve_full(dep, name)
-                        .ok_or_else(|| format!("cannot resolve '{}' from '{}'", dep, name))?;
-                    let source = Self::load_source(&path)?;
-                    self.register(&resolved, source);
-                    self.resolve_dependencies(&resolved)?;
-                }
-            } else {
-                // Full resolution chain for bare specifiers and node_modules.
-                let (canonical, path) = self
-                    .resolve_full(dep, name)
-                    .ok_or_else(|| format!("cannot resolve '{}' from '{}'", dep, name))?;
+            // Full resolution chain for relative paths, bare specifiers,
+            // and node_modules.
+            let (found, path) = self
+                .resolve_full(dep, name)
+                .ok_or_else(|| format!("cannot resolve '{}' from '{}'", dep, name))?;
 
-                if !self.contains(&canonical) {
-                    let source = Self::load_source(&path)?;
-                    self.register(&canonical, source);
-                    self.resolve_dependencies(&canonical)?;
-                }
+            // `found` may carry an extension while modules are keyed by
+            // extension-less canonical names — canonicalize before checking
+            // membership and recursing, or the same file is registered twice
+            // and the recursion fails with "module not found".
+            let canonical = self.canonicalize(&found);
+            if !self.contains(&canonical) {
+                let source = Self::load_source(&path)?;
+                self.register(&canonical, source);
+                self.resolve_dependencies(&canonical)?;
             }
         }
 
@@ -291,11 +317,15 @@ impl ModuleRegistry {
 
     /// Try to resolve `specifier` within `node_modules/` directories,
     /// walking up from `start_dir` to the filesystem root.
-    fn resolve_in_node_modules(specifier: &str, start_dir: &Path) -> Option<(String, PathBuf)> {
+    fn resolve_in_node_modules(
+        &self,
+        specifier: &str,
+        start_dir: &Path,
+    ) -> Option<(String, PathBuf)> {
         let mut current = Some(start_dir);
         while let Some(dir) = current {
             let nm = dir.join("node_modules").join(specifier);
-            if let Some(result) = Self::resolve_file_or_dir(&nm, &nm, specifier, nm.parent()) {
+            if let Some(result) = self.resolve_file_or_dir(&nm) {
                 return Some(result);
             }
             current = dir.parent();
@@ -304,15 +334,13 @@ impl ModuleRegistry {
     }
 
     /// Given a candidate path, try these in order:
-    /// 1. exact path + `.js` / `.ts` / `.mjs` / `.cjs`
+    /// 1. exact path + `.ts` / `.js` / `.mjs` / `.cjs`
     /// 2. `package.json` → `main` field
-    /// 3. `index.js` / `index.ts` / `index.mjs` / `index.cjs`
-    fn resolve_file_or_dir(
-        candidate: &Path,
-        _display_path: &Path,
-        _specifier: &str,
-        _parent_dir: Option<&Path>,
-    ) -> Option<(String, PathBuf)> {
+    /// 3. `index.ts` / `index.js` / `index.mjs` / `index.cjs`
+    ///
+    /// `.ts` wins over `.js`: an extension-less import must resolve to the
+    /// `.ts` source of truth, never to stale build output alongside it.
+    fn resolve_file_or_dir(&self, candidate: &Path) -> Option<(String, PathBuf)> {
         // 1. Direct file with extension.
         if candidate.is_file() {
             if let Some(name) = candidate.to_str() {
@@ -321,7 +349,7 @@ impl ModuleRegistry {
         }
 
         // 2. Try adding extensions.
-        for ext in &["js", "ts", "mjs", "cjs"] {
+        for ext in &["ts", "js", "mjs", "cjs"] {
             let with_ext = candidate.with_extension(ext);
             if with_ext.is_file() {
                 let name = with_ext.to_string_lossy().replace('\\', "/");
@@ -334,21 +362,18 @@ impl ModuleRegistry {
             // Check package.json main field.
             let pkg_json = candidate.join("package.json");
             if pkg_json.is_file() {
-                if let Some(main) = Self::read_package_json_main(&pkg_json) {
+                if let Some(main) = self.read_package_json_main(&pkg_json) {
                     let main_path = candidate.join(&main);
                     // Resolve main_path relative to the candidate directory.
                     let resolved = Self::normalize_path(&main_path);
-                    let dir = resolved.parent();
-                    let stem = resolved.file_name().and_then(|n| n.to_str()).unwrap_or("");
-                    if let Some(result) = Self::resolve_file_or_dir(&resolved, &resolved, stem, dir)
-                    {
+                    if let Some(result) = self.resolve_file_or_dir(&resolved) {
                         return Some(result);
                     }
                 }
             }
 
             // Check index files.
-            for ext in &["js", "ts", "mjs", "cjs"] {
+            for ext in &["ts", "js", "mjs", "cjs"] {
                 let index = candidate.join(format!("index.{}", ext));
                 if index.is_file() {
                     let name = index.to_string_lossy().replace('\\', "/");
@@ -360,8 +385,20 @@ impl ModuleRegistry {
         None
     }
 
-    /// Read the `main` field from a `package.json` file.
-    fn read_package_json_main(pkg_json: &Path) -> Option<String> {
+    /// Read the `main` field from a `package.json` file (memoized).
+    fn read_package_json_main(&self, pkg_json: &Path) -> Option<String> {
+        if let Some(cached) = self.pkg_json_cache.borrow().get(pkg_json) {
+            return cached.clone();
+        }
+        let main = Self::read_package_json_main_uncached(pkg_json);
+        self.pkg_json_cache
+            .borrow_mut()
+            .insert(pkg_json.to_path_buf(), main.clone());
+        main
+    }
+
+    /// Read the `main` field from a `package.json` file from disk.
+    fn read_package_json_main_uncached(pkg_json: &Path) -> Option<String> {
         let content = fs::read_to_string(pkg_json).ok()?;
         let parsed: serde_json::Value = serde_json::from_str(&content).ok()?;
         parsed
@@ -373,6 +410,11 @@ impl ModuleRegistry {
     /// Find the canonical name of the module that corresponds to the given
     /// file path. Used by hot reload to match absolute file-watcher paths
     /// to relative canonical names in the registry.
+    ///
+    /// Same-named modules in different directories (e.g. `foo/utils.ts` vs
+    /// `bar/utils.ts`) are disambiguated by picking the longest matching
+    /// module name; equal-length ties resolve lexicographically for
+    /// determinism.
     pub fn find_by_file_path(&self, path: &Path) -> Option<String> {
         let path_str = path.to_string_lossy().replace('\\', "/");
         // Strip file extension to get the path stem.
@@ -381,15 +423,31 @@ impl ModuleRegistry {
             _ => &path_str,
         };
 
+        let mut best: Option<&ModuleInfo> = None;
         for info in self.modules.values() {
-            let name = &info.name;
-            // Normalize: strip "./" prefix.
-            let normalized = name.strip_prefix("./").unwrap_or(name);
-            if path_stem.ends_with(normalized) || normalized == path_stem {
-                return Some(info.name.clone());
+            let name = info.name.strip_prefix("./").unwrap_or(&info.name);
+            // Exact match, or suffix match at a path-segment boundary (so
+            // `myutils` never matches a module named `utils`).
+            let matches = path_stem == name
+                || (path_stem.len() > name.len()
+                    && path_stem.ends_with(name)
+                    && path_stem.as_bytes()[path_stem.len() - name.len() - 1] == b'/');
+            if !matches {
+                continue;
+            }
+            let dominates = match best {
+                None => true,
+                Some(b) => {
+                    let best_name = b.name.strip_prefix("./").unwrap_or(&b.name);
+                    name.len() > best_name.len()
+                        || (name.len() == best_name.len() && name < best_name)
+                }
+            };
+            if dominates {
+                best = Some(info);
             }
         }
-        None
+        best.map(|info| info.name.clone())
     }
 
     /// Compute the set of modules that transitively import `target`
@@ -397,7 +455,38 @@ impl ModuleRegistry {
     /// incremental hot reload: only these modules need re-compilation
     /// when `target` changes.
     pub fn transitive_importers(&self, target: &str) -> std::collections::HashSet<String> {
-        // Build reverse dependency map: for each module, who imports it?
+        self.transitive_importers_many(std::slice::from_ref(&target.to_string()))
+    }
+
+    /// Compute the affected set for several changed modules at once.
+    ///
+    /// Equivalent to the union of [`transitive_importers`] over `targets`,
+    /// but builds the reverse dependency map only once — call this when a
+    /// hot-reload batch contains multiple changed files.
+    pub fn transitive_importers_many(
+        &self,
+        targets: &[String],
+    ) -> std::collections::HashSet<String> {
+        let reverse_deps = self.reverse_dependencies();
+
+        // BFS from every target to find all transitive importers.
+        let mut affected = std::collections::HashSet::new();
+        let mut queue: std::collections::VecDeque<&str> =
+            targets.iter().map(|s| s.as_str()).collect();
+        while let Some(module) = queue.pop_front() {
+            if affected.insert(module.to_string()) {
+                if let Some(importers) = reverse_deps.get(module) {
+                    for importer in importers {
+                        queue.push_back(importer.as_str());
+                    }
+                }
+            }
+        }
+        affected
+    }
+
+    /// Build the reverse dependency map: for each module, who imports it?
+    fn reverse_dependencies(&self) -> HashMap<String, Vec<String>> {
         let mut reverse_deps: HashMap<String, Vec<String>> = HashMap::new();
         for (name, info) in &self.modules {
             for imp in &info.imports {
@@ -407,33 +496,35 @@ impl ModuleRegistry {
                 }
             }
         }
-
-        // BFS from target to find all transitive importers.
-        let mut affected = std::collections::HashSet::new();
-        let mut queue = std::collections::VecDeque::new();
-        queue.push_back(target.to_string());
-        while let Some(module) = queue.pop_front() {
-            if affected.insert(module.clone()) {
-                if let Some(importers) = reverse_deps.get(&module) {
-                    for importer in importers {
-                        queue.push_back(importer.clone());
-                    }
-                }
-            }
-        }
-        affected
+        reverse_deps
     }
 
     /// Topologically sort modules by dependency order.
     ///
     /// Returns module names in evaluation order (dependencies first).
     pub fn order_dependencies(&self, entry: &str) -> Result<Vec<String>, String> {
+        // Pre-resolve every module's imports to canonical names once
+        // (specifiers may carry extensions; registered names do not).
+        let resolved_imports: HashMap<String, Vec<String>> = self
+            .modules
+            .iter()
+            .map(|(name, info)| {
+                let resolved = info
+                    .imports
+                    .iter()
+                    .map(|spec| self.resolve(spec, name).unwrap_or_else(|| spec.clone()))
+                    .collect();
+                (name.clone(), resolved)
+            })
+            .collect();
+
         let mut visited = HashMap::new(); // false = visiting, true = done
         let mut order = Vec::new();
 
-        fn visit<'a>(
+        fn visit(
             name: &str,
-            modules: &'a HashMap<String, ModuleInfo>,
+            modules: &HashMap<String, ModuleInfo>,
+            resolved_imports: &HashMap<String, Vec<String>>,
             visited: &mut HashMap<String, bool>,
             order: &mut Vec<String>,
         ) -> Result<(), String> {
@@ -447,33 +538,14 @@ impl ModuleRegistry {
 
             visited.insert(name.to_string(), false);
 
-            let info = modules
-                .get(name)
-                .ok_or_else(|| format!("module '{}' not found", name))?;
+            if !modules.contains_key(name) {
+                return Err(format!("module '{}' not found", name));
+            }
 
-            // Resolve and visit dependencies.
-            for dep_spec in &info.imports {
-                // Resolve the specifier against the current module's name.
-                let resolved = if dep_spec.starts_with('.') {
-                    let base_dir = Path::new(name).parent().unwrap_or(Path::new("."));
-                    let resolved = ModuleRegistry::normalize_path(&base_dir.join(dep_spec));
-                    let c = resolved.to_string_lossy().replace('\\', "/");
-                    // Try to find it in the module map.
-                    if modules.contains_key(&c) {
-                        c
-                    } else {
-                        let with_js = format!("{}.js", c);
-                        if modules.contains_key(&with_js) {
-                            with_js
-                        } else {
-                            dep_spec.clone()
-                        }
-                    }
-                } else {
-                    dep_spec.clone()
-                };
-
-                visit(&resolved, modules, visited, order)?;
+            if let Some(deps) = resolved_imports.get(name) {
+                for dep in deps {
+                    visit(dep, modules, resolved_imports, visited, order)?;
+                }
             }
 
             visited.insert(name.to_string(), true);
@@ -481,14 +553,20 @@ impl ModuleRegistry {
             Ok(())
         }
 
-        visit(entry, &self.modules, &mut visited, &mut order)?;
+        visit(
+            entry,
+            &self.modules,
+            &resolved_imports,
+            &mut visited,
+            &mut order,
+        )?;
         Ok(order)
     }
 
     /// Canonicalize a module name: strip file extension, normalize path.
     fn canonicalize(&self, name: &str) -> String {
         let name = name.replace('\\', "/");
-        let stem = if let Some(dot) = name.rfind('.') {
+        if let Some(dot) = name.rfind('.') {
             if name[dot..].contains('/') {
                 name.clone()
             } else {
@@ -496,8 +574,7 @@ impl ModuleRegistry {
             }
         } else {
             name
-        };
-        stem
+        }
     }
 
     /// Normalize a path, removing `.` and `..` components.
@@ -719,5 +796,56 @@ export { baz } from './baz';
         let path = Path::new("a/b/../c/./d");
         let normalized = ModuleRegistry::normalize_path(path);
         assert_eq!(normalized, Path::new("a/c/d"));
+    }
+
+    #[test]
+    fn test_transitive_importers_many() {
+        let mut reg = ModuleRegistry::new();
+        reg.register(
+            "main",
+            "import { x } from \"./a\";\nimport { y } from \"./b\";\nexport function main() {}"
+                .to_string(),
+        );
+        reg.register(
+            "./a",
+            "import { z } from \"./c\";\nexport const x = 1;".to_string(),
+        );
+        reg.register("./b", "export const y = 2;".to_string());
+        reg.register("./c", "export const z = 3;".to_string());
+
+        // One batch from two roots: ./c → ./a → main, ./b → main.
+        let affected = reg.transitive_importers_many(&["./b".to_string(), "./c".to_string()]);
+        assert_eq!(affected.len(), 4);
+        assert!(affected.contains("main"));
+        assert!(affected.contains("./a"));
+        assert!(affected.contains("./b"));
+        assert!(affected.contains("./c"));
+
+        // Equivalent to the union of the per-root queries.
+        let union: std::collections::HashSet<String> = reg
+            .transitive_importers("./b")
+            .into_iter()
+            .chain(reg.transitive_importers("./c"))
+            .collect();
+        assert_eq!(affected, union);
+    }
+
+    #[test]
+    fn test_find_by_file_path_prefers_longest_match() {
+        let mut reg = ModuleRegistry::new();
+        reg.register("./utils", "export const x = 1;".to_string());
+        reg.register("scripts/foo/utils", "export const y = 2;".to_string());
+
+        // An absolute watcher path matching both suffixes must resolve to the
+        // deeper (more specific) module.
+        let found = reg.find_by_file_path(Path::new("/work/project/scripts/foo/utils.js"));
+        assert_eq!(found, Some("scripts/foo/utils".to_string()));
+
+        let found = reg.find_by_file_path(Path::new("/work/project/utils.js"));
+        assert_eq!(found, Some("./utils".to_string()));
+
+        // Segment-boundary check: `myutils` must not match module `utils`.
+        let found = reg.find_by_file_path(Path::new("/work/project/myutils.js"));
+        assert_eq!(found, None);
     }
 }

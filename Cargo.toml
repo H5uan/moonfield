@@ -10,7 +10,7 @@ edition = "2021"
 moonfield-app = { path = "crates/moonfield-app" }
 moonfield-base = { path = "crates/moonfield-base" }
 moonfield-ecs = { path = "crates/moonfield-ecs" }
-moonfield-script = { path = "crates/moonfield-script" }
+moonfield-script = { path = "crates/moonfield-script", default-features = false }
 moonfield-script-macros = { path = "crates/moonfield-script-macros" }
 moonfield-render = { path = "crates/moonfield-render" }
 moonfield-log = { path = "crates/moonfield-log" }

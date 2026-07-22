@@ -18,8 +18,22 @@ struct Vertex {
 
 #[test]
 fn headless_pipeline_and_command_buffer() {
-    let instance = Instance::new_headless().expect("instance creation");
-    let device = Device::new(&instance, None).expect("device creation");
+    // CI runners without a GPU/Vulkan driver (Windows, macOS) skip this test;
+    // Linux CI runs it against lavapipe (Mesa software Vulkan).
+    let instance = match Instance::new_headless() {
+        Ok(instance) => instance,
+        Err(err) => {
+            eprintln!("skipping: no Vulkan instance available ({err})");
+            return;
+        }
+    };
+    let device = match Device::new(&instance, None) {
+        Ok(device) => device,
+        Err(err) => {
+            eprintln!("skipping: no Vulkan device available ({err})");
+            return;
+        }
+    };
 
     let compiler = Compiler::new().expect("compiler creation");
 

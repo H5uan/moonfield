@@ -2,7 +2,7 @@
 
 use crate::error::{Error, Result};
 use ash::vk;
-use std::ffi::CStr;
+use std::ffi::{c_char, CStr};
 
 /// Vulkan instance and entry point.
 pub struct Instance {
@@ -29,10 +29,8 @@ impl Instance {
             .engine_version(vk::make_api_version(0, 0, 1, 0))
             .api_version(vk::API_VERSION_1_3);
 
-        let extensions: Vec<*const i8> = required_extensions
-            .iter()
-            .map(|ext| ext.as_ptr() as *const i8)
-            .collect();
+        let extensions: Vec<*const c_char> =
+            required_extensions.iter().map(|ext| ext.as_ptr()).collect();
 
         let create_info = vk::InstanceCreateInfo::default()
             .application_info(&app_info)
