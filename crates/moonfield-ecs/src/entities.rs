@@ -9,6 +9,7 @@ use std::{
     u32,
 };
 
+/// An error type for when an entity with a particular ID does not exist.
 #[derive(Debug, Clone, Eq, PartialEq)]
 pub struct NoSuchEntity;
 
@@ -20,12 +21,20 @@ impl fmt::Display for NoSuchEntity {
 
 impl Error for NoSuchEntity {}
 
+/// The location of an entity.
+///
+/// This struct is used to locate the entity in the world.
 #[derive(Copy, Clone)]
 pub(crate) struct Location {
+    /// The archetype that the entity belongs to. World will maintain a list of all archetypes.
     pub archetype: u32,
+    /// The index of the entity in the archetype. Archetype will maintain a list of all entities in the archetype.
     pub index: u32,
 }
 
+/// Entity properties.
+///
+/// This struct is used to store the properties of an entity, such as its generation and location.
 #[derive(Copy, Clone)]
 pub struct EntityMeta {
     pub(crate) generation: NonZeroU32,
@@ -47,13 +56,39 @@ impl EntityMeta {
 
 /// An opaque entity identifier.
 ///
+/// When packed into a `u64` via [`to_bits`](Entity::to_bits), the layout is:
+///
+/// ```text
+///  63      32 | 31       0
+///  ───────────┼───────────
+///  generation │    id
+///  ───────────┼───────────
+///   high 32   │  low 32
+/// ```
+///
+/// - **Bits 63..32 (high 32 bits)** — `generation`: incremented each time the entity
+///   is freed, used to detect dangling references.
+/// - **Bits 31..0  (low 32 bits)** — `id`: index into the global [`Entities`] metadata
+///   array.
+///
+/// See also [`to_bits`](Entity::to_bits) and [`from_bits`](Entity::from_bits).
 #[derive(Clone, Copy, PartialEq, Eq, Hash)]
 pub struct Entity {
+    /// The generation of the entity, incremented each time the entity is freed.
+    /// Packed into the high 32 bits of the `u64` representation.
     pub(crate) generation: NonZeroU32,
+    /// The unique index of the entity in the global [`Entities`] metadata array.
+    /// Packed into the low 32 bits of the `u64` representation.
     pub(crate) id: u32,
 }
 
 impl Entity {
+    /// A sentinel entity that is guaranteed to never be a valid entity.
+    ///
+    /// Both `generation` (`NonZeroU32(u32::MAX)`) and `id` (`u32::MAX`) are set to
+    /// their maximum possible values, making it impossible for this to match any
+    /// real entity returned by the allocator. Useful as a placeholder or default
+    /// value when an [`Entity`] is required but no valid entity exists.
     pub const DANGLING: Entity = Entity {
         generation: match NonZeroU32::new(u32::MAX) {
             Some(x) => x,
@@ -128,6 +163,7 @@ impl Iterator for ReserveEntitiesIterator<'_> {
     }
 }
 
+/// Track the state of allocation of many entities.
 #[derive(Clone)]
 pub(crate) struct AllocManyState {
     // the end of kept ids from the pending list
@@ -152,13 +188,59 @@ impl AllocManyState {
     }
 }
 
+/// The central entity allocator and metadata tracker.
+///
+/// Manages all entity IDs, their generations, and their locations within
+/// archetypes.  The design uses a **single `pending` list** partitioned by
+/// `free_cursor` to serve as both the free-list and the reservation buffer,
+/// avoiding a separate allocation structure.
+///
+/// # Layout
+///
+/// ```text
+///                        ┌── free_cursor ──┐
+///                        │                 │
+/// pending = [  freed IDs  |  reserved IDs  ]
+///            ◄────────────►◄──────────────►
+///              free list      reservation
+/// ```
+///
+/// - `pending[..free_cursor]` — IDs that have been freed and are ready to
+///   reuse (the **free list**).
+/// - `pending[free_cursor..]` — IDs that have been reserved via
+///   [`reserve_entities`](Entities::reserve_entities) but not yet flushed.
+///
+/// When `free_cursor` is **negative**, its absolute value represents the
+/// number of IDs that must be allocated beyond the current free list — i.e.
+/// fresh IDs from the [`meta`](Self::meta) extension.
 #[derive(Default)]
 pub(crate) struct Entities {
+    /// Metadata array indexed by entity ID.
+    ///
+    /// `meta[id]` holds the [`EntityMeta`] (generation + location) for the
+    /// entity with that ID.  The array grows monotonically — its length is
+    /// always `max_ever_allocated_id + 1`.  Freed entities keep their slot
+    /// so that dangling references can be detected via generation mismatch.
     pub meta: Vec<EntityMeta>,
-    // the whole list of entities
+
+    /// A dual-purpose list of entity IDs.
+    ///
+    /// The first `free_cursor` entries (when `free_cursor >= 0`) form the
+    /// **free list** — IDs of previously freed entities that can be reused.
+    /// The remaining entries are **reserved IDs** — IDs that have been
+    /// claimed by [`reserve_entities`](Entities::reserve_entities) but not
+    /// yet finalized via [`flush`](Entities::flush).
     pending: Vec<u32>,
-    // indicator for the end of the free list
+
+    /// Boundary pointer that partitions `pending` into the free list and
+    /// the reservation buffer (see the struct-level docs for details).
+    ///
+    /// - `>= 0` — number of free-list entries at the front of `pending`.
+    /// - `< 0` — the free list is exhausted; `-free_cursor` extra IDs must
+    ///   come from extending [`meta`](Self::meta).
     free_cursor: AtomicIsize,
+
+    /// Number of currently alive (allocated) entities.
     len: u32,
 }
 
@@ -187,6 +269,7 @@ impl Entities {
                 let Some(meta) = self.meta.get(entity.id as usize) else {
                     continue;
                 };
+                // check if the entity is alive, if is, then we cannot set it to the free list
                 assert_eq!(
                     meta.location.index,
                     u32::MAX,
@@ -195,10 +278,12 @@ impl Entities {
             }
         }
         if let Some(max) = freelist.iter().map(|e: &Entity| e.id()).max() {
+            // If some id is bigger than the lenth of meta, We will resize the meta list
             if max as usize >= self.meta.len() {
                 self.meta.resize(max as usize + 1, EntityMeta::EMPTY);
             }
         }
+        // Reconstruct pending list
         self.pending.clear();
         for entity in freelist {
             self.pending.push(entity.id);
@@ -362,6 +447,7 @@ impl Entities {
         let new_free_cursor = if free_cursor >= 0 {
             free_cursor as usize
         } else {
+            // If the free cursor is negative, then we need to resize the meta list
             let old_meta_len = self.meta.len();
             let new_meta_len = old_meta_len + -free_cursor as usize;
             self.meta.resize(new_meta_len, EntityMeta::EMPTY);
@@ -375,6 +461,7 @@ impl Entities {
         };
 
         self.len += (self.pending.len() - new_free_cursor) as u32;
+        // initialize the remaining pending list
         for id in self.pending.drain(new_free_cursor..) {
             init(id, &mut self.meta[id as usize].location);
         }
