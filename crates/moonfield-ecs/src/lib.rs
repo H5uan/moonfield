@@ -11,6 +11,7 @@ mod archetype;
 mod borrow;
 mod commands;
 mod component;
+mod component_ref;
 mod entities;
 mod entity_ref;
 mod query;

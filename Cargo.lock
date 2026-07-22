@@ -1412,6 +1412,7 @@ version = "0.1.0"
 name = "moonfield-ecs"
 version = "0.1.0"
 dependencies = [
+ "foldhash",
  "moonfield-base",
  "serde",
 ]

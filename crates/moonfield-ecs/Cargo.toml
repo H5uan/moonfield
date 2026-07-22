@@ -6,3 +6,4 @@ edition.workspace = true
 [dependencies]
 moonfield-base = { workspace = true }
 serde = "1.0.228"
+foldhash = "=0.2.0"
