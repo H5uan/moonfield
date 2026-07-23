@@ -6,7 +6,7 @@ use std::ffi::{c_char, CStr};
 
 /// Vulkan instance and entry point.
 pub struct Instance {
-    _entry: ash::Entry,
+    entry: ash::Entry,
     instance: ash::Instance,
     surface_instance: ash::khr::surface::Instance,
 }
@@ -42,7 +42,7 @@ impl Instance {
         let surface_instance = ash::khr::surface::Instance::new(&entry, &instance);
 
         Ok(Self {
-            _entry: entry,
+            entry,
             instance,
             surface_instance,
         })
@@ -51,6 +51,11 @@ impl Instance {
     /// Create a headless-friendly instance with no surface extensions.
     pub fn new_headless() -> Result<Self> {
         Self::new(&[])
+    }
+
+    /// Access the `ash::Entry` (needed e.g. for surface creation).
+    pub fn entry(&self) -> &ash::Entry {
+        &self.entry
     }
 
     /// Access the raw `ash::Instance`.

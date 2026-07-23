@@ -11,6 +11,7 @@ pub mod error;
 pub mod framebuffer;
 pub mod headless;
 pub mod instance;
+pub mod offscreen;
 pub mod pipeline;
 pub mod plugin;
 pub mod render_pass;
@@ -18,6 +19,7 @@ pub mod shader;
 pub mod shader_module;
 pub mod swapchain;
 pub mod sync;
+pub mod window_target;
 
 pub use buffer::Buffer;
 pub use command::{CommandBuffer, CommandPool};
@@ -26,6 +28,7 @@ pub use error::{Error, Result};
 pub use framebuffer::Framebuffer;
 pub use headless::HeadlessContext;
 pub use instance::Instance;
+pub use offscreen::OffscreenTarget;
 pub use pipeline::GraphicsPipeline;
 pub use plugin::RenderPlugin;
 pub use render_pass::RenderPass;
@@ -33,6 +36,7 @@ pub use shader::Compiler;
 pub use shader_module::ShaderModule;
 pub use swapchain::{Surface, Swapchain};
 pub use sync::{Fence, Semaphore};
+pub use window_target::WindowRenderer;
 
 use std::ffi::CStr;
 

@@ -272,6 +272,46 @@ impl Swapchain {
     pub fn extent(&self) -> vk::Extent2D {
         self.extent
     }
+
+    /// Acquire the next available swapchain image.
+    ///
+    /// Returns `(image_index, suboptimal)` on success. Propagates ash's
+    /// `vk::Result` so callers can react to `ERROR_OUT_OF_DATE_KHR` (the
+    /// swapchain must be recreated) and `SUBOPTIMAL_KHR`.
+    pub fn acquire_next_image(
+        &self,
+        timeout_ns: u64,
+        semaphore: vk::Semaphore,
+    ) -> std::result::Result<(u32, bool), vk::Result> {
+        // SAFETY: the swapchain and semaphore are valid handles; no fence is
+        // used, the caller synchronizes with its own in-flight fence.
+        unsafe {
+            self.loader
+                .acquire_next_image(self.swapchain, timeout_ns, semaphore, vk::Fence::null())
+        }
+    }
+
+    /// Present a rendered swapchain image, waiting on the given semaphores.
+    ///
+    /// Returns `true` when the swapchain is suboptimal for the surface.
+    /// Propagates ash's `vk::Result` so callers can react to
+    /// `ERROR_OUT_OF_DATE_KHR`.
+    pub fn queue_present(
+        &self,
+        queue: vk::Queue,
+        wait_semaphores: &[vk::Semaphore],
+        image_index: u32,
+    ) -> std::result::Result<bool, vk::Result> {
+        let swapchains = [self.swapchain];
+        let image_indices = [image_index];
+        let present_info = vk::PresentInfoKHR::default()
+            .wait_semaphores(wait_semaphores)
+            .swapchains(&swapchains)
+            .image_indices(&image_indices);
+        // SAFETY: the swapchain, queue and semaphores are valid handles; the
+        // image index was acquired from this swapchain.
+        unsafe { self.loader.queue_present(queue, &present_info) }
+    }
 }
 
 impl Drop for Swapchain {
