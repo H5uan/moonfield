@@ -21,6 +21,36 @@ use winit::{
     window::{CursorGrabMode, Window as WinitWindowHandle, WindowAttributes, WindowId},
 };
 
+/// Frame-scoped queue of raw [`WindowEvent`]s, for consumers that need the
+/// original winit events (e.g. `egui_winit`) rather than the translated
+/// [`InputEvent`] / [`WindowEventKind`] resources.
+///
+/// The windowing backend pushes every raw event as it arrives; consumers
+/// read them during the update/render phase, and the backend clears the
+/// queue at the frame boundary via [`RawWindowEvents::end_frame`].
+#[derive(Debug, Default)]
+pub struct RawWindowEvents {
+    events: Vec<WindowEvent>,
+}
+
+impl RawWindowEvents {
+    /// Queue one raw event.
+    pub fn push(&mut self, event: WindowEvent) {
+        self.events.push(event);
+    }
+
+    /// This frame's raw events, in arrival order.
+    pub fn events(&self) -> &[WindowEvent] {
+        &self.events
+    }
+
+    /// Clear the queue. Called by the backend once per frame, after consumers
+    /// have processed the frame's events.
+    pub fn end_frame(&mut self) {
+        self.events.clear();
+    }
+}
+
 /// Plugin that creates a winit window and runs the winit event loop.
 ///
 /// The plugin stores the window as a [`WinitWindow`] resource, creates the
@@ -96,6 +126,12 @@ impl WinitPlugin {
         self.window_requests = window_requests;
         self
     }
+
+    /// Set the control-flow strategy (poll vs. wait).
+    pub fn with_wait_mode(mut self, wait_mode: WaitMode) -> Self {
+        self.wait_mode = wait_mode;
+        self
+    }
 }
 
 /// A resource holding the raw winit [`Window`].
@@ -132,6 +168,7 @@ impl Plugin for WinitPlugin {
         });
         app.insert_resource(InputState::default());
         app.insert_resource(WindowEvents::default());
+        app.insert_resource(RawWindowEvents::default());
         app.insert_resource(self.window_state.clone());
         app.insert_resource(self.window_requests.clone());
     }
@@ -262,6 +299,12 @@ impl ApplicationHandler for WinitHandler<'_> {
         _window_id: WindowId,
         event: WindowEvent,
     ) {
+        // Broadcast the raw event to consumers that need the original winit
+        // event (e.g. egui_winit). Cleared at the frame boundary.
+        if let Some(mut raw) = self.app.get_resource_mut::<RawWindowEvents>() {
+            raw.push(event.clone());
+        }
+
         // Translate input events into the shared InputState resource
         // (consumed during the next app update).
         let input_event = match &event {
@@ -414,6 +457,9 @@ impl ApplicationHandler for WinitHandler<'_> {
         }
 
         self.app.update();
+        // Render phase: plugins that don't own the event loop (e.g. the
+        // editor) draw into the frame here, mirroring Bevy's render schedule.
+        self.app.render();
         // The frame's input has been consumed — clear frame-scoped state.
         if let Some(mut input) = self.app.get_resource_mut::<InputState>() {
             input.end_frame();
@@ -421,9 +467,27 @@ impl ApplicationHandler for WinitHandler<'_> {
         if let Some(mut events) = self.app.get_resource_mut::<WindowEvents>() {
             events.end_frame();
         }
+        if let Some(mut raw) = self.app.get_resource_mut::<RawWindowEvents>() {
+            raw.end_frame();
+        }
         // A script asked us to quit via `app_exit()`.
         if self.config.window_control.exit_requested() {
             event_loop.exit();
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn raw_window_events_are_frame_scoped() {
+        let mut raw = RawWindowEvents::default();
+        // Synthetic event — Resized with a zero size is enough to exercise the queue.
+        raw.push(WindowEvent::Resized(winit::dpi::PhysicalSize::new(0, 0)));
+        assert_eq!(raw.events().len(), 1);
+        raw.end_frame();
+        assert!(raw.events().is_empty());
     }
 }

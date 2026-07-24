@@ -27,6 +27,7 @@ pub mod prelude {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use moonfield_ecs::World;
     use std::sync::{Arc, Mutex};
 
     #[derive(Default)]
@@ -198,6 +199,50 @@ mod tests {
         assert_eq!(
             events.lock().unwrap().as_slice(),
             &["A::build", "A::finish", "A::cleanup"]
+        );
+    }
+
+    #[test]
+    fn render_systems_run_after_update() {
+        let (mut app, events) = make_app();
+        app.add_plugins(A);
+        app.add_render_system(|world: &mut World| {
+            world
+                .get_resource_mut::<Arc<Mutex<Vec<String>>>>()
+                .unwrap()
+                .lock()
+                .unwrap()
+                .push("render".to_string());
+        });
+
+        app.update();
+        app.render();
+
+        assert_eq!(
+            events.lock().unwrap().as_slice(),
+            &["A::build".to_string(), "render".to_string()]
+        );
+    }
+
+    #[test]
+    fn render_initializes_lazily_without_update() {
+        let (mut app, events) = make_app();
+        app.add_plugins(A);
+        app.add_render_system(|world: &mut World| {
+            world
+                .get_resource_mut::<Arc<Mutex<Vec<String>>>>()
+                .unwrap()
+                .lock()
+                .unwrap()
+                .push("render".to_string());
+        });
+
+        // No update() call — render() must still trigger startup.
+        app.render();
+
+        assert_eq!(
+            events.lock().unwrap().as_slice(),
+            &["A::build".to_string(), "render".to_string()]
         );
     }
 

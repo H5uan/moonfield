@@ -5,6 +5,7 @@ use std::collections::HashSet;
 type StartupFn = Box<dyn FnOnce(&mut World)>;
 type ShutdownFn = Box<dyn FnOnce(&mut World)>;
 type UpdateFn = Box<dyn FnMut(&mut World) -> bool>;
+type RenderFn = Box<dyn FnMut(&mut World)>;
 
 /// Errors that can occur while adding a [`Plugin`] to an [`App`].
 #[derive(Debug, PartialEq, Eq, thiserror::Error)]
@@ -33,6 +34,7 @@ pub struct App {
     startup_fns: Vec<StartupFn>,
     shutdown_fns: Vec<ShutdownFn>,
     update_fns: Vec<UpdateFn>,
+    render_fns: Vec<RenderFn>,
     runner: Option<Runner>,
     initialized: bool,
 }
@@ -53,6 +55,7 @@ impl App {
             startup_fns: Vec::new(),
             shutdown_fns: Vec::new(),
             update_fns: Vec::new(),
+            render_fns: Vec::new(),
             runner: None,
             initialized: false,
         }
@@ -148,6 +151,22 @@ impl App {
         self
     }
 
+    /// Register a render system. Render systems run once per frame after the
+    /// update phase, when a windowing backend calls [`App::render`]. Unlike
+    /// update systems they cannot terminate the loop — their return value is
+    /// discarded.
+    ///
+    /// Render systems are how plugins that do not own the event loop (e.g. an
+    /// editor or a UI renderer) draw into the frame produced by the windowing
+    /// backend, mirroring Bevy's render schedule.
+    pub fn add_render_system<F>(&mut self, f: F) -> &mut Self
+    where
+        F: FnMut(&mut World) + 'static,
+    {
+        self.render_fns.push(Box::new(f));
+        self
+    }
+
     /// Register an ECS startup system to run once at startup.
     pub fn add_startup_system_ecs(&mut self, system: impl IntoSystem) -> &mut Self {
         let mut sys = system.system();
@@ -208,6 +227,21 @@ impl App {
             }
         }
         true
+    }
+
+    /// Run one render tick. Called by the windowing backend after
+    /// [`App::update`] each frame; invokes every registered render system in
+    /// registration order. Startup runs lazily on the first call so a backend
+    /// that drives `render` without `update` still initializes.
+    ///
+    /// Render systems cannot terminate the loop.
+    pub fn render(&mut self) {
+        if !self.initialized {
+            self.startup();
+        }
+        for f in &mut self.render_fns {
+            f(&mut self.world);
+        }
     }
 
     /// Run the update loop until a system returns `false` or no systems remain.

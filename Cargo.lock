@@ -1537,6 +1537,8 @@ dependencies = [
  "moonfield-app",
  "moonfield-log",
  "moonfield-render",
+ "moonfield-window",
+ "moonfield-winit",
  "winit",
 ]
 

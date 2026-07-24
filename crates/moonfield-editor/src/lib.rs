@@ -1,36 +1,43 @@
 //! Moonfield editor plugin.
 //!
-//! Provides [`EditorPlugin`], a Bevy-style plugin that replaces the app's
-//! runner with an egui-based editor window powered by winit, Vulkan, and
-//! egui-ash-renderer. The editor is composed as a regular plugin alongside
-//! other plugins (e.g. `LogPlugin`, `ScriptPlugin`, `RenderPlugin`), not as
-//! a separate binary.
+//! Provides [`EditorPlugin`], a Bevy-style plugin that renders an egui-based
+//! editor UI into the window owned by [`moonfield_winit::WinitPlugin`].
+//! Unlike the previous design, the editor no longer owns the winit event loop
+//! or the window — it registers a render-phase system via
+//! [`App::add_render_system`](moonfield_app::App::add_render_system) and draws
+//! into the same swapchain every frame, mirroring how `bevy_egui` layers on
+//! `bevy_winit` rather than replacing it.
+//!
+//! Composition: add `WinitPlugin` first (it owns the window + event loop and
+//! registers [`WinitWindow`], [`RawHandleWrapper`], [`InputState`],
+//! [`WindowControl`], [`RawWindowEvents`]), then `EditorPlugin`. The editor
+//! reads those resources and lazily builds its Vulkan + egui state on the
+//! first render tick, once the window actually exists.
 
 mod ui;
 mod viewport;
 
-use moonfield_app::{App, Plugin, Runner};
+use moonfield_app::prelude::World;
+use moonfield_app::{App, Plugin};
 use moonfield_log::error;
 use moonfield_render::WindowRenderer;
+use moonfield_window::WindowControl;
+use moonfield_winit::{RawWindowEvents, WinitWindow};
 use ui::{Tab, TabContext};
 use viewport::Viewport;
 
 use ash::vk;
 use gpu_allocator::vulkan::{Allocator, AllocatorCreateDesc};
 use std::sync::{Arc, Mutex};
-use winit::{
-    application::ApplicationHandler,
-    dpi::LogicalSize,
-    event::WindowEvent,
-    event_loop::{ActiveEventLoop, ControlFlow, EventLoop},
-    window::{Window, WindowAttributes, WindowId},
-};
+use winit::event::WindowEvent;
 
-/// Plugin that replaces the app's default runner with an editor event loop.
+/// Plugin that registers the editor render system.
 ///
-/// The editor creates its own window, Vulkan renderer, and egui integration.
-/// Unlike the old `moonfield-editor` binary, this plugin is a library crate
-/// that composes with the existing App/Plugin architecture.
+/// The editor does not own the event loop or the window — it composes on top
+/// of [`moonfield_winit::WinitPlugin`], which must be added first. Each frame
+/// the winit backend calls `App::render`, which drives the editor's render
+/// system to build the egui UI and record it (plus the viewport scene) into
+/// the window's swapchain.
 pub struct EditorPlugin;
 
 impl Plugin for EditorPlugin {
@@ -38,38 +45,22 @@ impl Plugin for EditorPlugin {
         "moonfield_editor::EditorPlugin"
     }
 
-    fn build(&self, _app: &mut App) {}
-
-    fn finish(&self, app: &mut App) {
-        // Set the Runner so App::run() delegates to the editor event loop.
-        app.set_runner(Runner(Box::new(|app: &mut App| {
-            editor_run(app);
-        })));
+    fn build(&self, app: &mut App) {
+        // The editor state is built lazily on the first render tick, once the
+        // windowing backend has created the window and registered
+        // `WinitWindow` / `RawHandleWrapper`.
+        app.insert_resource(EditorStateSlot::default());
+        app.add_render_system(editor_render);
     }
 }
 
-/// Creates the window, the Vulkan renderer and the egui integration, then
-/// drives everything from the winit event loop. Called from the [`Runner`].
-fn editor_run(app: &mut App) {
-    let event_loop = EventLoop::new().expect("failed to create winit event loop");
-    event_loop.set_control_flow(ControlFlow::Poll);
-
-    let mut handler = EditorHandler {
-        app,
-        state: None,
-        frames_rendered: 0,
-    };
-    if let Err(e) = event_loop.run_app(&mut handler) {
-        error!("editor event loop exited with error: {e}");
-    }
-}
-
-struct EditorHandler<'a> {
-    app: &'a mut App,
-    state: Option<EditorState>,
-    /// Frames rendered, for the MOONFIELD_EDITOR_AUTO_CLOSE debug helper.
-    frames_rendered: u64,
-}
+/// Lazily-initialized editor state, stored as a world resource.
+///
+/// `None` until the first render tick after the window exists. The blanket
+/// `Resource` impl in `moonfield-ecs` covers this (it is `Send + Sync +
+/// 'static` once `EditorState` is).
+#[derive(Default)]
+struct EditorStateSlot(Option<EditorState>);
 
 /// All per-window editor state.
 ///
@@ -90,7 +81,7 @@ struct EditorState {
     window_renderer: WindowRenderer,
     egui_state: egui_winit::State,
     dock_state: egui_dock::DockState<Tab>,
-    window: Arc<Window>,
+    window: Arc<winit::window::Window>,
     /// Texture ids pending destruction, ring-buffered per in-flight frame.
     free_ring: [Vec<egui::TextureId>; 2],
     frame_counter: usize,
@@ -98,22 +89,21 @@ struct EditorState {
     /// offscreen target is resized against this *before* building the UI, so
     /// the current frame's draw data always references the live texture id.
     viewport_panel_points: Option<egui::Vec2>,
+    /// Frames rendered, for the MOONFIELD_EDITOR_AUTO_CLOSE debug helper.
+    frames_rendered: u64,
 }
 
 impl EditorState {
-    fn new(event_loop: &ActiveEventLoop) -> Self {
-        let attrs = WindowAttributes::default()
-            .with_title("Moonfield Editor")
-            .with_inner_size(LogicalSize::new(1280.0, 800.0));
-        let window = Arc::new(
-            event_loop
-                .create_window(attrs)
-                .expect("failed to create editor window"),
-        );
+    /// Build the editor state from the window registered by `WinitPlugin`.
+    fn new(world: &World) -> Result<Self, String> {
+        let winit_window = world.get_resource::<WinitWindow>().ok_or_else(|| {
+            "WinitWindow resource missing — add WinitPlugin before EditorPlugin".to_string()
+        })?;
+        let window = winit_window.0.clone();
 
         let size = window.inner_size();
         let window_renderer = WindowRenderer::new(window.as_ref(), size.width, size.height)
-            .expect("failed to create window renderer");
+            .map_err(|e| e.to_string())?;
 
         let allocator = Arc::new(Mutex::new(
             Allocator::new(&AllocatorCreateDesc {
@@ -124,7 +114,7 @@ impl EditorState {
                 buffer_device_address: false,
                 allocation_sizes: Default::default(),
             })
-            .expect("failed to create GPU allocator"),
+            .map_err(|e| format!("failed to create GPU allocator: {e}"))?,
         ));
 
         let mut egui_renderer = egui_ash_renderer::Renderer::with_gpu_allocator(
@@ -140,21 +130,21 @@ impl EditorState {
                 srgb_framebuffer: false,
             },
         )
-        .expect("failed to create egui renderer");
+        .map_err(|e| format!("failed to create egui renderer: {e}"))?;
 
         let mut viewport = Viewport::new(
             window_renderer.instance(),
             window_renderer.device(),
             allocator.clone(),
         )
-        .expect("failed to create viewport");
+        .map_err(|e| e.to_string())?;
         viewport.register_texture(&mut egui_renderer);
 
         let upload_pool = moonfield_render::CommandPool::new(
             window_renderer.device(),
             window_renderer.device().queue_family_indices().graphics,
         )
-        .expect("failed to create upload command pool");
+        .map_err(|e| e.to_string())?;
 
         let egui_state = egui_winit::State::new(
             egui::Context::default(),
@@ -165,7 +155,7 @@ impl EditorState {
             None,
         );
 
-        Self {
+        Ok(Self {
             egui_renderer,
             viewport,
             upload_pool,
@@ -177,7 +167,8 @@ impl EditorState {
             free_ring: [Vec::new(), Vec::new()],
             frame_counter: 0,
             viewport_panel_points: None,
-        }
+            frames_rendered: 0,
+        })
     }
 }
 
@@ -191,58 +182,70 @@ impl Drop for EditorState {
     }
 }
 
-impl ApplicationHandler for EditorHandler<'_> {
-    fn resumed(&mut self, event_loop: &ActiveEventLoop) {
-        if self.state.is_none() {
-            self.state = Some(EditorState::new(event_loop));
-        }
-    }
-
-    fn window_event(
-        &mut self,
-        event_loop: &ActiveEventLoop,
-        _window_id: WindowId,
-        event: WindowEvent,
-    ) {
-        let Some(state) = self.state.as_mut() else {
-            return;
-        };
-
-        // The editor consumes every event for egui; gameplay input routing
-        // (only when the viewport is focused) comes with script integration.
-        let _ = state.egui_state.on_window_event(&state.window, &event);
-
-        match event {
-            WindowEvent::CloseRequested => event_loop.exit(),
-            WindowEvent::RedrawRequested => {
-                if let Err(e) = render_frame(self.app, state) {
-                    error!("failed to render editor frame: {e}");
+/// Editor render system: drives egui input, builds the UI, records the
+/// viewport scene + UI passes, and presents the swapchain frame.
+fn editor_render(world: &mut World) {
+    // Lazily build the editor state once the window exists.
+    let needs_init = world
+        .get_resource::<EditorStateSlot>()
+        .map(|slot| slot.0.is_none())
+        .unwrap_or(true);
+    if needs_init {
+        let state = match EditorState::new(world) {
+            Ok(s) => s,
+            Err(e) => {
+                // The window may not exist yet on the very first ticks
+                // (e.g. before `resumed`). Stay quiet and retry next frame.
+                if !e.contains("WinitWindow resource missing") {
+                    error!("failed to build editor state: {e}");
                 }
+                return;
             }
-            _ => {}
-        }
+        };
+        let mut slot = world
+            .get_resource_mut::<EditorStateSlot>()
+            .expect("EditorStateSlot was just checked");
+        slot.0 = Some(state);
+        return; // Render starts on the next tick — once init succeeds, give
+                // the winit backend a clean frame boundary before recording.
     }
 
-    fn about_to_wait(&mut self, event_loop: &ActiveEventLoop) {
-        self.app.update();
-        if let Some(state) = &self.state {
-            state.window.request_redraw();
-        }
-        // Debug helper: MOONFIELD_EDITOR_AUTO_CLOSE=<frames> exits the loop
-        // after N rendered frames, so shutdown paths can be exercised from
-        // scripts/CI without manually closing the window.
-        if let Ok(frames) = std::env::var("MOONFIELD_EDITOR_AUTO_CLOSE") {
-            if let Ok(limit) = frames.parse::<u64>() {
-                self.frames_rendered = self.frames_rendered.saturating_add(1);
-                if self.frames_rendered >= limit {
-                    event_loop.exit();
+    let mut slot = world
+        .get_resource_mut::<EditorStateSlot>()
+        .expect("EditorStateSlot registered in build");
+    let Some(state) = slot.0.as_mut() else {
+        return;
+    };
+
+    // Drain raw window events into egui before building the UI.
+    let raw_events: Vec<WindowEvent> = world
+        .get_resource::<RawWindowEvents>()
+        .map(|r| r.events().to_vec())
+        .unwrap_or_default();
+    for event in &raw_events {
+        let _ = state.egui_state.on_window_event(&state.window, event);
+    }
+
+    if let Err(e) = render_frame(state) {
+        error!("failed to render editor frame: {e}");
+    }
+
+    // Debug helper: MOONFIELD_EDITOR_AUTO_CLOSE=<frames> signals exit via the
+    // shared WindowControl after N rendered frames, so shutdown paths can be
+    // exercised from scripts/CI without manually closing the window.
+    if let Ok(frames) = std::env::var("MOONFIELD_EDITOR_AUTO_CLOSE") {
+        if let Ok(limit) = frames.parse::<u64>() {
+            state.frames_rendered = state.frames_rendered.saturating_add(1);
+            if state.frames_rendered >= limit {
+                if let Some(ctrl) = world.get_resource::<WindowControl>() {
+                    ctrl.request_exit();
                 }
             }
         }
     }
 }
 
-fn render_frame(_app: &mut App, state: &mut EditorState) -> Result<(), String> {
+fn render_frame(state: &mut EditorState) -> Result<(), String> {
     let size = state.window.inner_size();
     if size.width == 0 || size.height == 0 {
         return Ok(()); // minimized
