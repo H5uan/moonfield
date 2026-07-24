@@ -11,7 +11,7 @@ crates/
   moonfield/          # Binary crate — the main executable entry point (src/main.rs)
   moonfield-app/      # Bevy-style App/Plugin framework (Plugin, PluginGroup, App, Resources)
   moonfield-base/     # Shared base types and utilities
-  moonfield-editor/   # Editor shell spike (egui + egui_dock + egui-ash-renderer): dock panels, offscreen viewport
+  moonfield-editor/   # Editor plugin (library crate, egui + egui_dock + egui-ash-renderer): dock panels, offscreen viewport
   moonfield-render/   # Lunar Mare — Vulkan RHI (ash-based): device, swapchain, pipeline, shaders, headless recording,
                       # offscreen targets (offscreen.rs), windowed frame loop (window_target.rs)
   moonfield-script/   # Scripting runtime with v8 and QuickJS backends, ES modules, hot reload (src/script/), input polling API (src/input.rs)
@@ -20,7 +20,7 @@ crates/
 scripts/              # TypeScript helper scripts (e.g. record_frame.ts); moonfield.d.ts is auto-generated
 ```
 
-The editor is a separate binary (`cargo run -p moonfield-editor`) composing the engine crates: `EditorPlugin` replaces the app runner with an egui-based winit event loop and owns the windowed Vulkan renderer (`WindowRenderer`). The scene renders into an `OffscreenTarget` (final layout `SHADER_READ_ONLY_OPTIMAL`) that egui samples as a user texture in the Viewport dock panel. The egui stack is anchored to egui-ash-renderer's compatibility table (currently egui 0.33 / egui-winit 0.33 / egui-ash-renderer 0.11 + gpu-allocator / egui_dock 0.18, ash 0.38, winit 0.30) — bump them together. Scripting (play mode) and ECS-driven scenes are not wired into the editor yet. Setting `MOONFIELD_EDITOR_AUTO_CLOSE=<frames>` exits the event loop after N frames, which allows scripted smoke tests of startup/shutdown on a machine with a display.
+The editor is a library crate that provides [`EditorPlugin`], a regular Bevy-style plugin composing the engine crates. `EditorPlugin` replaces the app runner with an egui-based winit event loop and owns the windowed Vulkan renderer (`WindowRenderer`). The scene renders into an `OffscreenTarget` (final layout `SHADER_READ_ONLY_OPTIMAL`) that egui samples as a user texture in the Viewport dock panel. The egui stack is anchored to egui-ash-renderer's compatibility table (currently egui 0.33 / egui-winit 0.33 / egui-ash-renderer 0.11 + gpu-allocator / egui_dock 0.18, ash 0.38, winit 0.30) — bump them together. Scripting (play mode) and ECS-driven scenes are not wired into the editor yet. Setting `MOONFIELD_EDITOR_AUTO_CLOSE=<frames>` exits the event loop after N frames, which allows scripted smoke tests of startup/shutdown on a machine with a display. To use the editor, add `EditorPlugin` to your app alongside other plugins, then `app.run()`. Both the game (`WinitPlugin`) and editor (`EditorPlugin`) paths go through the same `App::run()` -> `Runner` architecture.
 
 Host API bindings that touch engine layers (`record_frame`, …) live in the binary crate (`crates/moonfield/src/script_api.rs`) as the composition root — `moonfield-script` itself has no engine-layer dependencies. Bindings that only read script-owned state (the `input_*` polling API) are built into `moonfield-script` (`input::register_input_api`) and shared via an `Arc<Mutex<ScriptInputState>>` handle (`ScriptPlugin::with_input_state`). `scripts/moonfield.d.ts` is generated from the registered `ScriptApi` and kept in sync by a unit test.
 

@@ -3,7 +3,7 @@
 //! Provides a [`WinitPlugin`] that creates a window and runs the winit event
 //! loop, driving the application's update cycle.
 
-use moonfield_app::{App, Plugin};
+use moonfield_app::{App, Plugin, Runner};
 use moonfield_log::error;
 use moonfield_window::{
     CursorMode, InputEvent, InputState, RawHandleWrapper, SharedWindow, Window, WindowControl,
@@ -137,7 +137,11 @@ impl Plugin for WinitPlugin {
     }
 
     fn finish(&self, app: &mut App) {
-        app.set_runner(winit_runner);
+        // Set the Runner so App::run() delegates to the winit event loop
+        // instead of the default update loop.
+        app.set_runner(Runner(Box::new(|app: &mut App| {
+            winit_run(app);
+        })));
     }
 
     fn name(&self) -> &str {
@@ -145,11 +149,9 @@ impl Plugin for WinitPlugin {
     }
 }
 
-/// Default winit runner: creates an [`EventLoop`] + [`Window`] and drives the
-/// app via winit events.
-///
-/// Stored as the app's runner by [`WinitPlugin::finish`].
-pub fn winit_runner(app: &mut App) {
+/// Creates an [`EventLoop`] + [`Window`] and drives the app via winit events.
+/// Called from the [`Runner`] set by [`WinitPlugin`].
+pub fn winit_run(app: &mut App) {
     let event_loop = EventLoop::new().expect("failed to create winit event loop");
 
     let config = app

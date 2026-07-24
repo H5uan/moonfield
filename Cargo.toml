@@ -16,4 +16,5 @@ moonfield-render = { path = "crates/moonfield-render" }
 moonfield-log = { path = "crates/moonfield-log" }
 moonfield-window = { path = "crates/moonfield-window" }
 moonfield-winit = { path = "crates/moonfield-winit" }
+moonfield-editor = { path = "crates/moonfield-editor" }
 thiserror = "2.0.18"

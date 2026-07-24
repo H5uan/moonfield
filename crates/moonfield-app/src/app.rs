@@ -16,17 +16,24 @@ pub enum AppError {
 
 /// The main application container.
 ///
-/// An [`App`] holds registered plugins and a runner. Plugins are built when
-/// they are added, and the runner is invoked by [`App::run`].
+/// An [`App`] holds registered plugins. Plugins are built when they are
+/// added, and [`App::run`] calls `finish()`, runs the update loop, then
+/// calls `cleanup()`.
+///
+/// # Runner
+///
+/// By default [`App::run`] runs its own update loop. A plugin can override
+/// this by calling [`App::set_runner`]. The runner is a closure that receives
+/// `&mut App` and drives the application.
 #[must_use]
 pub struct App {
     plugins: Vec<Box<dyn Plugin>>,
     plugin_names: HashSet<String>,
-    runner: Box<dyn FnMut(&mut App)>,
     world: World,
     startup_fns: Vec<StartupFn>,
     shutdown_fns: Vec<ShutdownFn>,
     update_fns: Vec<UpdateFn>,
+    runner: Option<Runner>,
     initialized: bool,
 }
 
@@ -42,11 +49,11 @@ impl App {
         Self {
             plugins: Vec::new(),
             plugin_names: HashSet::new(),
-            runner: Box::new(|_| {}),
             world: World::new(),
             startup_fns: Vec::new(),
             shutdown_fns: Vec::new(),
             update_fns: Vec::new(),
+            runner: None,
             initialized: false,
         }
     }
@@ -104,12 +111,6 @@ impl App {
         &mut self.world
     }
 
-    /// Sets the runner function that will be invoked by [`App::run`].
-    pub fn set_runner(&mut self, runner: impl FnMut(&mut App) + 'static) -> &mut Self {
-        self.runner = Box::new(runner);
-        self
-    }
-
     /// Register a startup callback.
     pub fn add_startup_system<F>(&mut self, f: F) -> &mut Self
     where
@@ -154,6 +155,33 @@ impl App {
             sys.run(world);
         }));
         self
+    }
+
+    /// Set a custom runner function that replaces the default update loop.
+    ///
+    /// The runner receives `&mut App` and drives the application (typically
+    /// via a winit event loop). It is called once from [`App::run`] after
+    /// all plugins have been finished.
+    ///
+    /// # Example
+    ///
+    /// ```ignore
+    /// app.set_runner(Box::new(|app: &mut App| {
+    ///     loop {
+    ///         if !app.update() {
+    ///             break;
+    ///         }
+    ///     }
+    /// }));
+    /// ```
+    pub fn set_runner(&mut self, runner: Runner) -> &mut Self {
+        self.runner = Some(runner);
+        self
+    }
+
+    /// Take the runner, if set.
+    pub fn take_runner(&mut self) -> Option<Runner> {
+        self.runner.take()
     }
 
     /// Run startup systems.
@@ -206,7 +234,12 @@ impl App {
         self.initialized = false;
     }
 
-    /// Finishes all plugins, runs the runner, and then cleans up all plugins.
+    /// Finishes all plugins, runs the update loop (or a custom runner), then
+    /// cleans up all plugins.
+    ///
+    /// If a runner was set via [`set_runner`], it is called instead of the
+    /// default update loop. The runner receives `&mut App` and drives the
+    /// application.
     pub fn run(&mut self) {
         let plugins = std::mem::take(&mut self.plugins);
 
@@ -214,9 +247,12 @@ impl App {
             plugin.finish(self);
         }
 
-        let mut runner = std::mem::replace(&mut self.runner, Box::new(|_| {}));
-        runner(self);
-        self.runner = runner;
+        // If a plugin set a runner, delegate to it.
+        if let Some(runner) = self.runner.take() {
+            runner.0(self);
+        } else {
+            self.run_updates();
+        }
 
         for plugin in &plugins {
             plugin.cleanup(self);
@@ -233,6 +269,13 @@ impl Drop for App {
         }
     }
 }
+
+/// A runner function that drives the application.
+///
+/// A plugin that wants to replace the default update loop can set a runner
+/// via [`App::set_runner`]. The runner is responsible for calling
+/// `app.update()` each frame.
+pub struct Runner(pub Box<dyn FnOnce(&mut App)>);
 
 /// Types that can be passed to [`App::add_plugins`].
 pub trait Plugins<Marker>: sealed::Plugins<Marker> {}

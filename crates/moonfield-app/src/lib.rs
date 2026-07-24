@@ -11,7 +11,7 @@ mod app;
 mod plugin;
 mod plugin_group;
 
-pub use app::{App, AppError, Plugins};
+pub use app::{App, AppError, Plugins, Runner};
 pub use moonfield_ecs::Resource;
 pub use plugin::Plugin;
 pub use plugin_group::{PluginGroup, PluginGroupBuilder};
@@ -189,17 +189,15 @@ mod tests {
     }
 
     #[test]
-    fn run_invokes_finish_runner_and_cleanup() {
+    fn run_invokes_finish_run_updates_and_cleanup() {
         let (mut app, events) = make_app();
         app.add_plugins(A);
-        app.set_runner(|app| {
-            log_event("runner", app);
-        });
+        // A has no update systems, so run_updates completes immediately.
         app.run();
 
         assert_eq!(
             events.lock().unwrap().as_slice(),
-            &["A::build", "A::finish", "runner", "A::cleanup"]
+            &["A::build", "A::finish", "A::cleanup"]
         );
     }
 

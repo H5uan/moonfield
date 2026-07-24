@@ -1,17 +1,22 @@
-//! Editor event loop: winit + egui + the windowed Vulkan renderer.
+//! Moonfield editor plugin.
 //!
-//! [`EditorPlugin`] replaces the app's runner with an editor-specific winit
-//! event loop that drives egui on top of [`WindowRenderer`]. The frame flow
-//! is: `app.update()` → egui UI → scene pass into the viewport's offscreen
-//! target → egui pass into the swapchain → present.
+//! Provides [`EditorPlugin`], a Bevy-style plugin that replaces the app's
+//! runner with an egui-based editor window powered by winit, Vulkan, and
+//! egui-ash-renderer. The editor is composed as a regular plugin alongside
+//! other plugins (e.g. `LogPlugin`, `ScriptPlugin`, `RenderPlugin`), not as
+//! a separate binary.
 
-use crate::ui::{self, Tab, TabContext};
-use crate::viewport::Viewport;
+mod ui;
+mod viewport;
+
+use moonfield_app::{App, Plugin, Runner};
+use moonfield_log::error;
+use moonfield_render::WindowRenderer;
+use ui::{Tab, TabContext};
+use viewport::Viewport;
+
 use ash::vk;
 use gpu_allocator::vulkan::{Allocator, AllocatorCreateDesc};
-use moonfield_app::{App, Plugin};
-use moonfield_log::error;
-use moonfield_render::{CommandPool, WindowRenderer};
 use std::sync::{Arc, Mutex};
 use winit::{
     application::ApplicationHandler,
@@ -21,7 +26,11 @@ use winit::{
     window::{Window, WindowAttributes, WindowId},
 };
 
-/// Plugin that installs the editor event loop as the app's runner.
+/// Plugin that replaces the app's default runner with an editor event loop.
+///
+/// The editor creates its own window, Vulkan renderer, and egui integration.
+/// Unlike the old `moonfield-editor` binary, this plugin is a library crate
+/// that composes with the existing App/Plugin architecture.
 pub struct EditorPlugin;
 
 impl Plugin for EditorPlugin {
@@ -32,13 +41,16 @@ impl Plugin for EditorPlugin {
     fn build(&self, _app: &mut App) {}
 
     fn finish(&self, app: &mut App) {
-        app.set_runner(editor_runner);
+        // Set the Runner so App::run() delegates to the editor event loop.
+        app.set_runner(Runner(Box::new(|app: &mut App| {
+            editor_run(app);
+        })));
     }
 }
 
-/// The editor runner: creates the window, the Vulkan renderer and the egui
-/// integration, then drives everything from the winit event loop.
-pub fn editor_runner(app: &mut App) {
+/// Creates the window, the Vulkan renderer and the egui integration, then
+/// drives everything from the winit event loop. Called from the [`Runner`].
+fn editor_run(app: &mut App) {
     let event_loop = EventLoop::new().expect("failed to create winit event loop");
     event_loop.set_control_flow(ControlFlow::Poll);
 
@@ -70,7 +82,7 @@ struct EditorHandler<'a> {
 struct EditorState {
     egui_renderer: egui_ash_renderer::Renderer,
     viewport: Viewport,
-    upload_pool: CommandPool,
+    upload_pool: moonfield_render::CommandPool,
     /// Held to keep the allocator alive; the egui renderer and viewport
     /// share clones of it.
     #[allow(dead_code)]
@@ -138,7 +150,7 @@ impl EditorState {
         .expect("failed to create viewport");
         viewport.register_texture(&mut egui_renderer);
 
-        let upload_pool = CommandPool::new(
+        let upload_pool = moonfield_render::CommandPool::new(
             window_renderer.device(),
             window_renderer.device().queue_family_indices().graphics,
         )
