@@ -13,8 +13,11 @@ moonfield-ecs = { path = "crates/moonfield-ecs" }
 moonfield-script = { path = "crates/moonfield-script", default-features = false }
 moonfield-script-macros = { path = "crates/moonfield-script-macros" }
 moonfield-render = { path = "crates/moonfield-render" }
+moonfield-renderer = { path = "crates/moonfield-renderer" }
 moonfield-log = { path = "crates/moonfield-log" }
+moonfield-math = { path = "crates/moonfield-math" }
 moonfield-window = { path = "crates/moonfield-window" }
 moonfield-winit = { path = "crates/moonfield-winit" }
 moonfield-editor = { path = "crates/moonfield-editor" }
+glam = "0.30.10"
 thiserror = "2.0.18"

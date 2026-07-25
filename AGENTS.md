@@ -12,8 +12,12 @@ crates/
   moonfield-app/      # Bevy-style App/Plugin framework (Plugin, PluginGroup, App, Resources)
   moonfield-base/     # Shared base types and utilities
   moonfield-editor/   # Editor plugin (library crate, egui + egui_dock + egui-ash-renderer): dock panels, offscreen viewport
+  moonfield-math/     # glam re-export + domain types (Dir3/Ray3d), Vulkan projection conventions
+                      # — the workspace math single entry (bevy_math pattern)
   moonfield-render/   # Lunar Mare — Vulkan RHI (ash-based): device, swapchain, pipeline, shaders, headless recording,
                       # offscreen targets (offscreen.rs), windowed frame loop (window_target.rs)
+  moonfield-renderer/ # Lunaris — scene rendering & algorithms (splat/rt/gi), RenderAlgorithm phase abstraction,
+                      # 3DGS training (splat::train)
   moonfield-script/   # Scripting runtime with v8 and QuickJS backends, ES modules, hot reload (src/script/), input polling API (src/input.rs)
   moonfield-window/   # Abstract windowing types (Window resource, RawHandleWrapper, InputState/InputEvent, WindowEvents/WindowControl), no backend deps
   moonfield-winit/    # Windowing backend (winit), bridges winit Window → moonfield-window resources

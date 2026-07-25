@@ -1,0 +1,14 @@
+[package]
+name = "moonfield-renderer"
+version.workspace = true
+edition.workspace = true
+
+[features]
+default = ["splat"]
+splat = []
+rt = []
+gi = []
+
+[dependencies]
+moonfield-math = { workspace = true }
+thiserror = { workspace = true }
