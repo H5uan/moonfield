@@ -1,12 +1,17 @@
 //! Moonfield sample application entry point.
 
+// Script host API bindings (composition root). The script system is
+// temporarily unplugged from the app below — no `ScriptPlugin` is added, so
+// nothing calls into this module at runtime. It stays compiled so the
+// `moonfield.d.ts` sync test keeps guarding the bindings; re-enable by
+// wiring `ScriptPlugin` back into `main`.
+#[allow(dead_code)]
 mod script_api;
 
 use moonfield_app::prelude::World;
 use moonfield_app::App;
 use moonfield_log::info;
 use moonfield_render::RenderPlugin;
-use moonfield_script::ScriptPlugin;
 use moonfield_winit::WinitPlugin;
 
 fn main() {
@@ -23,31 +28,14 @@ fn main() {
     });
     app.add_systems(print_fps);
 
-    // 脚本系统：host API 在 script_api 模块组装（组合根模式）
-    let input = moonfield_script::new_shared_input();
-    let time = moonfield_script::new_shared_time();
-    let window_control = moonfield_window::WindowControl::default();
-    let window_state = moonfield_window::new_shared_window();
-    let window_requests = moonfield_window::WindowRequests::default();
-    let plugin = ScriptPlugin::new(script_api::build_script_api(
-        &input,
-        &time,
-        &window_control,
-        &window_state,
-        &window_requests,
-    ))
-    .with_input_state(input)
-    .with_time_state(time);
-    let plugin = plugin.with_configure(script_api::configure_runtime);
-    app.add_plugin(plugin);
+    // Script system temporarily unplugged: no `ScriptPlugin` is added, so no
+    // script runtime is created and `scripts/record_frame.ts` is not loaded.
+    // The window control/state/requests handles revert to the plugin's own
+    // defaults. Re-enable by restoring the `ScriptPlugin::new(...)` wiring
+    // here (see git history).
 
     app.add_plugin(RenderPlugin);
-    app.add_plugin(
-        WinitPlugin::default()
-            .with_window_control(window_control)
-            .with_window_state(window_state)
-            .with_window_requests(window_requests),
-    );
+    app.add_plugin(WinitPlugin::default());
 
     app.run();
 }
