@@ -8,7 +8,9 @@ name = "moonfield"
 path = "src/main.rs"
 
 [features]
-default = ["v8-backend"]
+default = ["v8-backend", "native"]
+native = ["moonfield-render/native"]
+web = ["moonfield-render/web"]
 v8-backend = ["moonfield-script/v8-backend", "dep:v8"]
 quickjs-backend = ["moonfield-script/quickjs-backend", "dep:rquickjs"]
 

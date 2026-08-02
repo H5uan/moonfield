@@ -11,6 +11,7 @@ mod script_api;
 use moonfield_app::prelude::World;
 use moonfield_app::App;
 use moonfield_log::info;
+#[cfg(feature = "native")]
 use moonfield_render::RenderPlugin;
 use moonfield_winit::WinitPlugin;
 
@@ -34,6 +35,9 @@ fn main() {
     // defaults. Re-enable by restoring the `ScriptPlugin::new(...)` wiring
     // here (see git history).
 
+    // The windowed renderer is native-only (Vulkan/ash); the `web` backend
+    // has no window plugin yet, so the app runs without one there.
+    #[cfg(feature = "native")]
     app.add_plugin(RenderPlugin);
     app.add_plugin(WinitPlugin::default());
 
