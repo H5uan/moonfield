@@ -1,6 +1,9 @@
-//! Perspective camera producing Vulkan-convention view/projection matrices.
+//! Perspective camera producing view/projection matrices.
+//!
+//! The projection convention depends on the crate's backend feature:
+//! `native` uses Vulkan conventions (NDC Y points down), `web` uses wgpu
+//! conventions (NDC Y points up). Both map depth to [0, 1].
 
-use moonfield_math::projection::perspective_vk;
 use moonfield_math::{Mat4, Vec3};
 
 /// A perspective camera positioned by `position` and oriented by `yaw` /
@@ -36,11 +39,25 @@ impl Camera {
         Mat4::look_at_rh(self.position, self.position + self.forward(), Vec3::Y)
     }
 
-    /// Perspective projection using Vulkan conventions: NDC depth in [0, 1]
-    /// (`near -> 0`, `far -> 1`) and flipped Y (NDC Y points down).
+    /// Perspective projection. The convention is backend-dependent: with the
+    /// `native` feature, Vulkan conventions (NDC depth in [0, 1], NDC Y
+    /// points down); with the `web` feature, wgpu conventions (NDC depth in
+    /// [0, 1], NDC Y points up).
     #[must_use]
     pub fn projection(&self) -> Mat4 {
-        perspective_vk(self.fov_y, self.aspect, self.near, self.far)
+        #[cfg(feature = "native")]
+        {
+            moonfield_math::projection::perspective_vk(self.fov_y, self.aspect, self.near, self.far)
+        }
+        #[cfg(feature = "web")]
+        {
+            moonfield_math::projection::perspective_wgpu(
+                self.fov_y,
+                self.aspect,
+                self.near,
+                self.far,
+            )
+        }
     }
 
     /// Combined `projection * view` matrix.
@@ -95,11 +112,22 @@ mod tests {
     }
 
     #[test]
+    #[cfg(feature = "native")]
     fn test_vulkan_y_flip() {
         // A point above the camera axis (+Y in world) must land at negative
         // NDC Y, because Vulkan NDC Y points down.
         let cam = test_camera();
         let y = ndc(&cam, Vec3::new(0.0, 1.0, -5.0)).y;
         assert!(y < 0.0, "y = {y}");
+    }
+
+    #[test]
+    #[cfg(feature = "web")]
+    fn test_wgpu_y_up() {
+        // A point above the camera axis (+Y in world) must land at positive
+        // NDC Y, because wgpu NDC Y points up.
+        let cam = test_camera();
+        let y = ndc(&cam, Vec3::new(0.0, 1.0, -5.0)).y;
+        assert!(y > 0.0, "y = {y}");
     }
 }

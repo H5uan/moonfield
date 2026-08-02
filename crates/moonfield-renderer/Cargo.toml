@@ -4,11 +4,14 @@ version.workspace = true
 edition.workspace = true
 
 [features]
-default = ["splat"]
+default = ["splat", "native"]
+native = ["moonfield-render/native"]
+web = ["moonfield-render/web"]
 splat = []
 rt = []
 gi = []
 
 [dependencies]
 moonfield-math = { workspace = true }
+moonfield-render = { workspace = true }
 thiserror = { workspace = true }
