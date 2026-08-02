@@ -12,12 +12,15 @@ crates/
   moonfield-app/      # Bevy-style App/Plugin framework (Plugin, PluginGroup, App, Resources)
   moonfield-base/     # Shared base types and utilities
   moonfield-editor/   # Editor plugin (library crate, egui + egui_dock + egui-ash-renderer): dock panels, offscreen viewport
-  moonfield-math/     # glam re-export + domain types (Dir3/Ray3d), Vulkan projection conventions
-                      # — the workspace math single entry (bevy_math pattern)
-  moonfield-render/   # Lunar Mare — Vulkan RHI (ash-based): device, swapchain, pipeline, shaders, headless recording,
+  moonfield-math/     # glam re-export + domain types (Dir3/Ray3d), Vulkan + wgpu projection conventions
+                      # (perspective_vk/perspective_wgpu) — the workspace math single entry (bevy_math pattern)
+  moonfield-render/   # Lunar Mare — rendering RHI with mutually-exclusive `native` (default, Vulkan/ash, src/native/)
+                      # and `web` (wgpu, src/web/) backend features; backend-neutral types (Format, BufferUsage,
+                      # VertexBufferLayout) in src/types.rs; swapchain, shaders, headless recording,
                       # offscreen targets (offscreen.rs), windowed frame loop (window_target.rs)
   moonfield-renderer/ # Lunaris — scene rendering & algorithms (splat/rt/gi), RenderAlgorithm phase abstraction,
-                      # 3DGS training (splat::train)
+                      # 3DGS training (splat::train); mirrors moonfield-render's mutually-exclusive
+                      # `native` (default) / `web` backend features and re-exports the RHI as `rhi`
   moonfield-script/   # Scripting runtime with v8 and QuickJS backends, ES modules, hot reload (src/script/), input polling API (src/input.rs)
   moonfield-window/   # Abstract windowing types (Window resource, RawHandleWrapper, InputState/InputEvent, WindowEvents/WindowControl), no backend deps
   moonfield-winit/    # Windowing backend (winit), bridges winit Window → moonfield-window resources
@@ -45,9 +48,21 @@ Window lifecycle events (`close_requested`/`resized`/`focus_*`) travel on a sepa
 
 The runtime supports two scripting backends selected via Cargo features: `v8-backend` (default) and `quickjs-backend`.
 
+The rendering crates support two backends selected via Cargo features: `native` (default, Vulkan/ash) and `web` (wgpu). They are **mutually exclusive** — `native` XOR `web`, enforced by `compile_error!` if both or neither are enabled. The web backend targets `wasm32-unknown-unknown`; check it with:
+
+| Command | Description |
+|---|---|
+| `cargo check -p moonfield-render --target wasm32-unknown-unknown --no-default-features --features web` | Check the RHI web backend. |
+| `cargo check -p moonfield-renderer --target wasm32-unknown-unknown --no-default-features --features "web,splat,rt,gi"` | Check scene rendering + all algorithms on web. |
+| `cargo clippy -p moonfield-render --target wasm32-unknown-unknown --no-default-features --features web -- -D warnings` | Lint the RHI web backend. |
+
+Shader authoring: runtime Slang→SPIR-V compilation is native-only (`native/shader.rs`). Both backends accept SPIR-V bytecode via `ShaderModule::from_spirv` — on web it is translated through naga's SPIR-V frontend (wgpu `spirv` feature), so one offline Slang compile (`slangc -target spirv`) serves both backends; embed the bytes with `include_bytes!` (no filesystem on wasm). `ShaderModule::from_wgsl` remains available for hand-written WGSL.
+
+Under the `web` backend the following remain native-only: `HeadlessContext`/`record_frame` (headless recording), `WindowRenderer`/`Swapchain` (windowed frame loop), `RenderPlugin`, the `moonfield-editor` crate (no web feature by design), and the Slang compiler itself.
+
 External native dependencies:
 
-- **Slang** — `shader-slang-sys` (via `moonfield-render`) links the Slang compiler dynamically. Set `SLANG_DIR` (a prebuilt [Slang release](https://github.com/shader-slang/slang/releases) with `include/`, `lib/`, `bin/`) or install a recent Vulkan SDK (`VULKAN_SDK` is used as a fallback). The Slang shared library must also be on the runtime library path (`PATH` on Windows, `LD_LIBRARY_PATH` on Linux, `DYLD_LIBRARY_PATH` on macOS) when running binaries/tests.
+- **Slang** — `shader-slang-sys` (via `moonfield-render`, optional and native-only) links the Slang compiler dynamically. Set `SLANG_DIR` (a prebuilt [Slang release](https://github.com/shader-slang/slang/releases) with `include/`, `lib/`, `bin/`) or install a recent Vulkan SDK (`VULKAN_SDK` is used as a fallback). The Slang shared library must also be on the runtime library path (`PATH` on Windows, `LD_LIBRARY_PATH` on Linux, `DYLD_LIBRARY_PATH` on macOS) when running binaries/tests. The web backend builds need neither Slang nor libclang.
 - **libclang** — required by `bindgen` (used by `shader-slang-sys` and `v8`).
 - The `v8` crate downloads a prebuilt static library automatically on `x86_64-pc-windows-msvc`, `x86_64-unknown-linux-gnu`, and `aarch64-apple-darwin`.
 
@@ -58,6 +73,7 @@ GitHub Actions (`.github/workflows/ci.yml`) runs on pushes to `master` and on PR
 - `rustfmt` — `cargo fmt --all -- --check`.
 - `clippy` — `cargo clippy --workspace --all-targets -- -D warnings` for both scripting backends, on all three platforms.
 - `test` — `cargo test --workspace` (v8 backend) and `cargo test -p moonfield -p moonfield-script --no-default-features --features quickjs-backend` (QuickJS backend) on all three platforms.
+- `web-check` — `cargo check`/`cargo clippy` of the web backend for `wasm32-unknown-unknown` (ubuntu-latest only; the wasm32 check is platform-independent). Runs without the setup-slang action, since shader-slang is optional and native-only.
 
 The `.github/actions/setup-slang` composite action downloads a pinned Slang release and exports `SLANG_DIR` plus the runtime library path. On Linux, CI installs `mesa-vulkan-drivers` (lavapipe) so GPU-dependent tests (`headless_triangle`, `record_frame` extent) run for real; on Windows/macOS they skip gracefully when no Vulkan driver is present.
 
