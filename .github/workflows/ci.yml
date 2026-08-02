@@ -60,7 +60,7 @@ jobs:
         run: cargo clippy --workspace --all-targets --locked -- -D warnings
 
       - name: Clippy (quickjs backend)
-        run: cargo clippy -p moonfield -p moonfield-script --all-targets --no-default-features --features quickjs-backend --locked -- -D warnings
+        run: cargo clippy -p moonfield -p moonfield-script --all-targets --no-default-features --features "native,quickjs-backend" --locked -- -D warnings
 
   test:
     name: test ${{ matrix.backend }} (${{ matrix.os }})
@@ -99,7 +99,7 @@ jobs:
 
       - name: Run tests (quickjs backend)
         if: matrix.backend == 'quickjs'
-        run: cargo test -p moonfield -p moonfield-script --no-default-features --features quickjs-backend --locked
+        run: cargo test -p moonfield -p moonfield-script --no-default-features --features "native,quickjs-backend" --locked
 
   web-check:
     name: web-check (wasm32)
