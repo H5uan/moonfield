@@ -101,9 +101,33 @@ jobs:
         if: matrix.backend == 'quickjs'
         run: cargo test -p moonfield -p moonfield-script --no-default-features --features quickjs-backend --locked
 
+  web-check:
+    name: web-check (wasm32)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy
+          targets: wasm32-unknown-unknown
+
+      - uses: Swatinem/rust-cache@v2
+
+      # No setup-slang here: shader-slang is optional and native-only,
+      # so the web backend builds without Slang or libclang.
+      - name: Check moonfield-render (web)
+        run: cargo check -p moonfield-render --target wasm32-unknown-unknown --no-default-features --features web --locked
+
+      - name: Check moonfield-renderer (web)
+        run: cargo check -p moonfield-renderer --target wasm32-unknown-unknown --no-default-features --features "web,splat,rt,gi" --locked
+
+      - name: Clippy moonfield-render (web)
+        run: cargo clippy -p moonfield-render --target wasm32-unknown-unknown --no-default-features --features web --locked -- -D warnings
+
   ci-result:
     name: CI result
-    needs: [fmt, clippy, test]
+    needs: [fmt, clippy, test, web-check]
     if: always()
     runs-on: ubuntu-latest
     steps:
