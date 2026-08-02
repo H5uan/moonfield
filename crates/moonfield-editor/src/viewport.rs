@@ -7,8 +7,8 @@ use egui_ash_renderer::vulkan::{
     create_vulkan_descriptor_set_layout,
 };
 use moonfield_render::{
-    Buffer, CommandBuffer, Compiler, Device, Error, GraphicsPipeline, OffscreenTarget, Result,
-    ShaderModule,
+    Buffer, BufferUsage, CommandBuffer, Compiler, Device, Error, Format, GraphicsPipeline,
+    OffscreenTarget, Result, ShaderModule, VertexAttribute, VertexBufferLayout, VertexFormat,
 };
 
 /// Initial offscreen target size; the viewport panel reports its real size
@@ -34,8 +34,6 @@ pub struct Viewport {
     descriptor_pool: vk::DescriptorPool,
     descriptor_set_layout: vk::DescriptorSetLayout,
     pipeline: GraphicsPipeline,
-    vertex_shader: ShaderModule,
-    fragment_shader: ShaderModule,
     vertex_buffer: Buffer,
     target: OffscreenTarget,
     texture_id: Option<egui::TextureId>,
@@ -45,7 +43,6 @@ pub struct Viewport {
 impl Viewport {
     /// Create the viewport scene with its initial offscreen target.
     pub fn new(
-        instance: &moonfield_render::Instance,
         device: &Device,
         allocator: std::sync::Arc<std::sync::Mutex<gpu_allocator::vulkan::Allocator>>,
     ) -> Result<Self> {
@@ -62,7 +59,7 @@ impl Viewport {
             allocator,
             INITIAL_WIDTH,
             INITIAL_HEIGHT,
-            vk::Format::B8G8R8A8_UNORM,
+            Format::B8G8R8A8Unorm,
         )?;
         let pipeline = create_pipeline(device, &target, &vertex_shader, &fragment_shader)?;
 
@@ -81,10 +78,9 @@ impl Viewport {
             },
         ];
         let vertex_buffer = Buffer::new(
-            instance,
             device,
-            std::mem::size_of_val(&vertices) as vk::DeviceSize,
-            vk::BufferUsageFlags::VERTEX_BUFFER,
+            std::mem::size_of_val(&vertices) as u64,
+            BufferUsage::VERTEX,
         )?;
         vertex_buffer.upload(&vertices)?;
 
@@ -96,8 +92,6 @@ impl Viewport {
             descriptor_pool,
             descriptor_set_layout,
             pipeline,
-            vertex_shader,
-            fragment_shader,
             vertex_buffer,
             target,
             texture_id: None,
@@ -125,18 +119,13 @@ impl Viewport {
     }
 
     /// Resize the offscreen target to match the viewport panel, recreating
-    /// the pipeline (its viewport is static) and the texture descriptor set.
+    /// the texture descriptor set. The pipeline is untouched: its viewport
+    /// and scissor are dynamic and follow the render area.
     pub fn resize(&mut self, device: &Device, width: u32, height: u32) -> Result<()> {
         if (width, height) == self.target.extent() {
             return Ok(());
         }
         self.target.resize(device, width, height)?;
-        self.pipeline = create_pipeline(
-            device,
-            &self.target,
-            &self.vertex_shader,
-            &self.fragment_shader,
-        )?;
 
         // The descriptor set references the old image view; recreate it.
         // The target waited for device idle during resize, so the old set is
@@ -202,32 +191,28 @@ fn create_pipeline(
     vertex_shader: &ShaderModule,
     fragment_shader: &ShaderModule,
 ) -> Result<GraphicsPipeline> {
-    let binding = vk::VertexInputBindingDescription::default()
-        .binding(0)
-        .stride(std::mem::size_of::<Vertex>() as u32)
-        .input_rate(vk::VertexInputRate::VERTEX);
+    let vertex_layout = VertexBufferLayout {
+        stride: std::mem::size_of::<Vertex>() as u32,
+        attributes: vec![
+            VertexAttribute {
+                location: 0,
+                format: VertexFormat::Float32x3,
+                offset: 0,
+            },
+            VertexAttribute {
+                location: 1,
+                format: VertexFormat::Float32x3,
+                offset: std::mem::size_of::<[f32; 3]>() as u32,
+            },
+        ],
+    };
 
-    let position_attribute = vk::VertexInputAttributeDescription::default()
-        .binding(0)
-        .location(0)
-        .format(vk::Format::R32G32B32_SFLOAT)
-        .offset(0);
-
-    let color_attribute = vk::VertexInputAttributeDescription::default()
-        .binding(0)
-        .location(1)
-        .format(vk::Format::R32G32B32_SFLOAT)
-        .offset(std::mem::size_of::<[f32; 3]>() as u32);
-
-    let (width, height) = target.extent();
     GraphicsPipeline::new(
         device,
         target.render_pass(),
         vertex_shader,
         fragment_shader,
-        &[binding],
-        &[position_attribute, color_attribute],
-        vk::Extent2D { width, height },
+        &vertex_layout,
     )
 }
 

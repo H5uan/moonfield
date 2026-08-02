@@ -1,7 +1,8 @@
 //! Vulkan render pass abstraction.
 
-use crate::device::Device;
 use crate::error::{Error, Result};
+use crate::native::device::Device;
+use crate::types::Format;
 use ash::vk;
 
 /// A Vulkan render pass with a single color attachment.
@@ -15,20 +16,24 @@ impl RenderPass {
     ///
     /// The attachment's final layout is `PRESENT_SRC_KHR`, suitable for
     /// rendering directly into a swapchain image.
-    pub fn new(device: &Device, color_format: vk::Format) -> Result<Self> {
+    pub fn new(device: &Device, color_format: Format) -> Result<Self> {
         Self::new_with_final_layout(device, color_format, vk::ImageLayout::PRESENT_SRC_KHR)
     }
 
     /// Create a simple render pass with an explicit final layout for the
     /// color attachment (e.g. `SHADER_READ_ONLY_OPTIMAL` for offscreen
     /// targets that are sampled afterwards).
+    ///
+    /// `final_layout` is a raw Vulkan layout for now: this type is part of
+    /// the native backend, and a neutral layout enum lands with the web
+    /// backend.
     pub fn new_with_final_layout(
         device: &Device,
-        color_format: vk::Format,
+        color_format: Format,
         final_layout: vk::ImageLayout,
     ) -> Result<Self> {
         let color_attachment = vk::AttachmentDescription::default()
-            .format(color_format)
+            .format(color_format.to_vk())
             .samples(vk::SampleCountFlags::TYPE_1)
             .load_op(vk::AttachmentLoadOp::CLEAR)
             .store_op(vk::AttachmentStoreOp::STORE)

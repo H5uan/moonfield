@@ -1,9 +1,10 @@
 //! Vulkan graphics pipeline abstraction.
 
-use crate::device::Device;
 use crate::error::{Error, Result};
-use crate::render_pass::RenderPass;
-use crate::shader_module::ShaderModule;
+use crate::native::device::Device;
+use crate::native::render_pass::RenderPass;
+use crate::native::shader_module::ShaderModule;
+use crate::types::VertexBufferLayout;
 use ash::vk;
 
 /// A Vulkan graphics pipeline and its layout.
@@ -16,16 +17,17 @@ pub struct GraphicsPipeline {
 impl GraphicsPipeline {
     /// Create a basic graphics pipeline.
     ///
-    /// The pipeline uses the provided vertex/fragment shaders, a single
-    /// subpass render pass, and static viewport/scissor covering `extent`.
+    /// The pipeline uses the provided vertex/fragment shaders and a single
+    /// subpass of `render_pass`. Viewport and scissor are dynamic: they are
+    /// set from the render area when a render pass is begun (see
+    /// [`CommandBuffer::begin_render_pass`](crate::CommandBuffer::begin_render_pass)),
+    /// so the pipeline is independent of the target extent.
     pub fn new(
         device: &Device,
         render_pass: &RenderPass,
         vertex_shader: &ShaderModule,
         fragment_shader: &ShaderModule,
-        vertex_input_bindings: &[vk::VertexInputBindingDescription],
-        vertex_input_attributes: &[vk::VertexInputAttributeDescription],
-        extent: vk::Extent2D,
+        vertex_layout: &VertexBufferLayout,
     ) -> Result<Self> {
         let vertex_entry = std::ffi::CString::new("main").unwrap();
         let fragment_entry = std::ffi::CString::new("main").unwrap();
@@ -41,31 +43,38 @@ impl GraphicsPipeline {
                 .name(&fragment_entry),
         ];
 
+        let binding = vk::VertexInputBindingDescription::default()
+            .binding(0)
+            .stride(vertex_layout.stride)
+            .input_rate(vk::VertexInputRate::VERTEX);
+        let attributes: Vec<vk::VertexInputAttributeDescription> = vertex_layout
+            .attributes
+            .iter()
+            .map(|attribute| {
+                vk::VertexInputAttributeDescription::default()
+                    .binding(0)
+                    .location(attribute.location)
+                    .format(attribute.format.to_vk())
+                    .offset(attribute.offset)
+            })
+            .collect();
+
         let vertex_input_info = vk::PipelineVertexInputStateCreateInfo::default()
-            .vertex_binding_descriptions(vertex_input_bindings)
-            .vertex_attribute_descriptions(vertex_input_attributes);
+            .vertex_binding_descriptions(std::slice::from_ref(&binding))
+            .vertex_attribute_descriptions(&attributes);
 
         let input_assembly = vk::PipelineInputAssemblyStateCreateInfo::default()
             .topology(vk::PrimitiveTopology::TRIANGLE_LIST)
             .primitive_restart_enable(false);
 
-        let viewport = vk::Viewport::default()
-            .x(0.0)
-            .y(0.0)
-            .width(extent.width as f32)
-            .height(extent.height as f32)
-            .min_depth(0.0)
-            .max_depth(1.0);
-
-        let scissor = vk::Rect2D::default()
-            .offset(vk::Offset2D { x: 0, y: 0 })
-            .extent(extent);
-
-        let viewports = [viewport];
-        let scissors = [scissor];
+        // Viewport and scissor are dynamic; only their counts are fixed here.
         let viewport_state = vk::PipelineViewportStateCreateInfo::default()
-            .viewports(&viewports)
-            .scissors(&scissors);
+            .viewport_count(1)
+            .scissor_count(1);
+
+        let dynamic_states = [vk::DynamicState::VIEWPORT, vk::DynamicState::SCISSOR];
+        let dynamic_state =
+            vk::PipelineDynamicStateCreateInfo::default().dynamic_states(&dynamic_states);
 
         let rasterizer = vk::PipelineRasterizationStateCreateInfo::default()
             .depth_clamp_enable(false)
@@ -105,6 +114,7 @@ impl GraphicsPipeline {
             .rasterization_state(&rasterizer)
             .multisample_state(&multisampling)
             .color_blend_state(&color_blending)
+            .dynamic_state(&dynamic_state)
             .layout(layout)
             .render_pass(render_pass.raw())
             .subpass(0);

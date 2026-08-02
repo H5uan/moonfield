@@ -3,13 +3,29 @@ name = "moonfield-render"
 version.workspace = true
 edition.workspace = true
 
+[features]
+default = ["native"]
+native = [
+    "dep:ash",
+    "dep:ash-window",
+    "dep:gpu-allocator",
+    "dep:shader-slang",
+    "dep:moonfield-app",
+    "dep:moonfield-base",
+    "dep:moonfield-ecs",
+    "dep:moonfield-log",
+    "dep:raw-window-handle",
+]
+web = ["dep:wgpu"]
+
 [dependencies]
-moonfield-app = { workspace = true }
-moonfield-base = { workspace = true }
-moonfield-ecs = { workspace = true }
-moonfield-log = { workspace = true }
-ash = "0.38.0"
-ash-window = "0.13.0"
-gpu-allocator = "0.28.0"
-raw-window-handle = "0.6.2"
-shader-slang = "0.1"
+moonfield-app = { workspace = true, optional = true }
+moonfield-base = { workspace = true, optional = true }
+moonfield-ecs = { workspace = true, optional = true }
+moonfield-log = { workspace = true, optional = true }
+ash = { version = "0.38.0", optional = true }
+ash-window = { version = "0.13.0", optional = true }
+gpu-allocator = { version = "0.28.0", optional = true }
+raw-window-handle = { version = "0.6.2", optional = true }
+shader-slang = { version = "0.1", optional = true }
+wgpu = { version = "30", features = ["spirv"], optional = true }

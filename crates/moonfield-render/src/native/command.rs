@@ -1,7 +1,7 @@
 //! Vulkan command pool and command buffer abstractions.
 
-use crate::device::Device;
 use crate::error::{Error, Result};
+use crate::native::device::Device;
 use ash::vk;
 
 /// A Vulkan command pool.
@@ -105,14 +105,29 @@ impl CommandBuffer {
     }
 
     /// Begin a render pass.
+    ///
+    /// Also sets the viewport and scissor to the pass's render area —
+    /// pipelines are created with dynamic viewport/scissor state.
     pub fn begin_render_pass(
         &self,
         render_pass_begin_info: &vk::RenderPassBeginInfo,
         contents: vk::SubpassContents,
     ) {
+        let render_area = render_pass_begin_info.render_area;
+        let viewport = vk::Viewport::default()
+            .x(render_area.offset.x as f32)
+            .y(render_area.offset.y as f32)
+            .width(render_area.extent.width as f32)
+            .height(render_area.extent.height as f32)
+            .min_depth(0.0)
+            .max_depth(1.0);
         unsafe {
             self.device
                 .cmd_begin_render_pass(self.buffer, render_pass_begin_info, contents);
+            self.device
+                .cmd_set_viewport(self.buffer, 0, std::slice::from_ref(&viewport));
+            self.device
+                .cmd_set_scissor(self.buffer, 0, std::slice::from_ref(&render_area));
         }
     }
 

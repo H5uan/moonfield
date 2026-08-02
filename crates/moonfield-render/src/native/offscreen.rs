@@ -6,10 +6,11 @@
 //! `SHADER_READ_ONLY_OPTIMAL`, so the image is ready for sampling at the end
 //! of every render pass without explicit transitions.
 
-use crate::device::Device;
 use crate::error::{Error, Result};
-use crate::framebuffer::Framebuffer;
-use crate::render_pass::RenderPass;
+use crate::native::device::Device;
+use crate::native::framebuffer::Framebuffer;
+use crate::native::render_pass::RenderPass;
+use crate::types::Format;
 use crate::{CommandBuffer, CommandPool};
 use ash::vk;
 use gpu_allocator::vulkan::{Allocation, AllocationCreateDesc, AllocationScheme, Allocator};
@@ -30,7 +31,7 @@ pub struct OffscreenTarget {
     allocation: Option<Allocation>,
     allocator: Arc<Mutex<Allocator>>,
     device: ash::Device,
-    format: vk::Format,
+    format: Format,
     extent: vk::Extent2D,
 }
 
@@ -43,7 +44,7 @@ impl OffscreenTarget {
         allocator: Arc<Mutex<Allocator>>,
         width: u32,
         height: u32,
-        format: vk::Format,
+        format: Format,
     ) -> Result<Self> {
         if width == 0 || height == 0 {
             return Err(Error::Validation(format!(
@@ -52,9 +53,10 @@ impl OffscreenTarget {
             )));
         }
 
+        let format_vk = format.to_vk();
         let extent = vk::Extent2D { width, height };
-        let (image, allocation) = create_color_image(device, &allocator, extent, format)?;
-        let image_view = create_image_view(device, image, format)?;
+        let (image, allocation) = create_color_image(device, &allocator, extent, format_vk)?;
+        let image_view = create_image_view(device, image, format_vk)?;
         let sampler = create_sampler(device)?;
         let render_pass = RenderPass::new_with_final_layout(
             device,
@@ -101,8 +103,9 @@ impl OffscreenTarget {
         self.destroy_image_resources();
 
         let extent = vk::Extent2D { width, height };
-        let (image, allocation) = create_color_image(device, &self.allocator, extent, self.format)?;
-        self.image_view = create_image_view(device, image, self.format)?;
+        let format_vk = self.format.to_vk();
+        let (image, allocation) = create_color_image(device, &self.allocator, extent, format_vk)?;
+        self.image_view = create_image_view(device, image, format_vk)?;
         self.image = image;
         self.allocation = Some(allocation);
         self.extent = extent;

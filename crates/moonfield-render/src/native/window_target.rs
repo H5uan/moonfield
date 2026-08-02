@@ -8,12 +8,13 @@
 //! buffer between [`WindowRenderer::begin_frame`] and
 //! [`WindowRenderer::end_frame`].
 
-use crate::device::Device;
 use crate::error::{Error, Result};
-use crate::framebuffer::Framebuffer;
-use crate::instance::Instance;
-use crate::render_pass::RenderPass;
-use crate::swapchain::{Surface, Swapchain};
+use crate::native::device::Device;
+use crate::native::framebuffer::Framebuffer;
+use crate::native::instance::Instance;
+use crate::native::render_pass::RenderPass;
+use crate::native::swapchain::{Surface, Swapchain};
+use crate::types::Format;
 use crate::{CommandBuffer, CommandPool, Fence, Semaphore};
 use ash::vk;
 use raw_window_handle::{HasDisplayHandle, HasWindowHandle};
@@ -69,7 +70,9 @@ impl WindowRenderer {
         let surface = Surface::from_window(instance.entry(), &instance, window)?;
         let device = Device::new(&instance, Some(surface.raw()))?;
         let swapchain = Swapchain::new(&instance, &device, &surface, [width, height])?;
-        let render_pass = RenderPass::new(&device, swapchain.format().format)?;
+        let render_pass_format =
+            Format::from_vk(swapchain.format().format).ok_or(Error::Unsupported)?;
+        let render_pass = RenderPass::new(&device, render_pass_format)?;
         let framebuffers = create_framebuffers(&device, &render_pass, &swapchain)?;
 
         let command_pool = CommandPool::new(&device, device.queue_family_indices().graphics)?;

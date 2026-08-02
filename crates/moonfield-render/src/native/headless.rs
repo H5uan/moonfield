@@ -6,8 +6,8 @@
 
 use crate::error::{Error, Result};
 use crate::{
-    Buffer, CommandBuffer, CommandPool, Compiler, Device, GraphicsPipeline, Instance, RenderPass,
-    ShaderModule,
+    Buffer, BufferUsage, CommandBuffer, CommandPool, Compiler, Device, Format, GraphicsPipeline,
+    Instance, RenderPass, ShaderModule, VertexAttribute, VertexBufferLayout, VertexFormat,
 };
 use ash::vk;
 
@@ -43,7 +43,7 @@ struct Vertex {
 
 impl HeadlessContext {
     /// Create a headless context and record one frame into a command buffer,
-    /// with a static viewport/scissor of `width`×`height`.
+    /// sized for a `width`×`height` target.
     ///
     /// The command buffer is owned by the returned context and is ready to be
     /// submitted to the graphics queue.
@@ -70,33 +70,30 @@ impl HeadlessContext {
         let vertex_shader = ShaderModule::from_spirv(&device, &vertex_spirv)?;
         let fragment_shader = ShaderModule::from_spirv(&device, &fragment_spirv)?;
 
-        let render_pass = RenderPass::new(&device, vk::Format::B8G8R8A8_UNORM)?;
+        let render_pass = RenderPass::new(&device, Format::B8G8R8A8Unorm)?;
 
-        let binding = vk::VertexInputBindingDescription::default()
-            .binding(0)
-            .stride(std::mem::size_of::<Vertex>() as u32)
-            .input_rate(vk::VertexInputRate::VERTEX);
-
-        let position_attribute = vk::VertexInputAttributeDescription::default()
-            .binding(0)
-            .location(0)
-            .format(vk::Format::R32G32B32_SFLOAT)
-            .offset(0);
-
-        let color_attribute = vk::VertexInputAttributeDescription::default()
-            .binding(0)
-            .location(1)
-            .format(vk::Format::R32G32B32_SFLOAT)
-            .offset(std::mem::size_of::<[f32; 3]>() as u32);
+        let vertex_layout = VertexBufferLayout {
+            stride: std::mem::size_of::<Vertex>() as u32,
+            attributes: vec![
+                VertexAttribute {
+                    location: 0,
+                    format: VertexFormat::Float32x3,
+                    offset: 0,
+                },
+                VertexAttribute {
+                    location: 1,
+                    format: VertexFormat::Float32x3,
+                    offset: std::mem::size_of::<[f32; 3]>() as u32,
+                },
+            ],
+        };
 
         let pipeline = GraphicsPipeline::new(
             &device,
             &render_pass,
             &vertex_shader,
             &fragment_shader,
-            &[binding],
-            &[position_attribute, color_attribute],
-            extent,
+            &vertex_layout,
         )?;
 
         let vertices = [
@@ -115,10 +112,9 @@ impl HeadlessContext {
         ];
 
         let vertex_buffer = Buffer::new(
-            &instance,
             &device,
-            std::mem::size_of_val(&vertices) as vk::DeviceSize,
-            vk::BufferUsageFlags::VERTEX_BUFFER,
+            std::mem::size_of_val(&vertices) as u64,
+            BufferUsage::VERTEX,
         )?;
         vertex_buffer.upload(&vertices)?;
 
@@ -197,8 +193,8 @@ PsOutput main(PsInput input)
 mod tests {
     use super::*;
 
-    /// The requested resolution is used for the recorded frame's
-    /// viewport/scissor extent. Needs a Vulkan device, like the
+    /// The requested resolution is reported back as the recorded frame's
+    /// extent. Needs a Vulkan device, like the
     /// `headless_triangle` integration test; skipped when no driver
     /// is available (GPU-less CI runners).
     #[test]

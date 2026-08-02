@@ -1,8 +1,8 @@
 //! Vulkan surface and swapchain abstraction.
 
-use crate::device::Device;
 use crate::error::{Error, Result};
-use crate::instance::Instance;
+use crate::native::device::Device;
+use crate::native::instance::Instance;
 use ash::vk;
 use raw_window_handle::{DisplayHandle, HasDisplayHandle, HasWindowHandle, WindowHandle};
 

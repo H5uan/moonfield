@@ -6,7 +6,8 @@
 
 use ash::vk;
 use moonfield_render::{
-    Buffer, CommandPool, Compiler, Device, GraphicsPipeline, Instance, RenderPass, ShaderModule,
+    Buffer, BufferUsage, CommandPool, Compiler, Device, Format, GraphicsPipeline, Instance,
+    RenderPass, ShaderModule, VertexAttribute, VertexBufferLayout, VertexFormat,
 };
 
 #[repr(C)]
@@ -72,28 +73,22 @@ PsOutput main(PsInput input)
     let vertex_shader = ShaderModule::from_spirv(&device, &vertex_spirv)?;
     let fragment_shader = ShaderModule::from_spirv(&device, &fragment_spirv)?;
 
-    let render_pass = RenderPass::new(&device, vk::Format::B8G8R8A8_UNORM)?;
+    let render_pass = RenderPass::new(&device, Format::B8G8R8A8Unorm)?;
 
-    let binding = vk::VertexInputBindingDescription::default()
-        .binding(0)
-        .stride(std::mem::size_of::<Vertex>() as u32)
-        .input_rate(vk::VertexInputRate::VERTEX);
-
-    let position_attribute = vk::VertexInputAttributeDescription::default()
-        .binding(0)
-        .location(0)
-        .format(vk::Format::R32G32B32_SFLOAT)
-        .offset(0);
-
-    let color_attribute = vk::VertexInputAttributeDescription::default()
-        .binding(0)
-        .location(1)
-        .format(vk::Format::R32G32B32_SFLOAT)
-        .offset(std::mem::size_of::<[f32; 3]>() as u32);
-
-    let extent = vk::Extent2D {
-        width: 800,
-        height: 600,
+    let vertex_layout = VertexBufferLayout {
+        stride: std::mem::size_of::<Vertex>() as u32,
+        attributes: vec![
+            VertexAttribute {
+                location: 0,
+                format: VertexFormat::Float32x3,
+                offset: 0,
+            },
+            VertexAttribute {
+                location: 1,
+                format: VertexFormat::Float32x3,
+                offset: std::mem::size_of::<[f32; 3]>() as u32,
+            },
+        ],
     };
 
     let pipeline = GraphicsPipeline::new(
@@ -101,9 +96,7 @@ PsOutput main(PsInput input)
         &render_pass,
         &vertex_shader,
         &fragment_shader,
-        &[binding],
-        &[position_attribute, color_attribute],
-        extent,
+        &vertex_layout,
     )?;
 
     let vertices = [
@@ -122,10 +115,9 @@ PsOutput main(PsInput input)
     ];
 
     let vertex_buffer = Buffer::new(
-        &instance,
         &device,
-        std::mem::size_of_val(&vertices) as vk::DeviceSize,
-        vk::BufferUsageFlags::VERTEX_BUFFER,
+        std::mem::size_of_val(&vertices) as u64,
+        BufferUsage::VERTEX,
     )?;
     vertex_buffer.upload(&vertices)?;
 

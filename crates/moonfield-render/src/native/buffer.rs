@@ -1,8 +1,8 @@
 //! Vulkan buffer abstraction with host-visible memory allocation.
 
-use crate::device::Device;
 use crate::error::{Error, Result};
-use crate::instance::Instance;
+use crate::native::device::Device;
+use crate::types::BufferUsage;
 use ash::vk;
 
 /// A Vulkan buffer backed by device memory.
@@ -15,15 +15,10 @@ pub struct Buffer {
 
 impl Buffer {
     /// Create a buffer of the given size and usage, allocating host-visible memory.
-    pub fn new(
-        instance: &Instance,
-        device: &Device,
-        size: vk::DeviceSize,
-        usage: vk::BufferUsageFlags,
-    ) -> Result<Self> {
+    pub fn new(device: &Device, size: u64, usage: BufferUsage) -> Result<Self> {
         let buffer_info = vk::BufferCreateInfo::default()
             .size(size)
-            .usage(usage)
+            .usage(usage.to_vk())
             .sharing_mode(vk::SharingMode::EXCLUSIVE);
 
         let buffer = unsafe {
@@ -36,8 +31,7 @@ impl Buffer {
         let mem_requirements = unsafe { device.raw().get_buffer_memory_requirements(buffer) };
 
         let memory_type_index = find_memory_type(
-            instance,
-            device.physical_device(),
+            device.memory_properties(),
             mem_requirements.memory_type_bits,
             vk::MemoryPropertyFlags::HOST_VISIBLE | vk::MemoryPropertyFlags::HOST_COHERENT,
         )?;
@@ -121,17 +115,10 @@ impl Drop for Buffer {
 }
 
 fn find_memory_type(
-    instance: &Instance,
-    physical_device: vk::PhysicalDevice,
+    mem_properties: &vk::PhysicalDeviceMemoryProperties,
     type_filter: u32,
     properties: vk::MemoryPropertyFlags,
 ) -> Result<u32> {
-    let mem_properties = unsafe {
-        instance
-            .raw()
-            .get_physical_device_memory_properties(physical_device)
-    };
-
     for i in 0..mem_properties.memory_type_count {
         let type_bits = type_filter & (1 << i);
         let supported = mem_properties.memory_types[i as usize]

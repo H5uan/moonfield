@@ -132,12 +132,8 @@ impl EditorState {
         )
         .map_err(|e| format!("failed to create egui renderer: {e}"))?;
 
-        let mut viewport = Viewport::new(
-            window_renderer.instance(),
-            window_renderer.device(),
-            allocator.clone(),
-        )
-        .map_err(|e| e.to_string())?;
+        let mut viewport = Viewport::new(window_renderer.device(), allocator.clone())
+            .map_err(|e| e.to_string())?;
         viewport.register_texture(&mut egui_renderer);
 
         let upload_pool = moonfield_render::CommandPool::new(

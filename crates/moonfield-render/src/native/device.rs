@@ -1,7 +1,7 @@
 //! Vulkan logical device abstraction.
 
 use crate::error::{Error, Result};
-use crate::instance::Instance;
+use crate::native::instance::Instance;
 use ash::vk;
 use std::ffi::{c_char, CStr};
 
@@ -64,6 +64,7 @@ impl QueueFamilyIndices {
 /// Vulkan logical device and its primary queues.
 pub struct Device {
     physical_device: vk::PhysicalDevice,
+    memory_properties: vk::PhysicalDeviceMemoryProperties,
     device: ash::Device,
     graphics_queue: vk::Queue,
     present_queue: vk::Queue,
@@ -106,6 +107,12 @@ impl Device {
     ) -> Result<Self> {
         let queue_family_indices = QueueFamilyIndices::find(instance, physical_device, surface)?;
 
+        let memory_properties = unsafe {
+            instance
+                .raw()
+                .get_physical_device_memory_properties(physical_device)
+        };
+
         let unique_indices = queue_family_indices.unique_indices();
         let queue_priorities = [1.0f32];
         let queue_create_infos: Vec<vk::DeviceQueueCreateInfo> = unique_indices
@@ -139,6 +146,7 @@ impl Device {
 
         Ok(Self {
             physical_device,
+            memory_properties,
             device,
             graphics_queue,
             present_queue,
@@ -154,6 +162,11 @@ impl Device {
     /// Access the underlying physical device handle.
     pub fn physical_device(&self) -> vk::PhysicalDevice {
         self.physical_device
+    }
+
+    /// Memory properties of the physical device, cached at creation.
+    pub(crate) fn memory_properties(&self) -> &vk::PhysicalDeviceMemoryProperties {
+        &self.memory_properties
     }
 
     /// Access the graphics queue.

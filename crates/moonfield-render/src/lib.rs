@@ -1,57 +1,24 @@
 //! Lunar Mare rendering infrastructure.
 //!
-//! Vulkan RHI implemented on top of `ash`. This crate exposes a safe Rust API
-//! surface over instance, physical device, logical device, and swapchain
-//! creation.
+//! Rendering RHI with pluggable backends: `native` (Vulkan via `ash`) and
+//! `web` (wgpu). Exactly one backend feature must be enabled.
 
-pub mod buffer;
-pub mod command;
-pub mod device;
+#[cfg(all(feature = "native", feature = "web"))]
+compile_error!("features `native` and `web` are mutually exclusive");
+#[cfg(not(any(feature = "native", feature = "web")))]
+compile_error!("either feature `native` or `web` must be enabled");
+
 pub mod error;
-pub mod framebuffer;
-pub mod headless;
-pub mod instance;
-pub mod offscreen;
-pub mod pipeline;
-pub mod plugin;
-pub mod render_pass;
-pub mod shader;
-pub mod shader_module;
-pub mod swapchain;
-pub mod sync;
-pub mod window_target;
+pub mod types;
 
-pub use buffer::Buffer;
-pub use command::{CommandBuffer, CommandPool};
-pub use device::{Device, QueueFamilyIndices};
+#[cfg(feature = "native")]
+pub mod native;
+#[cfg(feature = "web")]
+pub mod web;
+
 pub use error::{Error, Result};
-pub use framebuffer::Framebuffer;
-pub use headless::HeadlessContext;
-pub use instance::Instance;
-pub use offscreen::OffscreenTarget;
-pub use pipeline::GraphicsPipeline;
-pub use plugin::RenderPlugin;
-pub use render_pass::RenderPass;
-pub use shader::Compiler;
-pub use shader_module::ShaderModule;
-pub use swapchain::{Surface, Swapchain};
-pub use sync::{Fence, Semaphore};
-pub use window_target::WindowRenderer;
-
-use std::ffi::CStr;
-
-/// Common required instance extensions for surface rendering on the current platform.
-pub fn required_instance_extensions() -> Vec<&'static CStr> {
-    let mut extensions = vec![ash::khr::surface::NAME];
-
-    #[cfg(target_os = "windows")]
-    extensions.push(ash::khr::win32_surface::NAME);
-
-    #[cfg(target_os = "linux")]
-    extensions.push(ash::khr::xlib_surface::NAME);
-
-    #[cfg(target_os = "macos")]
-    extensions.push(ash::ext::metal_surface::NAME);
-
-    extensions
-}
+#[cfg(feature = "native")]
+pub use native::*;
+pub use types::{BufferUsage, Format, VertexAttribute, VertexBufferLayout, VertexFormat};
+#[cfg(feature = "web")]
+pub use web::*;
