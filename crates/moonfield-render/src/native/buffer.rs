@@ -121,6 +121,50 @@ impl Buffer {
         }
     }
 
+    /// Read `bytes` from a host-visible buffer back to the CPU.
+    ///
+    /// Maps the allocation, copies `bytes` out, and unmaps. Only valid for
+    /// host-visible locations (`CpuToGpu` / `GpuToCpu`); `GpuOnly` buffers
+    /// must be copied to a host-visible staging buffer first (the caller owns
+    /// that copy). Used by compute-readback paths and Phase 2 physics GPU/CPU
+    /// cross-validation.
+    pub fn read(&self, device: &Device, bytes: vk::DeviceSize) -> Result<Vec<u8>> {
+        if bytes > self.size {
+            return Err(Error::Validation(
+                "read size exceeds buffer size".to_string(),
+            ));
+        }
+        match self.location {
+            MemoryLocation::GpuOnly => Err(Error::Validation(
+                "cannot read directly from a GpuOnly buffer; copy to a host-visible buffer first"
+                    .to_string(),
+            )),
+            _ => self.read_host_visible(device, bytes),
+        }
+    }
+
+    fn read_host_visible(&self, device: &Device, bytes: vk::DeviceSize) -> Result<Vec<u8>> {
+        let allocation = self.allocation.as_ref().ok_or(Error::InvalidHandle)?;
+        unsafe {
+            let ptr = device
+                .raw()
+                .map_memory(
+                    allocation.memory(),
+                    allocation.offset(),
+                    bytes,
+                    vk::MemoryMapFlags::empty(),
+                )
+                .map_err(|e| Error::Backend(format!("failed to map buffer memory for read: {:?}", e)))?;
+
+            let mut out = Vec::<u8>::with_capacity(bytes as usize);
+            std::ptr::copy_nonoverlapping(ptr as *const u8, out.as_mut_ptr(), bytes as usize);
+            out.set_len(bytes as usize);
+
+            device.raw().unmap_memory(allocation.memory());
+            Ok(out)
+        }
+    }
+
     fn upload_host_visible<T: Copy>(&self, bytes: vk::DeviceSize, data: &[T]) -> Result<()> {
         let allocation = self.allocation.as_ref().ok_or(Error::InvalidHandle)?;
         unsafe {
