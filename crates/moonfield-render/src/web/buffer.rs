@@ -1,5 +1,6 @@
 //! wgpu buffer abstraction.
 
+use crate::bind::BufferRef;
 use crate::error::{Error, Result};
 use crate::types::BufferUsage;
 use crate::web::device::Device;
@@ -58,6 +59,12 @@ impl Buffer {
 
     /// Access the raw `wgpu::Buffer` handle.
     pub fn raw(&self) -> &wgpu::Buffer {
+        &self.buffer
+    }
+}
+
+impl BufferRef for Buffer {
+    fn raw_wgpu(&self) -> &wgpu::Buffer {
         &self.buffer
     }
 }

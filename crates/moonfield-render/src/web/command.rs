@@ -39,7 +39,7 @@ impl CommandEncoder {
         let inner = self.inner.begin_render_pass(&wgpu::RenderPassDescriptor {
             label: Some("moonfield-render-pass"),
             color_attachments: &[Some(wgpu::RenderPassColorAttachment {
-                view: target.texture_view(),
+                view: target.texture_view().raw_wgpu(),
                 depth_slice: None,
                 resolve_target: None,
                 ops: wgpu::Operations {

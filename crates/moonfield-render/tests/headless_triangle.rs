@@ -139,9 +139,12 @@ PsOutput main(PsInput input)
         &device,
         std::mem::size_of_val(&vertices) as u64,
         BufferUsage::VERTEX,
+        gpu_allocator::MemoryLocation::CpuToGpu,
     )
     .expect("vertex buffer");
-    vertex_buffer.upload(&vertices).expect("vertex upload");
+    vertex_buffer
+        .upload(&device, &vertices)
+        .expect("vertex upload");
 
     let queue_family_index = device.queue_family_indices().graphics;
     let command_pool = CommandPool::new(&device, queue_family_index).expect("command pool");
