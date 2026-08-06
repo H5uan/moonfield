@@ -63,6 +63,8 @@ impl BufferUsage {
     pub const COPY_DST: Self = Self(1 << 4);
     /// The buffer can be the source of a copy.
     pub const COPY_SRC: Self = Self(1 << 5);
+    /// The buffer can back an indirect draw/dispatch command.
+    pub const INDIRECT: Self = Self(1 << 6);
 
     /// An empty set of usage flags.
     pub const fn empty() -> Self {
@@ -111,6 +113,9 @@ impl BufferUsage {
         if self.contains(Self::COPY_SRC) {
             flags |= ash::vk::BufferUsageFlags::TRANSFER_SRC;
         }
+        if self.contains(Self::INDIRECT) {
+            flags |= ash::vk::BufferUsageFlags::INDIRECT_BUFFER;
+        }
         flags
     }
 }
@@ -137,6 +142,9 @@ impl BufferUsage {
         }
         if self.contains(Self::COPY_SRC) {
             flags |= wgpu::BufferUsages::COPY_SRC;
+        }
+        if self.contains(Self::INDIRECT) {
+            flags |= wgpu::BufferUsages::INDIRECT;
         }
         flags
     }

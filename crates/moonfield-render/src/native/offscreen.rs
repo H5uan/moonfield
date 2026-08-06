@@ -13,9 +13,8 @@ use crate::native::render_pass::RenderPass;
 use crate::types::Format;
 use crate::{CommandBuffer, CommandPool};
 use ash::vk;
-use gpu_allocator::vulkan::{Allocation, AllocationCreateDesc, AllocationScheme, Allocator};
+use gpu_allocator::vulkan::{Allocation, AllocationCreateDesc, AllocationScheme};
 use gpu_allocator::MemoryLocation;
-use std::sync::{Arc, Mutex};
 
 /// A renderable and sampleable offscreen color target.
 ///
@@ -29,8 +28,8 @@ pub struct OffscreenTarget {
     sampler: vk::Sampler,
     image: vk::Image,
     allocation: Option<Allocation>,
-    allocator: Arc<Mutex<Allocator>>,
     device: ash::Device,
+    allocator: std::sync::Arc<std::sync::Mutex<gpu_allocator::vulkan::Allocator>>,
     format: Format,
     extent: vk::Extent2D,
 }
@@ -39,13 +38,7 @@ impl OffscreenTarget {
     /// Create an offscreen target of `width`×`height` with the given color
     /// format. The image is transitioned to `SHADER_READ_ONLY_OPTIMAL` so it
     /// can be sampled before the first frame is rendered.
-    pub fn new(
-        device: &Device,
-        allocator: Arc<Mutex<Allocator>>,
-        width: u32,
-        height: u32,
-        format: Format,
-    ) -> Result<Self> {
+    pub fn new(device: &Device, width: u32, height: u32, format: Format) -> Result<Self> {
         if width == 0 || height == 0 {
             return Err(Error::Validation(format!(
                 "offscreen target dimensions must be non-zero, got {}x{}",
@@ -55,6 +48,7 @@ impl OffscreenTarget {
 
         let format_vk = format.to_vk();
         let extent = vk::Extent2D { width, height };
+        let allocator = device.allocator().clone();
         let (image, allocation) = create_color_image(device, &allocator, extent, format_vk)?;
         let image_view = create_image_view(device, image, format_vk)?;
         let sampler = create_sampler(device)?;
@@ -74,8 +68,8 @@ impl OffscreenTarget {
             sampler,
             image,
             allocation: Some(allocation),
-            allocator,
             device: device.raw().clone(),
+            allocator,
             format,
             extent,
         })
@@ -123,6 +117,22 @@ impl OffscreenTarget {
     /// Access the sampler paired with the color image.
     pub fn sampler(&self) -> vk::Sampler {
         self.sampler
+    }
+
+    /// Borrow the color image view as a backend-neutral [`TextureView`].
+    ///
+    /// The returned view borrows this target's underlying `vk::ImageView`; it
+    /// does not own it and must not outlive the target.
+    pub fn texture_view(&self) -> crate::bind::TextureView {
+        crate::bind::TextureView::borrow_raw(self.image_view, self.device.clone())
+    }
+
+    /// Borrow the sampler as a backend-neutral [`Sampler`].
+    ///
+    /// The returned sampler borrows this target's underlying `vk::Sampler`;
+    /// it does not own it and must not outlive the target.
+    pub fn sampler_view(&self) -> crate::bind::Sampler {
+        crate::bind::Sampler::borrow_raw(self.sampler, self.device.clone())
     }
 
     /// Access the render pass targeting this offscreen image.
@@ -174,7 +184,7 @@ impl Drop for OffscreenTarget {
 
 fn create_color_image(
     device: &Device,
-    allocator: &Arc<Mutex<Allocator>>,
+    allocator: &std::sync::Arc<std::sync::Mutex<gpu_allocator::vulkan::Allocator>>,
     extent: vk::Extent2D,
     format: vk::Format,
 ) -> Result<(vk::Image, Allocation)> {

@@ -8,7 +8,9 @@ compile_error!("features `native` and `web` are mutually exclusive");
 #[cfg(not(any(feature = "native", feature = "web")))]
 compile_error!("either feature `native` or `web` must be enabled");
 
+pub mod bind;
 pub mod error;
+pub mod indirect;
 pub mod types;
 
 #[cfg(feature = "native")]
@@ -16,7 +18,12 @@ pub mod native;
 #[cfg(feature = "web")]
 pub mod web;
 
+pub use bind::{
+    BindGroup, BindGroupEntry, BindGroupLayout, BindGroupLayoutEntry, BindingResource, BindingType,
+    BufferRef, Sampler, ShaderStage, TextureView,
+};
 pub use error::{Error, Result};
+pub use indirect::{DispatchIndirectArgs, DrawIndexedIndirectArgs, DrawIndirectArgs, IndexFormat};
 #[cfg(feature = "native")]
 pub use native::*;
 pub use types::{BufferUsage, Format, VertexAttribute, VertexBufferLayout, VertexFormat};

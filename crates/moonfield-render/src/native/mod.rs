@@ -35,21 +35,3 @@ pub use shader_module::ShaderModule;
 pub use swapchain::{Surface, Swapchain};
 pub use sync::{Fence, Semaphore};
 pub use window_target::WindowRenderer;
-
-use std::ffi::CStr;
-
-/// Common required instance extensions for surface rendering on the current platform.
-pub fn required_instance_extensions() -> Vec<&'static CStr> {
-    let mut extensions = vec![ash::khr::surface::NAME];
-
-    #[cfg(target_os = "windows")]
-    extensions.push(ash::khr::win32_surface::NAME);
-
-    #[cfg(target_os = "linux")]
-    extensions.push(ash::khr::xlib_surface::NAME);
-
-    #[cfg(target_os = "macos")]
-    extensions.push(ash::ext::metal_surface::NAME);
-
-    extensions
-}

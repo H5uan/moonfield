@@ -27,8 +27,7 @@ use ui::{Tab, TabContext};
 use viewport::Viewport;
 
 use ash::vk;
-use gpu_allocator::vulkan::{Allocator, AllocatorCreateDesc};
-use std::sync::{Arc, Mutex};
+use std::sync::Arc;
 use winit::event::WindowEvent;
 
 /// Plugin that registers the editor render system.
@@ -66,18 +65,12 @@ struct EditorStateSlot(Option<EditorState>);
 ///
 /// Fields are ordered for Vulkan-safe destruction (first declared drops
 /// first): the egui renderer and viewport destroy resources through the
-/// device, so they precede the window renderer that owns it. The allocator
-/// also precedes it — gpu-allocator frees its cached memory blocks via
-/// `vkFreeMemory` on drop, which requires a live device. `Drop` waits for
+/// device, so they precede the window renderer that owns it. `Drop` waits for
 /// the device to go idle before any field is destroyed.
 struct EditorState {
     egui_renderer: egui_ash_renderer::Renderer,
     viewport: Viewport,
     upload_pool: moonfield_render::CommandPool,
-    /// Held to keep the allocator alive; the egui renderer and viewport
-    /// share clones of it.
-    #[allow(dead_code)]
-    allocator: Arc<Mutex<Allocator>>,
     window_renderer: WindowRenderer,
     egui_state: egui_winit::State,
     dock_state: egui_dock::DockState<Tab>,
@@ -105,20 +98,11 @@ impl EditorState {
         let window_renderer = WindowRenderer::new(window.as_ref(), size.width, size.height)
             .map_err(|e| e.to_string())?;
 
-        let allocator = Arc::new(Mutex::new(
-            Allocator::new(&AllocatorCreateDesc {
-                instance: window_renderer.instance().raw().clone(),
-                device: window_renderer.device().raw().clone(),
-                physical_device: window_renderer.device().physical_device(),
-                debug_settings: Default::default(),
-                buffer_device_address: false,
-                allocation_sizes: Default::default(),
-            })
-            .map_err(|e| format!("failed to create GPU allocator: {e}"))?,
-        ));
+        // The egui renderer needs the same GPU allocator the device owns.
+        let allocator = window_renderer.device().allocator().clone();
 
         let mut egui_renderer = egui_ash_renderer::Renderer::with_gpu_allocator(
-            allocator.clone(),
+            allocator,
             window_renderer.device().raw().clone(),
             window_renderer.render_pass().raw(),
             egui_ash_renderer::Options {
@@ -132,8 +116,7 @@ impl EditorState {
         )
         .map_err(|e| format!("failed to create egui renderer: {e}"))?;
 
-        let mut viewport = Viewport::new(window_renderer.device(), allocator.clone())
-            .map_err(|e| e.to_string())?;
+        let mut viewport = Viewport::new(window_renderer.device()).map_err(|e| e.to_string())?;
         viewport.register_texture(&mut egui_renderer);
 
         let upload_pool = moonfield_render::CommandPool::new(
@@ -156,7 +139,6 @@ impl EditorState {
             viewport,
             upload_pool,
             window_renderer,
-            allocator,
             egui_state,
             dock_state: ui::initial_dock_state(),
             window,

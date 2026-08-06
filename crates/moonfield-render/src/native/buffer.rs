@@ -1,21 +1,44 @@
-//! Vulkan buffer abstraction with host-visible memory allocation.
+//! Vulkan buffer abstraction backed by `gpu_allocator`.
+//!
+//! Buffers allocate through the device's shared [`Allocator`] and may live in
+//! host-visible (`CpuToGpu`) or device-local (`GpuOnly`) memory. `GpuOnly`
+//! buffers are uploaded via a one-shot staging copy so the RHI can hold
+//! GPU-resident resources (indirect args, workgraph backing, vertex data).
 
+use crate::bind::BufferRef;
 use crate::error::{Error, Result};
+use crate::native::command::{CommandBuffer, CommandPool};
 use crate::native::device::Device;
 use crate::types::BufferUsage;
 use ash::vk;
+use gpu_allocator::vulkan::{Allocation, AllocationCreateDesc, AllocationScheme, Allocator};
+use gpu_allocator::MemoryLocation;
+use std::sync::{Arc, Mutex};
 
-/// A Vulkan buffer backed by device memory.
+/// A Vulkan buffer backed by `gpu_allocator`-managed memory.
 pub struct Buffer {
     buffer: vk::Buffer,
-    memory: vk::DeviceMemory,
+    allocation: Option<Allocation>,
     size: vk::DeviceSize,
+    location: MemoryLocation,
     device: ash::Device,
+    allocator: Arc<Mutex<Allocator>>,
 }
 
 impl Buffer {
-    /// Create a buffer of the given size and usage, allocating host-visible memory.
-    pub fn new(device: &Device, size: u64, usage: BufferUsage) -> Result<Self> {
+    /// Create a buffer of the given size, usage, and memory location.
+    ///
+    /// `COPY_DST` is OR-ed into the usage so uploads always go through a
+    /// staging copy on `GpuOnly` buffers (and are a no-op for host-visible
+    /// ones), matching the web backend's convention.
+    pub fn new(
+        device: &Device,
+        size: u64,
+        usage: BufferUsage,
+        location: MemoryLocation,
+    ) -> Result<Self> {
+        let usage = usage | BufferUsage::COPY_DST;
+
         let buffer_info = vk::BufferCreateInfo::default()
             .size(size)
             .usage(usage.to_vk())
@@ -28,37 +51,35 @@ impl Buffer {
                 .map_err(|e| Error::Backend(format!("failed to create buffer: {:?}", e)))?
         };
 
-        let mem_requirements = unsafe { device.raw().get_buffer_memory_requirements(buffer) };
+        let requirements = unsafe { device.raw().get_buffer_memory_requirements(buffer) };
 
-        let memory_type_index = find_memory_type(
-            device.memory_properties(),
-            mem_requirements.memory_type_bits,
-            vk::MemoryPropertyFlags::HOST_VISIBLE | vk::MemoryPropertyFlags::HOST_COHERENT,
-        )?;
-
-        let alloc_info = vk::MemoryAllocateInfo::default()
-            .allocation_size(mem_requirements.size)
-            .memory_type_index(memory_type_index);
-
-        let memory = unsafe {
-            device
-                .raw()
-                .allocate_memory(&alloc_info, None)
-                .map_err(|e| Error::Backend(format!("failed to allocate buffer memory: {:?}", e)))?
-        };
+        let allocator = device.allocator().clone();
+        let allocation = allocator
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .allocate(&AllocationCreateDesc {
+                name: "buffer",
+                requirements,
+                location,
+                linear: true,
+                allocation_scheme: AllocationScheme::GpuAllocatorManaged,
+            })
+            .map_err(|e| Error::Backend(format!("failed to allocate buffer memory: {e}")))?;
 
         unsafe {
             device
                 .raw()
-                .bind_buffer_memory(buffer, memory, 0)
+                .bind_buffer_memory(buffer, allocation.memory(), allocation.offset())
                 .map_err(|e| Error::Backend(format!("failed to bind buffer memory: {:?}", e)))?;
         }
 
         Ok(Self {
             buffer,
-            memory,
+            allocation: Some(allocation),
             size,
+            location,
             device: device.raw().clone(),
+            allocator,
         })
     }
 
@@ -72,13 +93,18 @@ impl Buffer {
         self.size
     }
 
+    /// The memory location this buffer was allocated in.
+    pub fn location(&self) -> MemoryLocation {
+        self.location
+    }
+
     /// Upload data to the buffer.
     ///
-    /// # Safety
-    ///
-    /// The buffer must be allocated with host-visible memory and the data size
-    /// must not exceed the buffer size.
-    pub fn upload<T: Copy>(&self, data: &[T]) -> Result<()> {
+    /// For host-visible buffers this maps and copies directly. For
+    /// device-local buffers it stages through a temporary host-visible buffer
+    /// and a one-shot copy command, blocking on the graphics queue until the
+    /// copy completes.
+    pub fn upload<T: Copy>(&self, device: &Device, data: &[T]) -> Result<()> {
         let bytes = std::mem::size_of_val(data) as vk::DeviceSize;
         if bytes > self.size {
             return Err(Error::Validation(
@@ -86,10 +112,26 @@ impl Buffer {
             ));
         }
 
+        match self.location {
+            MemoryLocation::GpuOnly => self.upload_via_staging(device, bytes, data),
+            // CpuToGpu / Unknown / GpuToCpu all back host-visible memory; map
+            // and copy directly. GpuToCpu is unusual for uploads but still
+            // host-visible, so the same path applies.
+            _ => self.upload_host_visible(bytes, data),
+        }
+    }
+
+    fn upload_host_visible<T: Copy>(&self, bytes: vk::DeviceSize, data: &[T]) -> Result<()> {
+        let allocation = self.allocation.as_ref().ok_or(Error::InvalidHandle)?;
         unsafe {
             let ptr = self
                 .device
-                .map_memory(self.memory, 0, bytes, vk::MemoryMapFlags::empty())
+                .map_memory(
+                    allocation.memory(),
+                    allocation.offset(),
+                    bytes,
+                    vk::MemoryMapFlags::empty(),
+                )
                 .map_err(|e| Error::Backend(format!("failed to map buffer memory: {:?}", e)))?;
 
             std::ptr::copy_nonoverlapping(
@@ -98,36 +140,83 @@ impl Buffer {
                 bytes as usize,
             );
 
-            self.device.unmap_memory(self.memory);
+            self.device.unmap_memory(allocation.memory());
         }
-
         Ok(())
+    }
+
+    fn upload_via_staging<T: Copy>(
+        &self,
+        device: &Device,
+        bytes: vk::DeviceSize,
+        data: &[T],
+    ) -> Result<()> {
+        // Temporary host-visible staging buffer.
+        let staging = Self::new(
+            device,
+            bytes,
+            BufferUsage::COPY_SRC,
+            MemoryLocation::CpuToGpu,
+        )?;
+        staging.upload_host_visible(bytes, data)?;
+
+        // One-shot copy command, matching the pattern in
+        // `offscreen::transition_to_shader_read`.
+        let command_pool = CommandPool::new(device, device.queue_family_indices().graphics)?;
+        let mut command_buffer: CommandBuffer = command_pool.allocate_command_buffer()?;
+
+        command_buffer.begin(vk::CommandBufferUsageFlags::ONE_TIME_SUBMIT)?;
+        let copy = vk::BufferCopy::default()
+            .src_offset(0)
+            .dst_offset(0)
+            .size(bytes);
+        unsafe {
+            self.device
+                .cmd_copy_buffer(command_buffer.raw(), staging.buffer, self.buffer, &[copy]);
+        }
+        command_buffer.end()?;
+
+        let command_buffers = [command_buffer.raw()];
+        let submit_info = vk::SubmitInfo::default().command_buffers(&command_buffers);
+        // SAFETY: the command buffer is fully recorded and the queue is valid.
+        unsafe {
+            device
+                .raw()
+                .queue_submit(
+                    device.graphics_queue(),
+                    std::slice::from_ref(&submit_info),
+                    vk::Fence::null(),
+                )
+                .map_err(|e| Error::Backend(format!("failed to submit buffer copy: {:?}", e)))?;
+            device
+                .raw()
+                .queue_wait_idle(device.graphics_queue())
+                .map_err(|e| Error::Backend(format!("failed to wait for buffer copy: {:?}", e)))?;
+        }
+        Ok(())
+    }
+}
+
+impl BufferRef for Buffer {
+    fn raw_vk(&self) -> vk::Buffer {
+        self.buffer
     }
 }
 
 impl Drop for Buffer {
     fn drop(&mut self) {
         unsafe {
-            self.device.free_memory(self.memory, None);
             self.device.destroy_buffer(self.buffer, None);
         }
-    }
-}
-
-fn find_memory_type(
-    mem_properties: &vk::PhysicalDeviceMemoryProperties,
-    type_filter: u32,
-    properties: vk::MemoryPropertyFlags,
-) -> Result<u32> {
-    for i in 0..mem_properties.memory_type_count {
-        let type_bits = type_filter & (1 << i);
-        let supported = mem_properties.memory_types[i as usize]
-            .property_flags
-            .contains(properties);
-        if type_bits != 0 && supported {
-            return Ok(i);
+        if let Some(allocation) = self.allocation.take() {
+            if let Err(e) = self
+                .allocator
+                .lock()
+                .unwrap_or_else(|e| e.into_inner())
+                .free(allocation)
+            {
+                moonfield_log::error!("failed to free buffer allocation: {e}");
+            }
         }
     }
-
-    Err(Error::Unsupported)
 }

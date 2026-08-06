@@ -62,14 +62,14 @@ impl OffscreenTarget {
         Ok(())
     }
 
-    /// Access the texture view (for sampling in a UI renderer, web only).
-    pub fn texture_view(&self) -> &wgpu::TextureView {
-        &self.view
+    /// Borrow the texture view as a backend-neutral [`TextureView`].
+    pub fn texture_view(&self) -> crate::bind::TextureView {
+        crate::bind::web_impl::TextureView::from_raw(self.view.clone())
     }
 
-    /// Access the sampler paired with the color texture (web only).
-    pub fn sampler(&self) -> &wgpu::Sampler {
-        &self.sampler
+    /// Borrow the sampler as a backend-neutral [`Sampler`].
+    pub fn sampler_view(&self) -> crate::bind::Sampler {
+        crate::bind::web_impl::Sampler::from_raw(self.sampler.clone())
     }
 
     /// The `(width, height)` of the target.

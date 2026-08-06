@@ -1,13 +1,14 @@
-//! Headless smoke test for Lunar Mare Vulkan RHI.
+//! Headless smoke test for the indirect-draw path of the Lunar Mare Vulkan RHI.
 //!
-//! Verifies that instance, device, command pool, command buffer, shader modules,
-//! render pass, graphics pipeline, and buffer can be created and that a command
-//! buffer can be recorded with a pipeline bind and draw command.
+//! Verifies that a `DrawIndirectArgs` buffer can be created with
+//! `BufferUsage::INDIRECT` and that a command buffer can record a
+//! `draw_indirect` call without panicking. Mirrors `headless_triangle.rs`'s
+//! GPU-less skip behavior.
 
 use ash::vk;
 use moonfield_render::{
-    Buffer, BufferUsage, CommandPool, Compiler, Device, Format, GraphicsPipeline, Instance,
-    RenderPass, ShaderModule, VertexAttribute, VertexBufferLayout, VertexFormat,
+    Buffer, BufferUsage, CommandPool, Compiler, Device, DrawIndirectArgs, Format, GraphicsPipeline,
+    Instance, RenderPass, ShaderModule, VertexAttribute, VertexBufferLayout, VertexFormat,
 };
 
 #[repr(C)]
@@ -18,7 +19,7 @@ struct Vertex {
 }
 
 #[test]
-fn headless_pipeline_and_command_buffer() {
+fn indirect_draw_records_without_panic() {
     // CI runners without a GPU/Vulkan driver (Windows, macOS) skip this test;
     // Linux CI runs it against lavapipe (Mesa software Vulkan).
     let instance = match Instance::new_headless() {
@@ -111,7 +112,7 @@ PsOutput main(PsInput input)
         ],
     };
 
-    let _pipeline = GraphicsPipeline::new(
+    let pipeline = GraphicsPipeline::new(
         &device,
         &render_pass,
         &vertex_shader,
@@ -146,6 +147,31 @@ PsOutput main(PsInput input)
         .upload(&device, &vertices)
         .expect("vertex upload");
 
+    // A single indirect draw record: 3 vertices, 1 instance.
+    let args = [DrawIndirectArgs {
+        vertex_count: 3,
+        instance_count: 1,
+        first_vertex: 0,
+        first_instance: 0,
+    }];
+    let args_buffer = Buffer::new(
+        &device,
+        std::mem::size_of_val(&args) as u64,
+        BufferUsage::INDIRECT,
+        gpu_allocator::MemoryLocation::CpuToGpu,
+    )
+    .expect("indirect args buffer");
+    args_buffer
+        .upload(&device, &args)
+        .expect("indirect args upload");
+
+    // Sanity: the neutral layout's size matches the Vulkan command struct, so
+    // the stride we pass to `draw_indirect` is correct for both backends.
+    assert_eq!(
+        std::mem::size_of::<DrawIndirectArgs>(),
+        std::mem::size_of::<vk::DrawIndirectCommand>(),
+    );
+
     let queue_family_index = device.queue_family_indices().graphics;
     let command_pool = CommandPool::new(&device, queue_family_index).expect("command pool");
     let mut command_buffer = command_pool
@@ -155,8 +181,63 @@ PsOutput main(PsInput input)
     command_buffer
         .begin(vk::CommandBufferUsageFlags::ONE_TIME_SUBMIT)
         .expect("begin command buffer");
-    command_buffer.bind_graphics_pipeline(_pipeline.raw());
+    command_buffer.bind_graphics_pipeline(pipeline.raw());
     command_buffer.bind_vertex_buffers(0, &[vertex_buffer.raw()], &[0]);
-    command_buffer.draw(3, 1, 0, 0);
+    command_buffer.draw_indirect(
+        args_buffer.raw(),
+        0,
+        1,
+        std::mem::size_of::<DrawIndirectArgs>() as u32,
+    );
     command_buffer.end().expect("end command buffer");
+
+    // Exercise the indexed-indirect API surface too: build a trivial index
+    // buffer + indexed args record and record (but do not submit) the command,
+    // confirming the binding/indexed-indirect path compiles and records.
+    let indices: [u32; 3] = [0, 1, 2];
+    let index_buffer = Buffer::new(
+        &device,
+        std::mem::size_of_val(&indices) as u64,
+        BufferUsage::INDEX,
+        gpu_allocator::MemoryLocation::CpuToGpu,
+    )
+    .expect("index buffer");
+    index_buffer
+        .upload(&device, &indices)
+        .expect("index upload");
+
+    let indexed_args = [moonfield_render::DrawIndexedIndirectArgs {
+        index_count: 3,
+        instance_count: 1,
+        first_index: 0,
+        base_vertex: 0,
+        first_instance: 0,
+    }];
+    let indexed_args_buffer = Buffer::new(
+        &device,
+        std::mem::size_of_val(&indexed_args) as u64,
+        BufferUsage::INDIRECT,
+        gpu_allocator::MemoryLocation::CpuToGpu,
+    )
+    .expect("indexed indirect args buffer");
+    indexed_args_buffer
+        .upload(&device, &indexed_args)
+        .expect("indexed indirect args upload");
+
+    let mut second = command_pool
+        .allocate_command_buffer()
+        .expect("second command buffer");
+    second
+        .begin(vk::CommandBufferUsageFlags::ONE_TIME_SUBMIT)
+        .expect("begin second command buffer");
+    second.bind_graphics_pipeline(pipeline.raw());
+    second.bind_vertex_buffers(0, &[vertex_buffer.raw()], &[0]);
+    second.bind_index_buffer(index_buffer.raw(), 0, vk::IndexType::UINT32);
+    second.draw_indexed_indirect(
+        indexed_args_buffer.raw(),
+        0,
+        1,
+        std::mem::size_of::<moonfield_render::DrawIndexedIndirectArgs>() as u32,
+    );
+    second.end().expect("end second command buffer");
 }

@@ -2,12 +2,12 @@
 //! it as an egui texture.
 
 use ash::vk;
-use egui_ash_renderer::vulkan::{
-    create_vulkan_descriptor_pool, create_vulkan_descriptor_set,
-    create_vulkan_descriptor_set_layout,
+use moonfield_render::bind::{
+    BindGroup, BindGroupEntry, BindGroupLayout, BindGroupLayoutEntry, BindingResource, BindingType,
+    ShaderStage,
 };
 use moonfield_render::{
-    Buffer, BufferUsage, CommandBuffer, Compiler, Device, Error, Format, GraphicsPipeline,
+    Buffer, BufferUsage, CommandBuffer, Compiler, Device, Format, GraphicsPipeline,
     OffscreenTarget, Result, ShaderModule, VertexAttribute, VertexBufferLayout, VertexFormat,
 };
 
@@ -26,26 +26,25 @@ struct Vertex {
 /// The viewport scene: an offscreen render target, a demo triangle pipeline,
 /// and the egui texture bindings pointing at the target.
 ///
-/// Fields are ordered for Vulkan-safe destruction: descriptor bindings and
-/// pipeline first, then the offscreen target (which waits for device idle),
-/// then the shared device handle.
+/// Fields are ordered for Vulkan-safe destruction: the bind group and layout
+/// first, then the pipeline, then the offscreen target (which waits for
+/// device idle). The bind group/layout own their own descriptor objects and
+/// drop themselves.
 pub struct Viewport {
-    descriptor_set: vk::DescriptorSet,
-    descriptor_pool: vk::DescriptorPool,
-    descriptor_set_layout: vk::DescriptorSetLayout,
+    bind_group: BindGroup,
+    /// Held to keep the layout alive for the lifetime of the bind group;
+    /// the bind group references it but does not own it.
+    #[allow(dead_code)]
+    bind_group_layout: BindGroupLayout,
     pipeline: GraphicsPipeline,
     vertex_buffer: Buffer,
     target: OffscreenTarget,
     texture_id: Option<egui::TextureId>,
-    device: ash::Device,
 }
 
 impl Viewport {
     /// Create the viewport scene with its initial offscreen target.
-    pub fn new(
-        device: &Device,
-        allocator: std::sync::Arc<std::sync::Mutex<gpu_allocator::vulkan::Allocator>>,
-    ) -> Result<Self> {
+    pub fn new(device: &Device) -> Result<Self> {
         let compiler = Compiler::new()?;
         let vertex_spirv =
             compiler.compile_source_to_spirv("viewport_vs", VERTEX_SHADER, "main")?;
@@ -54,13 +53,8 @@ impl Viewport {
         let vertex_shader = ShaderModule::from_spirv(device, &vertex_spirv)?;
         let fragment_shader = ShaderModule::from_spirv(device, &fragment_spirv)?;
 
-        let target = OffscreenTarget::new(
-            device,
-            allocator,
-            INITIAL_WIDTH,
-            INITIAL_HEIGHT,
-            Format::B8G8R8A8Unorm,
-        )?;
+        let target =
+            OffscreenTarget::new(device, INITIAL_WIDTH, INITIAL_HEIGHT, Format::B8G8R8A8Unorm)?;
         let pipeline = create_pipeline(device, &target, &vertex_shader, &fragment_shader)?;
 
         let vertices = [
@@ -81,21 +75,19 @@ impl Viewport {
             device,
             std::mem::size_of_val(&vertices) as u64,
             BufferUsage::VERTEX,
+            gpu_allocator::MemoryLocation::CpuToGpu,
         )?;
-        vertex_buffer.upload(&vertices)?;
+        vertex_buffer.upload(device, &vertices)?;
 
-        let (descriptor_set_layout, descriptor_pool, descriptor_set) =
-            create_descriptor_bindings(device.raw(), target.image_view(), target.sampler())?;
+        let (bind_group_layout, bind_group) = create_bind_group(device, &target)?;
 
         Ok(Self {
-            descriptor_set,
-            descriptor_pool,
-            descriptor_set_layout,
+            bind_group,
+            bind_group_layout,
             pipeline,
             vertex_buffer,
             target,
             texture_id: None,
-            device: device.raw().clone(),
         })
     }
 
@@ -105,7 +97,7 @@ impl Viewport {
         if let Some(id) = self.texture_id.take() {
             egui_renderer.remove_user_texture(id);
         }
-        self.texture_id = Some(egui_renderer.add_user_texture(self.descriptor_set));
+        self.texture_id = Some(egui_renderer.add_user_texture(self.bind_group.raw_vk()));
     }
 
     /// The egui texture id of the offscreen image, if registered.
@@ -119,7 +111,7 @@ impl Viewport {
     }
 
     /// Resize the offscreen target to match the viewport panel, recreating
-    /// the texture descriptor set. The pipeline is untouched: its viewport
+    /// the texture bind group. The pipeline is untouched: its viewport
     /// and scissor are dynamic and follow the render area.
     pub fn resize(&mut self, device: &Device, width: u32, height: u32) -> Result<()> {
         if (width, height) == self.target.extent() {
@@ -127,23 +119,11 @@ impl Viewport {
         }
         self.target.resize(device, width, height)?;
 
-        // The descriptor set references the old image view; recreate it.
-        // The target waited for device idle during resize, so the old set is
-        // no longer in use.
-        // SAFETY: the GPU is idle and the set was allocated from our pool.
-        unsafe {
-            self.device
-                .free_descriptor_sets(self.descriptor_pool, &[self.descriptor_set])
-                .map_err(|e| Error::Backend(format!("failed to free descriptor set: {:?}", e)))?;
-        }
-        self.descriptor_set = create_vulkan_descriptor_set(
-            &self.device,
-            self.descriptor_set_layout,
-            self.descriptor_pool,
-            self.target.image_view(),
-            self.target.sampler(),
-        )
-        .map_err(|e| Error::Backend(format!("failed to create descriptor set: {e}")))?;
+        // The bind group references the old image view; recreate it. The
+        // target waited for device idle during resize, so the old set is no
+        // longer in use; `BindGroup::Drop` frees it from its own pool.
+        let (_, bind_group) = create_bind_group(device, &self.target)?;
+        self.bind_group = bind_group;
         Ok(())
     }
 
@@ -169,19 +149,6 @@ impl Viewport {
         command_buffer.bind_vertex_buffers(0, &[self.vertex_buffer.raw()], &[0]);
         command_buffer.draw(3, 1, 0, 0);
         command_buffer.end_render_pass();
-    }
-}
-
-impl Drop for Viewport {
-    fn drop(&mut self) {
-        // SAFETY: the GPU is idle by the time the editor state is dropped
-        // (its Drop waits for the device), so these handles are unused.
-        unsafe {
-            self.device
-                .destroy_descriptor_pool(self.descriptor_pool, None);
-            self.device
-                .destroy_descriptor_set_layout(self.descriptor_set_layout, None);
-        }
     }
 }
 
@@ -216,22 +183,35 @@ fn create_pipeline(
     )
 }
 
-fn create_descriptor_bindings(
-    device: &ash::Device,
-    image_view: vk::ImageView,
-    sampler: vk::Sampler,
-) -> Result<(
-    vk::DescriptorSetLayout,
-    vk::DescriptorPool,
-    vk::DescriptorSet,
-)> {
-    let layout = create_vulkan_descriptor_set_layout(device)
-        .map_err(|e| Error::Backend(format!("failed to create descriptor set layout: {e}")))?;
-    let pool = create_vulkan_descriptor_pool(device, 1)
-        .map_err(|e| Error::Backend(format!("failed to create descriptor pool: {e}")))?;
-    let set = create_vulkan_descriptor_set(device, layout, pool, image_view, sampler)
-        .map_err(|e| Error::Backend(format!("failed to create descriptor set: {e}")))?;
-    Ok((layout, pool, set))
+fn create_bind_group(
+    device: &Device,
+    target: &OffscreenTarget,
+) -> Result<(BindGroupLayout, BindGroup)> {
+    // Borrow neutral views of the target's image view + sampler. The bind
+    // group only holds the descriptor set; the underlying view/sampler stay
+    // owned by the target.
+    let view = target.texture_view();
+    let sampler = target.sampler_view();
+    let layout = BindGroupLayout::new(
+        device,
+        &[BindGroupLayoutEntry {
+            binding: 0,
+            ty: BindingType::SampledTexture,
+            visibility: ShaderStage::Fragment,
+        }],
+    )?;
+    let bind_group = BindGroup::new(
+        device,
+        &layout,
+        &[BindGroupEntry {
+            binding: 0,
+            resource: BindingResource::Texture {
+                view: &view,
+                sampler: &sampler,
+            },
+        }],
+    )?;
+    Ok((layout, bind_group))
 }
 
 const VERTEX_SHADER: &str = r#"

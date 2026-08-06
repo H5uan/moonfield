@@ -3,7 +3,9 @@
 use crate::error::{Error, Result};
 use crate::native::instance::Instance;
 use ash::vk;
+use gpu_allocator::vulkan::{Allocator, AllocatorCreateDesc};
 use std::ffi::{c_char, CStr};
+use std::sync::{Arc, Mutex};
 
 const DEVICE_EXTENSIONS: &[&CStr] = &[ash::khr::swapchain::NAME];
 
@@ -64,11 +66,14 @@ impl QueueFamilyIndices {
 /// Vulkan logical device and its primary queues.
 pub struct Device {
     physical_device: vk::PhysicalDevice,
-    memory_properties: vk::PhysicalDeviceMemoryProperties,
     device: ash::Device,
     graphics_queue: vk::Queue,
     present_queue: vk::Queue,
     queue_family_indices: QueueFamilyIndices,
+    /// Shared GPU memory allocator for buffers and images. Wrapped in
+    /// `Arc<Mutex>` so resources can hold clones and free their allocations
+    /// on drop without a borrow on the device.
+    allocator: Arc<Mutex<Allocator>>,
 }
 
 impl Device {
@@ -107,12 +112,6 @@ impl Device {
     ) -> Result<Self> {
         let queue_family_indices = QueueFamilyIndices::find(instance, physical_device, surface)?;
 
-        let memory_properties = unsafe {
-            instance
-                .raw()
-                .get_physical_device_memory_properties(physical_device)
-        };
-
         let unique_indices = queue_family_indices.unique_indices();
         let queue_priorities = [1.0f32];
         let queue_create_infos: Vec<vk::DeviceQueueCreateInfo> = unique_indices
@@ -144,13 +143,23 @@ impl Device {
         let graphics_queue = unsafe { device.get_device_queue(queue_family_indices.graphics, 0) };
         let present_queue = unsafe { device.get_device_queue(queue_family_indices.present, 0) };
 
+        let allocator = Allocator::new(&AllocatorCreateDesc {
+            instance: instance.raw().clone(),
+            device: device.clone(),
+            physical_device,
+            debug_settings: Default::default(),
+            buffer_device_address: false,
+            allocation_sizes: Default::default(),
+        })
+        .map_err(|e| Error::Backend(format!("failed to create GPU allocator: {e}")))?;
+
         Ok(Self {
             physical_device,
-            memory_properties,
             device,
             graphics_queue,
             present_queue,
             queue_family_indices,
+            allocator: Arc::new(Mutex::new(allocator)),
         })
     }
 
@@ -162,11 +171,6 @@ impl Device {
     /// Access the underlying physical device handle.
     pub fn physical_device(&self) -> vk::PhysicalDevice {
         self.physical_device
-    }
-
-    /// Memory properties of the physical device, cached at creation.
-    pub(crate) fn memory_properties(&self) -> &vk::PhysicalDeviceMemoryProperties {
-        &self.memory_properties
     }
 
     /// Access the graphics queue.
@@ -182,6 +186,13 @@ impl Device {
     /// Access the selected queue family indices.
     pub fn queue_family_indices(&self) -> QueueFamilyIndices {
         self.queue_family_indices
+    }
+
+    /// Shared GPU memory allocator for buffers and images. Resources allocate
+    /// through this and free their allocations on drop. Exposed so downstream
+    /// code (e.g. `egui-ash-renderer`) can share the same allocator.
+    pub fn allocator(&self) -> &Arc<Mutex<Allocator>> {
+        &self.allocator
     }
 }
 
