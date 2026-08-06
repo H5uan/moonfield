@@ -22,14 +22,18 @@
 
 mod buffer;
 mod command;
+mod compute_pipeline;
 mod device;
 mod offscreen;
 mod pipeline;
+mod pipeline_layout;
 mod shader_module;
 
 pub use buffer::Buffer;
 pub use command::{CommandEncoder, RenderPass};
+pub use compute_pipeline::ComputePipeline;
 pub use device::Device;
 pub use offscreen::OffscreenTarget;
 pub use pipeline::GraphicsPipeline;
+pub use pipeline_layout::PipelineLayout;
 pub use shader_module::ShaderModule;
