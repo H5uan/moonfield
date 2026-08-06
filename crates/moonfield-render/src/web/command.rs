@@ -2,8 +2,14 @@
 //!
 //! This is deliberately a much smaller surface than the native
 //! `CommandBuffer`: just enough for render algorithms to draw into an
-//! [`OffscreenTarget`]. No parity with the Vulkan command API is claimed.
+//! [`OffscreenTarget`]. No full parity with the Vulkan command API is claimed,
+//! but indirect draw commands (`draw_indirect`, `draw_indexed_indirect`,
+//! `multi_draw_*`) ARE part of the parity set — they are a hard requirement
+//! for GPU-driven algorithms (e.g. 3D Gaussian splatting) and so mirror the
+//! native backend. The `*_indirect_count` variants are not exposed here
+//! because they require a non-default wgpu device feature.
 
+use crate::indirect::IndexFormat;
 use crate::web::buffer::Buffer;
 use crate::web::device::Device;
 use crate::web::offscreen::OffscreenTarget;
@@ -81,8 +87,41 @@ impl<'a> RenderPass<'a> {
         self.inner.set_vertex_buffer(slot, buffer.raw().slice(..));
     }
 
+    /// Bind an index buffer with the given element format.
+    pub fn set_index_buffer(&mut self, buffer: &'a Buffer, format: IndexFormat) {
+        self.inner
+            .set_index_buffer(buffer.raw().slice(..), format.to_wgpu());
+    }
+
     /// Draw non-indexed primitives for the given vertex range.
     pub fn draw(&mut self, vertices: Range<u32>) {
         self.inner.draw(vertices, 0..1);
+    }
+
+    /// Draw indexed primitives for the given index range.
+    pub fn draw_indexed(&mut self, indices: Range<u32>, base_vertex: i32, instances: Range<u32>) {
+        self.inner.draw_indexed(indices, base_vertex, instances);
+    }
+
+    /// Issue a single non-indexed indirect draw from `indirect` at `offset`.
+    pub fn draw_indirect(&mut self, indirect: &'a Buffer, offset: u64) {
+        self.inner.draw_indirect(indirect.raw(), offset);
+    }
+
+    /// Issue a single indexed indirect draw from `indirect` at `offset`.
+    pub fn draw_indexed_indirect(&mut self, indirect: &'a Buffer, offset: u64) {
+        self.inner.draw_indexed_indirect(indirect.raw(), offset);
+    }
+
+    /// Issue `count` non-indexed indirect draws from `indirect` at `offset`.
+    pub fn multi_draw_indirect(&mut self, indirect: &'a Buffer, offset: u64, count: u32) {
+        self.inner
+            .multi_draw_indirect(indirect.raw(), offset, count);
+    }
+
+    /// Issue `count` indexed indirect draws from `indirect` at `offset`.
+    pub fn multi_draw_indexed_indirect(&mut self, indirect: &'a Buffer, offset: u64, count: u32) {
+        self.inner
+            .multi_draw_indexed_indirect(indirect.raw(), offset, count);
     }
 }

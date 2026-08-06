@@ -159,6 +159,128 @@ impl CommandBuffer {
         }
     }
 
+    /// Bind an index buffer.
+    pub fn bind_index_buffer(
+        &self,
+        buffer: vk::Buffer,
+        offset: vk::DeviceSize,
+        index_type: vk::IndexType,
+    ) {
+        unsafe {
+            self.device
+                .cmd_bind_index_buffer(self.buffer, buffer, offset, index_type);
+        }
+    }
+
+    /// Draw indexed primitives.
+    pub fn draw_indexed(
+        &self,
+        index_count: u32,
+        instance_count: u32,
+        first_index: u32,
+        vertex_offset: i32,
+        first_instance: u32,
+    ) {
+        unsafe {
+            self.device.cmd_draw_indexed(
+                self.buffer,
+                index_count,
+                instance_count,
+                first_index,
+                vertex_offset,
+                first_instance,
+            );
+        }
+    }
+
+    /// Issue `draw_count` non-indexed draws from an indirect argument buffer.
+    ///
+    /// `stride` is the byte stride between consecutive `DrawIndirectArgs`
+    /// records and must be a multiple of 4.
+    pub fn draw_indirect(
+        &self,
+        buffer: vk::Buffer,
+        offset: vk::DeviceSize,
+        draw_count: u32,
+        stride: u32,
+    ) {
+        unsafe {
+            self.device
+                .cmd_draw_indirect(self.buffer, buffer, offset, draw_count, stride);
+        }
+    }
+
+    /// Issue `draw_count` indexed draws from an indirect argument buffer.
+    ///
+    /// `stride` is the byte stride between consecutive `DrawIndexedIndirectArgs`
+    /// records and must be a multiple of 4.
+    pub fn draw_indexed_indirect(
+        &self,
+        buffer: vk::Buffer,
+        offset: vk::DeviceSize,
+        draw_count: u32,
+        stride: u32,
+    ) {
+        unsafe {
+            self.device
+                .cmd_draw_indexed_indirect(self.buffer, buffer, offset, draw_count, stride);
+        }
+    }
+
+    /// Issue non-indexed draws where the draw count is read from
+    /// `count_buffer` at runtime (GPU-driven count).
+    ///
+    /// Requires Vulkan 1.2+ (promoted from `VK_KHR_draw_indirect_count`); the
+    /// instance requests `API_VERSION_1_3` so this is always available.
+    pub fn draw_indirect_count(
+        &self,
+        buffer: vk::Buffer,
+        offset: vk::DeviceSize,
+        count_buffer: vk::Buffer,
+        count_buffer_offset: vk::DeviceSize,
+        max_draw_count: u32,
+        stride: u32,
+    ) {
+        unsafe {
+            self.device.cmd_draw_indirect_count(
+                self.buffer,
+                buffer,
+                offset,
+                count_buffer,
+                count_buffer_offset,
+                max_draw_count,
+                stride,
+            );
+        }
+    }
+
+    /// Issue indexed draws where the draw count is read from `count_buffer`
+    /// at runtime (GPU-driven count).
+    ///
+    /// Requires Vulkan 1.2+ (promoted from `VK_KHR_draw_indirect_count`); the
+    /// instance requests `API_VERSION_1_3` so this is always available.
+    pub fn draw_indexed_indirect_count(
+        &self,
+        buffer: vk::Buffer,
+        offset: vk::DeviceSize,
+        count_buffer: vk::Buffer,
+        count_buffer_offset: vk::DeviceSize,
+        max_draw_count: u32,
+        stride: u32,
+    ) {
+        unsafe {
+            self.device.cmd_draw_indexed_indirect_count(
+                self.buffer,
+                buffer,
+                offset,
+                count_buffer,
+                count_buffer_offset,
+                max_draw_count,
+                stride,
+            );
+        }
+    }
+
     /// Draw vertices.
     pub fn draw(
         &self,
