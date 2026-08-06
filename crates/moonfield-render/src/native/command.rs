@@ -300,6 +300,93 @@ impl CommandBuffer {
         }
     }
 
+    /// Bind a compute pipeline.
+    ///
+    /// Records `vkCmdBindPipeline` with `PIPELINE_BIND_POINT_COMPUTE`. The
+    /// pipeline stays bound until another `bind_compute_pipeline` call or the
+    /// command buffer is reset.
+    pub fn bind_compute_pipeline(&self, pipeline: vk::Pipeline) {
+        unsafe {
+            self.device
+                .cmd_bind_pipeline(self.buffer, vk::PipelineBindPoint::COMPUTE, pipeline);
+        }
+    }
+
+    /// Bind descriptor sets to the **graphics** bind point.
+    ///
+    /// `first_set` is the set number `descriptor_sets[0]` binds to; subsequent
+    /// sets bind to consecutive numbers. `dynamic_offsets` supplies values
+    /// for any dynamic descriptors in the bound sets (empty for static-only
+    /// layouts). Use after [`bind_graphics_pipeline`](Self::bind_graphics_pipeline).
+    pub fn bind_descriptor_sets(
+        &self,
+        pipeline_layout: vk::PipelineLayout,
+        first_set: u32,
+        descriptor_sets: &[vk::DescriptorSet],
+        dynamic_offsets: &[u32],
+    ) {
+        unsafe {
+            self.device.cmd_bind_descriptor_sets(
+                self.buffer,
+                vk::PipelineBindPoint::GRAPHICS,
+                pipeline_layout,
+                first_set,
+                descriptor_sets,
+                dynamic_offsets,
+            );
+        }
+    }
+
+    /// Bind descriptor sets to the **compute** bind point.
+    ///
+    /// Compute counterpart of [`bind_descriptor_sets`](Self::bind_descriptor_sets);
+    /// `vkCmdBindDescriptor_sets` takes an explicit bind point, so the compute
+    /// path needs its own entry point. Use after
+    /// [`bind_compute_pipeline`](Self::bind_compute_pipeline).
+    pub fn bind_descriptor_sets_compute(
+        &self,
+        pipeline_layout: vk::PipelineLayout,
+        first_set: u32,
+        descriptor_sets: &[vk::DescriptorSet],
+        dynamic_offsets: &[u32],
+    ) {
+        unsafe {
+            self.device.cmd_bind_descriptor_sets(
+                self.buffer,
+                vk::PipelineBindPoint::COMPUTE,
+                pipeline_layout,
+                first_set,
+                descriptor_sets,
+                dynamic_offsets,
+            );
+        }
+    }
+
+    /// Dispatch compute workgroups.
+    ///
+    /// Records `vkCmdDispatch(group_count_x, group_count_y, group_count_z)`.
+    /// The currently-bound compute pipeline's local workgroup size (set in the
+    /// shader) multiplies these to yield total invocations.
+    pub fn dispatch(&self, group_count_x: u32, group_count_y: u32, group_count_z: u32) {
+        unsafe {
+            self.device
+                .cmd_dispatch(self.buffer, group_count_x, group_count_y, group_count_z);
+        }
+    }
+
+    /// Dispatch compute workgroups with GPU-driven arguments.
+    ///
+    /// Reads [`DispatchIndirectArgs`](crate::DispatchIndirectArgs) (`x`, `y`,
+    /// `z`) from `buffer` at `offset` at dispatch time — lets a prior compute
+    /// pass decide the grid size (e.g. GPU-driven broadphase emitting a
+    /// variable pair count). The buffer must have been created with
+    /// [`BufferUsage::INDIRECT`](crate::BufferUsage::INDIRECT).
+    pub fn dispatch_indirect(&self, buffer: vk::Buffer, offset: vk::DeviceSize) {
+        unsafe {
+            self.device.cmd_dispatch_indirect(self.buffer, buffer, offset);
+        }
+    }
+
     /// Insert a pipeline barrier.
     pub fn pipeline_barrier(
         &self,

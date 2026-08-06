@@ -6,12 +6,14 @@
 
 pub mod buffer;
 pub mod command;
+pub mod compute_pipeline;
 pub mod device;
 pub mod framebuffer;
 pub mod headless;
 pub mod instance;
 pub mod offscreen;
 pub mod pipeline;
+pub mod pipeline_layout;
 pub mod plugin;
 pub mod render_pass;
 pub mod shader;
@@ -22,12 +24,14 @@ pub mod window_target;
 
 pub use buffer::Buffer;
 pub use command::{CommandBuffer, CommandPool};
+pub use compute_pipeline::ComputePipeline;
 pub use device::{Device, QueueFamilyIndices};
 pub use framebuffer::Framebuffer;
 pub use headless::HeadlessContext;
 pub use instance::Instance;
 pub use offscreen::OffscreenTarget;
 pub use pipeline::GraphicsPipeline;
+pub use pipeline_layout::PipelineLayout;
 pub use plugin::RenderPlugin;
 pub use render_pass::RenderPass;
 pub use shader::Compiler;
