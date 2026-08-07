@@ -19,5 +19,6 @@ moonfield-math = { path = "crates/moonfield-math" }
 moonfield-window = { path = "crates/moonfield-window" }
 moonfield-winit = { path = "crates/moonfield-winit" }
 moonfield-editor = { path = "crates/moonfield-editor" }
-glam = "0.30.10"
+glam = { version = "0.30.10", default-features = false, features = ["bytemuck"] }
+bytemuck = { version = "1.25", default-features = false, features = ["derive"] }
 thiserror = "2.0.18"

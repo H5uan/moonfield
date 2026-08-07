@@ -190,9 +190,72 @@ PsOutput main(PsInput input)
 }
 "#;
 
+/// A Slang struct that mirrors a Rust `#[repr(C)]` GPU struct. The
+/// `float3 + float + float3 + float` layout yields a 32-byte struct in both
+/// Rust `repr(C)` and Slang storage-buffer rules (each `float3` padded to 16
+/// bytes). The reflection guard asserts the two match exactly.
+#[cfg(test)]
+const LAYOUT_SHADER: &str = r#"
+struct GpuParticle
+{
+    float3 position;
+    float  mass;
+    float3 velocity;
+    float  inv_mass;
+};
+
+[shader("compute")]
+[numthreads(1, 1, 1)]
+void main()
+{
+}
+"#;
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The Rust side of the `GpuParticle` struct. Field ordering and layout
+    /// must match the Slang mirror exactly; the reflection guard below asserts
+    /// `size`/`offset` so a drift is caught at test time.
+    #[repr(C)]
+    #[derive(Clone, Copy, bytemuck::Pod, bytemuck::Zeroable)]
+    struct GpuParticle {
+        position: [f32; 3],
+        mass: f32,
+        velocity: [f32; 3],
+        inv_mass: f32,
+    }
+
+    #[test]
+    fn test_slang_reflection_guards_rust_struct_layout() {
+        let compiler = Compiler::new().expect("compiler");
+        // Compile from source via a temp file (same path the SPIR-V path takes).
+        let temp_dir = std::env::temp_dir();
+        let temp_path = temp_dir.join("layout_guard.slang");
+        std::fs::write(&temp_path, LAYOUT_SHADER).unwrap();
+        let reflection = compiler
+            .compile_file_to_reflection(temp_path.to_str().unwrap(), "main")
+            .expect("compile to reflection");
+        let _ = std::fs::remove_file(&temp_path);
+
+        let layout = reflection
+            .struct_layout("GpuParticle")
+            .expect("GpuParticle layout");
+
+        // Rust repr(C): 12 + 4 + 12 + 4 = 32 bytes.
+        assert_eq!(std::mem::size_of::<GpuParticle>(), 32, "rust repr(C) size");
+        // Slang storage-buffer size: each float3 padded to 16 bytes -> 32.
+        assert_eq!(layout.size(), 32, "slang reflected size");
+
+        // Field offsets match between Rust and Slang.
+        assert_eq!(layout.field_offset("mass").unwrap(), 12, "mass offset");
+        assert_eq!(layout.field_offset("velocity").unwrap(), 16, "velocity offset");
+        assert_eq!(layout.field_offset("inv_mass").unwrap(), 28, "inv_mass offset");
+
+        // The guard: Rust and Slang must agree on every offset.
+        assert_eq!(std::mem::size_of::<GpuParticle>(), layout.size());
+    }
 
     /// The requested resolution is reported back as the recorded frame's
     /// extent. Needs a Vulkan device, like the

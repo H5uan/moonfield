@@ -1,7 +1,7 @@
 //! A guaranteed-normalized 3D direction, mirroring `bevy_math`'s `Dir3`.
 
-use std::fmt;
-use std::ops::{Deref, Neg};
+use core::fmt;
+use core::ops::{Deref, Neg};
 
 use crate::Vec3;
 
@@ -16,7 +16,7 @@ impl fmt::Display for DirError {
     }
 }
 
-impl std::error::Error for DirError {}
+impl core::error::Error for DirError {}
 
 /// A 3D direction that is always a unit vector.
 ///

@@ -87,6 +87,124 @@ impl Compiler {
 
         Ok(bytecode.as_slice().to_vec())
     }
+
+    /// Compile a Slang file and return a reflection object that computes struct
+    /// layouts on demand. Keeps the whole compile pipeline (session, program,
+    /// linked component) alive so every reflection pointer stays valid for the
+    /// returned wrapper's lifetime.
+    pub fn compile_file_to_reflection(&self, path: &str, entry_point: &str) -> RenderResult<Reflection> {
+        let options = shader_slang::CompilerOptions::default()
+            .optimization(shader_slang::OptimizationLevel::High)
+            .matrix_layout_row(true);
+
+        let profile = self.global_session.find_profile("glsl_450");
+        let target_desc = shader_slang::TargetDesc::default()
+            .format(shader_slang::CompileTarget::Spirv)
+            .profile(profile)
+            .options(&options);
+        let targets = [target_desc];
+
+        let session_desc = shader_slang::SessionDesc::default()
+            .targets(&targets)
+            .options(&options);
+
+        let session = self
+            .global_session
+            .create_session(&session_desc)
+            .ok_or_else(|| RenderError::Backend("failed to create Slang session".to_string()))?;
+
+        let module = session.load_module(path).map_err(map_slang_error)?;
+
+        let entry = module
+            .find_entry_point_by_name(entry_point)
+            .ok_or_else(|| {
+                RenderError::Backend(format!("entry point '{}' not found", entry_point))
+            })?;
+
+        let program = session
+            .create_composite_component_type(&[module.downcast().clone(), entry.downcast().clone()])
+            .map_err(map_slang_error)?;
+
+        let linked = program.link().map_err(map_slang_error)?;
+
+        // `layout(0)` returns a reference owned by `linked`; keep `linked` (and
+        // its dependencies) alive in the wrapper and store the raw pointer.
+        let reflection =
+            linked.layout(0).map_err(map_slang_error)? as *const shader_slang::reflection::Shader;
+
+        Ok(Reflection {
+            _session: session,
+            _linked: linked,
+            reflection,
+        })
+    }
+}
+
+/// A thin wrapper around a compiled program's reflection, exposing only the
+/// layout queries the GPU-layout guard needs.
+///
+/// Holds the session and compiled [`shader_slang::ComponentType`] alive so the
+/// owned reflection pointer stays valid for the wrapper's lifetime.
+pub struct Reflection {
+    _session: shader_slang::Session,
+    _linked: shader_slang::ComponentType,
+    reflection: *const shader_slang::reflection::Shader,
+}
+
+// The reflection object is owned by the held component type; sharing it behind
+// `&self` is safe as long as this wrapper is alive.
+unsafe impl Send for Reflection {}
+unsafe impl Sync for Reflection {}
+
+impl Reflection {
+    /// Look up a struct type by name and return its layout.
+    pub fn struct_layout(&self, name: &str) -> RenderResult<Layout<'_>> {
+        let reflection = unsafe { &*self.reflection };
+        let ty = reflection
+            .find_type_by_name(name)
+            .ok_or_else(|| RenderError::Backend(format!("type '{name}' not found in reflection")))?;
+        let layout = reflection
+            .type_layout(ty, shader_slang::LayoutRules::Default)
+            .ok_or_else(|| RenderError::Backend(format!("no layout for type '{name}'")))?;
+        Ok(Layout { layout })
+    }
+}
+
+/// A struct's GPU memory layout, queried from Slang reflection.
+pub struct Layout<'a> {
+    layout: &'a shader_slang::reflection::TypeLayout,
+}
+
+impl<'a> Layout<'a> {
+    /// The total byte size of the struct under the compiled target's layout
+    /// rules, across every parameter category the slang compiler reports.
+    pub fn size(&self) -> usize {
+        self.layout
+            .categories()
+            .map(|c| self.layout.size(c))
+            .max()
+            .unwrap_or(0)
+    }
+
+    /// The byte offset of a field by name, across the field's own categories.
+    pub fn field_offset(&self, name: &str) -> RenderResult<usize> {
+        let idx = self.layout.find_field_index_by_name(name);
+        if idx < 0 {
+            return Err(RenderError::Backend(format!(
+                "field '{name}' not found in reflected struct"
+            )));
+        }
+        let field = self
+            .layout
+            .field_by_index(idx as u32)
+            .ok_or_else(|| RenderError::Backend("field disappeared".to_string()))?;
+        Ok(field
+            .type_layout()
+            .categories()
+            .map(|c| field.offset(c))
+            .max()
+            .unwrap_or(0))
+    }
 }
 
 fn map_slang_error(err: shader_slang::Error) -> RenderError {

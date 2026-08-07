@@ -23,6 +23,7 @@ moonfield-app = { workspace = true, optional = true }
 moonfield-base = { workspace = true, optional = true }
 moonfield-ecs = { workspace = true, optional = true }
 moonfield-log = { workspace = true, optional = true }
+moonfield-math = { workspace = true }
 ash = { version = "0.38.0", optional = true }
 ash-window = { version = "0.13.0", optional = true }
 bytemuck = { version = "1.23", features = ["derive"] }

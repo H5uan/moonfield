@@ -9,6 +9,7 @@ compile_error!("features `native` and `web` are mutually exclusive");
 compile_error!("either feature `native` or `web` must be enabled");
 
 pub mod bind;
+pub mod camera;
 pub mod error;
 pub mod indirect;
 pub mod types;
@@ -17,6 +18,8 @@ pub mod types;
 pub mod native;
 #[cfg(feature = "web")]
 pub mod web;
+
+pub use camera::perspective_reverse_z;
 
 pub use bind::{
     BindGroup, BindGroupEntry, BindGroupLayout, BindGroupLayoutEntry, BindingResource, BindingType,
