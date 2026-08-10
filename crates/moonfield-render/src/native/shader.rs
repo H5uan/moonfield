@@ -4,7 +4,6 @@
 //! bytecode. Errors are mapped to the [`Error`](crate::error::Error) type.
 
 use crate::error::{Error as RenderError, Result as RenderResult};
-use shader_slang::Downcast;
 
 /// Slang compiler session wrapper.
 pub struct Compiler {
@@ -79,7 +78,7 @@ impl Compiler {
             })?;
 
         let program = session
-            .create_composite_component_type(&[module.downcast().clone(), entry.downcast().clone()])
+            .create_composite_component_type(&[module.into(), entry.into()])
             .map_err(map_slang_error)?;
 
         let linked = program.link().map_err(map_slang_error)?;
@@ -122,7 +121,7 @@ impl Compiler {
             })?;
 
         let program = session
-            .create_composite_component_type(&[module.downcast().clone(), entry.downcast().clone()])
+            .create_composite_component_type(&[module.into(), entry.into()])
             .map_err(map_slang_error)?;
 
         let linked = program.link().map_err(map_slang_error)?;
@@ -198,8 +197,10 @@ impl<'a> Layout<'a> {
             .layout
             .field_by_index(idx as u32)
             .ok_or_else(|| RenderError::Backend("field disappeared".to_string()))?;
-        Ok(field
+        let tl = field
             .type_layout()
+            .ok_or_else(|| RenderError::Backend("field has no type layout".to_string()))?;
+        Ok(tl
             .categories()
             .map(|c| field.offset(c))
             .max()
