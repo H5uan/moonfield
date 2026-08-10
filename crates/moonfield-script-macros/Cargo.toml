@@ -9,7 +9,7 @@ proc-macro = true
 [dependencies]
 proc-macro2 = "1"
 quote = "1"
-syn = { version = "2", features = ["full"] }
+syn = { version = "3", features = ["full"] }
 
 # Integration tests expand `#[script_function]`, whose generated code refers
 # to `::moonfield_script::script` types (HostValue, ScriptFunction).
