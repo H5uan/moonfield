@@ -63,7 +63,12 @@ impl<V> OrderedTypeIdMap<V> {
     }
 }
 
-struct Column {
+/// Holds a component type's data for a whole archetype.
+///
+/// `raw_data` is a contiguous untyped buffer: row `i` (at byte offset
+/// `i * T::layout().size()`) holds the `T` component of entity `i` in this
+/// archetype. `borrow_state` arbitrates shared (read) vs unique (write) access.
+struct Data {
     borrow_state: AtomicBorrow,
     raw_data: NonNull<u8>,
 }
@@ -154,27 +159,47 @@ impl Eq for ComponentMeta {}
 pub struct Archetype {
     metas: Vec<ComponentMeta>,
     type_ids: Vec<TypeId>,
-    column_of: OrderedTypeIdMap<usize>,
+    index: OrderedTypeIdMap<usize>,
     len: u32,
     entities: Box<[u32]>,
     /// Raw data with atomic borrow state for each component type.
-    data: Box<[Column]>,
+    data: Box<[Data]>,
 }
 
 impl Archetype {
+    fn assert_component_meta(metas: &[ComponentMeta]) {
+        metas.windows(2).for_each(|x| match x[0].cmp(&x[1]) {
+            core::cmp::Ordering::Less => (),
+            #[cfg(debug_assertions)]
+            core::cmp::Ordering::Equal => panic!(
+                "attempted to allocate entity with duplicate {} components; \
+                 each type must occur at most once!",
+                x[0].type_name
+            ),
+            #[cfg(not(debug_assertions))]
+            core::cmp::Ordering::Equal => panic!(
+                "attempted to allocate entity with duplicate components; \
+                 each type must occur at most once!"
+            ),
+            core::cmp::Ordering::Greater => panic!("type info is unsorted"),
+        });
+    }
+
     pub(crate) fn new(metas: Vec<ComponentMeta>) -> Self {
         let max_align = metas.first().map_or(1, |meta| meta.layout.align());
+        // Reject duplicate component types and enforce the alignment-descending
+        // order that `ComponentMeta::cmp` guarantees, so `metas.first()` — and
+        // thus `max_align` above — is the maximum alignment.
+        Self::assert_component_meta(&metas);
         let component_count = metas.len();
         Self {
-            column_of: OrderedTypeIdMap::new(
-                metas.iter().enumerate().map(|(i, meta)| (meta.id, i)),
-            ),
+            index: OrderedTypeIdMap::new(metas.iter().enumerate().map(|(i, meta)| (meta.id, i))),
             type_ids: metas.iter().map(|meta| *meta.id()).collect(),
             metas,
             entities: Box::new([]),
             len: 0,
             data: (0..component_count)
-                .map(|_| Column {
+                .map(|_| Data {
                     borrow_state: AtomicBorrow::new(),
                     raw_data: NonNull::new(max_align as *mut u8).unwrap(),
                 })
@@ -198,7 +223,7 @@ impl Archetype {
     }
 
     pub fn has_in_runtime(&self, id: TypeId) -> bool {
-        self.column_of.contains_key(&id)
+        self.index.contains_key(&id)
     }
 
     pub fn has<T: Component>(&self) -> bool {
@@ -206,8 +231,8 @@ impl Archetype {
     }
 
     /// Get the type `T` corresponding column index.
-    pub(crate) fn get_column<T: Component>(&self) -> Option<usize> {
-        self.column_of.get(&TypeId::of::<T>()).copied()
+    pub(crate) fn get_state<T: Component>(&self) -> Option<usize> {
+        self.index.get(&TypeId::of::<T>()).copied()
     }
 
     pub(crate) unsafe fn get_base<T: Component>(&self, column: usize) -> NonNull<T> {
@@ -308,5 +333,32 @@ impl Archetype {
 
     pub(crate) fn type_ids(&self) -> &[TypeId] {
         &self.type_ids
+    }
+
+    pub(crate) fn capacity(&self) -> u32 {
+        self.entities.len() as u32
+    }
+
+    pub(crate) fn component_types(&self) -> impl ExactSizeIterator<Item = TypeId> + '_ {
+        self.metas
+            .iter()
+            .map(|component_type_meta| component_type_meta.id)
+    }
+
+    pub(crate) unsafe fn get_ptr(
+        &self,
+        ty: TypeId,
+        size: usize,
+        index: u32,
+    ) -> Option<NonNull<u8>> {
+        debug_assert!(index <= self.len());
+        Some(NonNull::new_unchecked(
+            self.data
+                .get_unchecked(*self.index.get(&ty)?)
+                .raw_data
+                .as_ptr()
+                .add(size * index as usize)
+                .cast::<u8>(),
+        ))
     }
 }
