@@ -77,10 +77,7 @@ pub fn aabb_from_points<'a>(points: impl IntoIterator<Item = &'a Vec3>) -> Optio
 /// A bounding sphere that contains `points`.
 #[must_use]
 pub fn sphere_from_points(points: &[Vec3]) -> BoundingSphere {
-    let center = points
-        .iter()
-        .fold(Vec3::ZERO, |acc, p| acc + *p)
-        / points.len() as f32;
+    let center = points.iter().fold(Vec3::ZERO, |acc, p| acc + *p) / points.len() as f32;
     let radius = points
         .iter()
         .map(|p| (*p - center).length())

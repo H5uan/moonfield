@@ -391,7 +391,12 @@ mod tests {
         let i = a.intersection(&b).unwrap();
         assert_eq!(i.min, Vec3::new(0.5, 0.0, 0.0));
         assert_eq!(i.max, Vec3::new(1.0, 1.0, 1.0));
-        assert!(a.intersection(&Aabb3d::from_min_max(Vec3::new(5.0, 5.0, 5.0), Vec3::new(6.0, 6.0, 6.0))).is_none());
+        assert!(a
+            .intersection(&Aabb3d::from_min_max(
+                Vec3::new(5.0, 5.0, 5.0),
+                Vec3::new(6.0, 6.0, 6.0)
+            ))
+            .is_none());
     }
 
     #[test]

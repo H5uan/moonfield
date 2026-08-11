@@ -61,7 +61,10 @@ mod tests {
         let far_z = ndc(Vec3::new(0.0, 0.0, -FAR)).z;
         assert!(far_z > 0.0 && far_z < 1.0, "far z = {far_z}");
         let deeper = ndc(Vec3::new(0.0, 0.0, -1e6)).z;
-        assert!(deeper < far_z, "deeper z = {deeper} should be < far z = {far_z}");
+        assert!(
+            deeper < far_z,
+            "deeper z = {deeper} should be < far z = {far_z}"
+        );
     }
 
     #[test]

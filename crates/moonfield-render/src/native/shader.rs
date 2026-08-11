@@ -91,7 +91,11 @@ impl Compiler {
     /// layouts on demand. Keeps the whole compile pipeline (session, program,
     /// linked component) alive so every reflection pointer stays valid for the
     /// returned wrapper's lifetime.
-    pub fn compile_file_to_reflection(&self, path: &str, entry_point: &str) -> RenderResult<Reflection> {
+    pub fn compile_file_to_reflection(
+        &self,
+        path: &str,
+        entry_point: &str,
+    ) -> RenderResult<Reflection> {
         let options = shader_slang::CompilerOptions::default()
             .optimization(shader_slang::OptimizationLevel::High)
             .matrix_layout_row(true);
@@ -159,9 +163,9 @@ impl Reflection {
     /// Look up a struct type by name and return its layout.
     pub fn struct_layout(&self, name: &str) -> RenderResult<Layout<'_>> {
         let reflection = unsafe { &*self.reflection };
-        let ty = reflection
-            .find_type_by_name(name)
-            .ok_or_else(|| RenderError::Backend(format!("type '{name}' not found in reflection")))?;
+        let ty = reflection.find_type_by_name(name).ok_or_else(|| {
+            RenderError::Backend(format!("type '{name}' not found in reflection"))
+        })?;
         let layout = reflection
             .type_layout(ty, shader_slang::LayoutRules::Default)
             .ok_or_else(|| RenderError::Backend(format!("no layout for type '{name}'")))?;
@@ -200,11 +204,7 @@ impl<'a> Layout<'a> {
         let tl = field
             .type_layout()
             .ok_or_else(|| RenderError::Backend("field has no type layout".to_string()))?;
-        Ok(tl
-            .categories()
-            .map(|c| field.offset(c))
-            .max()
-            .unwrap_or(0))
+        Ok(tl.categories().map(|c| field.offset(c)).max().unwrap_or(0))
     }
 }
 

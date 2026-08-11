@@ -250,8 +250,16 @@ mod tests {
 
         // Field offsets match between Rust and Slang.
         assert_eq!(layout.field_offset("mass").unwrap(), 12, "mass offset");
-        assert_eq!(layout.field_offset("velocity").unwrap(), 16, "velocity offset");
-        assert_eq!(layout.field_offset("inv_mass").unwrap(), 28, "inv_mass offset");
+        assert_eq!(
+            layout.field_offset("velocity").unwrap(),
+            16,
+            "velocity offset"
+        );
+        assert_eq!(
+            layout.field_offset("inv_mass").unwrap(),
+            28,
+            "inv_mass offset"
+        );
 
         // The guard: Rust and Slang must agree on every offset.
         assert_eq!(std::mem::size_of::<GpuParticle>(), layout.size());
