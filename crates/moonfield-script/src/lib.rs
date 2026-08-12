@@ -28,7 +28,9 @@ pub use script::V8Runtime as Runtime;
 #[cfg(feature = "quickjs-backend")]
 pub use script::QuickJsRuntime as Runtime;
 
-use script::{HostValue, HotReloadHandler, HotReloader, ScriptApi, ScriptRuntime};
+use script::{
+    HostValue, HotReloadHandler, HotReloader, ScriptApi, ScriptFileSnapshot, ScriptRuntime,
+};
 use std::cell::RefCell;
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
@@ -66,7 +68,8 @@ type ConfigureFn = Arc<dyn Fn(&mut Runtime) + Send + Sync>;
 /// (throttled) so a mid-write partial save recovers without another edit,
 /// and removing a module file surfaces as a reload error rather than going
 /// silent. A failed initial load is retried on the next file change (the
-/// runtime and file watcher stay installed). Repeated hook
+/// runtime and file watcher stay installed); a debounced filesystem snapshot
+/// covers watcher backends that miss that change. Repeated hook
 /// failures are throttled — the first few are logged in full, then a
 /// periodic summary reports the count — so one buggy per-frame hook cannot
 /// flood the log; the throttle resets when the hook succeeds or after a
@@ -190,6 +193,9 @@ struct ScriptState {
     /// file changes retry the full entry load (the runtime has no cached
     /// registry to reload incrementally from).
     entry_loaded: bool,
+    /// Filesystem-polling fallback used only while the initial entry load is
+    /// broken. This covers watcher backends that delay or lose a file event.
+    entry_retry: Option<EntryRetryState>,
     /// Wall-clock of the previous update, used to compute frame deltas.
     last_frame: Instant,
     /// Fixed-timestep accumulator feeding `on_fixed_update`.
@@ -202,6 +208,33 @@ struct ScriptState {
     /// Throttle for repeated hook errors, so a per-frame hook that keeps
     /// failing cannot flood the log.
     error_log: HookErrorLog,
+}
+
+/// Debounced filesystem fallback for a failed initial entry load.
+struct EntryRetryState {
+    watch_dir: PathBuf,
+    snapshot: ScriptFileSnapshot,
+    last_scan: Instant,
+}
+
+const ENTRY_RETRY_SCAN_INTERVAL: Duration = Duration::from_millis(250);
+
+impl EntryRetryState {
+    fn new(watch_dir: &Path) -> Self {
+        Self {
+            watch_dir: watch_dir.to_path_buf(),
+            snapshot: ScriptFileSnapshot::capture(watch_dir),
+            last_scan: Instant::now(),
+        }
+    }
+
+    fn changed_paths(&mut self) -> Vec<PathBuf> {
+        if self.last_scan.elapsed() < ENTRY_RETRY_SCAN_INTERVAL {
+            return Vec::new();
+        }
+        self.last_scan = Instant::now();
+        self.snapshot.changed_paths(&self.watch_dir)
+    }
 }
 
 /// Lock the shared input state, tolerating a poisoned mutex — a panicking
@@ -416,8 +449,8 @@ impl Plugin for ScriptPlugin {
             let entry_path = entry.unwrap_or_else(default_script_path);
             // A failed initial load (e.g. one syntax error) must not kill
             // scripting: the state is installed below regardless, and the
-            // hot-reload path retries the entry load on the next file
-            // change (see `EntryLoadRetry`).
+            // hot-reload path retries the entry load on the next file change
+            // (see `EntryLoadRetry`).
             let entry_loaded = match load_module_entry(&mut runtime, &entry_path) {
                 Ok(_) => true,
                 Err(e) => {
@@ -444,11 +477,13 @@ impl Plugin for ScriptPlugin {
                     None
                 }
             };
+            let entry_retry = (!entry_loaded).then(|| EntryRetryState::new(&watch_dir));
             *slot.borrow_mut() = Some(ScriptState {
                 runtime,
                 hot_reloader,
                 entry_path,
                 entry_loaded,
+                entry_retry,
                 last_frame: startup,
                 fixed: FixedStepAccumulator::new(fixed_timestep),
                 input,
@@ -464,13 +499,10 @@ impl Plugin for ScriptPlugin {
                 return true;
             };
             state.runtime.gc_step();
-            if let Some(reloader) = state.hot_reloader.as_mut() {
-                // While the entry graph is missing (failed startup load),
-                // any file change retries the full entry load; otherwise
-                // the runtime reloads the changed modules incrementally.
-                // A successful reload resets the hook error throttles —
-                // freshly loaded code gets a clean slate.
-                let result = if state.entry_loaded {
+            if state.entry_loaded {
+                if let Some(reloader) = state.hot_reloader.as_mut() {
+                    // A successful reload resets the hook error throttles —
+                    // freshly loaded code gets a clean slate.
                     let mut reload = ReloadReset {
                         runtime: &mut state.runtime,
                         reloaded: false,
@@ -479,20 +511,33 @@ impl Plugin for ScriptPlugin {
                     if reload.reloaded {
                         state.error_log.reset_all();
                     }
-                    result
-                } else {
-                    let mut retry = EntryLoadRetry {
-                        runtime: &mut state.runtime,
-                        entry_path: &state.entry_path,
-                        succeeded: false,
-                    };
-                    let result = reloader.poll(&mut retry);
-                    state.entry_loaded = retry.succeeded;
-                    if retry.succeeded {
-                        state.error_log.reset_all();
+                    if let Err(e) = result {
+                        error!("Hot reload failed: {}", e);
                     }
-                    result
+                }
+            } else {
+                let fallback_paths = state
+                    .entry_retry
+                    .as_mut()
+                    .map(EntryRetryState::changed_paths)
+                    .unwrap_or_default();
+                let mut retry = EntryLoadRetry {
+                    runtime: &mut state.runtime,
+                    entry_path: &state.entry_path,
+                    succeeded: false,
                 };
+                let result = if let Some(reloader) = state.hot_reloader.as_mut() {
+                    reloader.poll_with_fallback(&fallback_paths, &mut retry)
+                } else if fallback_paths.is_empty() {
+                    Ok(())
+                } else {
+                    retry.on_files_changed(&fallback_paths)
+                };
+                state.entry_loaded = retry.succeeded;
+                if retry.succeeded {
+                    state.entry_retry = None;
+                    state.error_log.reset_all();
+                }
                 if let Err(e) = result {
                     error!("Hot reload failed: {}", e);
                 }

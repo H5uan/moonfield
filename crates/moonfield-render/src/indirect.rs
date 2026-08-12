@@ -1,12 +1,10 @@
-//! Cross-backend indirect-draw/dispatch argument layouts.
+//! Vulkan indirect-draw/dispatch argument layouts.
 //!
-//! These `#[repr(C)]` structs are the **neutral canonical layout** for
-//! GPU-driven indirect commands: their field order and sizes match both the
-//! Vulkan command structs (`vk::DrawIndirectCommand`, etc.) and the wgpu arg
-//! structs (`wgpu::DrawIndirectArgs`, etc.), so a single buffer populated via
-//! `bytemuck::bytes_of` is valid on either backend without per-backend
-//! conversion. The RHI does not expose raw transmutation to backend types —
-//! callers write these structs into a [`Buffer`](crate::native::Buffer) with
+//! These `#[repr(C)]` structs mirror Vulkan's command structs
+//! (`vk::DrawIndirectCommand`, etc.), so a buffer populated via
+//! `bytemuck::bytes_of` can be submitted directly. The RHI does not expose raw
+//! transmutation to Vulkan types — callers write these structs into a
+//! [`Buffer`](crate::vulkan::Buffer) with
 //! [`BufferUsage::INDIRECT`](crate::BufferUsage::INDIRECT) and pass it to the
 //! command buffer's indirect draw methods.
 //!
@@ -18,7 +16,7 @@ use crate::types::BufferUsage;
 
 /// Argument buffer layout for non-indexed `draw_indirect` commands.
 ///
-/// 16 bytes; matches `vk::DrawIndirectCommand` and `wgpu::DrawIndirectArgs`.
+/// 16 bytes; matches `vk::DrawIndirectCommand`.
 #[repr(C)]
 #[derive(Clone, Copy, Debug, Default, bytemuck::Pod, bytemuck::Zeroable)]
 pub struct DrawIndirectArgs {
@@ -35,8 +33,7 @@ pub struct DrawIndirectArgs {
 
 /// Argument buffer layout for indexed `draw_indexed_indirect` commands.
 ///
-/// 20 bytes; matches `vk::DrawIndexedIndirectCommand` and
-/// `wgpu::DrawIndexedIndirectArgs`.
+/// 20 bytes; matches `vk::DrawIndexedIndirectCommand`.
 #[repr(C)]
 #[derive(Clone, Copy, Debug, Default, bytemuck::Pod, bytemuck::Zeroable)]
 pub struct DrawIndexedIndirectArgs {
@@ -56,8 +53,7 @@ pub struct DrawIndexedIndirectArgs {
 
 /// Argument buffer layout for `dispatch_workgroups_indirect` commands.
 ///
-/// 12 bytes; matches `vk::DispatchIndirectCommand` and
-/// `wgpu::DispatchIndirectArgs`.
+/// 12 bytes; matches `vk::DispatchIndirectCommand`.
 ///
 /// *Reserved for compute:* defined here for forward compatibility, but not yet
 /// wired into a RHI command because there is no `ComputePipeline` yet.
@@ -81,25 +77,13 @@ pub enum IndexFormat {
     Uint32,
 }
 
-#[cfg(feature = "native")]
 impl IndexFormat {
     /// Convert to the equivalent Vulkan index type.
-    #[allow(dead_code)] // used by tests/indirect_draw via raw vk::IndexType; kept for API symmetry with the web backend
+    #[allow(dead_code)] // used by tests/indirect_draw via raw vk::IndexType
     pub(crate) fn to_vk(self) -> ash::vk::IndexType {
         match self {
             Self::Uint16 => ash::vk::IndexType::UINT16,
             Self::Uint32 => ash::vk::IndexType::UINT32,
-        }
-    }
-}
-
-#[cfg(feature = "web")]
-impl IndexFormat {
-    /// Convert to the equivalent wgpu index format.
-    pub(crate) fn to_wgpu(self) -> wgpu::IndexFormat {
-        match self {
-            Self::Uint16 => wgpu::IndexFormat::Uint16,
-            Self::Uint32 => wgpu::IndexFormat::Uint32,
         }
     }
 }

@@ -7,10 +7,10 @@
 //! of every render pass without explicit transitions.
 
 use crate::error::{Error, Result};
-use crate::native::device::Device;
-use crate::native::framebuffer::Framebuffer;
-use crate::native::render_pass::RenderPass;
 use crate::types::Format;
+use crate::vulkan::device::Device;
+use crate::vulkan::framebuffer::Framebuffer;
+use crate::vulkan::render_pass::RenderPass;
 use crate::{CommandBuffer, CommandPool};
 use ash::vk;
 use gpu_allocator::vulkan::{Allocation, AllocationCreateDesc, AllocationScheme};

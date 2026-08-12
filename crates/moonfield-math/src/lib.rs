@@ -7,8 +7,8 @@
 //! directly — so the underlying implementation can evolve in one place.
 //!
 //! The crate serves **both** the graphics renderer and the future GPU-driven
-//! physics system. The GPU-facing types are `f32` (WGSL/slang compute shaders
-//! are `f32`/`f16`); the CPU-side wide-phase and large-world-coordinate math
+//! physics system. The GPU-facing types are `f32` (Slang compute shaders use
+//! `f32`/`f16`); the CPU-side wide-phase and large-world-coordinate math
 //! uses the `f64` `D*` variants re-exported from [`glam`].
 //!
 //! # `no_std` support
@@ -22,9 +22,9 @@
 //!
 //! - **World space** is right-handed, Y-up. A camera with no rotation looks
 //!   down -Z, +X is right, +Y is up.
-//! - **Clip / NDC space** uses a single convention across backends: Y points
-//!   *up* and depth is **reverse** (`far -> 0`, near -> 1) — the wgpu/WebGPU /
-//!   Bevy convention. Projection matrix construction (using this convention)
+//! - **Clip / NDC space** uses a single engine convention: Y points *up* and
+//!   depth is **reverse** (`far -> 0`, near -> 1). Projection matrix
+//!   construction (using this convention)
 //!   lives in the render crate's camera module, not here. This crate only
 //!   provides the low-level [`glam`] primitives (`Mat4::perspective_rh`, etc.).
 

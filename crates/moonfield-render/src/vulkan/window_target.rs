@@ -9,12 +9,12 @@
 //! [`WindowRenderer::end_frame`].
 
 use crate::error::{Error, Result};
-use crate::native::device::Device;
-use crate::native::framebuffer::Framebuffer;
-use crate::native::instance::Instance;
-use crate::native::render_pass::RenderPass;
-use crate::native::swapchain::{Surface, Swapchain};
 use crate::types::Format;
+use crate::vulkan::device::Device;
+use crate::vulkan::framebuffer::Framebuffer;
+use crate::vulkan::instance::Instance;
+use crate::vulkan::render_pass::RenderPass;
+use crate::vulkan::swapchain::{Surface, Swapchain};
 use crate::{CommandBuffer, CommandPool, Fence, Semaphore};
 use ash::vk;
 use raw_window_handle::{HasDisplayHandle, HasWindowHandle};

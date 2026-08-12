@@ -1,7 +1,7 @@
 //! Vulkan logical device abstraction.
 
 use crate::error::{Error, Result};
-use crate::native::instance::Instance;
+use crate::vulkan::instance::Instance;
 use ash::vk;
 use gpu_allocator::vulkan::{Allocator, AllocatorCreateDesc};
 use std::ffi::{c_char, CStr};

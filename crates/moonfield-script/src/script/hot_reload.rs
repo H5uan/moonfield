@@ -2,9 +2,11 @@
 
 use super::{Result, ScriptError};
 use notify::{Config, Event, RecommendedWatcher, RecursiveMode, Watcher};
+use std::collections::{hash_map::DefaultHasher, HashMap};
+use std::hash::{Hash, Hasher};
 use std::path::{Path, PathBuf};
 use std::sync::mpsc::{channel, Receiver};
-use std::time::{Duration, Instant};
+use std::time::{Duration, Instant, SystemTime};
 
 /// A handler invoked by [`HotReloader`] when a file change is detected.
 ///
@@ -48,6 +50,99 @@ pub struct HotReloader {
 /// permanently broken file cannot spin the reload path every frame.
 const RETRY_DEBOUNCE: Duration = Duration::from_millis(250);
 
+/// A cheap snapshot of the script files in a watched directory.
+///
+/// Native file watchers are still the primary source of hot-reload events, but
+/// some platforms/filesystems can delay or lose an event. The script plugin
+/// uses this snapshot only while the initial entry load is broken, where a
+/// small amount of polling is preferable to leaving scripting permanently
+/// disabled.
+#[derive(Debug, Default)]
+pub(crate) struct ScriptFileSnapshot {
+    files: HashMap<PathBuf, ScriptFileFingerprint>,
+}
+
+#[derive(Debug, Eq, PartialEq)]
+struct ScriptFileFingerprint {
+    len: u64,
+    modified: Option<SystemTime>,
+    content_hash: u64,
+}
+
+impl ScriptFileSnapshot {
+    /// Capture all readable `.ts` and `.js` files below `dir`.
+    pub(crate) fn capture(dir: &Path) -> Self {
+        Self {
+            files: collect_script_files(dir),
+        }
+    }
+
+    /// Return files whose contents or metadata changed since the last
+    /// snapshot, then replace the baseline with the current snapshot.
+    pub(crate) fn changed_paths(&mut self, dir: &Path) -> Vec<PathBuf> {
+        let current = collect_script_files(dir);
+        let mut changed = current
+            .iter()
+            .filter(|&(path, fingerprint)| self.files.get(path) != Some(fingerprint))
+            .map(|(path, _)| path.clone())
+            .collect::<Vec<_>>();
+        changed.extend(
+            self.files
+                .keys()
+                .filter(|path| !current.contains_key(*path))
+                .cloned(),
+        );
+        changed.sort();
+        self.files = current;
+        changed
+    }
+}
+
+fn collect_script_files(dir: &Path) -> HashMap<PathBuf, ScriptFileFingerprint> {
+    let mut files = HashMap::new();
+    let Ok(entries) = std::fs::read_dir(dir) else {
+        return files;
+    };
+
+    for entry in entries.flatten() {
+        let path = entry.path();
+        let Ok(file_type) = entry.file_type() else {
+            continue;
+        };
+        if file_type.is_dir() {
+            files.extend(collect_script_files(&path));
+            continue;
+        }
+        if !file_type.is_file()
+            || !matches!(
+                path.extension().and_then(|ext| ext.to_str()),
+                Some("ts" | "js")
+            )
+        {
+            continue;
+        }
+
+        let Ok(content) = std::fs::read(&path) else {
+            continue;
+        };
+        let Ok(metadata) = entry.metadata() else {
+            continue;
+        };
+        let mut hasher = DefaultHasher::new();
+        content.hash(&mut hasher);
+        files.insert(
+            path,
+            ScriptFileFingerprint {
+                len: metadata.len(),
+                modified: metadata.modified().ok(),
+                content_hash: hasher.finish(),
+            },
+        );
+    }
+
+    files
+}
+
 impl HotReloader {
     /// Start watching `dir` recursively for changes.
     pub fn new<D: AsRef<Path>>(dir: D) -> Result<Self> {
@@ -84,6 +179,18 @@ impl HotReloader {
     /// retried by later polls — event-less retries are throttled by
     /// [`RETRY_DEBOUNCE`].
     pub fn poll<H: HotReloadHandler>(&mut self, handler: &mut H) -> Result<()> {
+        self.poll_with_fallback(&[], handler)
+    }
+
+    /// Poll watcher events and, when none are available, dispatch the supplied
+    /// filesystem-polling fallback paths. The fallback is intentionally passed
+    /// in by the caller so normal hot reload remains event-driven; the script
+    /// plugin uses it only while recovering from a failed initial load.
+    pub(crate) fn poll_with_fallback<H: HotReloadHandler>(
+        &mut self,
+        fallback_paths: &[PathBuf],
+        handler: &mut H,
+    ) -> Result<()> {
         let mut changed_paths = std::mem::take(&mut self.pending);
         let mut got_new_events = false;
         while let Ok(event) = self.rx.try_recv() {
@@ -101,6 +208,10 @@ impl HotReloader {
                     }
                 }
             }
+        }
+        if changed_paths.is_empty() {
+            changed_paths.extend(fallback_paths.iter().cloned());
+            got_new_events = !changed_paths.is_empty();
         }
         if changed_paths.is_empty() {
             return Ok(());

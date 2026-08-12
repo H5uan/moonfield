@@ -1,11 +1,9 @@
-//! Backend-neutral types shared by the native (ash) and web (wgpu) backends.
+//! Public resource descriptions shared by Moonfield's Vulkan renderer.
 //!
-//! Everything in this module is free of backend dependencies so it compiles
-//! under both the `native` and `web` features. Backend conversions live in
-//! `#[cfg(feature = ...)]` blocks and never leak backend types into the
-//! shared signatures.
+//! The descriptions remain independent of raw Vulkan handles so higher-level
+//! renderer code does not need to construct ash types directly.
 
-/// Pixel/color formats supported by both backends. Grow as needed.
+/// Pixel/color formats supported by the Vulkan renderer. Grow as needed.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Format {
     /// 8-bit BGRA unorm; the preferred swapchain and offscreen format.
@@ -14,7 +12,6 @@ pub enum Format {
     R8G8B8A8Unorm,
 }
 
-#[cfg(feature = "native")]
 impl Format {
     /// Convert to the equivalent Vulkan format.
     pub(crate) fn to_vk(self) -> ash::vk::Format {
@@ -31,17 +28,6 @@ impl Format {
             ash::vk::Format::B8G8R8A8_UNORM => Some(Self::B8G8R8A8Unorm),
             ash::vk::Format::R8G8B8A8_UNORM => Some(Self::R8G8B8A8Unorm),
             _ => None,
-        }
-    }
-}
-
-#[cfg(feature = "web")]
-impl Format {
-    /// Convert to the equivalent wgpu texture format.
-    pub(crate) fn to_wgpu(self) -> wgpu::TextureFormat {
-        match self {
-            Self::B8G8R8A8Unorm => wgpu::TextureFormat::Bgra8Unorm,
-            Self::R8G8B8A8Unorm => wgpu::TextureFormat::Rgba8Unorm,
         }
     }
 }
@@ -90,7 +76,6 @@ impl std::ops::BitOr for BufferUsage {
     }
 }
 
-#[cfg(feature = "native")]
 impl BufferUsage {
     /// Convert to the equivalent Vulkan usage flags.
     pub(crate) fn to_vk(self) -> ash::vk::BufferUsageFlags {
@@ -120,37 +105,7 @@ impl BufferUsage {
     }
 }
 
-#[cfg(feature = "web")]
-impl BufferUsage {
-    /// Convert to the equivalent wgpu usage flags.
-    pub(crate) fn to_wgpu(self) -> wgpu::BufferUsages {
-        let mut flags = wgpu::BufferUsages::empty();
-        if self.contains(Self::VERTEX) {
-            flags |= wgpu::BufferUsages::VERTEX;
-        }
-        if self.contains(Self::INDEX) {
-            flags |= wgpu::BufferUsages::INDEX;
-        }
-        if self.contains(Self::UNIFORM) {
-            flags |= wgpu::BufferUsages::UNIFORM;
-        }
-        if self.contains(Self::STORAGE) {
-            flags |= wgpu::BufferUsages::STORAGE;
-        }
-        if self.contains(Self::COPY_DST) {
-            flags |= wgpu::BufferUsages::COPY_DST;
-        }
-        if self.contains(Self::COPY_SRC) {
-            flags |= wgpu::BufferUsages::COPY_SRC;
-        }
-        if self.contains(Self::INDIRECT) {
-            flags |= wgpu::BufferUsages::INDIRECT;
-        }
-        flags
-    }
-}
-
-/// Vertex attribute formats supported by both backends. Grow as needed.
+/// Vertex attribute formats supported by the Vulkan renderer. Grow as needed.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum VertexFormat {
     /// Two 32-bit floats.
@@ -161,7 +116,6 @@ pub enum VertexFormat {
     Float32x4,
 }
 
-#[cfg(feature = "native")]
 impl VertexFormat {
     /// Convert to the equivalent Vulkan format.
     pub(crate) fn to_vk(self) -> ash::vk::Format {
@@ -169,18 +123,6 @@ impl VertexFormat {
             Self::Float32x2 => ash::vk::Format::R32G32_SFLOAT,
             Self::Float32x3 => ash::vk::Format::R32G32B32_SFLOAT,
             Self::Float32x4 => ash::vk::Format::R32G32B32A32_SFLOAT,
-        }
-    }
-}
-
-#[cfg(feature = "web")]
-impl VertexFormat {
-    /// Convert to the equivalent wgpu vertex format.
-    pub(crate) fn to_wgpu(self) -> wgpu::VertexFormat {
-        match self {
-            Self::Float32x2 => wgpu::VertexFormat::Float32x2,
-            Self::Float32x3 => wgpu::VertexFormat::Float32x3,
-            Self::Float32x4 => wgpu::VertexFormat::Float32x4,
         }
     }
 }

@@ -7,9 +7,9 @@
 
 use crate::bind::BufferRef;
 use crate::error::{Error, Result};
-use crate::native::command::{CommandBuffer, CommandPool};
-use crate::native::device::Device;
 use crate::types::BufferUsage;
+use crate::vulkan::command::{CommandBuffer, CommandPool};
+use crate::vulkan::device::Device;
 use ash::vk;
 use gpu_allocator::vulkan::{Allocation, AllocationCreateDesc, AllocationScheme, Allocator};
 use gpu_allocator::MemoryLocation;
@@ -30,7 +30,7 @@ impl Buffer {
     ///
     /// `COPY_DST` is OR-ed into the usage so uploads always go through a
     /// staging copy on `GpuOnly` buffers (and are a no-op for host-visible
-    /// ones), matching the web backend's convention.
+    /// ones), matching Vulkan's buffer upload convention.
     pub fn new(
         device: &Device,
         size: u64,

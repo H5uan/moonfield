@@ -1,8 +1,8 @@
 //! Vulkan framebuffer abstraction.
 
 use crate::error::{Error, Result};
-use crate::native::device::Device;
-use crate::native::render_pass::RenderPass;
+use crate::vulkan::device::Device;
+use crate::vulkan::render_pass::RenderPass;
 use ash::vk;
 
 /// A Vulkan framebuffer.

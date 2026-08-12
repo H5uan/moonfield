@@ -1,8 +1,7 @@
-//! Cross-backend descriptor and resource-view abstraction.
+//! Vulkan descriptor and resource-view abstraction.
 //!
-//! Mirrors the wgpu bind-group model so the same code path serves the native
-//! (ash) and web (wgpu) backends. The native backend owns a `vk::DescriptorSet`
-//! (with a per-set pool) and exposes `raw_vk()` as a controlled escape hatch
+//! The Vulkan backend owns a `vk::DescriptorSet` (with a per-set pool) and
+//! exposes `raw_vk()` as a controlled escape hatch
 //! for interop with libraries that take raw Vulkan handles (e.g.
 //! `egui_ash_renderer`).
 //!
@@ -13,8 +12,7 @@
 
 use crate::types::BufferUsage;
 
-#[cfg(feature = "native")]
-use crate::native::device::Device as NativeDevice;
+use crate::vulkan::device::Device as VulkanDevice;
 
 /// Shader stages that may access a binding.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -25,7 +23,6 @@ pub enum ShaderStage {
     All,
 }
 
-#[cfg(feature = "native")]
 impl ShaderStage {
     pub(crate) fn to_vk(self) -> ash::vk::ShaderStageFlags {
         match self {
@@ -76,12 +73,9 @@ pub enum BindingResource<'a> {
 }
 
 /// Type-erased reference to a buffer, so `BindingResource` does not depend on
-/// the backend `Buffer` type. Implemented by the native and web `Buffer`s.
+/// the concrete Vulkan `Buffer` type.
 pub trait BufferRef {
-    #[cfg(feature = "native")]
     fn raw_vk(&self) -> ash::vk::Buffer;
-    #[cfg(feature = "web")]
-    fn raw_wgpu(&self) -> &wgpu::Buffer;
 }
 
 /// A single binding in a [`BindGroup`].
@@ -94,11 +88,10 @@ pub struct BindGroupEntry<'a> {
 }
 
 // ===========================================================================
-// native (ash) implementation
+// Vulkan (ash) implementation
 // ===========================================================================
 
-#[cfg(feature = "native")]
-pub(crate) mod native_impl {
+pub(crate) mod vulkan_impl {
     use super::*;
     use ash::vk;
 
@@ -198,7 +191,7 @@ pub(crate) mod native_impl {
 
     impl BindGroupLayout {
         /// Create a layout from the given entries.
-        pub fn new(device: &NativeDevice, entries: &[BindGroupLayoutEntry]) -> crate::Result<Self> {
+        pub fn new(device: &VulkanDevice, entries: &[BindGroupLayoutEntry]) -> crate::Result<Self> {
             let bindings: Vec<vk::DescriptorSetLayoutBinding> = entries
                 .iter()
                 .map(|e| {
@@ -259,7 +252,7 @@ pub(crate) mod native_impl {
     impl BindGroup {
         /// Allocate and write a descriptor set for the given entries.
         pub fn new(
-            device: &NativeDevice,
+            device: &VulkanDevice,
             layout: &BindGroupLayout,
             entries: &[BindGroupEntry<'_>],
         ) -> crate::Result<Self> {
@@ -397,138 +390,7 @@ pub(crate) mod native_impl {
     }
 }
 
-#[cfg(feature = "native")]
-pub use native_impl::{BindGroup, BindGroupLayout, Sampler, TextureView};
-
-// ===========================================================================
-// web (wgpu) implementation
-// ===========================================================================
-
-#[cfg(feature = "web")]
-pub(crate) mod web_impl {
-    use super::*;
-    use crate::web::Device as WgpuDevice;
-
-    pub struct Sampler(wgpu::Sampler);
-    impl Sampler {
-        pub(crate) fn from_raw(s: wgpu::Sampler) -> Self {
-            Self(s)
-        }
-        pub fn raw_wgpu(&self) -> &wgpu::Sampler {
-            &self.0
-        }
-    }
-
-    pub struct TextureView(wgpu::TextureView);
-    impl TextureView {
-        pub(crate) fn from_raw(v: wgpu::TextureView) -> Self {
-            Self(v)
-        }
-        pub fn raw_wgpu(&self) -> &wgpu::TextureView {
-            &self.0
-        }
-    }
-
-    pub struct BindGroupLayout {
-        layout: wgpu::BindGroupLayout,
-    }
-
-    impl BindGroupLayout {
-        pub fn new(device: &WgpuDevice, entries: &[BindGroupLayoutEntry]) -> crate::Result<Self> {
-            let entries: Vec<wgpu::BindGroupLayoutEntry> = entries
-                .iter()
-                .map(|e| {
-                    let ty = match e.ty {
-                        BindingType::SampledTexture => wgpu::BindingType::Texture {
-                            sample_type: wgpu::TextureSampleType::Float { filterable: true },
-                            view_dimension: wgpu::TextureViewDimension::D2,
-                            multisampled: false,
-                        },
-                        BindingType::StorageBuffer => wgpu::BindingType::Buffer {
-                            ty: wgpu::BufferBindingType::Storage { read_only: false },
-                            has_dynamic_offset: false,
-                            min_binding_size: None,
-                        },
-                        BindingType::UniformBuffer => wgpu::BindingType::Buffer {
-                            ty: wgpu::BufferBindingType::Uniform,
-                            has_dynamic_offset: false,
-                            min_binding_size: None,
-                        },
-                    };
-                    wgpu::BindGroupLayoutEntry {
-                        binding: e.binding,
-                        visibility: match e.visibility {
-                            ShaderStage::Vertex => wgpu::ShaderStages::VERTEX,
-                            ShaderStage::Fragment => wgpu::ShaderStages::FRAGMENT,
-                            ShaderStage::Compute => wgpu::ShaderStages::COMPUTE,
-                            ShaderStage::All => wgpu::ShaderStages::all(),
-                        },
-                        ty,
-                        count: None,
-                    }
-                })
-                .collect();
-            let layout =
-                device
-                    .device()
-                    .create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
-                        label: Some("moonfield-bind-group-layout"),
-                        entries: &entries,
-                    });
-            Ok(Self { layout })
-        }
-
-        pub fn raw_wgpu(&self) -> &wgpu::BindGroupLayout {
-            &self.layout
-        }
-    }
-
-    pub struct BindGroup(wgpu::BindGroup);
-    impl BindGroup {
-        pub fn new(
-            device: &WgpuDevice,
-            layout: &BindGroupLayout,
-            entries: &[BindGroupEntry<'_>],
-        ) -> crate::Result<Self> {
-            let entries: Vec<wgpu::BindGroupEntry<'_>> = entries
-                .iter()
-                .map(|e| match e.resource {
-                    BindingResource::Texture { view, .. } => wgpu::BindGroupEntry {
-                        binding: e.binding,
-                        resource: wgpu::BindingResource::TextureView(view.raw_wgpu()),
-                    },
-                    BindingResource::Buffer {
-                        buffer,
-                        offset,
-                        size,
-                    } => wgpu::BindGroupEntry {
-                        binding: e.binding,
-                        resource: wgpu::BindingResource::Buffer(wgpu::BufferBinding {
-                            buffer: buffer.raw_wgpu(),
-                            offset,
-                            size: std::num::NonZero::<u64>::new(size),
-                        }),
-                    },
-                })
-                .collect();
-            let bg = device
-                .device()
-                .create_bind_group(&wgpu::BindGroupDescriptor {
-                    label: Some("moonfield-bind-group"),
-                    layout: layout.raw_wgpu(),
-                    entries: &entries,
-                });
-            Ok(Self(bg))
-        }
-
-        pub fn raw_wgpu(&self) -> &wgpu::BindGroup {
-            &self.0
-        }
-    }
-}
-
-#[cfg(feature = "web")]
-pub use web_impl::{BindGroup, BindGroupLayout, Sampler, TextureView};
+pub use vulkan_impl::{BindGroup, BindGroupLayout, Sampler, TextureView};
 
 // Keep BufferUsage referenced so the module compiles even when only the
 // texture path is exercised; storage/uniform buffer bindings will use it.

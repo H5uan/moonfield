@@ -1,7 +1,7 @@
 //! Vulkan command pool and command buffer abstractions.
 
 use crate::error::{Error, Result};
-use crate::native::device::Device;
+use crate::vulkan::device::Device;
 use ash::vk;
 
 /// A Vulkan command pool.

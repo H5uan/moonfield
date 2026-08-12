@@ -1,8 +1,8 @@
 //! Vulkan render pass abstraction.
 
 use crate::error::{Error, Result};
-use crate::native::device::Device;
 use crate::types::Format;
+use crate::vulkan::device::Device;
 use ash::vk;
 
 /// A Vulkan render pass with a single color attachment.
@@ -25,7 +25,7 @@ impl RenderPass {
     /// targets that are sampled afterwards).
     ///
     /// `final_layout` is a raw Vulkan layout for now: this type is part of
-    /// the native backend, and a neutral layout enum lands with the web
+    /// the Vulkan backend, and a neutral layout enum keeps the public API
     /// backend.
     pub fn new_with_final_layout(
         device: &Device,

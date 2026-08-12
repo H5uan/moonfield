@@ -1,4 +1,4 @@
-//! Native rendering backend.
+//! Vulkan rendering backend.
 //!
 //! Vulkan RHI implemented on top of `ash`. This module exposes a safe Rust API
 //! surface over instance, physical device, logical device, and swapchain

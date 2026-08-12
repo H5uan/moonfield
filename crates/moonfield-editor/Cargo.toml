@@ -3,12 +3,6 @@ name = "moonfield-editor"
 version.workspace = true
 edition.workspace = true
 
-[features]
-# The editor is hard-wired to ash + egui-ash-renderer and stays native-only
-# by design — there is intentionally no `web` feature here.
-default = ["native"]
-native = ["moonfield-render/native"]
-
 [dependencies]
 moonfield-app = { workspace = true }
 moonfield-log = { workspace = true }
@@ -25,4 +19,3 @@ egui_dock = "0.18"
 
 [[example]]
 name = "editor"
-

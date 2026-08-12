@@ -1,10 +1,10 @@
 //! Vulkan graphics pipeline abstraction.
 
 use crate::error::{Error, Result};
-use crate::native::device::Device;
-use crate::native::render_pass::RenderPass;
-use crate::native::shader_module::ShaderModule;
 use crate::types::VertexBufferLayout;
+use crate::vulkan::device::Device;
+use crate::vulkan::render_pass::RenderPass;
+use crate::vulkan::shader_module::ShaderModule;
 use ash::vk;
 
 /// A Vulkan graphics pipeline and its layout.

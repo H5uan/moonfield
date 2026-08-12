@@ -5,22 +5,17 @@
 //! render crate are in scope. Keeping the bindings out of `moonfield-script`
 //! keeps that crate free of engine-layer dependencies.
 //!
-//! The `record_frame` binding is native-only: it is built on
-//! `HeadlessContext` (Vulkan + Slang + temp files), which the `web` backend
-//! does not provide. Everything `record_frame`-related below is therefore
-//! gated behind `#[cfg(feature = "native")]`.
+//! The `record_frame` binding is built on `HeadlessContext` (Vulkan + Slang +
+//! temp files), so it is available in the Vulkan application build.
 
-#[cfg(feature = "native")]
 use moonfield_render::HeadlessContext;
 use moonfield_script::input::{register_input_api, SharedInputState};
 use moonfield_script::register_window_api;
 use moonfield_script::script::ScriptApi;
 use moonfield_script::time::{register_time_api, SharedTimeState};
 use moonfield_window::{SharedWindow, WindowControl, WindowRequests};
-#[cfg(feature = "native")]
 use std::cell::RefCell;
 
-#[cfg(feature = "native")]
 thread_local! {
     /// Building the headless context means creating a Vulkan instance and
     /// device, compiling the shaders, and building the pipeline — far too
@@ -32,16 +27,13 @@ thread_local! {
 }
 
 /// Default resolution when a script calls `record_frame` without arguments.
-#[cfg(feature = "native")]
 const DEFAULT_WIDTH: u32 = 800;
-#[cfg(feature = "native")]
 const DEFAULT_HEIGHT: u32 = 600;
 
 /// Initialize the shared headless context on first use; subsequent calls
 /// with the same resolution are cheap no-ops, and a different resolution
 /// re-creates the context. A failed attempt is not cached — the next call
 /// retries.
-#[cfg(feature = "native")]
 fn ensure_headless_context(width: u32, height: u32) -> Result<(), String> {
     HEADLESS_CONTEXT.with(|cell| {
         let mut slot = cell.borrow_mut();
@@ -61,7 +53,6 @@ pub fn build_script_api(
     window_requests: &WindowRequests,
 ) -> ScriptApi {
     let mut api = ScriptApi::new();
-    #[cfg(feature = "native")]
     api.register_fn::<record_frame_Fn>();
     register_input_api(&mut api, input);
     register_time_api(&mut api, time);
@@ -79,7 +70,6 @@ pub fn build_script_api(
 /// Accepts optional `(width, height)` arguments, defaulting to 800×600.
 /// The context is built once and reused, or re-built when the requested
 /// resolution changes (see [`ensure_headless_context`]).
-#[cfg(feature = "native")]
 #[moonfield_script::script_function]
 fn record_frame(width: Option<u32>, height: Option<u32>) -> Result<(), String> {
     ensure_headless_context(
@@ -90,11 +80,7 @@ fn record_frame(width: Option<u32>, height: Option<u32>) -> Result<(), String> {
 
 /// Fast-path `record_frame` that extracts `u32` args directly from V8
 /// values, bypassing the `HostValue` marshaling chain.
-#[cfg(all(
-    feature = "native",
-    feature = "v8-backend",
-    not(feature = "quickjs-backend")
-))]
+#[cfg(all(feature = "v8-backend", not(feature = "quickjs-backend")))]
 fn direct_record_frame(
     scope: &mut v8::PinScope,
     args: v8::FunctionCallbackArguments,
@@ -123,7 +109,7 @@ fn direct_record_frame(
 
 /// Fast-path `record_frame` that extracts `u32` args directly from QuickJS
 /// values, bypassing the `HostValue` marshaling chain.
-#[cfg(all(feature = "native", feature = "quickjs-backend"))]
+#[cfg(feature = "quickjs-backend")]
 fn direct_record_frame(
     ctx: rquickjs::Ctx,
     args: rquickjs::function::Rest<rquickjs::Value>,
@@ -148,24 +134,19 @@ fn direct_record_frame(
 
 /// Install backend-specific fast-path host functions on a freshly created
 /// script runtime.
-#[cfg(all(
-    feature = "native",
-    feature = "v8-backend",
-    not(feature = "quickjs-backend")
-))]
+#[cfg(all(feature = "v8-backend", not(feature = "quickjs-backend")))]
 pub fn configure_runtime(rt: &mut moonfield_script::Runtime) {
     rt.register_direct("record_frame", direct_record_frame);
 }
 
-#[cfg(all(feature = "native", feature = "quickjs-backend"))]
+#[cfg(feature = "quickjs-backend")]
 pub fn configure_runtime(rt: &mut moonfield_script::Runtime) {
     rt.register_direct("record_frame", direct_record_frame);
 }
 
-// The d.ts sync test only runs under native: `record_frame` is registered
-// only there, so the generated d.ts matches the checked-in file only under
-// the native backend.
-#[cfg(all(test, feature = "native"))]
+// The d.ts sync test runs for the Vulkan application build, where
+// `record_frame` is registered unconditionally.
+#[cfg(test)]
 mod tests {
     use super::*;
 

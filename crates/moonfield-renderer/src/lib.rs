@@ -8,10 +8,7 @@
 //! - `rt` — ray tracing (placeholder).
 //! - `gi` — global illumination (placeholder).
 //!
-//! Exactly one backend feature must be enabled: `native` (default, Vulkan via
-//! `moonfield-render/native`) or `web` (wgpu via `moonfield-render/web`).
-//! They are mutually exclusive, enforced by `moonfield-render`'s
-//! `compile_error!` guards.
+//! The renderer targets Vulkan through the `moonfield-render` RHI.
 //!
 //! Frame orchestration follows a simplified version of Bevy's render phases:
 //! every algorithm implements [`frame::RenderAlgorithm`] with

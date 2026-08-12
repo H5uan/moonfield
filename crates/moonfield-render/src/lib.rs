@@ -1,12 +1,6 @@
 //! Lunar Mare rendering infrastructure.
 //!
-//! Rendering RHI with pluggable backends: `native` (Vulkan via `ash`) and
-//! `web` (wgpu). Exactly one backend feature must be enabled.
-
-#[cfg(all(feature = "native", feature = "web"))]
-compile_error!("features `native` and `web` are mutually exclusive");
-#[cfg(not(any(feature = "native", feature = "web")))]
-compile_error!("either feature `native` or `web` must be enabled");
+//! Rendering RHI for Vulkan, implemented with `ash`.
 
 pub mod bind;
 pub mod camera;
@@ -14,10 +8,7 @@ pub mod error;
 pub mod indirect;
 pub mod types;
 
-#[cfg(feature = "native")]
-pub mod native;
-#[cfg(feature = "web")]
-pub mod web;
+pub mod vulkan;
 
 pub use camera::perspective_reverse_z;
 
@@ -27,8 +18,5 @@ pub use bind::{
 };
 pub use error::{Error, Result};
 pub use indirect::{DispatchIndirectArgs, DrawIndexedIndirectArgs, DrawIndirectArgs, IndexFormat};
-#[cfg(feature = "native")]
-pub use native::*;
 pub use types::{BufferUsage, Format, VertexAttribute, VertexBufferLayout, VertexFormat};
-#[cfg(feature = "web")]
-pub use web::*;
+pub use vulkan::*;

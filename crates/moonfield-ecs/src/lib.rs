@@ -9,6 +9,7 @@ use std::collections::HashMap;
 
 mod archetype;
 mod borrow;
+mod bundle;
 mod commands;
 mod component;
 mod component_ref;

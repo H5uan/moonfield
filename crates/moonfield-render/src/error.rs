@@ -10,7 +10,7 @@ pub type Result<T> = std::result::Result<T, Error>;
 pub enum Error {
     /// A requested device capability is not supported.
     Unsupported,
-    /// A native API call returned an error.
+    /// A Vulkan API call returned an error.
     Backend(String),
     /// A resource handle was invalid or already destroyed.
     InvalidHandle,
@@ -40,30 +40,14 @@ impl fmt::Display for Error {
 
 impl std::error::Error for Error {}
 
-#[cfg(feature = "native")]
 impl From<ash::vk::Result> for Error {
     fn from(result: ash::vk::Result) -> Self {
         Error::Backend(format!("{:?}", result))
     }
 }
 
-#[cfg(feature = "native")]
 impl From<ash::LoadingError> for Error {
     fn from(err: ash::LoadingError) -> Self {
         Error::Backend(format!("failed to load Vulkan: {}", err))
-    }
-}
-
-#[cfg(feature = "web")]
-impl From<wgpu::RequestAdapterError> for Error {
-    fn from(err: wgpu::RequestAdapterError) -> Self {
-        Error::AdapterRequest(err.to_string())
-    }
-}
-
-#[cfg(feature = "web")]
-impl From<wgpu::RequestDeviceError> for Error {
-    fn from(err: wgpu::RequestDeviceError) -> Self {
-        Error::DeviceRequest(err.to_string())
     }
 }

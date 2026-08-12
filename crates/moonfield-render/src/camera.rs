@@ -1,11 +1,8 @@
 //! Projection helpers encoding moonfield's single clip-space convention.
 //!
-//! Moonfield uses **one** NDC convention across every backend: Y points *up*
-//! and depth is **reverse** (`far -> 0`, near -> 1) — the wgpu / WebGPU / Bevy
-//! convention. There is no per-backend projection matrix; if a particular
-//! backend (e.g. Vulkan via `ash`) needs a Y-flip or a different depth swizzle,
-//! that is applied as an *extra transform at the backend boundary*, never by
-//! swapping the projection matrix itself.
+//! Moonfield uses one engine-level NDC convention: Y points *up* and depth is
+//! **reverse** (`far -> 0`, near -> 1). Vulkan-specific viewport adjustments
+//! belong at the Vulkan boundary rather than in the shared projection matrix.
 //!
 //! Projection construction is a camera concern, so it lives in the render
 //! crate (mirroring `bevy_render::camera`), not in `moonfield-math`.
@@ -16,10 +13,8 @@ use moonfield_math::Mat4;
 /// single clip convention: the camera looks down -Z, NDC Y points *up*, and
 /// depth is reversed — `near -> 1`, `far -> -infinity` (clipped to 0).
 ///
-/// Built on [`Mat4::perspective_infinite_reverse_rh`]. This is the convention
-/// shared by wgpu / WebGPU / Bevy and is the *only* projection matrix moonfield
-/// produces; backends that need a different NDC (Vulkan's Y-down) add an extra
-/// transform at their boundary instead of assembling their own matrix.
+/// Built on [`Mat4::perspective_infinite_reverse_rh`]. This is the only
+/// projection matrix Moonfield produces.
 ///
 /// # Infinite far plane
 ///
@@ -77,7 +72,7 @@ mod tests {
     #[test]
     fn test_y_up() {
         // A point above the camera axis (+Y in view space) lands at positive
-        // NDC Y, because the convention is wgpu-style (Y up).
+        // NDC Y follows Moonfield's engine convention (Y up).
         let y = ndc(Vec3::new(0.0, 1.0, -5.0)).y;
         assert!(y > 0.0, "y = {y}");
         let y = ndc(Vec3::new(0.0, -1.0, -5.0)).y;

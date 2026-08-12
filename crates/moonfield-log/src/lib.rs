@@ -50,12 +50,7 @@ type PreFmtSubscriber = Layered<EnvFilter, Layered<Option<BoxedLayer>, Registry>
 pub type BoxedFmtLayer = Box<dyn Layer<PreFmtSubscriber> + Send + Sync + 'static>;
 
 /// The default [`LogPlugin`] [`EnvFilter`].
-pub const DEFAULT_FILTER: &str = concat!(
-    "wgpu=error,",
-    "naga=warn,",
-    "calloop::loop_logic=error,",
-    "calloop::sources=debug,",
-);
+pub const DEFAULT_FILTER: &str = concat!("calloop::loop_logic=error,", "calloop::sources=debug,",);
 
 /// Adds logging to Apps. This plugin sets up a `tracing-subscriber` collector
 /// that logs to `stderr`.
@@ -69,7 +64,7 @@ pub const DEFAULT_FILTER: &str = concat!(
 ///     App::new()
 ///         .add_plugins(LogPlugin {
 ///             level: Level::DEBUG,
-///             filter: "wgpu=error,moonfield_render=info".to_string(),
+///             filter: "moonfield_render=info".to_string(),
 ///             custom_layer: |_| None,
 ///         })
 ///         .run();
@@ -77,7 +72,7 @@ pub const DEFAULT_FILTER: &str = concat!(
 /// ```
 ///
 /// Log level can also be changed using the `RUST_LOG` environment variable.
-/// For example, using `RUST_LOG=wgpu=error,moonfield_render=info cargo run ..`
+/// For example, using `RUST_LOG=moonfield_render=info cargo run ..`
 ///
 /// If you define the `RUST_LOG` environment variable, the [`LogPlugin`] settings
 /// will be ignored.

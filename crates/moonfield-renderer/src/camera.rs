@@ -1,9 +1,8 @@
 //! Perspective camera producing view/projection matrices.
 //!
-//! Moonfield uses a **single** projection convention across both backends:
-//! wgpu-style NDC (Y up, reverse-Z depth `far -> 0`). The matrix is
-//! backend-agnostic; any backend-specific NDC transform (e.g. Vulkan's Y-down)
-//! is applied at the backend boundary, never here.
+//! Moonfield uses a single engine projection convention: Y-up NDC with
+//! reverse-Z depth (`far -> 0`). Vulkan-specific viewport adjustments are
+//! applied at the renderer boundary, never in this shared matrix.
 
 use moonfield_math::{Mat4, Vec3};
 
@@ -111,7 +110,7 @@ mod tests {
     #[test]
     fn test_y_up() {
         // A point above the camera axis (+Y in world) lands at positive NDC Y,
-        // because the single convention is wgpu-style (Y up).
+        // because the engine convention is Y-up.
         let cam = test_camera();
         let y = ndc(&cam, Vec3::new(0.0, 1.0, -5.0)).y;
         assert!(y > 0.0, "y = {y}");

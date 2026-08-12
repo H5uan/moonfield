@@ -40,6 +40,7 @@ pub use api::TypedArrayElement;
 pub use api::TypedArrayValue;
 pub use hot_reload::HotReloadHandler;
 pub use hot_reload::HotReloader;
+pub(crate) use hot_reload::ScriptFileSnapshot;
 pub use module::ModuleRegistry;
 
 #[cfg(feature = "quickjs-backend")]

@@ -1,7 +1,7 @@
 //! Vulkan shader module abstraction.
 
 use crate::error::{Error, Result};
-use crate::native::device::Device;
+use crate::vulkan::device::Device;
 use ash::vk;
 
 /// A Vulkan shader module created from SPIR-V bytecode.
