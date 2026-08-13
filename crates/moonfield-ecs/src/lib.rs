@@ -7,6 +7,28 @@ use std::any::{Any, TypeId};
 use std::cell::{Ref, RefCell, RefMut};
 use std::collections::HashMap;
 
+macro_rules! reverse_apply {
+    ($m:ident [] $($reversed:tt)*) => {
+        $m!{$($reversed),*} // base case
+    };
+    ($m:ident [$first:tt $($rest:tt)*] $($reversed:tt)*) => {
+        reverse_apply!{$m [$($rest)*] $first $($reversed)*}
+    };
+}
+
+/// Calls `m!()`, `m!(A)`, `m!(A, B)`, and `m!(A, B, C)` for i.e. `(m, A, B, C)`,
+/// where `m` is any macro, for any number of parameters.
+macro_rules! smaller_tuples_too {
+    ($m:ident, $next:tt) => {
+        $m!{}
+        $m!{$next}
+    };
+    ($m:ident, $next:tt, $($rest:tt),*) => {
+        smaller_tuples_too!{$m, $($rest),*}
+        reverse_apply!{$m [$next $($rest)*]}
+    };
+}
+
 mod archetype;
 mod borrow;
 mod bundle;
