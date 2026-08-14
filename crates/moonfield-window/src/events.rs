@@ -7,9 +7,9 @@
 //! consumes them during the update, and the backend clears the queue after.
 //!
 //! Exit policy mirrors Godot's `auto_accept_quit`: by default the backend
-//! exits immediately on `CloseRequested`; scripts can take over via
-//! `app_set_auto_exit_on_close(false)` and later call `app_exit()` (which
-//! sets [`WindowControl::exit_requested`]).
+//! exits immediately on `CloseRequested`; a caller can take over by setting
+//! [`WindowControl::set_auto_exit_on_close`] to `false` and later calling
+//! [`WindowControl::request_exit`] (which sets [`WindowControl::exit_requested`]).
 
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
@@ -54,18 +54,17 @@ impl WindowEvents {
     }
 }
 
-/// Window control signals shared between the windowing backend and host
-/// functions. Cheap to clone (atomics behind an `Arc`).
+/// Window control signals shared between the windowing backend and other
+/// callers. Cheap to clone (atomics behind an `Arc`).
 #[derive(Debug, Clone)]
 pub struct WindowControl {
     /// When true (the default), the backend exits the event loop
-    /// immediately on `CloseRequested` without consulting scripts — Godot's
-    /// `auto_accept_quit`. Scripts set this false via
-    /// `app_set_auto_exit_on_close(false)` to receive `close_requested`
-    /// events and decide themselves.
+    /// immediately on `CloseRequested` — Godot's `auto_accept_quit`. A caller
+    /// sets this false via [`WindowControl::set_auto_exit_on_close`] to
+    /// receive `close_requested` events and decide themselves.
     pub auto_exit_on_close: Arc<AtomicBool>,
-    /// Set by scripts via `app_exit()`; the backend exits the event loop at
-    /// the next frame boundary.
+    /// Set by a caller via [`WindowControl::request_exit`]; the backend exits
+    /// the event loop at the next frame boundary.
     pub exit_requested: Arc<AtomicBool>,
 }
 
@@ -100,9 +99,9 @@ impl WindowControl {
     }
 }
 
-/// Window mutation requests shared between host functions and the windowing
-/// backend. Host functions queue requests; the backend applies them on the
-/// next frame boundary.
+/// Window mutation requests shared between callers and the windowing
+/// backend. Callers queue requests; the backend applies them on the next
+/// frame boundary.
 #[derive(Debug, Clone, Default)]
 pub struct WindowRequests {
     title: Arc<Mutex<Option<String>>>,

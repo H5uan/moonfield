@@ -447,7 +447,7 @@ impl Archetype {
     /// archetype.
     ///
     /// Convenient for dispatching logic that must run over a set of type ids.
-    /// For example, a scripting system could iterate the world's archetypes,
+    /// For example, a reflection layer could iterate the world's archetypes,
     /// extract every combination of component types currently stored, and map
     /// each archetype to a wrapper object that provides functionality based on
     /// its components.

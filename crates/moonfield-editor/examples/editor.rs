@@ -2,7 +2,7 @@
 //!
 //! Wires `WinitPlugin` (Poll mode for continuous redraw) + `EditorPlugin`
 //! and runs the app. Set `MOONFIELD_EDITOR_AUTO_CLOSE=<frames>` to exit
-//! after N rendered frames — used by scripted startup/shutdown smoke tests
+//! after N rendered frames — used by automated startup/shutdown smoke tests
 //! on machines with a display and a Vulkan driver.
 //!
 //! ```sh
