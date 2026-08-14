@@ -41,6 +41,7 @@ mod query;
 mod resource;
 mod system;
 mod world;
+mod world2;
 
 pub use commands::{CommandQueue, Commands};
 pub use component::{Component, ComponentStorage};
