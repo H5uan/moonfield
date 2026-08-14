@@ -6,8 +6,8 @@
 use moonfield_app::{App, Plugin, Runner};
 use moonfield_log::error;
 use moonfield_window::{
-    CursorMode, InputEvent, InputState, RawHandleWrapper, SharedWindow, Window, WindowControl,
-    WindowEventKind, WindowEvents, WindowRequests,
+    CursorMode, InputEvent, InputState, RawHandleWrapper, Window, WindowControl, WindowEventKind,
+    WindowEvents, WindowRequests,
 };
 use raw_window_handle::{HasDisplayHandle, HasWindowHandle};
 use std::collections::HashMap;
@@ -77,11 +77,9 @@ pub struct WinitPlugin {
     pub height: u32,
     /// Whether to poll or wait for events.
     pub wait_mode: WaitMode,
-    /// Window control signals shared with scripts (exit policy).
+    /// Window control signals (exit policy).
     pub window_control: WindowControl,
-    /// Shared window state read by host functions.
-    pub window_state: SharedWindow,
-    /// Pending window mutation requests from host functions.
+    /// Pending window mutation requests.
     pub window_requests: WindowRequests,
 }
 
@@ -103,22 +101,15 @@ impl Default for WinitPlugin {
             height: 600,
             wait_mode: WaitMode::Wait,
             window_control: WindowControl::default(),
-            window_state: moonfield_window::new_shared_window(),
             window_requests: WindowRequests::default(),
         }
     }
 }
 
-/// Share the [`WindowControl`] handle with the event loop (and, via the
-/// composition root, with scripts).
+/// Share the [`WindowControl`] handle with the event loop.
 impl WinitPlugin {
     pub fn with_window_control(mut self, window_control: WindowControl) -> Self {
         self.window_control = window_control;
-        self
-    }
-
-    pub fn with_window_state(mut self, window_state: SharedWindow) -> Self {
-        self.window_state = window_state;
         self
     }
 
@@ -147,11 +138,9 @@ pub struct WindowConfig {
     pub width: u32,
     pub height: u32,
     pub wait_mode: WaitMode,
-    /// Window control signals shared with scripts (exit policy).
+    /// Window control signals (exit policy).
     pub window_control: WindowControl,
-    /// Shared window state read by host functions.
-    pub window_state: SharedWindow,
-    /// Pending window mutation requests from host functions.
+    /// Pending window mutation requests.
     pub window_requests: WindowRequests,
 }
 
@@ -163,13 +152,11 @@ impl Plugin for WinitPlugin {
             height: self.height,
             wait_mode: self.wait_mode,
             window_control: self.window_control.clone(),
-            window_state: self.window_state.clone(),
             window_requests: self.window_requests.clone(),
         });
         app.insert_resource(InputState::default());
         app.insert_resource(WindowEvents::default());
         app.insert_resource(RawWindowEvents::default());
-        app.insert_resource(self.window_state.clone());
         app.insert_resource(self.window_requests.clone());
     }
 
@@ -199,7 +186,6 @@ pub fn winit_run(app: &mut App) {
             height: c.height,
             wait_mode: c.wait_mode,
             window_control: c.window_control.clone(),
-            window_state: c.window_state.clone(),
             window_requests: c.window_requests.clone(),
         })
         .unwrap_or(WindowConfig {
@@ -208,7 +194,6 @@ pub fn winit_run(app: &mut App) {
             height: 600,
             wait_mode: WaitMode::Wait,
             window_control: WindowControl::default(),
-            window_state: moonfield_window::new_shared_window(),
             window_requests: WindowRequests::default(),
         });
 
@@ -259,14 +244,6 @@ impl ApplicationHandler for WinitHandler<'_> {
                     width: self.config.width,
                     height: self.config.height,
                 });
-
-                // — Mirror the initial window into the shared handle used by scripts —
-                if let Some(shared) = self.app.get_resource_mut::<SharedWindow>() {
-                    let mut w = shared.lock().unwrap_or_else(|e| e.into_inner());
-                    w.title = self.config.title.clone();
-                    w.width = self.config.width;
-                    w.height = self.config.height;
-                }
 
                 // — Create raw handle wrapper for surface creation —
                 match (
@@ -370,9 +347,9 @@ impl ApplicationHandler for WinitHandler<'_> {
                 if let Some(mut events) = self.app.get_resource_mut::<WindowEvents>() {
                     events.push(WindowEventKind::CloseRequested);
                 }
-                // Godot's auto_accept_quit: exit immediately unless scripts
-                // have taken over close handling via
-                // `app_set_auto_exit_on_close(false)`.
+                // Godot's auto_accept_quit: exit immediately by default, unless
+                // `auto_exit_on_close` was turned off to take over close
+                // handling.
                 if self.config.window_control.auto_exit_on_close() {
                     event_loop.exit();
                 }
@@ -388,12 +365,6 @@ impl ApplicationHandler for WinitHandler<'_> {
                 if let Some(mut win) = self.app.get_resource_mut::<Window>() {
                     win.width = size.width;
                     win.height = size.height;
-                }
-                // Keep the shared script-facing handle in sync.
-                if let Some(shared) = self.app.get_resource_mut::<SharedWindow>() {
-                    let mut w = shared.lock().unwrap_or_else(|e| e.into_inner());
-                    w.width = size.width;
-                    w.height = size.height;
                 }
                 // Rebuild raw handles when the window is resized (the handles
                 // themselves are still valid, but the size is updated above).
@@ -433,9 +404,6 @@ impl ApplicationHandler for WinitHandler<'_> {
         if let Some(window) = &self.window {
             if let Some(title) = self.config.window_requests.take_title() {
                 window.set_title(&title);
-                if let Some(shared) = self.app.get_resource_mut::<SharedWindow>() {
-                    shared.lock().unwrap_or_else(|e| e.into_inner()).title = title.clone();
-                }
                 if let Some(mut win) = self.app.get_resource_mut::<Window>() {
                     win.title = title;
                 }
@@ -470,7 +438,7 @@ impl ApplicationHandler for WinitHandler<'_> {
         if let Some(mut raw) = self.app.get_resource_mut::<RawWindowEvents>() {
             raw.end_frame();
         }
-        // A script asked us to quit via `app_exit()`.
+        // `app_exit()`-style request: a non-event-loop caller asked us to quit.
         if self.config.window_control.exit_requested() {
             event_loop.exit();
         }
