@@ -1,13 +1,5 @@
 //! Moonfield sample application entry point.
 
-// Script host API bindings (composition root). The script system is
-// temporarily unplugged from the app below — no `ScriptPlugin` is added, so
-// nothing calls into this module at runtime. It stays compiled so the
-// `moonfield.d.ts` sync test keeps guarding the bindings; re-enable by
-// wiring `ScriptPlugin` back into `main`.
-#[allow(dead_code)]
-mod script_api;
-
 use moonfield_app::prelude::World;
 use moonfield_app::App;
 use moonfield_log::info;
@@ -27,12 +19,6 @@ fn main() {
         info!("ECS startup!");
     });
     app.add_systems(print_fps);
-
-    // Script system temporarily unplugged: no `ScriptPlugin` is added, so no
-    // script runtime is created and `scripts/record_frame.ts` is not loaded.
-    // The window control/state/requests handles revert to the plugin's own
-    // defaults. Re-enable by restoring the `ScriptPlugin::new(...)` wiring
-    // here (see git history).
 
     app.add_plugin(RenderPlugin);
     app.add_plugin(WinitPlugin::default());

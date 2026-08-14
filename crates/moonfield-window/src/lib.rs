@@ -7,7 +7,6 @@
 
 use moonfield_app::App;
 use raw_window_handle::{RawDisplayHandle, RawWindowHandle};
-use std::sync::{Arc, Mutex};
 
 pub mod events;
 pub mod input;
@@ -45,15 +44,6 @@ impl Default for Window {
             height: 600,
         }
     }
-}
-
-/// Shared handle to a [`Window`], updated by the windowing backend and read by
-/// host functions that cannot access the ECS world.
-pub type SharedWindow = Arc<Mutex<Window>>;
-
-/// Create a shared window handle with the default size and title.
-pub fn new_shared_window() -> SharedWindow {
-    Arc::new(Mutex::new(Window::default()))
 }
 
 /// Raw window and display handles, suitable for graphics API surface creation.

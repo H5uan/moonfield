@@ -210,7 +210,7 @@ fn editor_render(world: &mut World) {
 
     // Debug helper: MOONFIELD_EDITOR_AUTO_CLOSE=<frames> signals exit via the
     // shared WindowControl after N rendered frames, so shutdown paths can be
-    // exercised from scripts/CI without manually closing the window.
+    // exercised from CI without manually closing the window.
     if let Ok(frames) = std::env::var("MOONFIELD_EDITOR_AUTO_CLOSE") {
         if let Ok(limit) = frames.parse::<u64>() {
             state.frames_rendered = state.frames_rendered.saturating_add(1);

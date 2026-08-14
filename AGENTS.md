@@ -1,6 +1,6 @@
 # Repository Guidelines
 
-Welcome to **moonfield** — a Rust workspace implementing a Vulkan RHI and a TypeScript scripting runtime. This guide helps you get oriented quickly.
+Welcome to **moonfield** — a Rust workspace implementing a Vulkan RHI, a Bevy-style ECS/app framework, and an editor. This guide helps you get oriented quickly.
 
 ## Project Structure & Module Organization
 
@@ -15,23 +15,19 @@ crates/
   moonfield-math/     # glam re-export + domain types (Dir3/Ray3d), engine clip-space conventions
                       # — the workspace math single entry (bevy_math pattern)
   moonfield-render/   # Lunar Mare — Vulkan-only rendering RHI (ash, src/vulkan/); public resource descriptions
-                      # (Format, BufferUsage, VertexBufferLayout) in src/types.rs; swapchain, shaders, headless recording,
+                      # (Format, BufferUsage, VertexBufferLayout) in src/types.rs; swapchain, shaders,
                       # offscreen targets (offscreen.rs), windowed frame loop (window_target.rs)
   moonfield-renderer/ # Lunaris — scene rendering & algorithms (splat/rt/gi), RenderAlgorithm phase abstraction,
                       # 3DGS training (splat::train); targets the Vulkan RHI and re-exports it as `rhi`
-  moonfield-script/   # Scripting runtime with v8 and QuickJS backends, ES modules, hot reload (src/script/), input polling API (src/input.rs)
   moonfield-window/   # Abstract windowing types (Window resource, RawHandleWrapper, InputState/InputEvent, WindowEvents/WindowControl), no backend deps
   moonfield-winit/    # Windowing backend (winit), bridges winit Window → moonfield-window resources
-scripts/              # TypeScript helper scripts (e.g. record_frame.ts); moonfield.d.ts is auto-generated
 ```
 
-The editor is a library crate that provides [`EditorPlugin`], a regular Bevy-style plugin composing the engine crates. `EditorPlugin` does **not** own the event loop or the window — it layers on top of `WinitPlugin` (which must be added first), reading the `WinitWindow`/`RawHandleWrapper`/`InputState`/`WindowControl`/`RawWindowEvents` resources the backend registers, and lazily building the windowed Vulkan renderer (`WindowRenderer`) + egui state on the first render tick. The editor registers a render-phase system via `App::add_render_system`; the winit backend calls `App::render` every frame after `App::update`, which drives the editor to build the egui UI and record it (plus the viewport scene) into the same swapchain. This mirrors how `bevy_egui` layers on `bevy_winit` rather than replacing it. The scene renders into an `OffscreenTarget` (final layout `SHADER_READ_ONLY_OPTIMAL`) that egui samples as a user texture in the Viewport dock panel. The egui stack is anchored to egui-ash-renderer's compatibility table (currently egui 0.33 / egui-winit 0.33 / egui-ash-renderer 0.11 + gpu-allocator / egui_dock 0.18, ash 0.38, winit 0.30) — bump them together. Scripting (play mode) and ECS-driven scenes are not wired into the editor yet. Setting `MOONFIELD_EDITOR_AUTO_CLOSE=<frames>` signals exit via the shared `WindowControl` after N rendered frames, which allows scripted smoke tests of startup/shutdown on a machine with a display. To use the editor, add `WinitPlugin` (with `WaitMode::Poll` for continuous redraw) first, then `EditorPlugin`, then `app.run()`. The game (`WinitPlugin`) and editor paths share the same `WinitPlugin` runner and the `App::run()` -> `Runner` architecture.
+The editor is a library crate that provides [`EditorPlugin`], a regular Bevy-style plugin composing the engine crates. `EditorPlugin` does **not** own the event loop or the window — it layers on top of `WinitPlugin` (which must be added first), reading the `WinitWindow`/`RawHandleWrapper`/`InputState`/`WindowControl`/`RawWindowEvents` resources the backend registers, and lazily building the windowed Vulkan renderer (`WindowRenderer`) + egui state on the first render tick. The editor registers a render-phase system via `App::add_render_system`; the winit backend calls `App::render` every frame after `App::update`, which drives the editor to build the egui UI and record it (plus the viewport scene) into the same swapchain. This mirrors how `bevy_egui` layers on `bevy_winit` rather than replacing it. The scene renders into an `OffscreenTarget` (final layout `SHADER_READ_ONLY_OPTIMAL`) that egui samples as a user texture in the Viewport dock panel. The egui stack is anchored to egui-ash-renderer's compatibility table (currently egui 0.33 / egui-winit 0.33 / egui-ash-renderer 0.11 + gpu-allocator / egui_dock 0.18, ash 0.38, winit 0.30) — bump them together. ECS-driven scenes are not wired into the editor yet. Setting `MOONFIELD_EDITOR_AUTO_CLOSE=<frames>` signals exit via the shared `WindowControl` after N rendered frames, which allows automated smoke tests of startup/shutdown on a machine with a display. To use the editor, add `WinitPlugin` (with `WaitMode::Poll` for continuous redraw) first, then `EditorPlugin`, then `app.run()`. The game (`WinitPlugin`) and editor paths share the same `WinitPlugin` runner and the `App::run()` -> `Runner` architecture.
 
-Host API bindings that touch engine layers (`record_frame`, …) live in the binary crate (`crates/moonfield/src/script_api.rs`) as the composition root — `moonfield-script` itself has no engine-layer dependencies. **The script system is currently unplugged from the binary**: `main.rs` adds no `ScriptPlugin`, so no script runtime is created at runtime; the `script_api` module stays compiled (via `#[allow(dead_code)]`) so the `moonfield.d.ts` sync test keeps guarding the bindings. Bindings that only read script-owned state (the `input_*` polling API) are built into `moonfield-script` (`input::register_input_api`) and shared via an `Arc<Mutex<ScriptInputState>>` handle (`ScriptPlugin::with_input_state`). `scripts/moonfield.d.ts` is generated from the registered `ScriptApi` and kept in sync by a unit test.
+Input flows: `moonfield-winit` translates winit events into the `InputState` world resource (frame-latched; cleared each frame after the update) for ECS systems to read during the update. `just_pressed` is frame-scoped in `on_update` and fixed-step-scoped in `on_fixed_update` (delivered to exactly one step, never lost across frames).
 
-Input flows: `moonfield-winit` translates winit events into the `InputState` world resource (frame-latched; cleared each frame after the update) → the script plugin mirrors it into the shared `ScriptInputState`, replays events to the `on_input` hook, and drives `on_fixed_update`/`on_update`. `just_pressed` is frame-scoped in `on_update` and fixed-step-scoped in `on_fixed_update` (delivered to exactly one step, never lost across frames).
-
-Window lifecycle events (`close_requested`/`resized`/`focus_*`) travel on a separate channel — the `WindowEvents` world resource → the `on_window_event` hook. Exit policy mirrors Godot's `auto_accept_quit`: `CloseRequested` exits immediately by default; scripts call `app_set_auto_exit_on_close(false)` to take over and later `app_exit()` (signals via the shared `WindowControl`).
+Window lifecycle events (`close_requested`/`resized`/`focus_*`) travel on a separate channel — the `WindowEvents` world resource. Exit policy mirrors Godot's `auto_accept_quit`: `CloseRequested` exits immediately by default; a caller sets `WindowControl::set_auto_exit_on_close(false)` to take over and later `WindowControl::request_exit()` (signals via the shared `WindowControl`).
 
 ## Build, Test, and Development Commands
 
@@ -42,11 +38,8 @@ Window lifecycle events (`close_requested`/`resized`/`focus_*`) travel on a sepa
 | `cargo test` | Run all unit and integration tests across the workspace. |
 | `cargo clippy` | Lint the codebase with Clippy. |
 | `cargo fmt` | Format all Rust source files. |
-| `cargo build --features quickjs-backend` | Build the runtime with the QuickJS backend instead of the default v8 backend. |
 
-The runtime supports two scripting backends selected via Cargo features: `v8-backend` (default) and `quickjs-backend`.
-
-The rendering crates support Vulkan only through `ash`. Backend-selection features are removed; the renderer is always available in the default build. The engine-level clip convention is Y-up with reverse-Z, with any Vulkan viewport adjustment handled at the Vulkan boundary.
+The rendering crates support Vulkan only through `ash`. The renderer is always available in the default build. The engine-level clip convention is Y-up with reverse-Z, with any Vulkan viewport adjustment handled at the Vulkan boundary.
 
 | Command | Description |
 |---|---|
@@ -56,32 +49,28 @@ The rendering crates support Vulkan only through `ash`. Backend-selection featur
 
 Shader authoring: runtime Slang→SPIR-V compilation is provided by the Vulkan backend (`vulkan/shader.rs`). `ShaderModule::from_spirv` loads Vulkan SPIR-V bytecode directly; one offline Slang compile (`slangc -target spirv`) can also produce embedded shader bytes with `include_bytes!`.
 
-`HeadlessContext`/`record_frame`, `WindowRenderer`/`Swapchain`, `RenderPlugin`, and `moonfield-editor` are all part of the Vulkan desktop path.
+`WindowRenderer`/`Swapchain`, `RenderPlugin`, and `moonfield-editor` are all part of the Vulkan desktop path.
 
 External native dependencies:
 
 - **Slang** — `shader-slang-sys` (via `moonfield-render`) links the Slang compiler dynamically. Set `SLANG_DIR` (a prebuilt [Slang release](https://github.com/shader-slang/slang/releases) with `include/`, `lib/`, `bin/`) or install a recent Vulkan SDK (`VULKAN_SDK` is used as a fallback). The Slang shared library must also be on the runtime library path (`PATH` on Windows, `LD_LIBRARY_PATH` on Linux, `DYLD_LIBRARY_PATH` on macOS) when running binaries/tests.
-- **libclang** — required by `bindgen` (used by `shader-slang-sys` and `v8`).
-- The `v8` crate downloads a prebuilt static library automatically on `x86_64-pc-windows-msvc`, `x86_64-unknown-linux-gnu`, and `aarch64-apple-darwin`.
+- **libclang** — required by `bindgen` (used by `shader-slang-sys`).
 
 ## Continuous Integration
 
 GitHub Actions (`.github/workflows/ci.yml`) runs on pushes to `master` and on PRs, across `ubuntu-latest`, `windows-latest`, and `macos-latest` (Apple Silicon):
 
 - `rustfmt` — `cargo fmt --all -- --check`.
-- `clippy` — `cargo clippy --workspace --all-targets -- -D warnings` for both scripting backends, on all three platforms.
-- `test` — `cargo test --workspace` (v8 backend) and `cargo test -p moonfield -p moonfield-script --no-default-features --features quickjs-backend` (QuickJS backend) on all three platforms.
+- `clippy` — `cargo clippy --workspace --all-targets -- -D warnings` on all three platforms.
+- `test` — `cargo test --workspace` on all three platforms.
 - `vulkan-smoke` — headless Vulkan triangle test on Ubuntu with lavapipe, alongside the workspace checks on Linux, Windows, and macOS.
 
-The `.github/actions/setup-slang` composite action downloads a pinned Slang release and exports `SLANG_DIR` plus the runtime library path. On Linux, CI installs `mesa-vulkan-drivers` (lavapipe) so GPU-dependent tests (`headless_triangle`, `record_frame` extent) run for real; on Windows/macOS they skip gracefully when no Vulkan driver is present.
+The `.github/actions/setup-slang` composite action downloads a pinned Slang release and exports `SLANG_DIR` plus the runtime library path. On Linux, CI installs `mesa-vulkan-drivers` (lavapipe) so GPU-dependent tests (`headless_triangle`) run for real; on Windows/macOS they skip gracefully when no Vulkan driver is present.
 
 ## Threading Model
 
-- The script VM (V8 isolate / QuickJS runtime) is `!Send` and lives on the **main thread**, driven from the winit event loop. Scripts exist to call host APIs, and host APIs touch thread-confined resources (winit window, Vulkan device, ECS `World`) — the same reason PuerTS keeps its JsEnv on the game thread.
-- Scripts never own GPU/native objects directly. `record_frame` (headless recording) is a debug-only exception; gameplay-facing host APIs must hand off via a command queue once multi-threaded rendering lands (the logic thread produces render commands, the render thread owns all Vulkan objects).
-- Runaway scripts are interrupted by an execution watchdog (`DEFAULT_EXECUTION_TIMEOUT`, 5 s per top-level call); the runtime stays usable afterwards.
-- The watchdog interrupts JS execution only (V8 `terminate_execution` fires at interrupt checks, QuickJS's handler runs between bytecodes); a host function blocked in a native call — e.g. a Vulkan driver call like `record_frame` — hangs the main thread past any timeout.
-- For heavy JS-side compute, use one isolate per worker thread with message passing (Worker-style). Never share a runtime across threads, even under locks — the QuickJS backend has no cross-thread support at all.
+- The winit event loop and all Vulkan objects live on the **main thread**; nothing is `Send` across threads yet. Render work and ECS `World` access are confined to that thread.
+- Once multi-threaded rendering lands, gameplay code must hand off to a render thread via a command queue (the logic thread produces render commands, the render thread owns all Vulkan objects); GPU/native objects are never shared directly across threads.
 
 ## Coding Style & Naming Conventions
 
@@ -95,7 +84,7 @@ The `.github/actions/setup-slang` composite action downloads a pinned Slang rele
 - Tests are written alongside source using Rust's built-in `#[cfg(test)]` module convention.
 - Run the full suite with `cargo test`.
 - When adding a feature, add a corresponding test module in the same file or a `tests/` directory within the crate.
-- Use descriptive test function names prefixed with `test_` (e.g. `test_script_api_roundtrip`).
+- Use descriptive test function names prefixed with `test_` (e.g. `test_window_control_defaults`).
 
 ## Commit & Pull Request Guidelines
 
@@ -103,7 +92,7 @@ Commit messages follow the **Conventional Commits** format observed in the histo
 
 ```
 feat: add headless triangle recording
-fix(v8): box ScriptApi to prevent dangling external pointer
+fix(render): box descriptor layout to prevent dangling pointer
 ```
 
 - Use `feat:`, `fix:`, `chore:`, `refactor:`, etc., with an optional scope in parentheses.

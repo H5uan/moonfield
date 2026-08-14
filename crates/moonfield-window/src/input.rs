@@ -3,8 +3,8 @@
 //! A windowing backend (e.g. `moonfield-winit`) translates raw OS events
 //! into [`InputEvent`]s and applies them to the [`InputState`] resource as
 //! they arrive; once per frame (after the app update has consumed them) it
-//! calls [`InputState::end_frame`]. Consumers — script runtimes, ECS
-//! systems — read the resource during the update.
+//! calls [`InputState::end_frame`]. Consumers — ECS systems — read the
+//! resource during the update.
 //!
 //! The model follows Bevy's `ButtonInput` contract: pressed state persists
 //! across frames, while `just_pressed`/`just_released` edges, the event
@@ -28,8 +28,8 @@ pub enum CursorMode {
 ///
 /// Key and button codes are strings matching winit's `KeyCode` /
 /// `MouseButton` debug names (e.g. `"Space"`, `"KeyW"`, `"ArrowLeft"`,
-/// `"Left"`) so scripts and backends share one vocabulary without depending
-/// on winit.
+/// `"Left"`) so backends and consumers share one vocabulary without
+/// depending on winit.
 #[derive(Debug, Clone, PartialEq)]
 pub enum InputEvent {
     /// A key was pressed (auto-repeat events are filtered by the backend).

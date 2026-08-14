@@ -56,20 +56,16 @@ jobs:
 
       - uses: Swatinem/rust-cache@v2
 
-      - name: Clippy (v8 backend)
+      - name: Clippy
         run: cargo clippy --workspace --all-targets --locked -- -D warnings
 
-      - name: Clippy (quickjs backend)
-        run: cargo clippy -p moonfield -p moonfield-script --all-targets --no-default-features --features "quickjs-backend" --locked -- -D warnings
-
   test:
-    name: test ${{ matrix.backend }} (${{ matrix.os }})
+    name: test (${{ matrix.os }})
     runs-on: ${{ matrix.os }}
     strategy:
       fail-fast: false
       matrix:
         os: [ubuntu-latest, windows-latest, macos-latest]
-        backend: [v8, quickjs]
     steps:
       - uses: actions/checkout@v7
 
@@ -93,13 +89,8 @@ jobs:
         if: runner.os == 'Linux'
         run: vulkaninfo --summary || true
 
-      - name: Run tests (v8 backend)
-        if: matrix.backend == 'v8'
+      - name: Run tests
         run: cargo test --workspace --locked
-
-      - name: Run tests (quickjs backend)
-        if: matrix.backend == 'quickjs'
-        run: cargo test -p moonfield -p moonfield-script --no-default-features --features "quickjs-backend" --locked
 
   vulkan-smoke:
     name: Vulkan smoke
