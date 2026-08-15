@@ -966,7 +966,7 @@ dependencies = [
 name = "moonfield-window"
 version = "0.1.0"
 dependencies = [
- "moonfield-app",
+ "moonfield-ecs",
  "raw-window-handle",
 ]
 
@@ -975,6 +975,7 @@ name = "moonfield-winit"
 version = "0.1.0"
 dependencies = [
  "moonfield-app",
+ "moonfield-ecs",
  "moonfield-log",
  "moonfield-window",
  "raw-window-handle",

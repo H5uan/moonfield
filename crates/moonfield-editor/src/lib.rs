@@ -8,11 +8,13 @@
 //! into the same swapchain every frame, mirroring how `bevy_egui` layers on
 //! `bevy_winit` rather than replacing it.
 //!
-//! Composition: add `WinitPlugin` first (it owns the window + event loop and
-//! registers [`WinitWindow`], [`RawHandleWrapper`], [`InputState`],
-//! [`WindowControl`], [`RawWindowEvents`]), then `EditorPlugin`. The editor
-//! reads those resources and lazily builds its Vulkan + egui state on the
-//! first render tick, once the window actually exists.
+//! Composition: add `WinitPlugin` first (it owns the window + event loop,
+//! spawns the primary window entity with its `Window` /
+//! `RawHandleWrapper` components, and registers [`WinitWindow`],
+//! [`InputState`], [`WindowControl`], [`RawWindowEvents`]), then
+//! `EditorPlugin`. The editor reads those resources and lazily builds its
+//! Vulkan + egui state on the first render tick, once the window actually
+//! exists.
 
 mod ui;
 mod viewport;
@@ -47,7 +49,7 @@ impl Plugin for EditorPlugin {
     fn build(&self, app: &mut App) {
         // The editor state is built lazily on the first render tick, once the
         // windowing backend has created the window and registered
-        // `WinitWindow` / `RawHandleWrapper`.
+        // `WinitWindow`.
         app.insert_resource(EditorStateSlot::default());
         app.add_render_system(editor_render);
     }

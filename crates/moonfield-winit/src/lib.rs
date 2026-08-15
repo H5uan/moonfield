@@ -2,24 +2,68 @@
 //!
 //! Provides a [`WinitPlugin`] that creates a window and runs the winit event
 //! loop, driving the application's update cycle.
+//!
+//! A window is an ECS entity carrying a [`Window`] component (plus
+//! [`PrimaryWindow`] and [`RawHandleWrapper`]); the backend owns the OS
+//! window, writes resize/DPI changes back into the component, and applies
+//! component-side mutations (title, cursor mode) once per frame via a
+//! [`CachedWindow`] field diff (Bevy's `changed_windows` pattern).
 
+use converters::{convert_modifiers, convert_mouse_button, convert_physical_key_code};
 use moonfield_app::{App, Plugin, Runner};
+use moonfield_ecs::Entity;
 use moonfield_log::error;
 use moonfield_window::{
-    CursorMode, InputEvent, InputState, RawHandleWrapper, Window, WindowControl, WindowEventKind,
-    WindowEvents, WindowRequests,
+    InputEvent, InputState, MouseScrollUnit, PrimaryWindow, RawHandleWrapper, Window,
+    WindowControl, WindowEventKind, WindowEvents, WindowResolution,
 };
 use raw_window_handle::{HasDisplayHandle, HasWindowHandle};
-use std::collections::HashMap;
 use std::sync::Arc;
 use winit::{
     application::ApplicationHandler,
     dpi::LogicalSize,
-    event::{ElementState, MouseButton, MouseScrollDelta, WindowEvent},
+    event::{ElementState, MouseScrollDelta, WindowEvent},
     event_loop::{ActiveEventLoop, ControlFlow, EventLoop},
-    keyboard::{KeyCode, PhysicalKey},
-    window::{CursorGrabMode, Window as WinitWindowHandle, WindowAttributes, WindowId},
+    window::{Window as WinitWindowHandle, WindowAttributes, WindowId},
 };
+
+mod converters;
+mod windows;
+mod winit_config;
+
+pub use windows::{CachedWindow, WinitWindows};
+pub use winit_config::{UpdateMode, WinitSettings};
+
+/// Events that can be sent into the winit event loop from outside it.
+///
+/// Sent via the [`EventLoopProxyWrapper`] resource (mirrors bevy's
+/// `WinitUserEvent`).
+#[derive(Debug, Clone, Copy)]
+pub enum WinitUserEvent {
+    /// Dummy event that just wakes up the event loop (e.g. a UI toolkit's
+    /// repaint request, or a background thread asking for a frame).
+    WakeUp,
+}
+
+/// A wrapper around [`winit::event_loop::EventLoopProxy`], stored as a world
+/// resource so any system (or external thread) can wake the event loop while
+/// it idles in a [`Reactive`](UpdateMode::Reactive) update mode.
+#[derive(Clone)]
+pub struct EventLoopProxyWrapper(winit::event_loop::EventLoopProxy<WinitUserEvent>);
+
+impl EventLoopProxyWrapper {
+    /// Wake the event loop, requesting a new frame.
+    pub fn wake_up(&self) {
+        let _ = self.0.send_event(WinitUserEvent::WakeUp);
+    }
+}
+
+impl std::ops::Deref for EventLoopProxyWrapper {
+    type Target = winit::event_loop::EventLoopProxy<WinitUserEvent>;
+    fn deref(&self) -> &Self::Target {
+        &self.0
+    }
+}
 
 /// Frame-scoped queue of raw [`WindowEvent`]s, for consumers that need the
 /// original winit events (e.g. `egui_winit`) rather than the translated
@@ -53,10 +97,11 @@ impl RawWindowEvents {
 
 /// Plugin that creates a winit window and runs the winit event loop.
 ///
-/// The plugin stores the window as a [`WinitWindow`] resource, creates the
-/// abstract [`moonfield_window::Window`] resource, and replaces the app's
-/// runner with a winit-based event loop. On each `about_to_wait` event the
-/// app's update systems are invoked.
+/// The plugin stores the raw window as a [`WinitWindow`] resource, spawns
+/// the primary window entity ([`Window`] + [`PrimaryWindow`] +
+/// [`RawHandleWrapper`] components) when the event loop resumes, and
+/// replaces the app's runner with a winit-based event loop. On each
+/// `about_to_wait` event the app's update systems are invoked.
 ///
 /// # Example
 ///
@@ -75,22 +120,11 @@ pub struct WinitPlugin {
     pub width: u32,
     /// Initial window height in logical pixels.
     pub height: u32,
-    /// Whether to poll or wait for events.
-    pub wait_mode: WaitMode,
+    /// Update-rate settings (stored as a [`WinitSettings`] resource,
+    /// re-read every frame decision).
+    pub settings: WinitSettings,
     /// Window control signals (exit policy).
     pub window_control: WindowControl,
-    /// Pending window mutation requests.
-    pub window_requests: WindowRequests,
-}
-
-/// Control-flow strategy for the event loop.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
-pub enum WaitMode {
-    /// Poll as fast as possible (no waiting).
-    Poll,
-    /// Wait for the next event, then wake up.
-    #[default]
-    Wait,
 }
 
 impl Default for WinitPlugin {
@@ -99,9 +133,8 @@ impl Default for WinitPlugin {
             title: "Moonfield".to_string(),
             width: 800,
             height: 600,
-            wait_mode: WaitMode::Wait,
+            settings: WinitSettings::default(),
             window_control: WindowControl::default(),
-            window_requests: WindowRequests::default(),
         }
     }
 }
@@ -113,14 +146,10 @@ impl WinitPlugin {
         self
     }
 
-    pub fn with_window_requests(mut self, window_requests: WindowRequests) -> Self {
-        self.window_requests = window_requests;
-        self
-    }
-
-    /// Set the control-flow strategy (poll vs. wait).
-    pub fn with_wait_mode(mut self, wait_mode: WaitMode) -> Self {
-        self.wait_mode = wait_mode;
+    /// Set the update-rate settings (e.g. [`WinitSettings::desktop_app`]
+    /// for an editor, [`WinitSettings::continuous`] for a game).
+    pub fn with_settings(mut self, settings: WinitSettings) -> Self {
+        self.settings = settings;
         self
     }
 }
@@ -137,11 +166,8 @@ pub struct WindowConfig {
     pub title: String,
     pub width: u32,
     pub height: u32,
-    pub wait_mode: WaitMode,
     /// Window control signals (exit policy).
     pub window_control: WindowControl,
-    /// Pending window mutation requests.
-    pub window_requests: WindowRequests,
 }
 
 impl Plugin for WinitPlugin {
@@ -150,14 +176,17 @@ impl Plugin for WinitPlugin {
             title: self.title.clone(),
             width: self.width,
             height: self.height,
-            wait_mode: self.wait_mode,
             window_control: self.window_control.clone(),
-            window_requests: self.window_requests.clone(),
         });
+        app.insert_resource(self.settings);
         app.insert_resource(InputState::default());
         app.insert_resource(WindowEvents::default());
         app.insert_resource(RawWindowEvents::default());
-        app.insert_resource(self.window_requests.clone());
+        app.insert_resource(WinitWindows::default());
+        // The shared exit-policy handle, readable by other plugins (e.g. the
+        // editor's MOONFIELD_EDITOR_AUTO_CLOSE helper calls request_exit on
+        // this same handle).
+        app.insert_resource(self.window_control.clone());
     }
 
     fn finish(&self, app: &mut App) {
@@ -176,7 +205,13 @@ impl Plugin for WinitPlugin {
 /// Creates an [`EventLoop`] + [`Window`] and drives the app via winit events.
 /// Called from the [`Runner`] set by [`WinitPlugin`].
 pub fn winit_run(app: &mut App) {
-    let event_loop = EventLoop::new().expect("failed to create winit event loop");
+    let event_loop = EventLoop::<WinitUserEvent>::with_user_event()
+        .build()
+        .expect("failed to create winit event loop");
+
+    // Expose the proxy so systems and external threads can wake the loop
+    // while it idles in a Reactive update mode.
+    app.insert_resource(EventLoopProxyWrapper(event_loop.create_proxy()));
 
     let config = app
         .get_resource::<WindowConfig>()
@@ -184,26 +219,27 @@ pub fn winit_run(app: &mut App) {
             title: c.title.clone(),
             width: c.width,
             height: c.height,
-            wait_mode: c.wait_mode,
             window_control: c.window_control.clone(),
-            window_requests: c.window_requests.clone(),
         })
         .unwrap_or(WindowConfig {
             title: "Moonfield".to_string(),
             width: 800,
             height: 600,
-            wait_mode: WaitMode::Wait,
             window_control: WindowControl::default(),
-            window_requests: WindowRequests::default(),
         });
 
     let mut handler = WinitHandler {
         app,
         window: None,
+        window_entity: None,
         config,
         last_cursor: None,
-        key_names: HashMap::new(),
-        button_names: HashMap::new(),
+        focused: true,
+        last_frame: std::time::Instant::now(),
+        redraw_pending: false,
+        window_event_received: false,
+        device_event_received: false,
+        user_event_received: false,
     };
 
     if let Err(e) = event_loop.run_app(&mut handler) {
@@ -215,53 +251,116 @@ pub fn winit_run(app: &mut App) {
 struct WinitHandler<'a> {
     app: &'a mut App,
     window: Option<Arc<WinitWindowHandle>>,
+    /// The primary window entity; `None` until `resumed` creates/adopts it.
+    window_entity: Option<Entity>,
     config: WindowConfig,
     /// Last cursor position, used to compute motion deltas.
     last_cursor: Option<(f64, f64)>,
-    /// Interned key/button debug names, so repeated events for the same
-    /// key reuse one cached `String` instead of re-running
-    /// `format!("{:?}", ..)` on every OS event.
-    key_names: HashMap<KeyCode, String>,
-    button_names: HashMap<MouseButton, String>,
+    /// Whether any window currently has focus (drives focused/unfocused
+    /// [`UpdateMode`] selection).
+    focused: bool,
+    /// Start time of the previous frame (drives `Reactive` wait deadlines).
+    last_frame: std::time::Instant,
+    /// A redraw was requested but not yet delivered by the OS.
+    redraw_pending: bool,
+    /// Event-kind flags accumulated since the last `about_to_wait`, gating
+    /// `Reactive` wake-ups by their `react_to_*` switches.
+    window_event_received: bool,
+    device_event_received: bool,
+    user_event_received: bool,
 }
 
-impl ApplicationHandler for WinitHandler<'_> {
+impl ApplicationHandler<WinitUserEvent> for WinitHandler<'_> {
     fn resumed(&mut self, event_loop: &ActiveEventLoop) {
-        let attrs = WindowAttributes::default()
-            .with_title(&self.config.title)
-            .with_inner_size(LogicalSize::new(self.config.width, self.config.height));
+        // Adopt a pre-spawned window entity (Bevy-style: user code may spawn
+        // a `Window` component at startup), or spawn the primary window
+        // entity from the plugin config.
+        let existing = <&Window as moonfield_ecs::Query>::fetch(self.app.world())
+            .next()
+            .map(|(e, _)| e);
+        let entity = match existing {
+            Some(e) => e,
+            None => {
+                let e = self.app.world_mut().spawn_empty();
+                self.app.world_mut().insert_component(
+                    e,
+                    Window {
+                        title: self.config.title.clone(),
+                        // Physical size is written back with real values once
+                        // the OS window exists; start at scale factor 1.0.
+                        resolution: WindowResolution::new(
+                            self.config.width,
+                            self.config.height,
+                            1.0,
+                        ),
+                        ..Default::default()
+                    },
+                );
+                e
+            }
+        };
+
+        let attrs = match self.app.world().get_component::<Window>(entity) {
+            Some(w) => WindowAttributes::default()
+                .with_title(&w.title)
+                .with_inner_size(LogicalSize::new(
+                    w.resolution.width() as f64,
+                    w.resolution.height() as f64,
+                )),
+            None => WindowAttributes::default()
+                .with_title(&self.config.title)
+                .with_inner_size(LogicalSize::new(self.config.width, self.config.height)),
+        };
 
         match event_loop.create_window(attrs) {
             Ok(window) => {
                 let window = Arc::new(window);
 
-                // — Store the raw winit window for direct access (e.g. surface creation) —
-                self.app.insert_resource(WinitWindow(window.clone()));
+                // — Write the real physical size / DPI back into the component —
+                if let Some(w) = self.app.world_mut().get_component_mut::<Window>(entity) {
+                    let size = window.inner_size();
+                    w.resolution.set_physical(size.width, size.height);
+                    w.resolution.set_scale_factor(window.scale_factor());
+                }
 
-                // — Create the abstract moonfield Window resource —
-                self.app.insert_resource(Window {
-                    title: self.config.title.clone(),
-                    width: self.config.width,
-                    height: self.config.height,
-                });
-
-                // — Create raw handle wrapper for surface creation —
+                // — Attach the window-side components —
+                let world = self.app.world_mut();
+                if world.get_component::<PrimaryWindow>(entity).is_none() {
+                    world.insert_component(entity, PrimaryWindow);
+                }
                 match (
                     window.as_ref().window_handle(),
                     window.as_ref().display_handle(),
                 ) {
                     (Ok(w_handle), Ok(d_handle)) => {
-                        self.app.insert_resource(RawHandleWrapper {
-                            window_handle: w_handle.into(),
-                            display_handle: d_handle.into(),
-                        });
+                        world.insert_component(
+                            entity,
+                            RawHandleWrapper {
+                                window_handle: w_handle.into(),
+                                display_handle: d_handle.into(),
+                            },
+                        );
                     }
                     _ => {
                         error!("failed to get window handles");
                     }
                 }
+                if let Some(w) = world.get_component::<Window>(entity) {
+                    let cache = CachedWindow::new(w);
+                    world.insert_component(entity, cache);
+                }
+
+                // — Register the mapping and the raw-window escape hatch —
+                if let Some(mut windows) = self.app.get_resource_mut::<WinitWindows>() {
+                    windows.insert(entity, window.clone());
+                }
+                self.app.insert_resource(WinitWindow(window.clone()));
 
                 self.window = Some(window);
+                self.window_entity = Some(entity);
+                // Kick the first frame deterministically instead of relying
+                // on the platform to deliver an initial RedrawRequested.
+                self.request_redraw();
             }
             Err(e) => {
                 error!("failed to create window: {e}");
@@ -273,9 +372,15 @@ impl ApplicationHandler for WinitHandler<'_> {
     fn window_event(
         &mut self,
         event_loop: &ActiveEventLoop,
-        _window_id: WindowId,
+        window_id: WindowId,
         event: WindowEvent,
     ) {
+        // Track the event kind for Reactive-mode wake-up gating; the redraw
+        // request itself is not a wake-up reason.
+        if !matches!(event, WindowEvent::RedrawRequested) {
+            self.window_event_received = true;
+        }
+
         // Broadcast the raw event to consumers that need the original winit
         // event (e.g. egui_winit). Cleared at the frame boundary.
         if let Some(mut raw) = self.app.get_resource_mut::<RawWindowEvents>() {
@@ -283,31 +388,22 @@ impl ApplicationHandler for WinitHandler<'_> {
         }
 
         // Translate input events into the shared InputState resource
-        // (consumed during the next app update).
+        // (consumed during the next app update). Auto-repeat presses are
+        // passed through (flagged `repeat`); InputState keeps them from
+        // re-arming the just_pressed edge.
         let input_event = match &event {
             WindowEvent::KeyboardInput { event, .. } => {
-                if event.repeat {
-                    None
-                } else if let PhysicalKey::Code(code) = event.physical_key {
-                    let code = self
-                        .key_names
-                        .entry(code)
-                        .or_insert_with(|| format!("{:?}", code))
-                        .clone();
-                    Some(match event.state {
-                        ElementState::Pressed => InputEvent::KeyPressed { code },
-                        ElementState::Released => InputEvent::KeyReleased { code },
-                    })
-                } else {
-                    None
-                }
+                let code = convert_physical_key_code(event.physical_key);
+                Some(match event.state {
+                    ElementState::Pressed => InputEvent::KeyPressed {
+                        code,
+                        repeat: event.repeat,
+                    },
+                    ElementState::Released => InputEvent::KeyReleased { code },
+                })
             }
             WindowEvent::MouseInput { state, button, .. } => {
-                let button = self
-                    .button_names
-                    .entry(*button)
-                    .or_insert_with(|| format!("{:?}", button))
-                    .clone();
+                let button = convert_mouse_button(*button);
                 Some(match state {
                     ElementState::Pressed => InputEvent::MouseButtonPressed { button },
                     ElementState::Released => InputEvent::MouseButtonReleased { button },
@@ -326,12 +422,16 @@ impl ApplicationHandler for WinitHandler<'_> {
                 Some(InputEvent::MouseMotion { dx, dy })
             }
             WindowEvent::MouseWheel { delta, .. } => {
-                let (dx, dy) = match delta {
-                    MouseScrollDelta::LineDelta(x, y) => (*x as f64, *y as f64),
-                    // Convert pixel deltas (precision touchpads) at ~16px/line.
-                    MouseScrollDelta::PixelDelta(pos) => (pos.x / 16.0, pos.y / 16.0),
+                // Keep the original unit: LineDelta stays lines, PixelDelta
+                // (precision touchpads) stays pixels. Consumers convert via
+                // MOUSE_SCROLL_PIXELS_PER_LINE if they need one unit.
+                let (unit, x, y) = match delta {
+                    MouseScrollDelta::LineDelta(x, y) => {
+                        (MouseScrollUnit::Line, *x as f64, *y as f64)
+                    }
+                    MouseScrollDelta::PixelDelta(pos) => (MouseScrollUnit::Pixel, pos.x, pos.y),
                 };
-                Some(InputEvent::MouseWheel { dx, dy })
+                Some(InputEvent::MouseWheel { unit, x, y })
             }
             WindowEvent::Focused(false) => Some(InputEvent::FocusLost),
             _ => None,
@@ -342,10 +442,20 @@ impl ApplicationHandler for WinitHandler<'_> {
             }
         }
 
+        // Resolve the window entity this event fired for (multi-window
+        // shape; single-window builds always resolve to the primary).
+        let window_entity = self
+            .app
+            .get_resource::<WinitWindows>()
+            .and_then(|w| w.get_entity(window_id))
+            .or(self.window_entity);
+
         match event {
             WindowEvent::CloseRequested => {
-                if let Some(mut events) = self.app.get_resource_mut::<WindowEvents>() {
-                    events.push(WindowEventKind::CloseRequested);
+                if let Some(window) = window_entity {
+                    if let Some(mut events) = self.app.get_resource_mut::<WindowEvents>() {
+                        events.push(WindowEventKind::CloseRequested { window });
+                    }
                 }
                 // Godot's auto_accept_quit: exit immediately by default, unless
                 // `auto_exit_on_close` was turned off to take over close
@@ -355,76 +465,144 @@ impl ApplicationHandler for WinitHandler<'_> {
                 }
             }
             WindowEvent::Resized(size) => {
-                if let Some(mut events) = self.app.get_resource_mut::<WindowEvents>() {
-                    events.push(WindowEventKind::Resized {
-                        width: size.width,
-                        height: size.height,
-                    });
-                }
-                // Update the abstract Window resource with the new size.
-                if let Some(mut win) = self.app.get_resource_mut::<Window>() {
-                    win.width = size.width;
-                    win.height = size.height;
-                }
-                // Rebuild raw handles when the window is resized (the handles
-                // themselves are still valid, but the size is updated above).
-                if let Some(window) = &self.window {
-                    if let (Ok(w_handle), Ok(d_handle)) = (
-                        window.as_ref().window_handle(),
-                        window.as_ref().display_handle(),
-                    ) {
-                        self.app.insert_resource(RawHandleWrapper {
-                            window_handle: w_handle.into(),
-                            display_handle: d_handle.into(),
+                if let Some(window) = window_entity {
+                    if let Some(mut events) = self.app.get_resource_mut::<WindowEvents>() {
+                        events.push(WindowEventKind::Resized {
+                            window,
+                            width: size.width,
+                            height: size.height,
                         });
+                    }
+                    // Write the OS-side change back into the component.
+                    if let Some(w) = self.app.world_mut().get_component_mut::<Window>(window) {
+                        w.resolution.set_physical(size.width, size.height);
+                    }
+                }
+            }
+            WindowEvent::ScaleFactorChanged { scale_factor, .. } => {
+                if let Some(window) = window_entity {
+                    if let Some(mut events) = self.app.get_resource_mut::<WindowEvents>() {
+                        events.push(WindowEventKind::ScaleFactorChanged {
+                            window,
+                            scale_factor,
+                        });
+                    }
+                    if let Some(w) = self.app.world_mut().get_component_mut::<Window>(window) {
+                        w.resolution.set_scale_factor(scale_factor);
+                        // The scale factor change comes with a new physical
+                        // size; keep resolution consistent.
+                        if let Some(os_window) = &self.window {
+                            let size = os_window.inner_size();
+                            w.resolution.set_physical(size.width, size.height);
+                        }
                     }
                 }
             }
             WindowEvent::Focused(focused) => {
-                if let Some(mut events) = self.app.get_resource_mut::<WindowEvents>() {
-                    events.push(if focused {
-                        WindowEventKind::FocusGained
-                    } else {
-                        WindowEventKind::FocusLost
-                    });
+                self.focused = focused;
+                if let Some(window) = window_entity {
+                    if let Some(mut events) = self.app.get_resource_mut::<WindowEvents>() {
+                        events.push(if focused {
+                            WindowEventKind::FocusGained { window }
+                        } else {
+                            WindowEventKind::FocusLost { window }
+                        });
+                    }
                 }
             }
+            WindowEvent::ModifiersChanged(modifiers) => {
+                // Modifier keys also arrive as ordinary key presses; this
+                // maintains the convenience bitflags view.
+                if let Some(mut input) = self.app.get_resource_mut::<InputState>() {
+                    input.set_modifiers(convert_modifiers(modifiers.state()));
+                }
+            }
+            // The OS asks for a frame: this is where the frame actually
+            // runs (Bevy's redraw_requested-driven model). Frame pacing is
+            // paced by the compositor, not by event-loop idle spinning.
+            WindowEvent::RedrawRequested => self.run_frame(event_loop),
             _ => {}
         }
     }
 
     fn about_to_wait(&mut self, event_loop: &ActiveEventLoop) {
-        match self.config.wait_mode {
-            WaitMode::Poll => event_loop.set_control_flow(ControlFlow::Poll),
-            WaitMode::Wait => event_loop.set_control_flow(ControlFlow::Wait),
+        // An exit requested from outside the event loop (e.g. a caller on
+        // another thread, or a script) can arrive while the loop idles in a
+        // Reactive mode; the WakeUp that accompanies it lands here.
+        if self.config.window_control.exit_requested() {
+            event_loop.exit();
+            return;
         }
 
-        // Apply pending window mutation requests before the app update sees the
-        // window state.
+        let settings = self
+            .app
+            .get_resource::<WinitSettings>()
+            .map(|s| *s)
+            .unwrap_or_default();
+        match settings.update_mode(self.focused) {
+            UpdateMode::Continuous => {
+                event_loop.set_control_flow(ControlFlow::Poll);
+                self.request_redraw();
+            }
+            UpdateMode::Reactive {
+                wait,
+                react_to_device_events,
+                react_to_user_events,
+                react_to_window_events,
+            } => {
+                let next_tick = self.last_frame + wait;
+                event_loop.set_control_flow(ControlFlow::WaitUntil(next_tick));
+                let woke = (self.window_event_received && react_to_window_events)
+                    || (self.device_event_received && react_to_device_events)
+                    || (self.user_event_received && react_to_user_events);
+                if woke || std::time::Instant::now() >= next_tick {
+                    self.request_redraw();
+                }
+            }
+        }
+        self.window_event_received = false;
+        self.device_event_received = false;
+        self.user_event_received = false;
+    }
+
+    fn user_event(&mut self, _event_loop: &ActiveEventLoop, event: WinitUserEvent) {
+        match event {
+            WinitUserEvent::WakeUp => self.user_event_received = true,
+        }
+    }
+
+    fn device_event(
+        &mut self,
+        _event_loop: &ActiveEventLoop,
+        _device_id: winit::event::DeviceId,
+        _event: winit::event::DeviceEvent,
+    ) {
+        // Raw device input (e.g. `DeviceEvent::MouseMotion` for FPS-style
+        // pointer-locked cameras) is deliberately not translated yet — it
+        // only participates in Reactive-mode wake-up gating.
+        self.device_event_received = true;
+    }
+}
+
+impl WinitHandler<'_> {
+    /// Request that the OS deliver `RedrawRequested` (coalesced).
+    fn request_redraw(&mut self) {
+        if self.redraw_pending {
+            return;
+        }
         if let Some(window) = &self.window {
-            if let Some(title) = self.config.window_requests.take_title() {
-                window.set_title(&title);
-                if let Some(mut win) = self.app.get_resource_mut::<Window>() {
-                    win.title = title;
-                }
-            }
-            if let Some(mode) = self.config.window_requests.take_cursor_mode() {
-                let (grab, visible) = match mode {
-                    CursorMode::Normal => (CursorGrabMode::None, true),
-                    CursorMode::Hidden => (CursorGrabMode::None, false),
-                    CursorMode::Locked => (CursorGrabMode::Locked, false),
-                };
-                if let Err(e) = window.set_cursor_grab(grab) {
-                    error!("failed to set cursor grab mode: {e}");
-                }
-                window.set_cursor_visible(visible);
-                if let Some(mut input) = self.app.get_resource_mut::<InputState>() {
-                    input.set_cursor_mode(mode);
-                }
-            }
+            window.request_redraw();
+            self.redraw_pending = true;
         }
+    }
 
+    /// Run one frame: update, apply window diffs, render, then clear the
+    /// frame-scoped state. Called from `RedrawRequested`.
+    fn run_frame(&mut self, event_loop: &ActiveEventLoop) {
         self.app.update();
+        // Apply ECS-side window mutations (title, cursor mode) via the
+        // CachedWindow field diff, after the update has settled.
+        windows::sync_windows(self.app.world_mut());
         // Render phase: plugins that don't own the event loop (e.g. the
         // editor) draw into the frame here, mirroring Bevy's render schedule.
         self.app.render();
@@ -438,6 +616,8 @@ impl ApplicationHandler for WinitHandler<'_> {
         if let Some(mut raw) = self.app.get_resource_mut::<RawWindowEvents>() {
             raw.end_frame();
         }
+        self.last_frame = std::time::Instant::now();
+        self.redraw_pending = false;
         // `app_exit()`-style request: a non-event-loop caller asked us to quit.
         if self.config.window_control.exit_requested() {
             event_loop.exit();

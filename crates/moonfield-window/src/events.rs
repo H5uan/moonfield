@@ -12,21 +12,32 @@
 //! [`WindowControl::request_exit`] (which sets [`WindowControl::exit_requested`]).
 
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::{Arc, Mutex};
+use std::sync::Arc;
 
-use crate::CursorMode;
+use moonfield_ecs::Entity;
 
 /// A window lifecycle event, translated from the backend's OS event.
-#[derive(Debug, Clone, PartialEq)]
+///
+/// Every variant carries the `window` [`Entity`] it fired for — the type is
+/// shaped for multi-window; single-window builds always report the primary
+/// window entity.
+#[derive(Debug, Clone, Copy, PartialEq)]
 pub enum WindowEventKind {
     /// The user asked to close the window (title-bar ×, Alt-F4).
-    CloseRequested,
-    /// The window was resized (logical pixels).
-    Resized { width: u32, height: u32 },
+    CloseRequested { window: Entity },
+    /// The window was resized (physical pixels).
+    Resized {
+        window: Entity,
+        width: u32,
+        height: u32,
+    },
+    /// The window's scale factor changed (DPI change, moved across
+    /// monitors).
+    ScaleFactorChanged { window: Entity, scale_factor: f64 },
     /// The window gained keyboard focus.
-    FocusGained,
+    FocusGained { window: Entity },
     /// The window lost keyboard focus.
-    FocusLost,
+    FocusLost { window: Entity },
 }
 
 /// Frame-scoped queue of window lifecycle events, stored as a world
@@ -99,40 +110,6 @@ impl WindowControl {
     }
 }
 
-/// Window mutation requests shared between callers and the windowing
-/// backend. Callers queue requests; the backend applies them on the next
-/// frame boundary.
-#[derive(Debug, Clone, Default)]
-pub struct WindowRequests {
-    title: Arc<Mutex<Option<String>>>,
-    cursor_mode: Arc<Mutex<Option<CursorMode>>>,
-}
-
-impl WindowRequests {
-    /// Request that the window title be changed to `title`.
-    pub fn request_title(&self, title: String) {
-        *self.title.lock().unwrap_or_else(|e| e.into_inner()) = Some(title);
-    }
-
-    /// Take a pending title request, if any.
-    pub fn take_title(&self) -> Option<String> {
-        self.title.lock().unwrap_or_else(|e| e.into_inner()).take()
-    }
-
-    /// Request that the cursor mode be changed to `mode`.
-    pub fn request_cursor_mode(&self, mode: CursorMode) {
-        *self.cursor_mode.lock().unwrap_or_else(|e| e.into_inner()) = Some(mode);
-    }
-
-    /// Take a pending cursor-mode request, if any.
-    pub fn take_cursor_mode(&self) -> Option<CursorMode> {
-        self.cursor_mode
-            .lock()
-            .unwrap_or_else(|e| e.into_inner())
-            .take()
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -140,8 +117,10 @@ mod tests {
     #[test]
     fn event_queue_is_frame_scoped() {
         let mut events = WindowEvents::default();
-        events.push(WindowEventKind::CloseRequested);
+        let window = Entity::DANGLING;
+        events.push(WindowEventKind::CloseRequested { window });
         events.push(WindowEventKind::Resized {
+            window,
             width: 1024,
             height: 768,
         });

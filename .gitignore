@@ -5,3 +5,5 @@ Thumbs.db
 *.swp
 *.swo
 *~
+
+/.slang/
