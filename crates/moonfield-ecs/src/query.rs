@@ -1,4 +1,5 @@
 use crate::archetype::Archetype;
+use crate::change_detection::{Mut, Tick};
 use crate::entities::EntityMeta;
 use crate::{Component, Entity, World};
 
@@ -135,11 +136,15 @@ pub struct MutArchIter<'w, T: Component> {
     hits: Vec<(usize, usize)>,
     ai: usize,
     row: u32,
+    last_run: Tick,
+    this_run: Tick,
     _marker: std::marker::PhantomData<&'w mut T>,
 }
 
 impl<'w, T: Component> MutArchIter<'w, T> {
     fn new(world: &'w mut World) -> Self {
+        let last_run = world.last_change_tick();
+        let this_run = world.change_tick();
         let archetypes = world.raw_archetypes();
         let meta = world.raw_entity_meta();
         let mut hits = Vec::new();
@@ -155,6 +160,8 @@ impl<'w, T: Component> MutArchIter<'w, T> {
             hits,
             ai: 0,
             row: 0,
+            last_run,
+            this_run,
             _marker: std::marker::PhantomData,
         }
     }
@@ -169,7 +176,7 @@ impl<T: Component> Drop for MutArchIter<'_, T> {
 }
 
 impl<'w, T: Component> Iterator for MutArchIter<'w, T> {
-    type Item = (Entity, &'w mut T);
+    type Item = (Entity, Mut<'w, T>);
     fn next(&mut self) -> Option<Self::Item> {
         loop {
             let &(arch_i, col) = self.hits.get(self.ai)?;
@@ -181,7 +188,17 @@ impl<'w, T: Component> Iterator for MutArchIter<'w, T> {
                     generation: self.meta[raw as usize].generation,
                 };
                 let ptr = unsafe { arch.get_base::<T>(col) };
-                let out: &'w mut T = unsafe { &mut *ptr.as_ptr().add(self.row as usize) };
+                let ticks = unsafe { arch.ticks_base(col) };
+                // SAFETY: the column is uniquely borrowed for 'w, so both the
+                // component row and its tick row are exclusively ours.
+                let out = unsafe {
+                    Mut::new(
+                        ptr.as_ptr().add(self.row as usize),
+                        ticks.as_ptr().add(self.row as usize),
+                        self.last_run,
+                        self.this_run,
+                    )
+                };
                 self.row += 1;
                 return Some((entity, out));
             }
@@ -193,7 +210,7 @@ impl<'w, T: Component> Iterator for MutArchIter<'w, T> {
 
 impl<T: Component> Query for &mut T {
     type Item<'w>
-        = &'w mut T
+        = Mut<'w, T>
     where
         Self: 'w;
     type Iter<'w>
@@ -322,11 +339,15 @@ pub struct MutSharedIter<'w, A: Component, B: Component> {
     hits: Vec<(usize, usize, usize)>,
     ai: usize,
     row: u32,
+    last_run: Tick,
+    this_run: Tick,
     _marker: std::marker::PhantomData<(&'w mut A, &'w B)>,
 }
 
 impl<'w, A: Component, B: Component> MutSharedIter<'w, A, B> {
     fn new(world: &'w mut World) -> Self {
+        let last_run = world.last_change_tick();
+        let this_run = world.change_tick();
         let archetypes = world.raw_archetypes();
         let meta = world.raw_entity_meta();
         let mut hits = Vec::new();
@@ -343,6 +364,8 @@ impl<'w, A: Component, B: Component> MutSharedIter<'w, A, B> {
             hits,
             ai: 0,
             row: 0,
+            last_run,
+            this_run,
             _marker: std::marker::PhantomData,
         }
     }
@@ -358,7 +381,7 @@ impl<A: Component, B: Component> Drop for MutSharedIter<'_, A, B> {
 }
 
 impl<'w, A: Component, B: Component> Iterator for MutSharedIter<'w, A, B> {
-    type Item = (Entity, (&'w mut A, &'w B));
+    type Item = (Entity, (Mut<'w, A>, &'w B));
     fn next(&mut self) -> Option<Self::Item> {
         loop {
             let &(arch_i, ca, cb) = self.hits.get(self.ai)?;
@@ -370,8 +393,17 @@ impl<'w, A: Component, B: Component> Iterator for MutSharedIter<'w, A, B> {
                     generation: self.meta[raw as usize].generation,
                 };
                 let pa = unsafe { arch.get_base::<A>(ca) };
+                let ta = unsafe { arch.ticks_base(ca) };
                 let pb = unsafe { arch.get_base::<B>(cb) };
-                let a: &'w mut A = unsafe { &mut *pa.as_ptr().add(self.row as usize) };
+                // SAFETY: column A is uniquely borrowed, column B shared.
+                let a = unsafe {
+                    Mut::new(
+                        pa.as_ptr().add(self.row as usize),
+                        ta.as_ptr().add(self.row as usize),
+                        self.last_run,
+                        self.this_run,
+                    )
+                };
                 let b: &'w B = unsafe { &*pb.as_ptr().add(self.row as usize) };
                 self.row += 1;
                 return Some((entity, (a, b)));
@@ -384,7 +416,7 @@ impl<'w, A: Component, B: Component> Iterator for MutSharedIter<'w, A, B> {
 
 impl<A: Component, B: Component> Query for (&mut A, &B) {
     type Item<'w>
-        = (&'w mut A, &'w B)
+        = (Mut<'w, A>, &'w B)
     where
         Self: 'w;
     type Iter<'w>
@@ -417,11 +449,15 @@ pub struct MutBothIter<'w, A: Component, B: Component> {
     hits: Vec<(usize, usize, usize)>,
     ai: usize,
     row: u32,
+    last_run: Tick,
+    this_run: Tick,
     _marker: std::marker::PhantomData<(&'w mut A, &'w mut B)>,
 }
 
 impl<'w, A: Component, B: Component> MutBothIter<'w, A, B> {
     fn new(world: &'w mut World) -> Self {
+        let last_run = world.last_change_tick();
+        let this_run = world.change_tick();
         let meta = world.raw_entity_meta();
         let archetypes = world.raw_archetypes();
         let mut hits = Vec::new();
@@ -438,6 +474,8 @@ impl<'w, A: Component, B: Component> MutBothIter<'w, A, B> {
             hits,
             ai: 0,
             row: 0,
+            last_run,
+            this_run,
             _marker: std::marker::PhantomData,
         }
     }
@@ -453,7 +491,7 @@ impl<A: Component, B: Component> Drop for MutBothIter<'_, A, B> {
 }
 
 impl<'w, A: Component, B: Component> Iterator for MutBothIter<'w, A, B> {
-    type Item = (Entity, (&'w mut A, &'w mut B));
+    type Item = (Entity, (Mut<'w, A>, Mut<'w, B>));
     fn next(&mut self) -> Option<Self::Item> {
         loop {
             let &(arch_i, ca, cb) = self.hits.get(self.ai)?;
@@ -465,9 +503,26 @@ impl<'w, A: Component, B: Component> Iterator for MutBothIter<'w, A, B> {
                     generation: self.meta[raw as usize].generation,
                 };
                 let pa = unsafe { arch.get_base::<A>(ca) };
+                let ta = unsafe { arch.ticks_base(ca) };
                 let pb = unsafe { arch.get_base::<B>(cb) };
-                let a: &'w mut A = unsafe { &mut *pa.as_ptr().add(self.row as usize) };
-                let b: &'w mut B = unsafe { &mut *pb.as_ptr().add(self.row as usize) };
+                let tb = unsafe { arch.ticks_base(cb) };
+                // SAFETY: both columns are uniquely borrowed for 'w.
+                let a = unsafe {
+                    Mut::new(
+                        pa.as_ptr().add(self.row as usize),
+                        ta.as_ptr().add(self.row as usize),
+                        self.last_run,
+                        self.this_run,
+                    )
+                };
+                let b = unsafe {
+                    Mut::new(
+                        pb.as_ptr().add(self.row as usize),
+                        tb.as_ptr().add(self.row as usize),
+                        self.last_run,
+                        self.this_run,
+                    )
+                };
                 self.row += 1;
                 return Some((entity, (a, b)));
             }
@@ -479,7 +534,7 @@ impl<'w, A: Component, B: Component> Iterator for MutBothIter<'w, A, B> {
 
 impl<A: Component, B: Component> Query for (&mut A, &mut B) {
     type Item<'w>
-        = (&'w mut A, &'w mut B)
+        = (Mut<'w, A>, Mut<'w, B>)
     where
         Self: 'w;
     type Iter<'w>

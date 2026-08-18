@@ -317,7 +317,7 @@ impl ApplicationHandler<WinitUserEvent> for WinitHandler<'_> {
                 let window = Arc::new(window);
 
                 // — Write the real physical size / DPI back into the component —
-                if let Some(w) = self.app.world_mut().get_component_mut::<Window>(entity) {
+                if let Some(mut w) = self.app.world_mut().get_component_mut::<Window>(entity) {
                     let size = window.inner_size();
                     w.resolution.set_physical(size.width, size.height);
                     w.resolution.set_scale_factor(window.scale_factor());
@@ -474,7 +474,7 @@ impl ApplicationHandler<WinitUserEvent> for WinitHandler<'_> {
                         });
                     }
                     // Write the OS-side change back into the component.
-                    if let Some(w) = self.app.world_mut().get_component_mut::<Window>(window) {
+                    if let Some(mut w) = self.app.world_mut().get_component_mut::<Window>(window) {
                         w.resolution.set_physical(size.width, size.height);
                     }
                 }
@@ -487,7 +487,7 @@ impl ApplicationHandler<WinitUserEvent> for WinitHandler<'_> {
                             scale_factor,
                         });
                     }
-                    if let Some(w) = self.app.world_mut().get_component_mut::<Window>(window) {
+                    if let Some(mut w) = self.app.world_mut().get_component_mut::<Window>(window) {
                         w.resolution.set_scale_factor(scale_factor);
                         // The scale factor change comes with a new physical
                         // size; keep resolution consistent.

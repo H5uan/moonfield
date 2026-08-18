@@ -13,7 +13,9 @@ use std::{
     ptr::{self, NonNull},
 };
 
-use crate::{borrow::AtomicBorrow, component_ref::ComponentRef, Component};
+use crate::{
+    borrow::AtomicBorrow, change_detection::ComponentTicks, component_ref::ComponentRef, Component,
+};
 
 /// A [`Hasher`] that forwards the `TypeId` value directly.
 ///
@@ -96,6 +98,9 @@ impl<V> OrderedTypeIdMap<V> {
 struct Data {
     borrow_state: AtomicBorrow,
     raw_data: NonNull<u8>,
+    /// Per-row change-detection ticks, parallel to the component column.
+    /// Allocated alongside `raw_data` with the archetype's row capacity.
+    ticks: NonNull<ComponentTicks>,
 }
 
 /// A type-erased, runtime description of a component type.
@@ -259,6 +264,7 @@ impl Archetype {
                     // A placeholder non-null pointer; real storage is allocated
                     // on first grow, before any value is written.
                     raw_data: NonNull::new(max_align as *mut u8).unwrap(),
+                    ticks: NonNull::dangling(),
                 })
                 .collect(),
         }
@@ -298,6 +304,61 @@ impl Archetype {
     /// be used with [`Self::get_base`].
     pub(crate) fn get_state<T: Component>(&self) -> Option<usize> {
         self.index.get(&TypeId::of::<T>()).copied()
+    }
+
+    /// Find the column index associated with a runtime [`TypeId`], if present.
+    pub(crate) fn get_state_by_id(&self, id: &TypeId) -> Option<usize> {
+        self.index.get(id).copied()
+    }
+
+    /// Write the change-detection ticks for a row. The row must have been
+    /// allocated (via [`Self::allocate`]) and not yet removed.
+    pub(crate) fn write_ticks(&mut self, column: usize, row: u32, ticks: ComponentTicks) {
+        debug_assert!(row < self.len);
+        // SAFETY: `&mut self` guarantees no outstanding borrows; the row is
+        // within the live range, hence within capacity.
+        unsafe {
+            *self.data[column].ticks.as_ptr().add(row as usize) = ticks;
+        }
+    }
+
+    /// Mark a freshly written row: both added and changed ticks read `tick`.
+    pub(crate) fn write_fresh_ticks(
+        &mut self,
+        column: usize,
+        row: u32,
+        tick: crate::change_detection::Tick,
+    ) {
+        self.write_ticks(
+            column,
+            row,
+            ComponentTicks {
+                added: tick,
+                changed: tick,
+            },
+        );
+    }
+
+    /// Read the change-detection ticks for a row.
+    ///
+    /// # Safety
+    ///
+    /// The caller must ensure the row is live and tick access does not race
+    /// with a writer.
+    pub(crate) unsafe fn read_ticks(&self, column: usize, row: u32) -> ComponentTicks {
+        debug_assert!(row < self.len);
+        *self.data[column].ticks.as_ptr().add(row as usize)
+    }
+
+    /// Get the address of the tick array for `column`, parallel to the column's
+    /// component data.
+    ///
+    /// # Safety
+    ///
+    /// `column` must be in bounds. Access to the rows must respect the column's
+    /// borrow state.
+    pub(crate) unsafe fn ticks_base(&self, column: usize) -> NonNull<ComponentTicks> {
+        self.data.get_unchecked(column).ticks
     }
 
     /// Get the address of the first `T` component, given a state index from
@@ -498,6 +559,7 @@ impl Archetype {
         // rows over. Only `self.data` is swapped in after every column has been
         // successfully allocated, so an OOM never leaves the archetype
         // partially reallocated.
+        let ticks_layout = Layout::array::<ComponentTicks>(new_cap).unwrap();
         let new_data = self
             .metas
             .iter()
@@ -524,30 +586,44 @@ impl Archetype {
                         mem
                     }
                 };
+                let ticks = unsafe {
+                    let mem = alloc(ticks_layout);
+                    let mem = NonNull::new(mem).unwrap_or_else(|| handle_alloc_error(ticks_layout));
+                    ptr::copy_nonoverlapping(
+                        old_data.ticks.as_ptr().cast::<u8>(),
+                        mem.as_ptr(),
+                        std::mem::size_of::<ComponentTicks>() * old_count,
+                    );
+                    mem.cast::<ComponentTicks>()
+                };
                 Data {
                     // `&mut self` guarantees no outstanding borrows, so the
                     // fresh borrow state starts unlocked.
                     borrow_state: AtomicBorrow::new(),
                     raw_data,
+                    ticks,
                 }
             })
             .collect::<Box<[_]>>();
 
         // Now that the replacement is fully built, free the old column buffers.
         if old_cap > 0 {
+            let old_ticks_layout = Layout::array::<ComponentTicks>(old_cap).unwrap();
             for (component_meta, data) in self.metas.iter().zip(&*self.data) {
-                if component_meta.layout.size() == 0 {
-                    continue;
+                if component_meta.layout.size() != 0 {
+                    unsafe {
+                        std::alloc::dealloc(
+                            data.raw_data.as_ptr(),
+                            Layout::from_size_align(
+                                component_meta.layout().size() * old_cap,
+                                component_meta.layout.align(),
+                            )
+                            .unwrap(),
+                        );
+                    }
                 }
                 unsafe {
-                    std::alloc::dealloc(
-                        data.raw_data.as_ptr(),
-                        Layout::from_size_align(
-                            component_meta.layout().size() * old_cap,
-                            component_meta.layout.align(),
-                        )
-                        .unwrap(),
-                    );
+                    std::alloc::dealloc(data.ticks.as_ptr().cast(), old_ticks_layout);
                 }
             }
         }
@@ -626,6 +702,9 @@ impl Archetype {
                     .as_ptr()
                     .add(last as usize * component_meta.layout().size());
                 ptr::copy_nonoverlapping(moved, removed, component_meta.layout().size());
+                // The tick row follows its component row.
+                let ticks = data.ticks.as_ptr();
+                *ticks.add(index as usize) = *ticks.add(last as usize);
             }
         }
 
@@ -665,6 +744,9 @@ impl Archetype {
                     .as_ptr()
                     .add(last as usize * component_meta.layout.size());
                 ptr::copy_nonoverlapping(moved, moved_out, component_meta.layout.size());
+                // The tick row follows its component row.
+                let ticks = data.ticks.as_ptr();
+                *ticks.add(index as usize) = *ticks.add(last as usize);
             }
         }
         self.len -= 1;
@@ -709,7 +791,11 @@ impl Archetype {
                 .copy_from_nonoverlapping(
                     src.raw_data.as_ptr(),
                     other.len as usize * info.layout.size(),
-                )
+                );
+            dst.ticks
+                .as_ptr()
+                .add(self.len as usize)
+                .copy_from_nonoverlapping(src.ticks.as_ptr(), other.len as usize);
         }
         self.len += other.len;
         // Transfer ownership of the rows to `self`; `other` must not drop them.
@@ -735,6 +821,7 @@ impl Drop for Archetype {
         }
 
         // ... then free each column buffer.
+        let ticks_layout = Layout::array::<ComponentTicks>(self.entities.len()).unwrap();
         for (component_meta, data) in self.metas.iter().zip(&*self.data) {
             if component_meta.layout.size() != 0 {
                 unsafe {
@@ -746,6 +833,9 @@ impl Drop for Archetype {
                         ),
                     );
                 }
+            }
+            unsafe {
+                dealloc(data.ticks.as_ptr().cast(), ticks_layout);
             }
         }
     }

@@ -117,7 +117,7 @@ pub fn sync_windows(world: &mut World) {
         };
         let Some(diff) = world
             .get_component_mut::<CachedWindow>(entity)
-            .map(|cache| diff_window(&title, cursor_mode, cache))
+            .map(|mut cache| diff_window(&title, cursor_mode, &mut cache))
         else {
             continue;
         };

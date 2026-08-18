@@ -6,6 +6,7 @@ use std::sync::atomic::AtomicU64;
 
 use crate::archetype::{Archetype, ComponentMeta, TypeIdMap};
 use crate::bundle::{Bundle, DynamicBundle};
+use crate::change_detection::{Mut, Ref, Tick};
 use crate::entities::{AllocManyState, Entities, Location, NoSuchEntity, ReserveEntitiesIterator};
 use crate::{Component, Entity, Query, Resources};
 use std::mem;
@@ -99,6 +100,8 @@ where
     entities: &'a mut Entities,
     archetype_id: u32,
     archetype: &'a mut Archetype,
+    /// The change tick recorded on every component written by this batch.
+    tick: Tick,
 }
 
 impl<I> Drop for SpawnBatchIter<'_, I>
@@ -122,6 +125,7 @@ where
         let components = self.inner.next()?;
         let entity = self.entities.alloc();
         let index = unsafe { self.archetype.allocate(entity.id) };
+        let tick = self.tick;
         unsafe {
             components.put(|ptr, component_meta| {
                 self.archetype.put_ptr(
@@ -130,6 +134,8 @@ where
                     component_meta.layout().size(),
                     index,
                 );
+                let column = self.archetype.get_state_by_id(component_meta.id()).unwrap();
+                self.archetype.write_fresh_ticks(column, index, tick);
             });
         }
         self.entities.meta[entity.id as usize].location = Location {
@@ -194,6 +200,14 @@ pub struct World2 {
     remove_edges: IndexTypeIdMap<u32>,
     resources: Resources,
 
+    /// The world's current change-detection tick. Component writes record this
+    /// value; it advances once per schedule run via [`Self::increment_change_tick`].
+    change_tick: Tick,
+    /// The tick at which trackers were last advanced. Together with
+    /// `change_tick` it forms the default `(last, current)` window used by
+    /// tick-aware accessors.
+    last_change_tick: Tick,
+
     id: AtomicU64,
 }
 
@@ -212,6 +226,10 @@ impl World2 {
             insert_edges: IndexTypeIdMap::default(),
             remove_edges: IndexTypeIdMap::default(),
             resources: Resources::default(),
+            // The change clock starts at 1 so that a system's initial
+            // `last_run` of 0 observes every component as new.
+            change_tick: Tick::new(1),
+            last_change_tick: Tick::new(0),
             id: AtomicU64::new(0),
         }
     }
@@ -221,6 +239,35 @@ impl World2 {
         let archetype = self.archetypes.get_mut(0);
         self.entities
             .flush(|id, location| location.index = unsafe { archetype.allocate(id) });
+    }
+
+    // ------------------------------------------------------------------
+    // Change detection
+    // ------------------------------------------------------------------
+
+    /// Reads the world's current change tick.
+    #[inline]
+    pub fn change_tick(&self) -> Tick {
+        self.change_tick
+    }
+
+    /// The tick at which change trackers were last advanced.
+    #[inline]
+    pub fn last_change_tick(&self) -> Tick {
+        self.last_change_tick
+    }
+
+    /// Advances the change clock, returning the previous tick.
+    ///
+    /// The previous tick becomes [`Self::last_change_tick`], so the window
+    /// `(last_change_tick, change_tick)` always spans exactly the writes made
+    /// since the previous call.
+    #[inline]
+    pub fn increment_change_tick(&mut self) -> Tick {
+        let prev = self.change_tick;
+        self.last_change_tick = prev;
+        self.change_tick = Tick::new(prev.get().wrapping_add(1));
+        prev
     }
 
     /// Create an entity with certain components
@@ -260,11 +307,14 @@ impl World2 {
             None => self.archetypes.get_for(&components),
         };
 
+        let tick = self.change_tick;
         let index = unsafe {
             let archetype = self.archetypes.get_mut(archetype_id);
             let row = archetype.allocate(entity.id());
             components.put(|ptr, meta| {
                 archetype.put_ptr(ptr, *meta.id(), meta.layout().size(), row);
+                let column = archetype.get_state_by_id(meta.id()).unwrap();
+                archetype.write_fresh_ticks(column, row, tick);
             });
             row
         };
@@ -291,6 +341,7 @@ impl World2 {
             entities: &mut self.entities,
             archetype_id,
             archetype: &mut self.archetypes.archetypes[archetype_id as usize],
+            tick: self.change_tick,
         }
     }
 
@@ -435,18 +486,52 @@ impl World2 {
         Some(unsafe { &*arch.get_base::<T>(col).as_ptr().add(loc.index as usize) })
     }
 
-    /// Get a mutable reference to `T` on `entity`, if present.
-    pub fn get_component_mut<T: Component>(&mut self, entity: Entity) -> Option<&mut T> {
+    /// Get a tick-aware shared reference to `T` on `entity`, if present.
+    ///
+    /// The returned [`Ref`] reports added/changed relative to the world's
+    /// default window `(last_change_tick, change_tick)`.
+    pub fn get_component_ref<T: Component>(&self, entity: Entity) -> Option<Ref<'_, T>> {
+        let loc = self.entities.get(entity).ok()?;
+        let arch = &self.archetypes.archetypes[loc.archetype as usize];
+        let col = arch.get_state::<T>()?;
+        // SAFETY: same reasoning as `get_component`; the tick row is parallel
+        // to the component row and equally in bounds.
+        let value = unsafe { &*arch.get_base::<T>(col).as_ptr().add(loc.index as usize) };
+        let ticks = unsafe { arch.read_ticks(col, loc.index) };
+        Some(Ref::new(
+            value,
+            ticks,
+            self.last_change_tick,
+            self.change_tick,
+        ))
+    }
+
+    /// Get a tick-aware unique reference to `T` on `entity`, if present.
+    ///
+    /// Mutably dereferencing the returned [`Mut`] records the world's current
+    /// change tick on the component.
+    pub fn get_component_mut<T: Component>(&mut self, entity: Entity) -> Option<Mut<'_, T>> {
         // Resolve the location first so the borrow of `self.entities` is
         // released before we take a mutable borrow of the archetype slice.
         let loc = self.entities.get(entity).ok()?;
+        let last_run = self.last_change_tick;
+        let this_run = self.change_tick;
         let archetypes = &mut self.archetypes.archetypes;
         let arch = &mut archetypes[loc.archetype as usize];
         let col = arch.get_state::<T>()?;
         let base = unsafe { arch.get_base::<T>(col) };
-        // SAFETY: `base` is derived from `arch` (mutably borrowed via `&mut self`);
-        // the row is within bounds and no other `&mut T` can exist.
-        Some(unsafe { &mut *base.as_ptr().add(loc.index as usize) })
+        let ticks = unsafe { arch.ticks_base(col) };
+        // SAFETY: `base`/`ticks` are derived from `arch` (mutably borrowed via
+        // `&mut self`); the row is within bounds and no other reference can
+        // exist.
+        Some(unsafe {
+            Mut::new(
+                base.as_ptr().add(loc.index as usize),
+                ticks.as_ptr().add(loc.index as usize),
+                last_run,
+                this_run,
+            )
+        })
     }
 
     /// Insert (or replace) component `T` on `entity`.
@@ -461,12 +546,18 @@ impl World2 {
         let loc = self.entities.get(entity).ok()?;
         let old_id = loc.archetype;
         let old_row = loc.index;
-        let old_arch = &self.archetypes.archetypes[old_id as usize];
+        let tick = self.change_tick;
 
         // Replace in place when the archetype already holds `T`.
+        let old_arch = &self.archetypes.archetypes[old_id as usize];
         if let Some(col) = old_arch.get_state::<T>() {
             // SAFETY: `&mut self` guarantees no aliasing `&T`/`&mut T` here.
             unsafe { *old_arch.get_base::<T>(col).as_ptr().add(old_row as usize) = value };
+            let old_arch = &mut self.archetypes.archetypes[old_id as usize];
+            // The value was replaced: bump changed, preserve added.
+            let mut ticks = unsafe { old_arch.read_ticks(col, old_row) };
+            ticks.changed = tick;
+            old_arch.write_ticks(col, old_row, ticks);
             return Some(());
         }
 
@@ -490,7 +581,7 @@ impl World2 {
         let new_row = unsafe { (*target_raw).allocate(entity.id) };
 
         // Move every already-present component's bytes from the old row to the
-        // new target row.
+        // new target row, carrying their change ticks along.
         // SAFETY: both archetypes are live; old_row/new_row are in bounds; we are
         // copying from a distinct allocation into the freshly allocated target row.
         unsafe {
@@ -499,9 +590,13 @@ impl World2 {
                 let size = meta.layout().size();
                 if let Some(src) = old.get_ptr(*meta.id(), size, old_row) {
                     (*target_raw).put_ptr(src.as_ptr(), *meta.id(), size, new_row);
+                    let old_col = old.get_state_by_id(meta.id()).unwrap();
+                    let new_col = (*target_raw).get_state_by_id(meta.id()).unwrap();
+                    let ticks = old.read_ticks(old_col, old_row);
+                    (*target_raw).write_ticks(new_col, new_row, ticks);
                 }
             }
-            // Write the newly inserted component value.
+            // Write the newly inserted component value with fresh ticks.
             let mut value = value;
             (*target_raw).put_ptr(
                 (&mut value as *mut T).cast(),
@@ -510,6 +605,8 @@ impl World2 {
                 new_row,
             );
             mem::forget(value);
+            let new_col = (*target_raw).get_state_by_id(&TypeId::of::<T>()).unwrap();
+            (*target_raw).write_fresh_ticks(new_col, new_row, tick);
         }
 
         // Update the entity's location to the target archetype.

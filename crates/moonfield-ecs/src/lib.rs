@@ -10,7 +10,7 @@
 #![allow(clippy::type_complexity)]
 
 use std::any::{Any, TypeId};
-use std::cell::{Ref, RefCell, RefMut};
+use std::cell::{RefCell, RefMut};
 use std::collections::HashMap;
 
 macro_rules! reverse_apply {
@@ -38,6 +38,7 @@ macro_rules! smaller_tuples_too {
 mod archetype;
 mod borrow;
 mod bundle;
+mod change_detection;
 mod component;
 mod component_ref;
 mod entities;
@@ -47,6 +48,7 @@ mod resource;
 mod system;
 mod world2;
 
+pub use change_detection::{ComponentTicks, Mut, Ref, Tick};
 pub use component::Component;
 pub use entities::Entity;
 pub use query::Query;
@@ -75,10 +77,10 @@ impl Resources {
         self.data.contains_key(&TypeId::of::<R>())
     }
 
-    pub fn get<R: Resource>(&self) -> Option<Ref<'_, R>> {
+    pub fn get<R: Resource>(&self) -> Option<std::cell::Ref<'_, R>> {
         let cell = self.data.get(&TypeId::of::<R>())?;
         // If already mutably borrowed, this will panic at runtime — acceptable for a minimal ECS.
-        Some(Ref::map(cell.borrow(), |any| {
+        Some(std::cell::Ref::map(cell.borrow(), |any| {
             any.downcast_ref::<R>().unwrap()
         }))
     }
@@ -134,7 +136,7 @@ mod tests {
         let mut world = World::new();
         world.spawn((Position { x: 1.0, y: 2.0 }, Velocity { x: 1.0, y: 0.0 }));
 
-        for (_, (pos, vel)) in world.query_mut::<(&mut Position, &Velocity)>() {
+        for (_, (mut pos, vel)) in world.query_mut::<(&mut Position, &Velocity)>() {
             pos.x += vel.x;
             pos.y += vel.y;
         }
@@ -158,6 +160,18 @@ mod tests {
     }
 
     #[test]
+    fn world_change_tick_advances() {
+        let mut world = World::new();
+        assert_eq!(world.change_tick().get(), 1);
+        assert_eq!(world.last_change_tick().get(), 0);
+
+        let old = world.increment_change_tick();
+        assert_eq!(old.get(), 1);
+        assert_eq!(world.change_tick().get(), 2);
+        assert_eq!(world.last_change_tick().get(), 1);
+    }
+
+    #[test]
     fn spawn_and_despawn() {
         let mut world = World::new();
         let e = world.spawn((Position { x: 10.0, y: 20.0 },));
@@ -171,9 +185,116 @@ mod tests {
     }
 
     #[test]
+    fn component_ticks_track_add() {
+        let mut world = World::new();
+        let e = world.spawn((Position { x: 1.0, y: 2.0 },));
+
+        // Freshly spawned: added and changed inside the world's initial window.
+        let r = world.get_component_ref::<Position>(e).unwrap();
+        assert!(r.is_added());
+        assert!(r.is_changed());
+
+        // After the clock advances, the component is no longer new.
+        world.increment_change_tick();
+        let r = world.get_component_ref::<Position>(e).unwrap();
+        assert!(!r.is_added());
+        assert!(!r.is_changed());
+    }
+
+    #[test]
+    fn component_ticks_track_mutation() {
+        let mut world = World::new();
+        let e = world.spawn((Position { x: 1.0, y: 2.0 },));
+        world.increment_change_tick();
+
+        // Read-only access does not mark the component changed.
+        let _ = world.get_component_ref::<Position>(e).unwrap();
+        assert!(!world.get_component_ref::<Position>(e).unwrap().is_changed());
+
+        // Mutable access marks it changed; the added tick is preserved.
+        world.get_component_mut::<Position>(e).unwrap().x = 5.0;
+        let r = world.get_component_ref::<Position>(e).unwrap();
+        assert!(r.is_changed());
+        assert!(!r.is_added());
+    }
+
+    #[test]
+    fn replace_bumps_changed_preserves_added() {
+        let mut world = World::new();
+        let e = world.spawn((Position { x: 1.0, y: 2.0 }, Velocity { x: 0.0, y: 0.0 }));
+        world.increment_change_tick();
+
+        world.insert_component(e, Position { x: 9.0, y: 9.0 });
+        let r = world.get_component_ref::<Position>(e).unwrap();
+        assert!(r.is_changed());
+        assert!(!r.is_added());
+
+        // The untouched component is unaffected.
+        assert!(!world.get_component_ref::<Velocity>(e).unwrap().is_changed());
+    }
+
+    #[test]
+    fn cross_archetype_move_preserves_existing_ticks() {
+        let mut world = World::new();
+        let e = world.spawn((Position { x: 1.0, y: 2.0 },));
+        world.increment_change_tick();
+
+        // Adding Velocity moves the entity across archetypes.
+        world.insert_component(e, Velocity { x: 1.0, y: 1.0 });
+
+        // Position's ticks survived the move; Velocity reads as newly added.
+        let pos = world.get_component_ref::<Position>(e).unwrap();
+        assert!(!pos.is_added());
+        assert!(!pos.is_changed());
+        let vel = world.get_component_ref::<Velocity>(e).unwrap();
+        assert!(vel.is_added());
+    }
+
+    #[test]
+    fn despawn_swap_keeps_ticks_with_components() {
+        let mut world = World::new();
+        let a = world.spawn((Position { x: 1.0, y: 0.0 },));
+        world.increment_change_tick();
+        let b = world.spawn((Position { x: 2.0, y: 0.0 },));
+
+        // Despawning `a` swap-removes `b` into its row; b's ticks must follow.
+        world.despawn(a).unwrap();
+        let r = world.get_component_ref::<Position>(b).unwrap();
+        assert_eq!(r.x, 2.0);
+        assert!(r.is_added());
+    }
+
+    #[test]
+    fn query_mutation_marks_changed() {
+        let mut world = World::new();
+        let e = world.spawn((Position { x: 1.0, y: 2.0 }, Velocity { x: 0.5, y: 0.5 }));
+        world.increment_change_tick();
+
+        for (_, mut pos) in world.query_mut::<&mut Position>() {
+            pos.x += 1.0;
+        }
+        assert!(world.get_component_ref::<Position>(e).unwrap().is_changed());
+        assert!(!world.get_component_ref::<Velocity>(e).unwrap().is_changed());
+    }
+
+    #[test]
+    fn pair_query_mutation_marks_only_written_component() {
+        let mut world = World::new();
+        let e = world.spawn((Position { x: 0.0, y: 0.0 }, Velocity { x: 1.0, y: 2.0 }));
+        world.increment_change_tick();
+
+        for (_, (mut pos, vel)) in world.query_mut::<(&mut Position, &Velocity)>() {
+            pos.x += vel.x;
+            pos.y += vel.y;
+        }
+        assert!(world.get_component_ref::<Position>(e).unwrap().is_changed());
+        assert!(!world.get_component_ref::<Velocity>(e).unwrap().is_changed());
+    }
+
+    #[test]
     fn system_runs_on_world() {
         fn update_positions(world: &mut World) {
-            for (_, (pos, vel)) in world.query_mut::<(&mut Position, &Velocity)>() {
+            for (_, (mut pos, vel)) in world.query_mut::<(&mut Position, &Velocity)>() {
                 pos.x += vel.x;
                 pos.y += vel.y;
             }
