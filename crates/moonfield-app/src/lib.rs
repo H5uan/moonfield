@@ -19,9 +19,7 @@ pub use plugin_group::{PluginGroup, PluginGroupBuilder};
 /// Common imports.
 pub mod prelude {
     pub use crate::{App, Plugin, PluginGroup, PluginGroupBuilder, Resource};
-    pub use moonfield_ecs::prelude::{
-        Commands, Component, Entity, IntoSystem, Query, System, World,
-    };
+    pub use moonfield_ecs::prelude::{Component, Entity, IntoSystem, Query, System, World};
 }
 
 #[cfg(test)]
