@@ -212,4 +212,32 @@ mod tests {
         assert_eq!(pos.x, 2.0);
         assert!(iter.next().is_none());
     }
+
+    #[test]
+    fn component_access_by_entity() {
+        let mut world = World::new();
+        let e = world.spawn((Position { x: 1.0, y: 2.0 },));
+        assert!(world.get_component::<Velocity>(e).is_none());
+
+        // Insert a new component (cross-archetype move).
+        assert!(world
+            .insert_component(e, Velocity { x: 3.0, y: 4.0 })
+            .is_some());
+        assert_eq!(world.get_component::<Velocity>(e).map(|v| v.x), Some(3.0));
+
+        // Mutate through get_component_mut.
+        world.get_component_mut::<Velocity>(e).unwrap().x = 9.0;
+        assert_eq!(world.get_component::<Velocity>(e).map(|v| v.x), Some(9.0));
+
+        // Replace when already present (no archetype change).
+        assert!(world
+            .insert_component(e, Velocity { x: 5.0, y: 6.0 })
+            .is_some());
+        assert_eq!(world.get_component::<Velocity>(e).map(|v| v.x), Some(5.0));
+
+        // Entity remains queryable with both components after the move.
+        let mut iter = world.query::<(&Position, &Velocity)>();
+        assert!(iter.next().is_some());
+        assert!(iter.next().is_none());
+    }
 }
