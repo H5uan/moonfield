@@ -1,5 +1,11 @@
-// The ECS crate is under active construction. Much of the archetype/borrow/
-// entity-allocation scaffolding is present but not yet wired into the public API.
+// The ECS crate: archetype-based storage with an archetype query engine. The
+// public `World` is the archetype `World2` (see `world2`).
+//
+// The crate is still under active construction. The items silenced below are
+// deliberate in-progress features kept for upcoming milestones (entity-ref /
+// component-ref access, column-batch spawning, dynamic clone bundles, and the
+// insert/remove edge tables for cross-archetype moves). The former sparse-set
+// implementation has been fully removed.
 #![allow(dead_code)]
 #![allow(clippy::type_complexity)]
 
@@ -32,7 +38,6 @@ macro_rules! smaller_tuples_too {
 mod archetype;
 mod borrow;
 mod bundle;
-mod commands;
 mod component;
 mod component_ref;
 mod entities;
@@ -40,20 +45,18 @@ mod entity_ref;
 mod query;
 mod resource;
 mod system;
-mod world;
 mod world2;
 
-pub use commands::{CommandQueue, Commands};
-pub use component::{Component, ComponentStorage};
+pub use component::Component;
 pub use entities::Entity;
 pub use query::Query;
 pub use resource::Resource;
 pub use system::{IntoSystem, System};
-pub use world::World;
+pub use world2::World2 as World;
 
 /// Common ECS imports.
 pub mod prelude {
-    pub use crate::{Commands, Component, Entity, IntoSystem, Query, Resource, System, World};
+    pub use crate::{Component, Entity, IntoSystem, Query, Resource, System, World};
 }
 
 /// Type-erased resource storage.
@@ -94,27 +97,6 @@ impl Resources {
     }
 }
 
-/// World-local change queue used by [`Commands`].
-#[derive(Default)]
-pub(crate) struct EntityChanges {
-    pub to_spawn: Vec<Vec<Box<dyn FnOnce(Entity, &mut World)>>>,
-    pub to_despawn: Vec<Entity>,
-}
-
-impl EntityChanges {
-    pub fn apply(&mut self, world: &mut World) {
-        for bundle_fns in self.to_spawn.drain(..) {
-            let e = world.spawn_empty();
-            for f in bundle_fns {
-                f(e, world);
-            }
-        }
-        for e in self.to_despawn.drain(..) {
-            world.despawn(e);
-        }
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -138,9 +120,9 @@ mod tests {
     fn spawn_entity_and_query() {
         let mut world = World::new();
         world.spawn((Position { x: 1.0, y: 2.0 },));
-        world.spawn2(Position { x: 3.0, y: 4.0 }, Velocity { x: 0.5, y: 0.5 });
+        world.spawn((Position { x: 3.0, y: 4.0 }, Velocity { x: 0.5, y: 0.5 }));
 
-        let positions: Vec<_> = world.query::<&Position>().cloned().collect();
+        let positions: Vec<_> = world.query::<&Position>().map(|(_, v)| v.clone()).collect();
         assert_eq!(
             positions,
             vec![Position { x: 1.0, y: 2.0 }, Position { x: 3.0, y: 4.0 }]
@@ -150,14 +132,18 @@ mod tests {
     #[test]
     fn query_mutable() {
         let mut world = World::new();
-        world.spawn2(Position { x: 1.0, y: 2.0 }, Velocity { x: 1.0, y: 0.0 });
+        world.spawn((Position { x: 1.0, y: 2.0 }, Velocity { x: 1.0, y: 0.0 }));
 
-        for (pos, vel) in world.query_mut::<(&mut Position, &Velocity)>() {
+        for (_, (pos, vel)) in world.query_mut::<(&mut Position, &Velocity)>() {
             pos.x += vel.x;
             pos.y += vel.y;
         }
 
-        let pos = world.query::<&Position>().next().unwrap();
+        let pos = world
+            .query::<&Position>()
+            .map(|(_, v)| v.clone())
+            .next()
+            .unwrap();
         assert_eq!(pos.x, 2.0);
         assert_eq!(pos.y, 2.0);
     }
@@ -172,27 +158,14 @@ mod tests {
     }
 
     #[test]
-    fn commands_spawn_and_despawn() {
+    fn spawn_and_despawn() {
         let mut world = World::new();
+        let e = world.spawn((Position { x: 10.0, y: 20.0 },));
 
-        // spawn via command
-        {
-            let mut cmds = world.commands();
-            cmds.spawn((Position { x: 10.0, y: 20.0 },));
-        }
-        world.apply_commands();
-
-        let pos: Vec<_> = world.query::<&Position>().cloned().collect();
+        let pos: Vec<_> = world.query::<&Position>().map(|(_, v)| v.clone()).collect();
         assert_eq!(pos, vec![Position { x: 10.0, y: 20.0 }]);
 
-        // despawn via command
-        let entity = world.entities().alive_entities().next().unwrap();
-        {
-            let mut cmds = world.commands();
-            cmds.despawn(entity);
-        }
-        world.apply_commands();
-
+        assert!(world.despawn(e).is_ok());
         let count = world.query::<&Position>().count();
         assert_eq!(count, 0);
     }
@@ -200,17 +173,21 @@ mod tests {
     #[test]
     fn system_runs_on_world() {
         fn update_positions(world: &mut World) {
-            for (pos, vel) in world.query_mut::<(&mut Position, &Velocity)>() {
+            for (_, (pos, vel)) in world.query_mut::<(&mut Position, &Velocity)>() {
                 pos.x += vel.x;
                 pos.y += vel.y;
             }
         }
 
         let mut world = World::new();
-        world.spawn2(Position { x: 0.0, y: 0.0 }, Velocity { x: 1.0, y: 2.0 });
+        world.spawn((Position { x: 0.0, y: 0.0 }, Velocity { x: 1.0, y: 2.0 }));
         update_positions(&mut world);
 
-        let pos = world.query::<&Position>().next().unwrap();
+        let pos = world
+            .query::<&Position>()
+            .map(|(_, v)| v.clone())
+            .next()
+            .unwrap();
         assert_eq!(pos.x, 1.0);
         assert_eq!(pos.y, 2.0);
     }
@@ -219,7 +196,7 @@ mod tests {
     fn despawn_entity() {
         let mut world = World::new();
         let e = world.spawn((Position { x: 1.0, y: 2.0 },));
-        assert!(world.despawn(e));
+        assert!(world.despawn(e).is_ok());
         let count = world.query::<&Position>().count();
         assert_eq!(count, 0);
     }
@@ -228,10 +205,11 @@ mod tests {
     fn query_filter_only_entities_with_all_components() {
         let mut world = World::new();
         world.spawn((Position { x: 1.0, y: 1.0 },));
-        world.spawn2(Position { x: 2.0, y: 2.0 }, Velocity { x: 0.0, y: 0.0 });
+        world.spawn((Position { x: 2.0, y: 2.0 }, Velocity { x: 0.0, y: 0.0 }));
 
         let mut iter = world.query::<(&Position, &Velocity)>();
-        assert_eq!(iter.next().unwrap().0.x, 2.0);
+        let (_, (pos, _)) = iter.next().unwrap();
+        assert_eq!(pos.x, 2.0);
         assert!(iter.next().is_none());
     }
 }
