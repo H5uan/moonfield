@@ -1,5 +1,6 @@
 //! Vulkan command pool and command buffer abstractions.
 
+use crate::bindless::GpuPtr;
 use crate::error::{Error, Result};
 use crate::vulkan::device::Device;
 use ash::vk;
@@ -144,6 +145,43 @@ impl CommandBuffer {
             self.device
                 .cmd_bind_pipeline(self.buffer, vk::PipelineBindPoint::GRAPHICS, pipeline);
         }
+    }
+
+    /// Bind a compute pipeline.
+    pub fn bind_compute_pipeline(&self, pipeline: vk::Pipeline) {
+        unsafe {
+            self.device
+                .cmd_bind_pipeline(self.buffer, vk::PipelineBindPoint::COMPUTE, pipeline);
+        }
+    }
+
+    /// Push the entry-point root pointers for a compute dispatch.
+    ///
+    /// Writes two 64-bit GPU addresses as one push-constant struct: `layout`
+    /// must be the layout of the bound pipeline, whose root struct matches
+    /// the kernel's pointer parameters (input @ 0, output @ 8).
+    pub fn set_bindless_root(&self, layout: vk::PipelineLayout, input: GpuPtr, output: GpuPtr) {
+        let root: [u64; 2] = [input.as_raw(), output.as_raw()];
+        let bytes = unsafe {
+            std::slice::from_raw_parts(root.as_ptr() as *const u8, std::mem::size_of_val(&root))
+        };
+        unsafe {
+            self.device.cmd_push_constants(
+                self.buffer,
+                layout,
+                vk::ShaderStageFlags::COMPUTE,
+                0,
+                bytes,
+            );
+        }
+    }
+
+    /// Launch a compute kernel with the given workgroup counts.
+    ///
+    /// Requires a bound compute pipeline and (for bindless kernels) a root
+    /// pointer set via [`set_bindless_root`] ahead of the call.
+    pub fn dispatch(&self, x: u32, y: u32, z: u32) {
+        unsafe { self.device.cmd_dispatch(self.buffer, x, y, z) };
     }
 
     /// Bind vertex buffers.

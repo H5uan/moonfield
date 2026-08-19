@@ -31,6 +31,40 @@ impl Semaphore {
     pub fn raw(&self) -> vk::Semaphore {
         self.semaphore
     }
+
+    pub fn new_timeline(device: &Device, initial_value: u64) -> Result<Self> {
+        let mut type_info = vk::SemaphoreTypeCreateInfo::default()
+            .semaphore_type(vk::SemaphoreType::TIMELINE)
+            .initial_value(initial_value);
+        let create_info = vk::SemaphoreCreateInfo::default().push_next(&mut type_info);
+        let semaphore = unsafe {
+            device
+                .raw()
+                .create_semaphore(&create_info, None)
+                .map_err(|e| {
+                    Error::Backend(format!("failed to create timeline semaphore: {:?}", e))
+                })?
+        };
+        Ok(Self {
+            semaphore,
+            device: device.raw().clone(),
+        })
+    }
+
+    /// Block the CPU until the timeline counter reaches at least `value`.
+    pub fn wait(&self, value: u64, timeout_ns: u64) -> Result<()> {
+        let wait_info = vk::SemaphoreWaitInfo::default()
+            .semaphores(std::slice::from_ref(&self.semaphore))
+            .values(std::slice::from_ref(&value));
+        unsafe {
+            self.device
+                .wait_semaphores(&wait_info, timeout_ns)
+                .map_err(|e| {
+                    Error::Backend(format!("failed to wait for timeline semaphore: {:?}", e))
+                })?;
+        }
+        Ok(())
+    }
 }
 
 impl Drop for Semaphore {

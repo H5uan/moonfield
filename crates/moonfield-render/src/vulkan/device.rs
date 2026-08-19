@@ -1,5 +1,6 @@
 //! Vulkan logical device abstraction.
 
+use crate::bindless;
 use crate::error::{Error, Result};
 use crate::vulkan::instance::Instance;
 use ash::vk;
@@ -14,6 +15,7 @@ const DEVICE_EXTENSIONS: &[&CStr] = &[ash::khr::swapchain::NAME];
 pub struct QueueFamilyIndices {
     pub graphics: u32,
     pub present: u32,
+    pub compute: u32,
 }
 
 impl QueueFamilyIndices {
@@ -30,12 +32,20 @@ impl QueueFamilyIndices {
 
         let mut graphics = None;
         let mut present = None;
+        let mut compute = None;
 
         for (index, props) in properties.iter().enumerate() {
             let index = index as u32;
 
             if graphics.is_none() && props.queue_flags.contains(vk::QueueFlags::GRAPHICS) {
                 graphics = Some(index);
+            }
+
+            if compute.is_none()
+                && props.queue_flags.contains(vk::QueueFlags::COMPUTE)
+                && !props.queue_flags.contains(vk::QueueFlags::GRAPHICS)
+            {
+                compute = Some(index);
             }
 
             if let Some(surface) = surface {
@@ -49,17 +59,21 @@ impl QueueFamilyIndices {
 
         let graphics = graphics.ok_or(Error::Unsupported)?;
         let present = present.unwrap_or(graphics);
+        let compute = compute.unwrap_or(graphics);
 
-        Ok(Self { graphics, present })
+        Ok(Self {
+            graphics,
+            present,
+            compute,
+        })
     }
 
     /// Returns the unique queue family indices needed to create the device.
     pub fn unique_indices(&self) -> Vec<u32> {
-        if self.graphics == self.present {
-            vec![self.graphics]
-        } else {
-            vec![self.graphics, self.present]
-        }
+        let mut indices = vec![self.graphics, self.present, self.compute];
+        indices.sort_unstable();
+        indices.dedup();
+        indices
     }
 }
 
@@ -68,6 +82,7 @@ pub struct Device {
     physical_device: vk::PhysicalDevice,
     device: ash::Device,
     graphics_queue: vk::Queue,
+    compute_queue: vk::Queue,
     present_queue: vk::Queue,
     queue_family_indices: QueueFamilyIndices,
     /// Shared GPU memory allocator for buffers and images. Wrapped in
@@ -126,12 +141,17 @@ impl Device {
         let device_extension_names: Vec<*const c_char> =
             DEVICE_EXTENSIONS.iter().map(|name| name.as_ptr()).collect();
 
-        let features = vk::PhysicalDeviceFeatures::default();
+        let mut vulkan_12_features = vk::PhysicalDeviceVulkan12Features::default()
+            .buffer_device_address(true)
+            .timeline_semaphore(true);
+        let mut features2 =
+            vk::PhysicalDeviceFeatures2::default().features(vk::PhysicalDeviceFeatures::default());
+        let _ = features2.push_next(&mut vulkan_12_features);
 
         let create_info = vk::DeviceCreateInfo::default()
             .queue_create_infos(&queue_create_infos)
             .enabled_extension_names(&device_extension_names)
-            .enabled_features(&features);
+            .push_next(&mut features2);
 
         let device = unsafe {
             instance
@@ -141,6 +161,7 @@ impl Device {
         .map_err(|e| Error::Backend(format!("failed to create logical device: {:?}", e)))?;
 
         let graphics_queue = unsafe { device.get_device_queue(queue_family_indices.graphics, 0) };
+        let compute_queue = unsafe { device.get_device_queue(queue_family_indices.compute, 0) };
         let present_queue = unsafe { device.get_device_queue(queue_family_indices.present, 0) };
 
         let allocator = Allocator::new(&AllocatorCreateDesc {
@@ -148,7 +169,10 @@ impl Device {
             device: device.clone(),
             physical_device,
             debug_settings: Default::default(),
-            buffer_device_address: false,
+            // Device enables `bufferDeviceAddress` (Vulkan 1.2 core) for the
+            // bindless GPU pointer model; the allocator must match or
+            // allocations cannot back a buffer device address.
+            buffer_device_address: true,
             allocation_sizes: Default::default(),
         })
         .map_err(|e| Error::Backend(format!("failed to create GPU allocator: {e}")))?;
@@ -157,6 +181,7 @@ impl Device {
             physical_device,
             device,
             graphics_queue,
+            compute_queue,
             present_queue,
             queue_family_indices,
             allocator: Arc::new(Mutex::new(allocator)),
@@ -178,9 +203,21 @@ impl Device {
         self.graphics_queue
     }
 
+    /// Access the compute queue.
+    pub fn compute_queue(&self) -> vk::Queue {
+        self.compute_queue
+    }
+
     /// Access the presentation queue.
     pub fn present_queue(&self) -> vk::Queue {
         self.present_queue
+    }
+
+    pub fn queue(&self, ty: bindless::QueueType) -> vk::Queue {
+        match ty {
+            bindless::QueueType::Graphics => self.graphics_queue,
+            bindless::QueueType::Compute => self.compute_queue,
+        }
     }
 
     /// Access the selected queue family indices.
