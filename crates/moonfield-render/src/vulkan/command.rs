@@ -1,5 +1,6 @@
 //! Vulkan command pool and command buffer abstractions.
 
+use crate::bindless::{GpuPtr, Stage};
 use crate::error::{Error, Result};
 use crate::vulkan::device::Device;
 use ash::vk;
@@ -168,6 +169,64 @@ impl CommandBuffer {
         unsafe {
             self.device
                 .cmd_bind_pipeline(self.buffer, vk::PipelineBindPoint::GRAPHICS, pipeline);
+        }
+    }
+
+    /// Bind a compute pipeline.
+    pub fn bind_compute_pipeline(&self, pipeline: vk::Pipeline) {
+        unsafe {
+            self.device
+                .cmd_bind_pipeline(self.buffer, vk::PipelineBindPoint::COMPUTE, pipeline);
+        }
+    }
+
+    /// Push the entry-point root pointers for a compute dispatch.
+    ///
+    /// Writes two 64-bit GPU addresses as one push-constant struct: `layout`
+    /// must be the layout of the bound pipeline, whose root struct matches
+    /// the kernel's pointer parameters (input @ 0, output @ 8).
+    pub fn set_bindless_root(&self, layout: vk::PipelineLayout, input: GpuPtr, output: GpuPtr) {
+        let root: [u64; 2] = [input.as_raw(), output.as_raw()];
+        let bytes = unsafe {
+            std::slice::from_raw_parts(root.as_ptr() as *const u8, std::mem::size_of_val(&root))
+        };
+        unsafe {
+            self.device.cmd_push_constants(
+                self.buffer,
+                layout,
+                vk::ShaderStageFlags::COMPUTE,
+                0,
+                bytes,
+            );
+        }
+    }
+
+    /// Launch a compute kernel with the given workgroup counts.
+    ///
+    /// Requires a bound compute pipeline and (for bindless kernels) a root
+    /// pointer set via [`set_bindless_root`] ahead of the call.
+    pub fn dispatch(&self, x: u32, y: u32, z: u32) {
+        unsafe { self.device.cmd_dispatch(self.buffer, x, y, z) };
+    }
+
+    /// Order the end of `before` against the start of `after` without naming
+    /// any resource.
+    ///
+    /// Emits a single global memory barrier (sync2): all memory writes by
+    /// `before` become visible to all memory accesses in `after`. This is the
+    /// bindless form of synchronization — shaders touch memory through
+    /// pointers, so a resource list would be both impossible and meaningless.
+    pub fn barrier(&self, before: Stage, after: Stage) {
+        let memory_barrier = vk::MemoryBarrier2::default()
+            .src_stage_mask(before.to_vk())
+            .src_access_mask(vk::AccessFlags2::MEMORY_READ | vk::AccessFlags2::MEMORY_WRITE)
+            .dst_stage_mask(after.to_vk())
+            .dst_access_mask(vk::AccessFlags2::MEMORY_READ | vk::AccessFlags2::MEMORY_WRITE);
+        let dependency_info =
+            vk::DependencyInfo::default().memory_barriers(std::slice::from_ref(&memory_barrier));
+        unsafe {
+            self.device
+                .cmd_pipeline_barrier2(self.buffer, &dependency_info);
         }
     }
 

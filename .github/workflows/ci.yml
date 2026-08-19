@@ -112,9 +112,18 @@ jobs:
       - name: Run Vulkan headless smoke test
         run: cargo test -p moonfield-render --test headless_triangle --locked
 
+  agent-docs:
+    name: Agent notes gate
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+
+      - name: Verify Agent Notes
+        run: python3 scripts/verify_agents.py
+
   ci-result:
     name: CI result
-    needs: [fmt, clippy, test, vulkan-smoke]
+    needs: [fmt, clippy, test, vulkan-smoke, agent-docs]
     if: always()
     runs-on: ubuntu-latest
     steps:
