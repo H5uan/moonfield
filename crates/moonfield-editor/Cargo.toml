@@ -20,7 +20,7 @@ gpu-allocator = "0.28.0"
 winit = "0.30"
 egui = "0.33"
 egui-winit = { version = "0.33", default-features = false }
-egui-ash-renderer = { version = "0.11", default-features = false, features = ["gpu-allocator"] }
+egui-ash-renderer = { version = "0.13", default-features = false, features = ["gpu-allocator"] }
 egui_dock = "0.18"
 
 [[example]]
