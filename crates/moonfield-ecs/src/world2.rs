@@ -495,6 +495,19 @@ impl World2 {
         Q::fetch_mut(self)
     }
 
+    /// Query with an archetype filter
+    /// ([`With`](crate::With)/[`Without`](crate::Without)/[`Or`](crate::Or)).
+    pub fn query_filtered<'a, Q: WorldQuery, F: crate::QueryFilter>(&'a self) -> Q::Iter<'a> {
+        Q::fetch_with(self, &crate::system::archetype_matches::<F>)
+    }
+
+    /// Mutable query with an archetype filter.
+    pub fn query_filtered_mut<'a, Q: WorldQuery, F: crate::QueryFilter>(
+        &'a mut self,
+    ) -> Q::Iter<'a> {
+        Q::fetch_mut_with(self, &crate::system::archetype_matches::<F>)
+    }
+
     // ------------------------------------------------------------------
     // Commands (deferred structural mutation queue)
     // ------------------------------------------------------------------

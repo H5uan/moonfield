@@ -41,6 +41,14 @@ inserting the `AppExit` resource (e.g. via `Commands::insert_resource`), not
 by a system return value. The low-level archetype query trait is `WorldQuery`,
 distinct from the `Query<Q>` system param.
 
+Queries accept an optional second type parameter — the filter:
+`Query<&Transform, With<MeshRenderer>>`, `Query<&mut Transform,
+Without<ChildOf>>`, `Query<&T, Or<(With<A>, With<B>)>>` (tuples of filters
+conjoin, `Or` disjoins, `()` is no filter). Filters are archetypal: each is
+evaluated once per archetype against its component type set at iterator
+construction, never per entity. The same filtering is available imperatively
+via `World::query_filtered::<Q, F>()` / `query_filtered_mut`.
+
 ## Component hooks
 
 Each component type can register `on_add`/`on_insert`/`on_discard`/`on_remove`

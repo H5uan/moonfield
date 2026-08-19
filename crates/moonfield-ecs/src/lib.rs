@@ -44,6 +44,7 @@ mod component;
 mod component_ref;
 mod entities;
 mod entity_ref;
+mod filter;
 mod hierarchy;
 mod hooks;
 mod message;
@@ -60,6 +61,7 @@ pub use change_detection::{ComponentTicks, Mut, Ref, Tick};
 pub use commands::{Commands, EntityCommands};
 pub use component::Component;
 pub use entities::Entity;
+pub use filter::{Or, QueryFilter, With, Without};
 pub use hierarchy::{ensure_global_transforms, propagate_transforms, ChildOf, Children};
 pub use hooks::{ComponentHook, ComponentHooks};
 pub use message::{
@@ -82,8 +84,8 @@ pub mod prelude {
     pub use crate::{
         ChildOf, Children, Commands, Component, ComponentHooks, Entity, EntityCommands, IntoSystem,
         IntoSystemConfigs, Local, Message, MessageCursor, MessageId, MessageReader, MessageWriter,
-        Messages, Name, Query, Relationship, RelationshipTarget, Res, ResMut, Resource, Schedule,
-        ScheduleLabel, System, World, WorldQuery,
+        Messages, Name, Or, Query, QueryFilter, Relationship, RelationshipTarget, Res, ResMut,
+        Resource, Schedule, ScheduleLabel, System, With, Without, World, WorldQuery,
     };
 }
 

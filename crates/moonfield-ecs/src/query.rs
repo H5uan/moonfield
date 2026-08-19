@@ -3,6 +3,11 @@ use crate::change_detection::{Mut, Tick};
 use crate::entities::EntityMeta;
 use crate::{Component, Entity, World};
 
+/// Archetype-level predicate consulted when a query iterator is built:
+/// archetypes it rejects contribute no entities. This is how
+/// [`QueryFilter`](crate::QueryFilter) (`With`/`Without`/`Or`) is applied.
+pub(crate) type ArchetypeFilter<'f> = &'f dyn Fn(&Archetype) -> bool;
+
 /// A type-erased iterator over the world's archetypes, tied to a borrow of the
 /// world so that yielded references outlive every `next` call.
 ///
@@ -22,6 +27,15 @@ pub trait WorldQuery {
     /// Build an iterator borrowing the world immutably.
     fn fetch<'w>(world: &'w World) -> Self::Iter<'w>
     where
+        Self: 'w,
+    {
+        Self::fetch_with(world, &|_| true)
+    }
+
+    /// Build an iterator, skipping archetypes rejected by `filter`.
+    #[doc(hidden)]
+    fn fetch_with<'w>(world: &'w World, filter: ArchetypeFilter) -> Self::Iter<'w>
+    where
         Self: 'w;
 
     /// Build an iterator borrowing the world mutably.
@@ -30,6 +44,14 @@ pub trait WorldQuery {
         Self: 'w,
     {
         Self::fetch_mut_cell(world)
+    }
+
+    /// `fetch_mut` with an archetype filter.
+    fn fetch_mut_with<'w>(world: &'w mut World, filter: ArchetypeFilter) -> Self::Iter<'w>
+    where
+        Self: 'w,
+    {
+        Self::fetch_mut_cell_with(world, filter)
     }
 
     /// Build the mutable iterator from a *shared* world reference.
@@ -41,6 +63,15 @@ pub trait WorldQuery {
     /// accesses panic at iterator construction instead of aliasing.
     #[doc(hidden)]
     fn fetch_mut_cell<'w>(world: &'w World) -> Self::Iter<'w>
+    where
+        Self: 'w,
+    {
+        Self::fetch_mut_cell_with(world, &|_| true)
+    }
+
+    /// `fetch_mut_cell` with an archetype filter.
+    #[doc(hidden)]
+    fn fetch_mut_cell_with<'w>(world: &'w World, filter: ArchetypeFilter) -> Self::Iter<'w>
     where
         Self: 'w;
 
@@ -179,11 +210,14 @@ pub struct ArchIter<'w, T: Component> {
 }
 
 impl<'w, T: Component> ArchIter<'w, T> {
-    fn new(world: &'w World) -> Self {
+    fn new(world: &'w World, filter: ArchetypeFilter) -> Self {
         let archetypes = world.raw_archetypes();
         let meta = world.raw_entity_meta();
         let mut hits = Vec::new();
         for (i, a) in archetypes.iter().enumerate() {
+            if !filter(a) {
+                continue;
+            }
             if let Some(col) = a.get_state::<T>() {
                 a.borrow::<T>(col);
                 hits.push((i, col));
@@ -248,18 +282,18 @@ impl<T: Component> WorldQuery for &T {
     where
         Self: 'w;
 
-    fn fetch<'w>(world: &'w World) -> Self::Iter<'w>
+    fn fetch_with<'w>(world: &'w World, filter: ArchetypeFilter) -> Self::Iter<'w>
     where
         Self: 'w,
     {
-        ArchIter::new(world)
+        ArchIter::new(world, filter)
     }
 
-    fn fetch_mut_cell<'w>(world: &'w World) -> Self::Iter<'w>
+    fn fetch_mut_cell_with<'w>(world: &'w World, filter: ArchetypeFilter) -> Self::Iter<'w>
     where
         Self: 'w,
     {
-        Self::fetch(world)
+        Self::fetch_with(world, filter)
     }
 
     type EntityFetch<'w>
@@ -291,13 +325,16 @@ pub struct MutArchIter<'w, T: Component> {
 }
 
 impl<'w, T: Component> MutArchIter<'w, T> {
-    fn new(world: &'w World) -> Self {
+    fn new(world: &'w World, filter: ArchetypeFilter) -> Self {
         let last_run = world.last_change_tick();
         let this_run = world.change_tick();
         let archetypes = world.raw_archetypes();
         let meta = world.raw_entity_meta();
         let mut hits = Vec::new();
         for (i, a) in archetypes.iter().enumerate() {
+            if !filter(a) {
+                continue;
+            }
             if let Some(col) = a.get_state::<T>() {
                 a.borrow_mut::<T>(col);
                 hits.push((i, col));
@@ -367,7 +404,7 @@ impl<T: Component> WorldQuery for &mut T {
     where
         Self: 'w;
 
-    fn fetch<'w>(_world: &'w World) -> Self::Iter<'w>
+    fn fetch_with<'w>(_world: &'w World, _filter: ArchetypeFilter) -> Self::Iter<'w>
     where
         Self: 'w,
     {
@@ -375,11 +412,11 @@ impl<T: Component> WorldQuery for &mut T {
         unreachable!("`&mut T` query requires a mutable world (`query_mut`)")
     }
 
-    fn fetch_mut_cell<'w>(world: &'w World) -> Self::Iter<'w>
+    fn fetch_mut_cell_with<'w>(world: &'w World, filter: ArchetypeFilter) -> Self::Iter<'w>
     where
         Self: 'w,
     {
-        MutArchIter::new(world)
+        MutArchIter::new(world, filter)
     }
 
     type EntityFetch<'w>
@@ -409,11 +446,14 @@ pub struct PairIter<'w, A: Component, B: Component> {
 }
 
 impl<'w, A: Component, B: Component> PairIter<'w, A, B> {
-    fn new_shared(world: &'w World) -> Self {
+    fn new_shared(world: &'w World, filter: ArchetypeFilter) -> Self {
         let archetypes = world.raw_archetypes();
         let meta = world.raw_entity_meta();
         let mut hits = Vec::new();
         for (i, a) in archetypes.iter().enumerate() {
+            if !filter(a) {
+                continue;
+            }
             if let (Some(ca), Some(cb)) = (a.get_state::<A>(), a.get_state::<B>()) {
                 a.borrow::<A>(ca);
                 a.borrow::<B>(cb);
@@ -475,18 +515,18 @@ impl<A: Component, B: Component> WorldQuery for (&A, &B) {
     where
         Self: 'w;
 
-    fn fetch<'w>(world: &'w World) -> Self::Iter<'w>
+    fn fetch_with<'w>(world: &'w World, filter: ArchetypeFilter) -> Self::Iter<'w>
     where
         Self: 'w,
     {
-        PairIter::new_shared(world)
+        PairIter::new_shared(world, filter)
     }
 
-    fn fetch_mut_cell<'w>(world: &'w World) -> Self::Iter<'w>
+    fn fetch_mut_cell_with<'w>(world: &'w World, filter: ArchetypeFilter) -> Self::Iter<'w>
     where
         Self: 'w,
     {
-        Self::fetch(world)
+        Self::fetch_with(world, filter)
     }
 
     type EntityFetch<'w>
@@ -519,13 +559,16 @@ pub struct MutSharedIter<'w, A: Component, B: Component> {
 }
 
 impl<'w, A: Component, B: Component> MutSharedIter<'w, A, B> {
-    fn new(world: &'w World) -> Self {
+    fn new(world: &'w World, filter: ArchetypeFilter) -> Self {
         let last_run = world.last_change_tick();
         let this_run = world.change_tick();
         let archetypes = world.raw_archetypes();
         let meta = world.raw_entity_meta();
         let mut hits = Vec::new();
         for (i, a) in archetypes.iter().enumerate() {
+            if !filter(a) {
+                continue;
+            }
             if let (Some(ca), Some(cb)) = (a.get_state::<A>(), a.get_state::<B>()) {
                 a.borrow_mut::<A>(ca);
                 a.borrow::<B>(cb);
@@ -598,18 +641,18 @@ impl<A: Component, B: Component> WorldQuery for (&mut A, &B) {
     where
         Self: 'w;
 
-    fn fetch<'w>(_world: &'w World) -> Self::Iter<'w>
+    fn fetch_with<'w>(_world: &'w World, _filter: ArchetypeFilter) -> Self::Iter<'w>
     where
         Self: 'w,
     {
         unreachable!("`(&mut A, &B)` requires `query_mut`")
     }
 
-    fn fetch_mut_cell<'w>(world: &'w World) -> Self::Iter<'w>
+    fn fetch_mut_cell_with<'w>(world: &'w World, filter: ArchetypeFilter) -> Self::Iter<'w>
     where
         Self: 'w,
     {
-        MutSharedIter::new(world)
+        MutSharedIter::new(world, filter)
     }
 
     type EntityFetch<'w>
@@ -642,13 +685,16 @@ pub struct MutBothIter<'w, A: Component, B: Component> {
 }
 
 impl<'w, A: Component, B: Component> MutBothIter<'w, A, B> {
-    fn new(world: &'w World) -> Self {
+    fn new(world: &'w World, filter: ArchetypeFilter) -> Self {
         let last_run = world.last_change_tick();
         let this_run = world.change_tick();
         let meta = world.raw_entity_meta();
         let archetypes = world.raw_archetypes();
         let mut hits = Vec::new();
         for (i, a) in archetypes.iter().enumerate() {
+            if !filter(a) {
+                continue;
+            }
             if let (Some(ca), Some(cb)) = (a.get_state::<A>(), a.get_state::<B>()) {
                 a.borrow_mut::<A>(ca);
                 a.borrow_mut::<B>(cb);
@@ -729,18 +775,18 @@ impl<A: Component, B: Component> WorldQuery for (&mut A, &mut B) {
     where
         Self: 'w;
 
-    fn fetch<'w>(_world: &'w World) -> Self::Iter<'w>
+    fn fetch_with<'w>(_world: &'w World, _filter: ArchetypeFilter) -> Self::Iter<'w>
     where
         Self: 'w,
     {
         unreachable!("`(&mut A, &mut B)` requires `query_mut`")
     }
 
-    fn fetch_mut_cell<'w>(world: &'w World) -> Self::Iter<'w>
+    fn fetch_mut_cell_with<'w>(world: &'w World, filter: ArchetypeFilter) -> Self::Iter<'w>
     where
         Self: 'w,
     {
-        MutBothIter::new(world)
+        MutBothIter::new(world, filter)
     }
 
     type EntityFetch<'w>
@@ -764,19 +810,26 @@ impl<A: Component, B: Component> WorldQuery for (&mut A, &mut B) {
 pub struct OptionIter<'w, T: Component> {
     meta: &'w [EntityMeta],
     archetypes: &'w [Archetype],
+    /// Archetype indices passing the filter (the iteration set).
+    included: Vec<usize>,
     /// Archetype indices that contain T (these columns are shared-borrowed).
     borrowed: Vec<usize>,
-    arch_i: usize,
+    ai: usize,
     row: u32,
     _marker: std::marker::PhantomData<&'w T>,
 }
 
 impl<'w, T: Component> OptionIter<'w, T> {
-    fn new(world: &'w World) -> Self {
+    fn new(world: &'w World, filter: ArchetypeFilter) -> Self {
         let archetypes = world.raw_archetypes();
         let meta = world.raw_entity_meta();
+        let mut included = Vec::new();
         let mut borrowed = Vec::new();
         for (i, a) in archetypes.iter().enumerate() {
+            if !filter(a) {
+                continue;
+            }
+            included.push(i);
             if let Some(col) = a.get_state::<T>() {
                 a.borrow::<T>(col);
                 borrowed.push(i);
@@ -785,8 +838,9 @@ impl<'w, T: Component> OptionIter<'w, T> {
         Self {
             meta,
             archetypes,
+            included,
             borrowed,
-            arch_i: 0,
+            ai: 0,
             row: 0,
             _marker: std::marker::PhantomData,
         }
@@ -806,7 +860,8 @@ impl<'w, T: Component> Iterator for OptionIter<'w, T> {
     type Item = (Entity, Option<&'w T>);
     fn next(&mut self) -> Option<Self::Item> {
         loop {
-            let arch = self.archetypes.get(self.arch_i)?;
+            let &arch_i = self.included.get(self.ai)?;
+            let arch = &self.archetypes[arch_i];
             if self.row < arch.len() {
                 let raw = arch.entity_id(self.row);
                 let entity = Entity {
@@ -822,7 +877,7 @@ impl<'w, T: Component> Iterator for OptionIter<'w, T> {
                 self.row += 1;
                 return Some((entity, value));
             }
-            self.arch_i += 1;
+            self.ai += 1;
             self.row = 0;
         }
     }
@@ -838,18 +893,18 @@ impl<T: Component> WorldQuery for Option<&T> {
     where
         Self: 'w;
 
-    fn fetch<'w>(world: &'w World) -> Self::Iter<'w>
+    fn fetch_with<'w>(world: &'w World, filter: ArchetypeFilter) -> Self::Iter<'w>
     where
         Self: 'w,
     {
-        OptionIter::new(world)
+        OptionIter::new(world, filter)
     }
 
-    fn fetch_mut_cell<'w>(world: &'w World) -> Self::Iter<'w>
+    fn fetch_mut_cell_with<'w>(world: &'w World, filter: ArchetypeFilter) -> Self::Iter<'w>
     where
         Self: 'w,
     {
-        Self::fetch(world)
+        Self::fetch_with(world, filter)
     }
 
     type EntityFetch<'w>
