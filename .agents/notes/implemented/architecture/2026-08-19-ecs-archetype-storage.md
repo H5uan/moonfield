@@ -42,9 +42,10 @@ unified under one name once the migration completes.
 - **Keep the entity-keyed map.** Rejected: component filtering and insert/remove
   cost grew with total entity count instead of with the matching subset, and
   scattered component slices defeated the tight loops this engine targets.
-- **Adopt bevy_ecs wholesale.** Rejected: the workspace builds its own learning
-  line of ECS in `moonfield-ecs`; pulling a full dependency would have surrendered
-  the design decisions (e.g. simple tick windows) this crate wants to own.
+- **Adopt a mainstream third-party ECS wholesale.** Rejected: the workspace
+  builds its own learning line of ECS in `moonfield-ecs`; pulling a full
+  dependency would have surrendered the design decisions (e.g. simple tick
+  windows) this crate wants to own.
 - **Sparse-set storage (entity-side SOA) instead of archetype.** Rejected: it
   wins on single-component insert/remove but loses on dense archetype iteration,
   which is the dominant pattern here.
