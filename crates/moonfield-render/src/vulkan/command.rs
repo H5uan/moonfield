@@ -1,6 +1,6 @@
 //! Vulkan command pool and command buffer abstractions.
 
-use crate::bindless::GpuPtr;
+use crate::bindless::{GpuPtr, Stage};
 use crate::error::{Error, Result};
 use crate::vulkan::device::Device;
 use ash::vk;
@@ -182,6 +182,27 @@ impl CommandBuffer {
     /// pointer set via [`set_bindless_root`] ahead of the call.
     pub fn dispatch(&self, x: u32, y: u32, z: u32) {
         unsafe { self.device.cmd_dispatch(self.buffer, x, y, z) };
+    }
+
+    /// Order the end of `before` against the start of `after` without naming
+    /// any resource.
+    ///
+    /// Emits a single global memory barrier (sync2): all memory writes by
+    /// `before` become visible to all memory accesses in `after`. This is the
+    /// bindless form of synchronization — shaders touch memory through
+    /// pointers, so a resource list would be both impossible and meaningless.
+    pub fn barrier(&self, before: Stage, after: Stage) {
+        let memory_barrier = vk::MemoryBarrier2::default()
+            .src_stage_mask(before.to_vk())
+            .src_access_mask(vk::AccessFlags2::MEMORY_READ | vk::AccessFlags2::MEMORY_WRITE)
+            .dst_stage_mask(after.to_vk())
+            .dst_access_mask(vk::AccessFlags2::MEMORY_READ | vk::AccessFlags2::MEMORY_WRITE);
+        let dependency_info =
+            vk::DependencyInfo::default().memory_barriers(std::slice::from_ref(&memory_barrier));
+        unsafe {
+            self.device
+                .cmd_pipeline_barrier2(self.buffer, &dependency_info);
+        }
     }
 
     /// Bind vertex buffers.

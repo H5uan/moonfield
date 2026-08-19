@@ -144,9 +144,13 @@ impl Device {
         let mut vulkan_12_features = vk::PhysicalDeviceVulkan12Features::default()
             .buffer_device_address(true)
             .timeline_semaphore(true);
+        let mut vulkan_13_features =
+            vk::PhysicalDeviceVulkan13Features::default().synchronization2(true);
         let mut features2 =
             vk::PhysicalDeviceFeatures2::default().features(vk::PhysicalDeviceFeatures::default());
-        let _ = features2.push_next(&mut vulkan_12_features);
+        let _ = features2
+            .push_next(&mut vulkan_12_features)
+            .push_next(&mut vulkan_13_features);
 
         let create_info = vk::DeviceCreateInfo::default()
             .queue_create_infos(&queue_create_infos)
