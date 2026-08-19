@@ -24,7 +24,7 @@ truth for logical window state in `moonfield-window`.
   `sync_windows` (`windows.rs`) diffs live `Window` fields against a
   `CachedWindow` component, and `diff_window` returns a `WindowDiff`
   (title, cursor mode) that the backend applies to the native window. This is
-  Bevy's `CachedWindow` pattern without change detection.
+  the `CachedWindow` diff pattern without change detection.
 - `WinitWindows` (resource) maps `Entity ↔ WindowId`; the primary window
   entity is spawned in `resumed`, adopting a pre-created `Window` entity if one
   exists.
@@ -32,8 +32,8 @@ truth for logical window state in `moonfield-window`.
 - Lifecycle events (`close_requested`/`resized`/`focus_*`/`scale_factor_changed`)
   travel on a separate channel, the `WindowEvents` world resource, so they are
   never missed by a consumer that does not poll every frame.
-- Exit policy mirrors Godot's `auto_accept_quit`: `CloseRequested` exits by
-  default; `WindowControl::set_auto_exit_on_close(false)` hands control over,
+- Exit policy mirrors the `auto_accept_quit` convention: `CloseRequested` exits
+  by default; `WindowControl::set_auto_exit_on_close(false)` hands control over,
   and `WindowControl::request_exit()` exits later.
 
 ## Alternatives considered

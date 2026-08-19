@@ -23,7 +23,7 @@ Status: implemented
 ## Alternatives considered
 
 - **保留实体键 map。** 拒绝:组件过滤与插入/移除的成本随实体总数增长(而非随匹配子集),零散的组件切片也不利于本引擎目标中的紧循环。
-- **整体引入 bevy_ecs。** 拒绝:本 workspace 在 `moonfield-ecs` 中自建 ECS 学习线;拉入完整依赖等于交出本 crate 想拥有的设计决策(例如简化的 tick 窗口)。
+- **整体引入主流第三方 ECS。** 拒绝:本 workspace 在 `moonfield-ecs` 中自建 ECS 学习线;拉入完整依赖等于交出本 crate 想拥有的设计决策(例如简化的 tick 窗口)。
 - **用 sparse-set 存储(实体侧 SOA)而非 archetype。** 拒绝:它在单组件插入/移除上有优势,但在密集 archetype 迭代上吃亏——而后者是这里的支配性模式。
 
 ## Consequences

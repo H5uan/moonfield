@@ -1,6 +1,6 @@
 # moonfield — Repository Guidelines
 
-moonfield is a Rust workspace implementing a Vulkan RHI, a Bevy-style ECS/app
+moonfield is a Rust workspace implementing a Vulkan RHI, a plugin-based ECS/app
 framework, and an editor. This file carries the standing rules agents need in
 every session; [docs/architecture.md](docs/architecture.md) describes the runtime
 mechanisms, [crates/AGENTS.md](crates/AGENTS.md) carries workspace coding rules,
@@ -12,7 +12,7 @@ Cargo-managed monorepo under `crates/`:
 
 ```
 moonfield/          # Binary crate — main executable entry point
-moonfield-app/      # Bevy-style App/Plugin framework (Plugin, PluginGroup, App, Resources)
+moonfield-app/      # Plugin-based App/Plugin framework (Plugin, PluginGroup, App, Resources)
 moonfield-base/     # Shared base types and utilities
 moonfield-editor/   # Editor plugin (egui + egui_dock + egui-ash-renderer): dock panels, offscreen viewport
 moonfield-math/     # The workspace math single entry: glam re-export + domain types (Dir3/Ray3d)

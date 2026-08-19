@@ -7,7 +7,7 @@ patterns are recorded in the linked Agent Notes where a decision was made.
 
 ## Frame loop
 
-The frame loop is **redraw-driven** (bevy_winit's model): `about_to_wait` only
+The frame loop is **redraw-driven**: `about_to_wait` only
 decides `ControlFlow` and requests redraws; the frame (`App::update` →
 `sync_windows` → `App::render` → frame-state clearing → exit check) runs inside
 `WindowEvent::RedrawRequested`. Update pacing is governed by the `WinitSettings`
@@ -20,20 +20,20 @@ runtime. External threads and UI toolkits wake an idle Reactive loop via the
 ## Windows are ECS entities
 
 The backend spawns the primary window entity in `resumed` (adopting a
-pre-spawned `Window` entity if user code created one at startup, Bevy-style) and
+pre-spawned `Window` entity if user code created one at startup) and
 attaches `Window` + `PrimaryWindow` + `RawHandleWrapper` + `CachedWindow`
 components. winit→ECS direction (resize/DPI/focus) writes back into the `Window`
 component immediately in `window_event`; ECS→winit direction (title/cursor_mode
 mutations by gameplay/editor code) is applied once per frame after `App::update`
 by `sync_windows`, which diffs the live component against the `CachedWindow`
-cache (Bevy's `changed_windows` pattern without change detection). `WinitWindows`
+cache (a per-field cached-window diff, without change detection). `WinitWindows`
 (resource) holds the `Entity ↔ WindowId` mapping. There is no `WindowRequests`
 channel — mutate the component.
 
 Window lifecycle events (`close_requested`/`resized`/`focus_*`/
 `scale_factor_changed`) travel on a separate channel — the `WindowEvents` world
 resource; every entry carries the window `Entity` (multi-window-shaped,
-single-window today). Exit policy mirrors Godot's `auto_accept_quit`:
+single-window today). Exit policy mirrors the `auto_accept_quit` convention:
 `CloseRequested` exits immediately by default; a caller sets
 `WindowControl::set_auto_exit_on_close(false)` to take over and later
 `WindowControl::request_exit()`.
@@ -58,8 +58,8 @@ The renderer is Vulkan-only through `ash` and always available in the default
 build. The engine-level clip convention is Y-up with reverse-Z, with any Vulkan
 viewport adjustment handled at the Vulkan boundary.
 
-The editor is a library crate providing `EditorPlugin`, a regular Bevy-style
-plugin composing the engine crates. `EditorPlugin` does **not** own the event
+The editor is a library crate providing `EditorPlugin`, a regular plugin
+composing the engine crates. `EditorPlugin` does **not** own the event
 loop or the window — it layers on top of `WinitPlugin` (which must be added
 first), reading the `WinitWindow`/`InputState`/`WindowControl`/`RawWindowEvents`
 resources the backend registers, and lazily building the windowed Vulkan
