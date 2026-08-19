@@ -4,6 +4,7 @@
 //! surface over instance, physical device, logical device, and swapchain
 //! creation.
 
+pub mod bindless;
 pub mod buffer;
 pub mod command;
 pub mod device;
