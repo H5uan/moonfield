@@ -1,11 +1,30 @@
 use crate::{Plugin, PluginGroup};
-use moonfield_ecs::{IntoSystem, System, World};
-use std::collections::HashSet;
+use moonfield_ecs::{IntoSystemConfigs, Schedule, ScheduleLabel, World};
+use std::any::TypeId;
+use std::collections::{HashMap, HashSet};
 
-type StartupFn = Box<dyn FnOnce(&mut World)>;
-type ShutdownFn = Box<dyn FnOnce(&mut World)>;
-type UpdateFn = Box<dyn FnMut(&mut World) -> bool>;
-type RenderFn = Box<dyn FnMut(&mut World)>;
+/// Schedule label for systems that run once at app startup.
+pub struct Startup;
+/// Schedule label for systems that run every frame, during [`App::update`].
+pub struct Update;
+/// Schedule label for render-phase systems, run by [`App::render`] after the
+/// update phase when a windowing backend drives the frame.
+pub struct Render;
+/// Schedule label for systems that run once at app shutdown.
+pub struct Shutdown;
+
+impl ScheduleLabel for Startup {}
+impl ScheduleLabel for Update {}
+impl ScheduleLabel for Render {}
+impl ScheduleLabel for Shutdown {}
+
+/// Resource marking that the app should exit its update loop.
+///
+/// Insert it (e.g. via `Commands::insert_resource`) to make [`App::update`]
+/// return `false`. This replaces the old convention of update systems
+/// returning `bool`: systems no longer have return values.
+#[derive(Debug, Default, Clone, Copy)]
+pub struct AppExit;
 
 /// Errors that can occur while adding a [`Plugin`] to an [`App`].
 #[derive(Debug, PartialEq, Eq, thiserror::Error)]
@@ -21,6 +40,14 @@ pub enum AppError {
 /// added, and [`App::run`] calls `finish()`, runs the update loop, then
 /// calls `cleanup()`.
 ///
+/// # Schedules
+///
+/// Systems live in labeled [`Schedule`]s. The app drives four of them:
+/// [`Startup`] (once, lazily on the first update/render), [`Update`] (every
+/// [`App::update`]), [`Render`] (every [`App::render`], called by the
+/// windowing backend after the update), and [`Shutdown`] (once, from
+/// [`App::shutdown`]).
+///
 /// # Runner
 ///
 /// By default [`App::run`] runs its own update loop. A plugin can override
@@ -31,10 +58,7 @@ pub struct App {
     plugins: Vec<Box<dyn Plugin>>,
     plugin_names: HashSet<String>,
     world: World,
-    startup_fns: Vec<StartupFn>,
-    shutdown_fns: Vec<ShutdownFn>,
-    update_fns: Vec<UpdateFn>,
-    render_fns: Vec<RenderFn>,
+    schedules: HashMap<TypeId, Schedule>,
     runner: Option<Runner>,
     initialized: bool,
 }
@@ -52,10 +76,7 @@ impl App {
             plugins: Vec::new(),
             plugin_names: HashSet::new(),
             world: World::new(),
-            startup_fns: Vec::new(),
-            shutdown_fns: Vec::new(),
-            update_fns: Vec::new(),
-            render_fns: Vec::new(),
+            schedules: HashMap::new(),
             runner: None,
             initialized: false,
         }
@@ -94,6 +115,15 @@ impl App {
         self
     }
 
+    /// Register lifecycle hooks for component `T` in the app's world.
+    ///
+    /// See [`moonfield_ecs::ComponentHooks`] for firing points and semantics.
+    pub fn register_component_hooks<T: moonfield_ecs::Component>(
+        &mut self,
+    ) -> &mut moonfield_ecs::ComponentHooks {
+        self.world.register_component_hooks::<T>()
+    }
+
     /// Gets an immutable reference to a previously inserted resource.
     pub fn get_resource<R: moonfield_ecs::Resource>(&self) -> Option<std::cell::Ref<'_, R>> {
         self.world.get_resource::<R>()
@@ -114,66 +144,43 @@ impl App {
         &mut self.world
     }
 
-    /// Register a startup callback.
-    pub fn add_startup_system<F>(&mut self, f: F) -> &mut Self
-    where
-        F: FnOnce(&mut World) + 'static,
-    {
-        self.startup_fns.push(Box::new(f));
-        self
-    }
-
-    /// Register a shutdown callback.
-    pub fn add_shutdown_system<F>(&mut self, f: F) -> &mut Self
-    where
-        F: FnOnce(&mut World) + 'static,
-    {
-        self.shutdown_fns.push(Box::new(f));
-        self
-    }
-
-    /// Register an update callback. Returning `false` ends the loop.
-    pub fn add_update_system<F>(&mut self, f: F) -> &mut Self
-    where
-        F: FnMut(&mut World) -> bool + 'static,
-    {
-        self.update_fns.push(Box::new(f));
-        self
-    }
-
-    /// Register an ECS system to run every frame.
-    pub fn add_systems(&mut self, system: impl IntoSystem) -> &mut Self {
-        let mut sys = system.system();
-        self.update_fns.push(Box::new(move |world: &mut World| {
-            sys.run(world);
-            true
-        }));
-        self
-    }
-
-    /// Register a render system. Render systems run once per frame after the
-    /// update phase, when a windowing backend calls [`App::render`]. Unlike
-    /// update systems they cannot terminate the loop — their return value is
-    /// discarded.
+    /// Register one or more systems into the schedule identified by `label`.
     ///
-    /// Render systems are how plugins that do not own the event loop (e.g. an
-    /// editor or a UI renderer) draw into the frame produced by the windowing
-    /// backend, mirroring Bevy's render schedule.
-    pub fn add_render_system<F>(&mut self, f: F) -> &mut Self
-    where
-        F: FnMut(&mut World) + 'static,
-    {
-        self.render_fns.push(Box::new(f));
+    /// Accepts a single system, a `.before()`/`.after()` ordering chain, or a
+    /// tuple of either. Systems are ordinary functions whose parameters are
+    /// system params (`Res<T>`, `ResMut<T>`, `Query<Q>`, `Local<T>`,
+    /// `Commands`), or exclusive `FnMut(&mut World)` systems.
+    ///
+    /// ```ignore
+    /// app.add_systems(Startup, setup_scene);
+    /// app.add_systems(Update, (apply_gravity, integrate.after(&apply_gravity)));
+    /// app.add_systems(Render, editor_render);
+    /// ```
+    pub fn add_systems<L: ScheduleLabel, M>(
+        &mut self,
+        _label: L,
+        systems: impl IntoSystemConfigs<M>,
+    ) -> &mut Self {
+        self.schedules
+            .entry(TypeId::of::<L>())
+            .or_default()
+            .add_systems(systems);
         self
     }
 
-    /// Register an ECS startup system to run once at startup.
-    pub fn add_startup_system_ecs(&mut self, system: impl IntoSystem) -> &mut Self {
-        let mut sys = system.system();
-        self.startup_fns.push(Box::new(move |world: &mut World| {
-            sys.run(world);
-        }));
-        self
+    /// Run the schedule identified by `label` once, if it exists.
+    pub fn run_schedule<L: ScheduleLabel>(&mut self, _label: L) {
+        if let Some(schedule) = self.schedules.get_mut(&TypeId::of::<L>()) {
+            schedule.run(&mut self.world);
+        }
+    }
+
+    /// Whether the schedule identified by `L` has no systems (or does not
+    /// exist).
+    fn schedule_is_empty<L: ScheduleLabel>(&self) -> bool {
+        self.schedules
+            .get(&TypeId::of::<L>())
+            .is_none_or(Schedule::is_empty)
     }
 
     /// Set a custom runner function that replaces the default update loop.
@@ -203,67 +210,57 @@ impl App {
         self.runner.take()
     }
 
-    /// Run startup systems.
+    /// Run the [`Startup`] schedule once.
     pub fn startup(&mut self) {
         moonfield_base::initialize();
         self.initialized = true;
-        for f in self.startup_fns.drain(..) {
-            f(&mut self.world);
-        }
+        self.run_schedule(Startup);
     }
 
-    /// Run a single update tick. Returns `false` if any system returned `false`.
+    /// Run a single update tick: the [`Update`] schedule once. Returns `false`
+    /// if an [`AppExit`] resource was inserted (e.g. via
+    /// `Commands::insert_resource`), signaling the loop should end.
     ///
     /// This is the per-frame counterpart of [`run_updates`]; it runs startup
-    /// once on the first call, then invokes each update system exactly once.
+    /// once on the first call.
     pub fn update(&mut self) -> bool {
         if !self.initialized {
             self.startup();
         }
-        self.world.apply_commands();
-        for f in &mut self.update_fns {
-            if !f(&mut self.world) {
-                return false;
-            }
-        }
-        true
+        self.run_schedule(Update);
+        !self.world.contains_resource::<AppExit>()
     }
 
-    /// Run one render tick. Called by the windowing backend after
-    /// [`App::update`] each frame; invokes every registered render system in
-    /// registration order. Startup runs lazily on the first call so a backend
+    /// Run one render tick: the [`Render`] schedule once. Called by the
+    /// windowing backend after [`App::update`] each frame, mirroring Bevy's
+    /// render schedule. Startup runs lazily on the first call so a backend
     /// that drives `render` without `update` still initializes.
-    ///
-    /// Render systems cannot terminate the loop.
     pub fn render(&mut self) {
         if !self.initialized {
             self.startup();
         }
-        for f in &mut self.render_fns {
-            f(&mut self.world);
-        }
+        self.run_schedule(Render);
     }
 
-    /// Run the update loop until a system returns `false` or no systems remain.
+    /// Run the update loop until exit is requested via [`AppExit`] or the
+    /// [`Update`] schedule is empty.
     pub fn run_updates(&mut self) {
         loop {
             if !self.update() {
                 break;
             }
-            if self.update_fns.is_empty() {
+            if self.schedule_is_empty::<Update>() {
                 break;
             }
         }
     }
 
-    /// Run shutdown systems.
+    /// Run the [`Shutdown`] schedule once.
     pub fn shutdown(&mut self) {
         if !self.initialized {
             return;
         }
-        for f in self.shutdown_fns.drain(..) {
-            f(&mut self.world);
-        }
+        self.run_schedule(Shutdown);
         moonfield_base::shutdown();
         self.initialized = false;
     }

@@ -5,7 +5,11 @@ use crate::{Component, Entity, World};
 
 /// A type-erased iterator over the world's archetypes, tied to a borrow of the
 /// world so that yielded references outlive every `next` call.
-pub trait Query {
+///
+/// Named after Bevy's `WorldQuery`: this is the low-level query description
+/// (`&T`, `&mut T`, tuples), distinct from the [`Query`](crate::Query) system
+/// param that wraps it.
+pub trait WorldQuery {
     /// The item produced per matching entity.
     type Item<'w>: 'w
     where
@@ -23,7 +27,140 @@ pub trait Query {
     /// Build an iterator borrowing the world mutably.
     fn fetch_mut<'w>(world: &'w mut World) -> Self::Iter<'w>
     where
+        Self: 'w,
+    {
+        Self::fetch_mut_cell(world)
+    }
+
+    /// Build the mutable iterator from a *shared* world reference.
+    ///
+    /// Used by the [`Query`](crate::Query) system param, which is fetched from
+    /// a shared borrow so it can coexist with the system's other params.
+    /// Sound because systems run with exclusive world access and every column
+    /// is arbitrated by the archetype's runtime borrow flags: conflicting
+    /// accesses panic at iterator construction instead of aliasing.
+    #[doc(hidden)]
+    fn fetch_mut_cell<'w>(world: &'w World) -> Self::Iter<'w>
+    where
         Self: 'w;
+
+    /// The item produced by per-entity access ([`Query::get`](crate::Query::get)):
+    /// a guard that dereferences to the component and releases its column
+    /// borrow flag on drop.
+    type EntityFetch<'w>: 'w
+    where
+        Self: 'w;
+
+    /// Fetch the item for a single entity, if it matches the query.
+    ///
+    /// Implemented for the single-component shapes (`&T`, `&mut T`); tuple
+    /// and `Option` shapes panic — port them when a caller needs them.
+    #[doc(hidden)]
+    fn get_entity<'w>(world: &'w World, entity: Entity) -> Option<Self::EntityFetch<'w>>
+    where
+        Self: 'w;
+}
+
+// ---------------------------------------------------------------------
+// Per-entity access guards (Query::get)
+// ---------------------------------------------------------------------
+
+/// Guard produced by per-entity shared access (`Query<&T>::get`).
+///
+/// Dereferences to `&T`; the column's shared borrow flag is released on drop.
+pub struct EntityRef<'w, T: Component> {
+    value: &'w T,
+    archetype: &'w Archetype,
+    column: usize,
+}
+
+impl<T: Component> std::ops::Deref for EntityRef<'_, T> {
+    type Target = T;
+
+    fn deref(&self) -> &Self::Target {
+        self.value
+    }
+}
+
+impl<T: Component> Drop for EntityRef<'_, T> {
+    fn drop(&mut self) {
+        self.archetype.release::<T>(self.column);
+    }
+}
+
+/// Guard produced by per-entity mutable access (`Query<&mut T>::get`).
+///
+/// Dereferences to `Mut<T>` (and thus `T`); the column's unique borrow flag is
+/// released on drop.
+pub struct EntityMut<'w, T: Component> {
+    inner: Mut<'w, T>,
+    archetype: &'w Archetype,
+    column: usize,
+}
+
+impl<T: Component> std::ops::Deref for EntityMut<'_, T> {
+    type Target = T;
+
+    fn deref(&self) -> &Self::Target {
+        &self.inner
+    }
+}
+
+impl<T: Component> std::ops::DerefMut for EntityMut<'_, T> {
+    fn deref_mut(&mut self) -> &mut Self::Target {
+        &mut self.inner
+    }
+}
+
+impl<T: Component> Drop for EntityMut<'_, T> {
+    fn drop(&mut self) {
+        self.archetype.release_mut::<T>(self.column);
+    }
+}
+
+/// Shared per-entity fetch for single-component queries.
+fn get_entity_ref<'w, T: Component>(world: &'w World, entity: Entity) -> Option<EntityRef<'w, T>> {
+    let (arch_i, row) = world.locate_entity(entity)?;
+    let archetype = &world.raw_archetypes()[arch_i];
+    let column = archetype.get_state::<T>()?;
+    archetype.borrow::<T>(column);
+    // SAFETY: the column is shared-borrowed above and the row is live.
+    let value = unsafe { &*archetype.get_base::<T>(column).as_ptr().add(row as usize) };
+    Some(EntityRef {
+        value,
+        archetype,
+        column,
+    })
+}
+
+/// Mutable per-entity fetch for single-component queries.
+fn get_entity_mut<'w, T: Component>(world: &'w World, entity: Entity) -> Option<EntityMut<'w, T>> {
+    let (arch_i, row) = world.locate_entity(entity)?;
+    let archetype = &world.raw_archetypes()[arch_i];
+    let column = archetype.get_state::<T>()?;
+    archetype.borrow_mut::<T>(column);
+    let base = unsafe { archetype.get_base::<T>(column) };
+    let ticks = unsafe { archetype.ticks_base(column) };
+    // SAFETY: the column is uniquely borrowed above and the row is live; both
+    // the component row and its tick row are exclusively ours until the guard
+    // drops.
+    let inner = unsafe {
+        Mut::new(
+            base.as_ptr().add(row as usize),
+            ticks.as_ptr().add(row as usize),
+            world.last_change_tick(),
+            world.change_tick(),
+        )
+    };
+    Some(EntityMut {
+        inner,
+        archetype,
+        column,
+    })
+}
+
+fn get_entity_unsupported<Q>() -> Option<Q> {
+    panic!("per-entity `Query::get` is only implemented for `&T` and `&mut T` queries")
 }
 
 // ---------------------------------------------------------------------
@@ -101,7 +238,7 @@ impl<'w, T: Component> ArchIter<'w, T> {
     }
 }
 
-impl<T: Component> Query for &T {
+impl<T: Component> WorldQuery for &T {
     type Item<'w>
         = &'w T
     where
@@ -118,11 +255,23 @@ impl<T: Component> Query for &T {
         ArchIter::new(world)
     }
 
-    fn fetch_mut<'w>(world: &'w mut World) -> Self::Iter<'w>
+    fn fetch_mut_cell<'w>(world: &'w World) -> Self::Iter<'w>
     where
         Self: 'w,
     {
         Self::fetch(world)
+    }
+
+    type EntityFetch<'w>
+        = EntityRef<'w, T>
+    where
+        Self: 'w;
+
+    fn get_entity<'w>(world: &'w World, entity: Entity) -> Option<Self::EntityFetch<'w>>
+    where
+        Self: 'w,
+    {
+        get_entity_ref::<T>(world, entity)
     }
 }
 
@@ -142,7 +291,7 @@ pub struct MutArchIter<'w, T: Component> {
 }
 
 impl<'w, T: Component> MutArchIter<'w, T> {
-    fn new(world: &'w mut World) -> Self {
+    fn new(world: &'w World) -> Self {
         let last_run = world.last_change_tick();
         let this_run = world.change_tick();
         let archetypes = world.raw_archetypes();
@@ -208,7 +357,7 @@ impl<'w, T: Component> Iterator for MutArchIter<'w, T> {
     }
 }
 
-impl<T: Component> Query for &mut T {
+impl<T: Component> WorldQuery for &mut T {
     type Item<'w>
         = Mut<'w, T>
     where
@@ -226,11 +375,23 @@ impl<T: Component> Query for &mut T {
         unreachable!("`&mut T` query requires a mutable world (`query_mut`)")
     }
 
-    fn fetch_mut<'w>(world: &'w mut World) -> Self::Iter<'w>
+    fn fetch_mut_cell<'w>(world: &'w World) -> Self::Iter<'w>
     where
         Self: 'w,
     {
         MutArchIter::new(world)
+    }
+
+    type EntityFetch<'w>
+        = EntityMut<'w, T>
+    where
+        Self: 'w;
+
+    fn get_entity<'w>(world: &'w World, entity: Entity) -> Option<Self::EntityFetch<'w>>
+    where
+        Self: 'w,
+    {
+        get_entity_mut::<T>(world, entity)
     }
 }
 
@@ -304,7 +465,7 @@ impl<'w, A: Component, B: Component> Iterator for PairIter<'w, A, B> {
     }
 }
 
-impl<A: Component, B: Component> Query for (&A, &B) {
+impl<A: Component, B: Component> WorldQuery for (&A, &B) {
     type Item<'w>
         = (&'w A, &'w B)
     where
@@ -321,11 +482,24 @@ impl<A: Component, B: Component> Query for (&A, &B) {
         PairIter::new_shared(world)
     }
 
-    fn fetch_mut<'w>(world: &'w mut World) -> Self::Iter<'w>
+    fn fetch_mut_cell<'w>(world: &'w World) -> Self::Iter<'w>
     where
         Self: 'w,
     {
         Self::fetch(world)
+    }
+
+    type EntityFetch<'w>
+        = ()
+    where
+        Self: 'w;
+
+    fn get_entity<'w>(world: &'w World, entity: Entity) -> Option<Self::EntityFetch<'w>>
+    where
+        Self: 'w,
+    {
+        let _ = (world, entity);
+        get_entity_unsupported()
     }
 }
 
@@ -345,7 +519,7 @@ pub struct MutSharedIter<'w, A: Component, B: Component> {
 }
 
 impl<'w, A: Component, B: Component> MutSharedIter<'w, A, B> {
-    fn new(world: &'w mut World) -> Self {
+    fn new(world: &'w World) -> Self {
         let last_run = world.last_change_tick();
         let this_run = world.change_tick();
         let archetypes = world.raw_archetypes();
@@ -414,7 +588,7 @@ impl<'w, A: Component, B: Component> Iterator for MutSharedIter<'w, A, B> {
     }
 }
 
-impl<A: Component, B: Component> Query for (&mut A, &B) {
+impl<A: Component, B: Component> WorldQuery for (&mut A, &B) {
     type Item<'w>
         = (Mut<'w, A>, &'w B)
     where
@@ -431,11 +605,24 @@ impl<A: Component, B: Component> Query for (&mut A, &B) {
         unreachable!("`(&mut A, &B)` requires `query_mut`")
     }
 
-    fn fetch_mut<'w>(world: &'w mut World) -> Self::Iter<'w>
+    fn fetch_mut_cell<'w>(world: &'w World) -> Self::Iter<'w>
     where
         Self: 'w,
     {
         MutSharedIter::new(world)
+    }
+
+    type EntityFetch<'w>
+        = ()
+    where
+        Self: 'w;
+
+    fn get_entity<'w>(world: &'w World, entity: Entity) -> Option<Self::EntityFetch<'w>>
+    where
+        Self: 'w,
+    {
+        let _ = (world, entity);
+        get_entity_unsupported()
     }
 }
 
@@ -455,7 +642,7 @@ pub struct MutBothIter<'w, A: Component, B: Component> {
 }
 
 impl<'w, A: Component, B: Component> MutBothIter<'w, A, B> {
-    fn new(world: &'w mut World) -> Self {
+    fn new(world: &'w World) -> Self {
         let last_run = world.last_change_tick();
         let this_run = world.change_tick();
         let meta = world.raw_entity_meta();
@@ -532,7 +719,7 @@ impl<'w, A: Component, B: Component> Iterator for MutBothIter<'w, A, B> {
     }
 }
 
-impl<A: Component, B: Component> Query for (&mut A, &mut B) {
+impl<A: Component, B: Component> WorldQuery for (&mut A, &mut B) {
     type Item<'w>
         = (Mut<'w, A>, Mut<'w, B>)
     where
@@ -549,11 +736,24 @@ impl<A: Component, B: Component> Query for (&mut A, &mut B) {
         unreachable!("`(&mut A, &mut B)` requires `query_mut`")
     }
 
-    fn fetch_mut<'w>(world: &'w mut World) -> Self::Iter<'w>
+    fn fetch_mut_cell<'w>(world: &'w World) -> Self::Iter<'w>
     where
         Self: 'w,
     {
         MutBothIter::new(world)
+    }
+
+    type EntityFetch<'w>
+        = ()
+    where
+        Self: 'w;
+
+    fn get_entity<'w>(world: &'w World, entity: Entity) -> Option<Self::EntityFetch<'w>>
+    where
+        Self: 'w,
+    {
+        let _ = (world, entity);
+        get_entity_unsupported()
     }
 }
 
@@ -628,7 +828,7 @@ impl<'w, T: Component> Iterator for OptionIter<'w, T> {
     }
 }
 
-impl<T: Component> Query for Option<&T> {
+impl<T: Component> WorldQuery for Option<&T> {
     type Item<'w>
         = Option<&'w T>
     where
@@ -645,10 +845,23 @@ impl<T: Component> Query for Option<&T> {
         OptionIter::new(world)
     }
 
-    fn fetch_mut<'w>(world: &'w mut World) -> Self::Iter<'w>
+    fn fetch_mut_cell<'w>(world: &'w World) -> Self::Iter<'w>
     where
         Self: 'w,
     {
         Self::fetch(world)
+    }
+
+    type EntityFetch<'w>
+        = ()
+    where
+        Self: 'w;
+
+    fn get_entity<'w>(world: &'w World, entity: Entity) -> Option<Self::EntityFetch<'w>>
+    where
+        Self: 'w,
+    {
+        let _ = (world, entity);
+        get_entity_unsupported()
     }
 }

@@ -8,12 +8,16 @@ edition = "2021"
 
 [workspace.dependencies]
 moonfield-app = { path = "crates/moonfield-app" }
+moonfield-asset = { path = "crates/moonfield-asset" }
 moonfield-base = { path = "crates/moonfield-base" }
 moonfield-ecs = { path = "crates/moonfield-ecs" }
 moonfield-render = { path = "crates/moonfield-render", default-features = false }
 moonfield-renderer = { path = "crates/moonfield-renderer", default-features = false }
+moonfield-time = { path = "crates/moonfield-time" }
 moonfield-log = { path = "crates/moonfield-log" }
 moonfield-math = { path = "crates/moonfield-math" }
+moonfield-reflect = { path = "crates/moonfield-reflect" }
+moonfield-reflect-derive = { path = "crates/moonfield-reflect-derive" }
 moonfield-window = { path = "crates/moonfield-window" }
 moonfield-winit = { path = "crates/moonfield-winit" }
 moonfield-editor = { path = "crates/moonfield-editor" }

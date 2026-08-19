@@ -47,6 +47,15 @@ pub unsafe trait DynamicBundle {
 
     fn component_meta(&self) -> Vec<ComponentMeta>;
 
+    /// Move each component value out of the bundle, invoking `f` with a
+    /// pointer to it and its [`ComponentMeta`].
+    ///
+    /// # Safety
+    ///
+    /// Every pointer handed to `f` points to a valid, initialized value of the
+    /// type described by the accompanying [`ComponentMeta`], and the callback
+    /// must not outlive that value. Each component is yielded exactly once;
+    /// the bundle must not be used afterward.
     unsafe fn put(self, f: impl FnMut(*mut u8, ComponentMeta));
 }
 
@@ -65,6 +74,15 @@ pub unsafe trait Bundle: DynamicBundle {
 
     fn with_static_component_meta<T>(f: impl FnOnce(&[ComponentMeta]) -> T) -> T;
 
+    /// Rebuild the bundle by reading each component out of the storage
+    /// provided by `f`.
+    ///
+    /// # Safety
+    ///
+    /// The pointer returned by `f` for a given [`ComponentMeta`] must point to
+    /// a valid, initialized value of the described type (or be null, in which
+    /// case [`MissingComponent`] is returned and the pointer is never
+    /// dereferenced). Each value is read out exactly once.
     unsafe fn get(
         f: impl FnMut(ComponentMeta) -> Option<NonNull<u8>>,
     ) -> Result<Self, MissingComponent>

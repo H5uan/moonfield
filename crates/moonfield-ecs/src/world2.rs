@@ -7,8 +7,11 @@ use std::sync::atomic::AtomicU64;
 use crate::archetype::{Archetype, ComponentMeta, TypeIdMap};
 use crate::bundle::{Bundle, DynamicBundle};
 use crate::change_detection::{Mut, Ref, Tick};
+use crate::commands::Command;
 use crate::entities::{AllocManyState, Entities, Location, NoSuchEntity, ReserveEntitiesIterator};
-use crate::{Component, Entity, Query, Resources};
+use crate::hooks::{ComponentHooks, HookKind};
+use crate::{Component, Entity, Resources, WorldQuery};
+use std::cell::RefCell;
 use std::mem;
 
 struct ArchetypeSet {
@@ -199,6 +202,11 @@ pub struct World2 {
     insert_edges: IndexTypeIdMap<InsertTarget>,
     remove_edges: IndexTypeIdMap<u32>,
     resources: Resources,
+    /// Deferred structural mutations queued by [`Commands`](crate::Commands),
+    /// drained by [`Self::apply_commands`].
+    command_queue: RefCell<Vec<Command>>,
+    /// Lifecycle hooks registered per component type, keyed by [`TypeId`].
+    pub(crate) component_hooks: HashMap<TypeId, ComponentHooks>,
 
     /// The world's current change-detection tick. Component writes record this
     /// value; it advances once per schedule run via [`Self::increment_change_tick`].
@@ -226,6 +234,8 @@ impl World2 {
             insert_edges: IndexTypeIdMap::default(),
             remove_edges: IndexTypeIdMap::default(),
             resources: Resources::default(),
+            command_queue: RefCell::new(Vec::new()),
+            component_hooks: HashMap::new(),
             // The change clock starts at 1 so that a system's initial
             // `last_run` of 0 observes every component as new.
             change_tick: Tick::new(1),
@@ -299,6 +309,7 @@ impl World2 {
     }
 
     fn spawn_inner(&mut self, entity: Entity, components: impl DynamicBundle) {
+        let ids: Vec<TypeId> = components.with_ids(|ids| ids.to_vec());
         let archetype_id = match components.key() {
             Some(k) => *self
                 .bundle_to_archetype
@@ -323,6 +334,11 @@ impl World2 {
             archetype: archetype_id,
             index,
         };
+
+        // Spawning counts as adding every component.
+        for id in ids {
+            self.fire_component_added(id, entity);
+        }
     }
 
     pub fn spawn_batch<I>(&mut self, iter: I) -> SpawnBatchIter<'_, I::IntoIter>
@@ -330,6 +346,9 @@ impl World2 {
         I: IntoIterator,
         I::Item: Bundle + 'static,
     {
+        // NOTE: the bulk path does not fire component lifecycle hooks (the
+        // iterator borrows the world's storage directly, so there is no
+        // consistent point to run `&mut World` callbacks from).
         self.flush();
         let iter = iter.into_iter();
         let (lower, upper) = iter.size_hint();
@@ -355,11 +374,30 @@ impl World2 {
 
     pub fn despawn(&mut self, entity: Entity) -> Result<(), NoSuchEntity> {
         self.flush();
+        // Resolve first so the despawn/discard hooks can fire while every
+        // component is still in place.
+        let loc = self.entities.get(entity)?;
+        let ids: Vec<TypeId> = self.archetypes.archetypes[loc.archetype as usize]
+            .type_ids()
+            .to_vec();
+        // Despawn hooks run first: linked-spawn relationship targets despawn
+        // their sources here, and each source's own discard hook then unlinks
+        // it from this entity's (still present) target collection.
+        for &id in &ids {
+            self.fire_hook(HookKind::Despawn, id, entity);
+        }
+        for &id in &ids {
+            self.fire_hook(HookKind::Discard, id, entity);
+        }
+        // Re-resolve: a hook may have moved (or even despawned) the entity.
         let loc = self.entities.free(entity)?;
         if let Some(moved) =
             unsafe { self.archetypes.archetypes[loc.archetype as usize].remove(loc.index, true) }
         {
             self.entities.meta[moved as usize].location.index = loc.index;
+        }
+        for id in ids {
+            self.fire_hook(HookKind::Remove, id, entity);
         }
         Ok(())
     }
@@ -431,6 +469,11 @@ impl World2 {
         self.resources.get_mut::<R>()
     }
 
+    /// Whether a resource of type `R` exists in the world.
+    pub fn contains_resource<R: crate::Resource>(&self) -> bool {
+        self.resources.contains::<R>()
+    }
+
     /// Remove a resource from the world, returning it if it existed.
     pub fn remove_resource<R: crate::Resource>(&mut self) -> Option<R> {
         self.resources.remove::<R>()
@@ -443,22 +486,40 @@ impl World2 {
     /// Query the world for a combination of components.
     ///
     /// Yields `(Entity, item)` pairs where each item borrows from the world.
-    pub fn query<'a, Q: Query>(&'a self) -> Q::Iter<'a> {
+    pub fn query<'a, Q: WorldQuery>(&'a self) -> Q::Iter<'a> {
         Q::fetch(self)
     }
 
     /// Query the world for a mutable combination of components.
-    pub fn query_mut<'a, Q: Query>(&'a mut self) -> Q::Iter<'a> {
+    pub fn query_mut<'a, Q: WorldQuery>(&'a mut self) -> Q::Iter<'a> {
         Q::fetch_mut(self)
     }
 
     // ------------------------------------------------------------------
-    // Commands (no-op in the minimal archetype backend)
+    // Commands (deferred structural mutation queue)
     // ------------------------------------------------------------------
 
-    /// Deferred structural commands are not yet supported; `App` calls this
-    /// unconditionally, so it is a safe no-op that keeps the app runner intact.
-    pub fn apply_commands(&mut self) {}
+    /// Queue a deferred world mutation. Used by [`Commands`](crate::Commands);
+    /// applied by [`Self::apply_commands`].
+    pub(crate) fn queue_command(&self, command: Command) {
+        self.command_queue.borrow_mut().push(command);
+    }
+
+    /// Drain the deferred command queue, applying every queued mutation in
+    /// order. Commands queued by other commands are applied within the same
+    /// pass. The schedule runner calls this after every system, so a system's
+    /// commands are visible to the systems that run after it.
+    pub fn apply_commands(&mut self) {
+        loop {
+            let batch = mem::take(self.command_queue.get_mut());
+            if batch.is_empty() {
+                break;
+            }
+            for command in batch {
+                command(self);
+            }
+        }
+    }
 
     // ------------------------------------------------------------------
     // Internals (crate-visible for the archetype query engine)
@@ -470,6 +531,12 @@ impl World2 {
 
     pub(crate) fn raw_entity_meta(&self) -> &[crate::entities::EntityMeta] {
         &self.entities.meta
+    }
+
+    /// Locate an entity as `(archetype index, row)`, if it exists.
+    pub(crate) fn locate_entity(&self, entity: Entity) -> Option<(usize, u32)> {
+        let loc = self.entities.get(entity).ok()?;
+        Some((loc.archetype as usize, loc.index))
     }
 
     // ------------------------------------------------------------------
@@ -543,6 +610,17 @@ impl World2 {
     /// Returns `None` if `entity` does not exist.
     pub fn insert_component<T: Component>(&mut self, entity: Entity, value: T) -> Option<()> {
         self.flush();
+        // Replacing an existing component: fire the discard hook while the
+        // old value is still in place.
+        if self
+            .entities
+            .get(entity)
+            .ok()
+            .is_some_and(|loc| self.archetypes.archetypes[loc.archetype as usize].has::<T>())
+        {
+            self.fire_hook(HookKind::Discard, TypeId::of::<T>(), entity);
+        }
+        // Re-resolve: a hook may have moved (or despawned) the entity.
         let loc = self.entities.get(entity).ok()?;
         let old_id = loc.archetype;
         let old_row = loc.index;
@@ -558,6 +636,7 @@ impl World2 {
             let mut ticks = unsafe { old_arch.read_ticks(col, old_row) };
             ticks.changed = tick;
             old_arch.write_ticks(col, old_row, ticks);
+            self.fire_hook(HookKind::Insert, TypeId::of::<T>(), entity);
             return Some(());
         }
 
@@ -627,6 +706,218 @@ impl World2 {
             self.entities.meta[moved as usize].location.index = old_row;
         }
 
+        // Newly added component: on_add then on_insert.
+        self.fire_component_added(TypeId::of::<T>(), entity);
         Some(())
+    }
+
+    /// Insert (or replace) every component of `components` on `entity` in a
+    /// single archetype move.
+    ///
+    /// Components the entity already has are replaced in value (changed tick
+    /// bumped, added tick preserved); new components are added with fresh
+    /// ticks. Returns `None` if `entity` does not exist.
+    pub fn insert_bundle(&mut self, entity: Entity, components: impl DynamicBundle) -> Option<()> {
+        self.flush();
+        // Which bundle components already exist (will be replaced)? Fire their
+        // discard hooks while the old values are still in place.
+        let bundle_ids: Vec<TypeId> = components.with_ids(|ids| ids.to_vec());
+        let mut replaced: Vec<TypeId> = Vec::new();
+        match self.entities.get(entity) {
+            Ok(loc) => {
+                let arch = &self.archetypes.archetypes[loc.archetype as usize];
+                for &id in &bundle_ids {
+                    if arch.has_in_runtime(id) {
+                        replaced.push(id);
+                    }
+                }
+            }
+            Err(_) => return None,
+        }
+        for &id in &replaced {
+            self.fire_hook(HookKind::Discard, id, entity);
+        }
+        // Re-resolve: a hook may have moved (or despawned) the entity.
+        let loc = self.entities.get(entity).ok()?;
+        let old_id = loc.archetype;
+        let old_row = loc.index;
+        let tick = self.change_tick;
+
+        // Target type set = old set ∪ bundle set, in archetype key order.
+        let old_arch = &self.archetypes.archetypes[old_id as usize];
+        let mut metas: Vec<ComponentMeta> = old_arch.component_metas().to_vec();
+        for meta in components.component_meta() {
+            if !metas.contains(&meta) {
+                metas.push(meta);
+            }
+        }
+        metas.sort_unstable();
+        let ids: Box<[TypeId]> = metas.iter().map(|m| *m.id()).collect();
+        let target_id = self.archetypes.get(ids, || metas.clone());
+
+        // SAFETY: `target_id` may equal `old_id` (pure replacement); the raw
+        // pointers below are used with disjoint rows in that case, and with
+        // disjoint archetypes otherwise. They are taken after `get`, which may
+        // have reallocated the archetype list.
+        let old_raw: *const Archetype = &self.archetypes.archetypes[old_id as usize];
+        let target_raw: *mut Archetype = &mut self.archetypes.archetypes[target_id as usize];
+
+        // SAFETY: allocate a fresh row in the target archetype (no outstanding
+        // borrows on its columns).
+        let new_row = unsafe { (*target_raw).allocate(entity.id) };
+
+        // Copy every old component the bundle does not replace, carrying ticks.
+        // SAFETY: rows are in bounds; source and destination rows are disjoint.
+        unsafe {
+            let old = &*old_raw;
+            for meta in old.component_metas() {
+                if components.with_ids(|ids| ids.contains(meta.id())) {
+                    continue;
+                }
+                let size = meta.layout().size();
+                if let Some(src) = old.get_ptr(*meta.id(), size, old_row) {
+                    (*target_raw).put_ptr(src.as_ptr(), *meta.id(), size, new_row);
+                    let old_col = old.get_state_by_id(meta.id()).unwrap();
+                    let new_col = (*target_raw).get_state_by_id(meta.id()).unwrap();
+                    let ticks = old.read_ticks(old_col, old_row);
+                    (*target_raw).write_ticks(new_col, new_row, ticks);
+                }
+            }
+        }
+
+        // Write the bundle's values. Replaced components keep their added tick
+        // and bump changed; their old value is dropped in place (its slot is
+        // logically consumed, so the swap-remove below must not drop it again).
+        // SAFETY: as above; `put` hands each component value to the callback
+        // exactly once, and `put_ptr` moves it into the archetype.
+        unsafe {
+            let old = &*old_raw;
+            components.put(|ptr, meta| {
+                let size = meta.layout().size();
+                (*target_raw).put_ptr(ptr, *meta.id(), size, new_row);
+                let new_col = (*target_raw).get_state_by_id(meta.id()).unwrap();
+                if let Some(old_col) = old.get_state_by_id(meta.id()) {
+                    let mut ticks = old.read_ticks(old_col, old_row);
+                    ticks.changed = tick;
+                    (*target_raw).write_ticks(new_col, new_row, ticks);
+                    if let Some(old_slot) = old.get_ptr(*meta.id(), size, old_row) {
+                        meta.drop_in_place(old_slot.as_ptr());
+                    }
+                } else {
+                    (*target_raw).write_fresh_ticks(new_col, new_row, tick);
+                }
+            });
+        }
+
+        self.entities.meta[entity.id as usize].location = Location {
+            archetype: target_id,
+            index: new_row,
+        };
+
+        // Remove the old row without dropping: untouched components were moved
+        // out above, replaced ones were already dropped. When target == old the
+        // swap-remove packs the new row into the old slot, and the moved-entity
+        // fixup below updates this entity's own index.
+        // SAFETY: no outstanding borrows on the old archetype's columns.
+        if let Some(moved) =
+            unsafe { self.archetypes.archetypes[old_id as usize].remove(old_row, false) }
+        {
+            self.entities.meta[moved as usize].location.index = old_row;
+        }
+
+        for id in bundle_ids {
+            if replaced.contains(&id) {
+                self.fire_hook(HookKind::Insert, id, entity);
+            } else {
+                self.fire_component_added(id, entity);
+            }
+        }
+        Some(())
+    }
+
+    /// Remove component `T` from `entity`, moving it to the archetype without
+    /// `T` and returning the removed value.
+    ///
+    /// Returns `None` if `entity` does not exist or does not have `T`.
+    pub fn remove_component<T: Component>(&mut self, entity: Entity) -> Option<T> {
+        self.flush();
+        // Fire the discard hook while the value is still in place.
+        if self
+            .entities
+            .get(entity)
+            .ok()
+            .is_some_and(|loc| self.archetypes.archetypes[loc.archetype as usize].has::<T>())
+        {
+            self.fire_hook(HookKind::Discard, TypeId::of::<T>(), entity);
+        }
+        // Re-resolve: a hook may have moved (or despawned) the entity.
+        let loc = self.entities.get(entity).ok()?;
+        let old_id = loc.archetype;
+        let old_row = loc.index;
+
+        let old_arch = &self.archetypes.archetypes[old_id as usize];
+        let col = old_arch.get_state::<T>()?;
+        // Move the value out of its column (the swap-remove below must not
+        // drop it again).
+        // SAFETY: `&mut self` guarantees no aliasing access; the row is live.
+        let value = unsafe {
+            old_arch
+                .get_base::<T>(col)
+                .as_ptr()
+                .add(old_row as usize)
+                .read()
+        };
+
+        // Target type set = old set − {T} (order preserved by removal).
+        let metas: Vec<ComponentMeta> = old_arch
+            .component_metas()
+            .iter()
+            .copied()
+            .filter(|m| m.id() != &TypeId::of::<T>())
+            .collect();
+        let ids: Box<[TypeId]> = metas.iter().map(|m| *m.id()).collect();
+        let target_id = self.archetypes.get(ids, || metas.clone());
+        debug_assert_ne!(target_id, old_id);
+
+        // SAFETY: distinct archetypes; pointers taken after `get`.
+        let old_raw: *const Archetype = &self.archetypes.archetypes[old_id as usize];
+        let target_raw: *mut Archetype = &mut self.archetypes.archetypes[target_id as usize];
+        // SAFETY: no outstanding borrows on the target archetype's columns.
+        let new_row = unsafe { (*target_raw).allocate(entity.id) };
+
+        // Move every remaining component's bytes and ticks to the target row.
+        // SAFETY: rows in bounds, disjoint allocations.
+        unsafe {
+            let old = &*old_raw;
+            for meta in old.component_metas() {
+                if meta.id() == &TypeId::of::<T>() {
+                    continue;
+                }
+                let size = meta.layout().size();
+                if let Some(src) = old.get_ptr(*meta.id(), size, old_row) {
+                    (*target_raw).put_ptr(src.as_ptr(), *meta.id(), size, new_row);
+                    let old_col = old.get_state_by_id(meta.id()).unwrap();
+                    let new_col = (*target_raw).get_state_by_id(meta.id()).unwrap();
+                    let ticks = old.read_ticks(old_col, old_row);
+                    (*target_raw).write_ticks(new_col, new_row, ticks);
+                }
+            }
+        }
+
+        self.entities.meta[entity.id as usize].location = Location {
+            archetype: target_id,
+            index: new_row,
+        };
+
+        // No drop: T was read out above, the rest were moved.
+        // SAFETY: no outstanding borrows on the old archetype's columns.
+        if let Some(moved) =
+            unsafe { self.archetypes.archetypes[old_id as usize].remove(old_row, false) }
+        {
+            self.entities.meta[moved as usize].location.index = old_row;
+        }
+
+        self.fire_hook(HookKind::Remove, TypeId::of::<T>(), entity);
+        Some(value)
     }
 }

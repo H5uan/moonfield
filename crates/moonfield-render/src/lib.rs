@@ -6,11 +6,13 @@ pub mod bind;
 pub mod camera;
 pub mod error;
 pub mod indirect;
+pub mod scene;
 pub mod types;
 
 pub mod vulkan;
 
 pub use camera::perspective_reverse_z;
+pub use scene::{view_matrix, Camera, MeshRenderer, PrimaryCamera};
 
 pub use bind::{
     BindGroup, BindGroupEntry, BindGroupLayout, BindGroupLayoutEntry, BindingResource, BindingType,

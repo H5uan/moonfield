@@ -12,5 +12,6 @@ moonfield-app = { workspace = true }
 moonfield-base = { workspace = true }
 moonfield-log = { workspace = true }
 moonfield-render = { workspace = true }
+moonfield-time = { workspace = true }
 moonfield-window = { workspace = true }
 moonfield-winit = { workspace = true }

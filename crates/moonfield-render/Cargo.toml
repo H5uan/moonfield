@@ -9,6 +9,7 @@ moonfield-base = { workspace = true }
 moonfield-ecs = { workspace = true }
 moonfield-log = { workspace = true }
 moonfield-math = { workspace = true }
+moonfield-reflect = { workspace = true }
 ash = "0.38.0"
 ash-window = "0.13.0"
 bytemuck = { version = "1.23", features = ["derive"] }

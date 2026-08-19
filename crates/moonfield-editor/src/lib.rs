@@ -3,26 +3,31 @@
 //! Provides [`EditorPlugin`], a Bevy-style plugin that renders an egui-based
 //! editor UI into the window owned by [`moonfield_winit::WinitPlugin`].
 //! Unlike the previous design, the editor no longer owns the winit event loop
-//! or the window — it registers a render-phase system via
-//! [`App::add_render_system`](moonfield_app::App::add_render_system) and draws
+//! or the window — it registers a render-phase system in the `Render` schedule
+//! via [`App::add_systems`](moonfield_app::App::add_systems) and draws
 //! into the same swapchain every frame, mirroring how `bevy_egui` layers on
 //! `bevy_winit` rather than replacing it.
 //!
 //! Composition: add `WinitPlugin` first (it owns the window + event loop,
 //! spawns the primary window entity with its `Window` /
 //! `RawHandleWrapper` components, and registers [`WinitWindow`],
-//! [`InputState`], [`WindowControl`], [`RawWindowEvents`]), then
-//! `EditorPlugin`. The editor reads those resources and lazily builds its
-//! Vulkan + egui state on the first render tick, once the window actually
-//! exists.
+//! [`InputState`], [`WindowControl`], [`RawWindowEvents`]), plus
+//! `RenderPlugin` (it creates the shared [`RenderDevice`] world resource —
+//! the Vulkan instance + logical device singletons), then `EditorPlugin`.
+//! The editor reads those resources and lazily builds its window-bound
+//! Vulkan objects (surface, swapchain, frame loop) + egui state on the
+//! first render tick, once the window actually exists.
 
+mod registry;
+mod scene_io;
 mod ui;
 mod viewport;
 
-use moonfield_app::prelude::World;
+use moonfield_app::prelude::{Render, World};
 use moonfield_app::{App, Plugin};
 use moonfield_log::error;
-use moonfield_render::WindowRenderer;
+use moonfield_render::{RenderDevice, WindowRenderer};
+use moonfield_renderer::splat::cloud::SplatCloud;
 use moonfield_window::WindowControl;
 use moonfield_winit::{RawWindowEvents, WinitWindow};
 use ui::{Tab, TabContext};
@@ -51,7 +56,11 @@ impl Plugin for EditorPlugin {
         // windowing backend has created the window and registered
         // `WinitWindow`.
         app.insert_resource(EditorStateSlot::default());
-        app.add_render_system(editor_render);
+        app.insert_resource(registry::InspectorRegistry::with_engine_types());
+        // The splat asset store: PLY files loaded through the editor land
+        // here, entities reference them via SplatCloudHandle components.
+        app.insert_resource(moonfield_asset::Assets::<SplatCloud>::default());
+        app.add_systems(Render, editor_render);
     }
 }
 
@@ -67,7 +76,9 @@ struct EditorStateSlot(Option<EditorState>);
 ///
 /// Fields are ordered for Vulkan-safe destruction (first declared drops
 /// first): the egui renderer and viewport destroy resources through the
-/// device, so they precede the window renderer that owns it. `Drop` waits for
+/// device, so they precede the window renderer. The device itself is *shared*
+/// (the world's [`RenderDevice`] resource, held by the window renderer
+/// through `Arc`s) and outlives this struct by refcounting. `Drop` waits for
 /// the device to go idle before any field is destroyed.
 struct EditorState {
     egui_renderer: egui_ash_renderer::Renderer,
@@ -84,21 +95,31 @@ struct EditorState {
     /// offscreen target is resized against this *before* building the UI, so
     /// the current frame's draw data always references the live texture id.
     viewport_panel_points: Option<egui::Vec2>,
+    /// The entity selected in the hierarchy panel, edited by the inspector.
+    selection: Option<moonfield_ecs::Entity>,
+    /// Hierarchy panel state: the PLY load path field and last status.
+    load_state: ui::LoadSplatState,
     /// Frames rendered, for the MOONFIELD_EDITOR_AUTO_CLOSE debug helper.
     frames_rendered: u64,
 }
 
 impl EditorState {
-    /// Build the editor state from the window registered by `WinitPlugin`.
+    /// Build the editor state from the window registered by `WinitPlugin` and
+    /// the shared render device registered by `RenderPlugin`.
     fn new(world: &World) -> Result<Self, String> {
         let winit_window = world.get_resource::<WinitWindow>().ok_or_else(|| {
             "WinitWindow resource missing — add WinitPlugin before EditorPlugin".to_string()
         })?;
         let window = winit_window.0.clone();
 
+        let render_device = world.get_resource::<RenderDevice>().ok_or_else(|| {
+            "RenderDevice resource missing — add RenderPlugin before EditorPlugin".to_string()
+        })?;
+
         let size = window.inner_size();
-        let window_renderer = WindowRenderer::new(window.as_ref(), size.width, size.height)
-            .map_err(|e| e.to_string())?;
+        let window_renderer =
+            WindowRenderer::new(&render_device, window.as_ref(), size.width, size.height)
+                .map_err(|e| e.to_string())?;
 
         // The egui renderer needs the same GPU allocator the device owns.
         let allocator = window_renderer.device().allocator().clone();
@@ -147,6 +168,8 @@ impl EditorState {
             free_ring: [Vec::new(), Vec::new()],
             frame_counter: 0,
             viewport_panel_points: None,
+            selection: None,
+            load_state: ui::LoadSplatState::default(),
             frames_rendered: 0,
         })
     }
@@ -174,9 +197,12 @@ fn editor_render(world: &mut World) {
         let state = match EditorState::new(world) {
             Ok(s) => s,
             Err(e) => {
-                // The window may not exist yet on the very first ticks
-                // (e.g. before `resumed`). Stay quiet and retry next frame.
-                if !e.contains("WinitWindow resource missing") {
+                // The window or the shared render device may not exist yet on
+                // the very first ticks (e.g. before `resumed`, or on a machine
+                // without a Vulkan driver). Stay quiet and retry next frame.
+                let waiting_on_prerequisites = e.contains("WinitWindow resource missing")
+                    || e.contains("RenderDevice resource missing");
+                if !waiting_on_prerequisites {
                     error!("failed to build editor state: {e}");
                 }
                 return;
@@ -190,11 +216,16 @@ fn editor_render(world: &mut World) {
                 // the winit backend a clean frame boundary before recording.
     }
 
-    let mut slot = world
-        .get_resource_mut::<EditorStateSlot>()
-        .expect("EditorStateSlot registered in build");
-    let Some(state) = slot.0.as_mut() else {
-        return;
+    // Take the state out of its slot so panels can get `&mut World`
+    // (inspector edits) and the scene pass can query the world freely.
+    let mut state = {
+        let mut slot = world
+            .get_resource_mut::<EditorStateSlot>()
+            .expect("EditorStateSlot registered in build");
+        let Some(state) = slot.0.take() else {
+            return;
+        };
+        state
     };
 
     // Drain raw window events into egui before building the UI.
@@ -206,7 +237,7 @@ fn editor_render(world: &mut World) {
         let _ = state.egui_state.on_window_event(&state.window, event);
     }
 
-    if let Err(e) = render_frame(state) {
+    if let Err(e) = render_frame(world, &mut state) {
         error!("failed to render editor frame: {e}");
     }
 
@@ -223,9 +254,15 @@ fn editor_render(world: &mut World) {
             }
         }
     }
+
+    // Put the state back for the next frame.
+    world
+        .get_resource_mut::<EditorStateSlot>()
+        .expect("EditorStateSlot registered in build")
+        .0 = Some(state);
 }
 
-fn render_frame(state: &mut EditorState) -> Result<(), String> {
+fn render_frame(world: &mut World, state: &mut EditorState) -> Result<(), String> {
     let size = state.window.inner_size();
     if size.width == 0 || size.height == 0 {
         return Ok(()); // minimized
@@ -264,6 +301,9 @@ fn render_frame(state: &mut EditorState) -> Result<(), String> {
     let egui_ctx = state.egui_state.egui_ctx().clone();
     let raw_input = state.egui_state.take_egui_input(&state.window);
     let mut tab_context = TabContext {
+        world: &mut *world,
+        selection: &mut state.selection,
+        load_state: &mut state.load_state,
         viewport_texture: state.viewport.texture_id(),
         viewport_size_points: None,
     };
@@ -294,7 +334,14 @@ fn render_frame(state: &mut EditorState) -> Result<(), String> {
     // From here on a frame is in progress: any error must go through
     // `finish_frame` so the frame state (fence, semaphores, acquired image)
     // stays consistent.
-    let result = record_frame(state, &egui_ctx, shapes, &textures_delta, pixels_per_point);
+    let result = record_frame(
+        world,
+        state,
+        &egui_ctx,
+        shapes,
+        &textures_delta,
+        pixels_per_point,
+    );
     finish_frame(state, result)?;
 
     // Queue this frame's texture frees; they become safe to destroy once the
@@ -308,6 +355,7 @@ fn render_frame(state: &mut EditorState) -> Result<(), String> {
 /// Record the scene and UI passes. Returns whether the UI render pass was
 /// left open on error, so `finish_frame` can close it before submitting.
 fn record_frame(
+    world: &World,
     state: &mut EditorState,
     egui_ctx: &egui::Context,
     shapes: Vec<egui::epaint::ClippedShape>,
@@ -338,7 +386,7 @@ fn record_frame(
     // — Scene pass into the viewport's offscreen target —
     state
         .viewport
-        .record_scene(state.window_renderer.command_buffer());
+        .record_scene(world, state.window_renderer.command_buffer());
 
     // — UI pass into the swapchain image —
     let primitives = egui_ctx.tessellate(shapes, pixels_per_point);

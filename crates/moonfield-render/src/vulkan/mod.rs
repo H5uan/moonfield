@@ -26,7 +26,7 @@ pub use framebuffer::Framebuffer;
 pub use instance::Instance;
 pub use offscreen::OffscreenTarget;
 pub use pipeline::GraphicsPipeline;
-pub use plugin::RenderPlugin;
+pub use plugin::{RenderDevice, RenderPlugin};
 pub use render_pass::RenderPass;
 pub use shader::Compiler;
 pub use shader_module::ShaderModule;
