@@ -1,6 +1,6 @@
 # Agent Note: Bindless RHI GPU pointer model
 
-Status: proposed
+Status: implemented
 
 [中文](2026-08-19-bindless-rhi-gpu-pointer-model.zh.md)
 
@@ -25,12 +25,19 @@ it.
 
 [no-gapi]: https://www.sebastianaaltonen.com/blog/no-graphics-api
 
-## Proposal
+## Decision
 
-Add a `bindless` module under `moonfield-render/src/vulkan/`, exposed as
+A `bindless` module lives under `moonfield-render/src/vulkan/`, exposed as
 `moonfield_render::bindless`. It is a parallel compute-first path; the existing
 `BindGroup`/`RenderPass`-based modules stay frozen until the bindless path
-covers the graphics pipeline, then the retained modes are deleted in one switch.
+covers the graphics pipeline, then the retained modes are deleted in one
+switch.
+
+The value types shipped in the first unit: `Memory` with `Default`
+(CPU-mapped), `Gpu` (device-local), and `ReadBack`; `GpuPtr(u64)`, the buffer
+device address usable in shaders; and `HostPtr`, the CPU view of the same
+allocation. The device enables `bufferDeviceAddress` (Vulkan 1.2 core
+feature), matching the allocator's BDA support.
 
 ### Memory: `gpu_alloc`
 
@@ -46,6 +53,20 @@ in any struct, passed to a shader, and arithmetic-adjusted on the CPU side —
 the same design Loon GPU uses. Rust keeps the object-model safety through
 ownership (`&`/structs); no `Handle<T>` layer is introduced.
 
+### Probe-cached memory requirements
+
+The engine-side `gpu_alloc` follows the blog's memory-first model: query size
+and alignment before allocating, so a resource does not have to exist first.
+Vulkan provides no formula for these values — `vkGetBufferMemoryRequirements`
+and `vkGetImageMemoryRequirements` only answer for an existing object — so the
+engine probes once at device creation: it creates a 1 MiB test buffer (and a
+representative image for textures), reads the requirements, destroys the test
+objects, and caches the results in the device. Every later allocation applies
+the cached alignment and the caller's requested size, without any Vulkan
+query. Texture alignment additionally varies with format, dimensions, and
+usage; `texture_size_align(desc)` derives those from the probe cache, creating
+and destroying a probe object only for first-time combinations.
+
 ### Root data
 
 A compute/vertex/fragment shader receives its root data as a single `GpuPtr`
@@ -57,10 +78,15 @@ bindless command layer pushes that pointer as push constant data.
 ### Queue and synchronization
 
 `queue` — `QueueType::{Graphics, Compute}` — is a first-class value in the
-module, but the initial milestone maps both to the same physical queue; the
-abstraction stays so a separate async-compute queue can be introduced without
-breaking callers. Frame pacing uses a timeline semaphore with two frames in
-flight.
+module. The device resolves a dedicated async-compute queue family when one
+exists and falls back to the graphics family otherwise; `Device::queue` maps
+each `QueueType` to the resolved `vk::Queue`.
+
+Frame pacing uses a timeline semaphore with two frames in
+flight. `Semaphore::new_timeline` creates one (initial counter value), and
+`Semaphore::wait` blocks the CPU until the counter reaches a value — the
+monotonic counter is the same 64-bit object across frames, so ring-buffer
+reuse and read-back have a single legal wait point.
 
 `barrier(before, after)` maps to a Vulkan `MemoryBarrier2` with only stage
 masks — no resource list. Hazard flags (`HAZARD_DRAW_ARGUMENTS` for GPU-side
@@ -103,22 +129,18 @@ draw (indirect multi-draw).
   descriptor sets. Rejected as the root-data path: shader in-struct pointers
   are the point of this design.
 
-## Acceptance criteria
+## Consequences
 
-- `gpu_alloc` returns a CPU-writable pointer and a usable`GpuPtr`; CPU writes
-  are visible to the GPU.
-- A Slang compute shader with a `Ptr<T, Access>` root parameter reads data at
-  the pushed GPU address and writes a result buffer.
-- `dispatch` launches the kernel; the result is read back to CPU and
-  validates the expected value (CPU→GPU→CPU closed loop).
-- `barrier(Stage::Compute, Stage::Compute)` runs on the queue without a
-  resource list.
-- Two frames in flight pace on one timeline semaphore.
-- `tests/bindless_compute.rs` passes on both MoltenVK (macOS driver present)
-  and lavapipe (CI), reusing the existing Vulkan-presence skip pattern.
-
-## Risks
-
+- `PhysicalStorageBuffer` loads/stores are non-coherent by default: kernel
+  writes are only visible within the same workgroup. Cross-workgroup
+  visibility comes from explicit memory semantics (coherent/volatile
+  decorations or atomics); stage-only barriers without the memory model are
+  not enough. This is the BDA semantic the blog flags and it shapes the
+  barrier design.
+- Vulkan provides capture/replay support for buffer device addresses through
+  the opaque capture address API, so debugging is not blocked; replay relies
+  on the record side keeping the opaque capture address per allocation, which
+  `gpu_alloc` carries.
 - Slang's `PhysicalStorageBuffer` emission and the push-constant root pointer
   are pinned behavior of the pinned toolchain; upgrading Slang may shift
   layout and needs a compile-time check.

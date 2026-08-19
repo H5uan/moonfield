@@ -1,6 +1,6 @@
 # Agent Note: Bindless RHI GPU pointer model
 
-Status: proposed
+Status: implemented
 
 [English](2026-08-19-bindless-rhi-gpu-pointer-model.md)
 
@@ -12,9 +12,11 @@ Status: proposed
 
 [no-gapi]: https://www.sebastianaaltonen.com/blog/no-graphics-api
 
-## Proposal
+## Decision
 
 在 `moonfield-render/src/vulkan/` 下新增 `bindless` 模块,并以 `moonfield_render::bindless` 暴露。它是并行的 compute-first 路径;现有基于 `BindGroup`/`RenderPass` 的模块保持冻结,直到 bindless 路径覆盖图形管线,然后一次性删除保留模式。
+
+第一单元已落地:值类型 `Memory`(`Default` CPU 映射、`Gpu` device-local、`ReadBack`)、`GpuPtr(u64)`(可在着色器中使用的 buffer device address)与 `HostPtr`(同一分配在 CPU 侧的视图)。设备开启 `bufferDeviceAddress`(Vulkan 1.2 core 特性),与分配器的 BDA 支持一致。
 
 ### Memory: `gpu_alloc`
 
@@ -22,13 +24,19 @@ Status: proposed
 
 GPU 指针是值类型 `GpuPtr(u64)`,不是句柄:它可以存入任意结构体、传给着色器、在 CPU 侧做算术调整——与 Loon GPU 的设计相同。Rust 通过所有权(`&`/struct)保留对象模型的安全性;不引入 `Handle<T>` 层。
 
+### Probe 缓存的 memory requirements
+
+引擎侧 `gpu_alloc` 遵循博客的内存先行模型:先查询 size 与 alignment 再分配,资源无需先存在。Vulkan 对这些值没有公式——`vkGetBufferMemoryRequirements` 与 `vkGetImageMemoryRequirements` 只对已存在的对象作答——因此引擎在设备创建时探查一次:创建一个 1 MiB 测试 buffer(以及一个代表性的纹理 image),读取 requirements,销毁测试对象,并将结果缓存在设备中。此后的每次分配直接套用缓存的 alignment 与调用方请求的 size,不再有任何 Vulkan 查询。纹理的 alignment 还会随 format、dimensions、usage 变化;`texture_size_align(desc)` 从 probe 缓存推导这些值,只对首次出现的组合创建并销毁 probe 对象。
+
 ### Root data
 
 compute/vertex/fragment 着色器的根数据是每个阶段一个 `GpuPtr`。本地实验确认 Slang 工具链对 `Ptr<T, Access.Read>` 参数产出 `PhysicalStorageBuffer64` SPIR-V,并通过入口点 stage 的 push constant 传递根指针。bindless 命令层将指针作为 push constant 数据下发。
 
 ### Queue and synchronization
 
-`queue`——`QueueType::{Graphics, Compute}`——是模块中的一等值,但初始里程碑将两者映射到同一物理队列;抽象保留,以便日后引入独立的 async-compute 队列而不破坏调用方。帧节奏使用 timeline semaphore,两帧在飞。
+`queue`——`QueueType::{Graphics, Compute}`——是模块中的一等值。设备在存在独立 async-compute 队列族时解析它,否则回落 graphics 队列族;`Device::queue` 将每个 `QueueType` 映射到解析出的 `vk::Queue`。
+
+帧节奏使用 timeline semaphore,两帧在飞。`Semaphore::new_timeline` 创建它(带初始计数值),`Semaphore::wait` 阻塞 CPU 直到计数器到达某值——这个单调递增的 64 位计数器跨帧是同一个对象,因此 ring buffer 复用与回读共享同一条合法等待点。
 
 `barrier(before, after)` 映射为只有 stage 掩码的 Vulkan `MemoryBarrier2`——无资源列表。Hazard 标志(`HAZARD_DRAW_ARGUMENTS`,用于 GPU 侧生成绘制参数)留给后续里程碑。
 
@@ -51,17 +59,10 @@ compute/vertex/fragment 着色器的根数据是每个阶段一个 `GpuPtr`。�
 - **CPU 侧 `Handle<T>` 对象句柄。** 拒绝:Rust 所有权模型已在编译期证明生命周期;句柄表会把同样的错误推向运行时,还增加查找与锁。在 GPU 可寻址范围内的 `GpuPtr` 与纹理索引是值,不是句柄。
 - **一个大的 update-after-bind 描述符集作为绑定。** 部分采纳:最终纹理模型使用 update-after-bind 描述符集。拒绝作为根数据路径:结构体内指针才是本设计的核心。
 
-## Acceptance criteria
+## Consequences
 
-- `gpu_alloc` 返回可写的 CPU 指针和可用的 `GpuPtr`;CPU 写入对 GPU 可见。
-- 带 `Ptr<T, Access>` 根参数的 Slang 计算着色器读取被下发的 GPU 地址处的数据,并写入结果 buffer。
-- `dispatch` 启动 kernel;结果回读到 CPU 并校验预期值(CPU→GPU→CPU 闭环)。
-- `barrier(Stage::Compute, Stage::Compute)` 在队列上运行,无资源列表。
-- 两个在飞帧在一条 timeline semaphore 上排程。
-- `tests/bindless_compute.rs` 在 MoltenVK(macOS 有驱动)与 lavapipe(CI)上双双通过,复用现有 Vulkan 存在性跳过模式。
-
-## Risks
-
+- `PhysicalStorageBuffer` 的 load/store 默认非 coherent:kernel 的写入只在同一 workgroup 内可见。跨 workgroup 可见性必须来自显式内存语义(coherent/volatile 修饰或原子操作);只依赖纯 stage barrier 而不处理内存模型是不够的。这是博客点名的 BDA 语义,它塑造了 barrier 设计。
+- Vulkan 通过 opaque capture address API 为 buffer device address 提供 capture/replay 支持,因此调试不受阻碍;replay 依赖录制侧为每次分配保留 opaque capture address,`gpu_alloc` 必须携带它。
 - Slang 的 `PhysicalStorageBuffer` 输出与 push constant 根指针是所固定工具链的绑定行为;升级 Slang 可能改变布局,需要一个编译期检查。
 - MoltenVK 与 lavapipe 在部分描述符特性上限上不一致;计算路径只使用两者共享的特性集(如上述)。
 - 过渡期内保留模式路径仍留在树中,因此 `cargo clippy` 不能因为冻结模块的调用方逐渐移走而对其告警。
