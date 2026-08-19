@@ -24,7 +24,8 @@ runtime. External threads and UI toolkits wake an idle Reactive loop via the
 `moonfield-ecs` is a single-threaded, archetype-storage ECS in the style of a
 mainstream retained-mode ECS. Systems declare their data access through system
 params: `Res<T>`/`ResMut<T>` (resources), `Query<Q>` (archetype queries),
-`Local<T>` (per-system state), `Commands` (deferred world mutations), plus
+`Local<T>` (per-system state), `Commands` (deferred world mutations),
+`MessageReader<M>`/`MessageWriter<M>` (buffered messages), plus
 `Option<Res<T>>` and tuples up to 8; exclusive `FnMut(&mut World)` systems are
 still supported. `Component` and `Resource` are blanket impls — no derive.
 
@@ -33,11 +34,12 @@ A `Schedule` groups systems under a `ScheduleLabel` and orders them with
 executor). `Commands` queue into a world-global buffer that
 `World::apply_commands` drains after **every** system run, so a system's
 commands are visible to later systems in the same run; the world's change tick
-advances once per schedule run. `App` drives four schedules —
-`Startup`/`Update`/`Render`/`Shutdown`. Exit is signaled by inserting the
-`AppExit` resource (e.g. via `Commands::insert_resource`), not by a system
-return value. The low-level archetype query trait is `WorldQuery`, distinct
-from the `Query<Q>` system param.
+advances once per schedule run. `App` drives five schedules —
+`Startup`/`First`/`Update`/`Render`/`Shutdown` (`First` runs at the start of
+every update phase; the message buffer swap lives there). Exit is signaled by
+inserting the `AppExit` resource (e.g. via `Commands::insert_resource`), not
+by a system return value. The low-level archetype query trait is `WorldQuery`,
+distinct from the `Query<Q>` system param.
 
 ## Component hooks
 
@@ -70,6 +72,22 @@ dependency directions acyclic). `ensure_global_transforms` and
 `propagate_transforms` run as normal param systems in `Update`, wired by
 `moonfield_app::HierarchyPlugin`.
 
+## Messages
+
+`moonfield-ecs::message` is the buffered-event channel (the reference
+implementation's current dev branch calls these *messages* rather than
+*events*). `App::add_message::<M>()` inserts the `Messages<M>` resource and
+registers the type in the `MessageRegistry` resource; `message_update_system`
+runs in `First` and swaps each registered store's double buffer once per
+frame, giving every message a two-frame lifetime. Writers use the
+`MessageWriter<M>` param; readers use `MessageReader<M>`, whose per-system
+cursor (`MessageCursor<M>`, held as the param's persistent state) tracks
+which messages that system has seen — each reader consumes each message
+exactly once. Exclusive systems and non-system consumers (the editor's
+render loop) hold a `MessageCursor` directly. The windowing backend's
+lifecycle events (`WindowEventKind`) and raw winit events travel on this
+channel; `InputState` stays latched state with its own frame-scoped clearing.
+
 ## Time
 
 `moonfield-time` provides the `Time<Real>` / `Time<Virtual>` / generic `Time`
@@ -95,9 +113,11 @@ cache (a per-field cached-window diff, without change detection). `WinitWindows`
 channel — mutate the component.
 
 Window lifecycle events (`close_requested`/`resized`/`focus_*`/
-`scale_factor_changed`) travel on a separate channel — the `WindowEvents` world
-resource; every entry carries the window `Entity` (multi-window-shaped,
-single-window today). Exit policy mirrors the `auto_accept_quit` convention:
+`scale_factor_changed`) travel on the message channel — the
+`Messages<WindowEventKind>` resource, written by the backend as events arrive
+and read with per-reader cursors (see Messages); every entry carries the
+window `Entity` (multi-window-shaped, single-window today). Exit policy
+mirrors the `auto_accept_quit` convention:
 `CloseRequested` exits immediately by default; a caller sets
 `WindowControl::set_auto_exit_on_close(false)` to take over and later
 `WindowControl::request_exit()`.
@@ -133,8 +153,8 @@ window.
 The editor is a library crate providing `EditorPlugin`, a regular plugin
 composing the engine crates. `EditorPlugin` does **not** own the event
 loop or the window — it layers on top of `WinitPlugin` (which must be added
-first), reading the `WinitWindow`/`InputState`/`WindowControl`/`RawWindowEvents`
-resources the backend registers, and lazily building the `WindowRenderer` +
+first), reading the `WinitWindow`/`InputState`/`WindowControl` resources and
+the raw-event message channel the backend registers, and lazily building the `WindowRenderer` +
 egui state (`EditorState` keeps only editor-only state) on the first render
 tick. Render-phase systems register via `App::add_systems(Render, ...)`; the
 winit backend calls `App::render` every frame after `App::update`, which drives

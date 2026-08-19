@@ -30,8 +30,9 @@ truth for logical window state in `moonfield-window`.
   exists.
 - There is **no `WindowRequests` channel** — mutate the component.
 - Lifecycle events (`close_requested`/`resized`/`focus_*`/`scale_factor_changed`)
-  travel on a separate channel, the `WindowEvents` world resource, so they are
-  never missed by a consumer that does not poll every frame.
+  travel on a message channel — the `Messages<WindowEventKind>` resource
+  (see [Buffered messages](../feature/2026-08-19-buffered-messages.md)) — so
+  they are never missed by a consumer that does not poll every frame.
 - Exit policy mirrors the `auto_accept_quit` convention: `CloseRequested` exits
   by default; `WindowControl::set_auto_exit_on_close(false)` hands control over,
   and `WindowControl::request_exit()` exits later.
@@ -57,5 +58,5 @@ truth for logical window state in `moonfield-window`.
 - The diff runs once per frame, so rapid changes collapse to the final value:
   intentional, but worth remembering when testing cursor/title behavior in
   bursts.
-- `WindowEvents` must be drained by the consumer (editor or app) each frame or
-  entries buffer.
+- `WindowEventKind` messages persist for two frames; consumers read them with
+  a per-reader cursor, so there is nothing to drain manually at frame end.

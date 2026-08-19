@@ -12,7 +12,7 @@ mod hierarchy;
 mod plugin;
 mod plugin_group;
 
-pub use app::{App, AppError, AppExit, Plugins, Render, Runner, Shutdown, Startup, Update};
+pub use app::{App, AppError, AppExit, First, Plugins, Render, Runner, Shutdown, Startup, Update};
 pub use hierarchy::HierarchyPlugin;
 pub use moonfield_ecs::Resource;
 pub use plugin::Plugin;
@@ -21,8 +21,8 @@ pub use plugin_group::{PluginGroup, PluginGroupBuilder};
 /// Common imports.
 pub mod prelude {
     pub use crate::{
-        App, AppExit, HierarchyPlugin, Plugin, PluginGroup, PluginGroupBuilder, Render, Resource,
-        Shutdown, Startup, Update,
+        App, AppExit, First, HierarchyPlugin, Plugin, PluginGroup, PluginGroupBuilder, Render,
+        Resource, Shutdown, Startup, Update,
     };
     pub use moonfield_ecs::prelude::{
         ChildOf, Children, Commands, Component, Entity, EntityCommands, IntoSystem,
@@ -292,5 +292,41 @@ mod tests {
         let (mut app, events) = make_app();
         app.add_plugins((D, D));
         assert_eq!(events.lock().unwrap().as_slice(), &["D::build", "D::build"]);
+    }
+
+    #[test]
+    fn add_message_enables_reader_writer_params_with_frame_retention() {
+        use moonfield_ecs::{IntoSystemConfigs, MessageReader, MessageWriter, ResMut};
+
+        struct Ping(u32);
+
+        #[derive(Default)]
+        struct Outbox(u32);
+        #[derive(Default)]
+        struct Seen(Vec<u32>);
+
+        fn write_ping(mut outbox: ResMut<Outbox>, mut writer: MessageWriter<Ping>) {
+            outbox.0 += 1;
+            writer.write(Ping(outbox.0));
+        }
+        fn read_pings(mut reader: MessageReader<Ping>, mut seen: ResMut<Seen>) {
+            for ping in reader.read() {
+                seen.0.push(ping.0);
+            }
+        }
+
+        let mut app = App::new();
+        app.insert_resource(Outbox::default());
+        app.insert_resource(Seen::default());
+        app.add_message::<Ping>();
+        app.add_systems(Update, (write_ping, read_pings.after(&write_ping)));
+
+        app.update();
+        app.update();
+        // Each written ping was consumed by the reader exactly once.
+        assert_eq!(app.world().get_resource::<Seen>().unwrap().0, vec![1, 2]);
+
+        app.update();
+        assert_eq!(app.world().get_resource::<Seen>().unwrap().0, vec![1, 2, 3]);
     }
 }

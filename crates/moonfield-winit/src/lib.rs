@@ -11,11 +11,11 @@
 
 use converters::{convert_modifiers, convert_mouse_button, convert_physical_key_code};
 use moonfield_app::{App, Plugin, Runner};
-use moonfield_ecs::Entity;
+use moonfield_ecs::{Entity, Messages};
 use moonfield_log::error;
 use moonfield_window::{
     InputEvent, InputState, MouseScrollUnit, PrimaryWindow, RawHandleWrapper, Window,
-    WindowControl, WindowEventKind, WindowEvents, WindowResolution,
+    WindowControl, WindowEventKind, WindowResolution,
 };
 use raw_window_handle::{HasDisplayHandle, HasWindowHandle};
 use std::sync::Arc;
@@ -65,36 +65,6 @@ impl std::ops::Deref for EventLoopProxyWrapper {
     }
 }
 
-/// Frame-scoped queue of raw [`WindowEvent`]s, for consumers that need the
-/// original winit events (e.g. `egui_winit`) rather than the translated
-/// [`InputEvent`] / [`WindowEventKind`] resources.
-///
-/// The windowing backend pushes every raw event as it arrives; consumers
-/// read them during the update/render phase, and the backend clears the
-/// queue at the frame boundary via [`RawWindowEvents::end_frame`].
-#[derive(Debug, Default)]
-pub struct RawWindowEvents {
-    events: Vec<WindowEvent>,
-}
-
-impl RawWindowEvents {
-    /// Queue one raw event.
-    pub fn push(&mut self, event: WindowEvent) {
-        self.events.push(event);
-    }
-
-    /// This frame's raw events, in arrival order.
-    pub fn events(&self) -> &[WindowEvent] {
-        &self.events
-    }
-
-    /// Clear the queue. Called by the backend once per frame, after consumers
-    /// have processed the frame's events.
-    pub fn end_frame(&mut self) {
-        self.events.clear();
-    }
-}
-
 /// Plugin that creates a winit window and runs the winit event loop.
 ///
 /// The plugin stores the raw window as a [`WinitWindow`] resource, spawns
@@ -102,6 +72,11 @@ impl RawWindowEvents {
 /// [`RawHandleWrapper`] components) when the event loop resumes, and
 /// replaces the app's runner with a winit-based event loop. On each
 /// `about_to_wait` event the app's update systems are invoked.
+///
+/// Event delivery uses message channels registered via `App::add_message`:
+/// [`WindowEventKind`] (translated lifecycle events) and raw
+/// [`WindowEvent`]s (for consumers like `egui_winit` that need the original
+/// winit events). Buffers swap once per frame in the `First` schedule.
 ///
 /// # Example
 ///
@@ -180,8 +155,10 @@ impl Plugin for WinitPlugin {
         });
         app.insert_resource(self.settings);
         app.insert_resource(InputState::default());
-        app.insert_resource(WindowEvents::default());
-        app.insert_resource(RawWindowEvents::default());
+        // Window lifecycle + raw winit events are delivered through message
+        // channels (two-frame retention; swapped in the `First` schedule).
+        app.add_message::<WindowEventKind>();
+        app.add_message::<WindowEvent>();
         app.insert_resource(WinitWindows::default());
         // The shared exit-policy handle, readable by other plugins (e.g. the
         // editor's MOONFIELD_EDITOR_AUTO_CLOSE helper calls request_exit on
@@ -382,9 +359,9 @@ impl ApplicationHandler<WinitUserEvent> for WinitHandler<'_> {
         }
 
         // Broadcast the raw event to consumers that need the original winit
-        // event (e.g. egui_winit). Cleared at the frame boundary.
-        if let Some(mut raw) = self.app.get_resource_mut::<RawWindowEvents>() {
-            raw.push(event.clone());
+        // event (e.g. egui_winit), through the raw-event message channel.
+        if let Some(mut raw) = self.app.get_resource_mut::<Messages<WindowEvent>>() {
+            raw.write(event.clone());
         }
 
         // Translate input events into the shared InputState resource
@@ -453,8 +430,10 @@ impl ApplicationHandler<WinitUserEvent> for WinitHandler<'_> {
         match event {
             WindowEvent::CloseRequested => {
                 if let Some(window) = window_entity {
-                    if let Some(mut events) = self.app.get_resource_mut::<WindowEvents>() {
-                        events.push(WindowEventKind::CloseRequested { window });
+                    if let Some(mut events) =
+                        self.app.get_resource_mut::<Messages<WindowEventKind>>()
+                    {
+                        events.write(WindowEventKind::CloseRequested { window });
                     }
                 }
                 // Godot's auto_accept_quit: exit immediately by default, unless
@@ -466,8 +445,10 @@ impl ApplicationHandler<WinitUserEvent> for WinitHandler<'_> {
             }
             WindowEvent::Resized(size) => {
                 if let Some(window) = window_entity {
-                    if let Some(mut events) = self.app.get_resource_mut::<WindowEvents>() {
-                        events.push(WindowEventKind::Resized {
+                    if let Some(mut events) =
+                        self.app.get_resource_mut::<Messages<WindowEventKind>>()
+                    {
+                        events.write(WindowEventKind::Resized {
                             window,
                             width: size.width,
                             height: size.height,
@@ -481,8 +462,10 @@ impl ApplicationHandler<WinitUserEvent> for WinitHandler<'_> {
             }
             WindowEvent::ScaleFactorChanged { scale_factor, .. } => {
                 if let Some(window) = window_entity {
-                    if let Some(mut events) = self.app.get_resource_mut::<WindowEvents>() {
-                        events.push(WindowEventKind::ScaleFactorChanged {
+                    if let Some(mut events) =
+                        self.app.get_resource_mut::<Messages<WindowEventKind>>()
+                    {
+                        events.write(WindowEventKind::ScaleFactorChanged {
                             window,
                             scale_factor,
                         });
@@ -501,8 +484,10 @@ impl ApplicationHandler<WinitUserEvent> for WinitHandler<'_> {
             WindowEvent::Focused(focused) => {
                 self.focused = focused;
                 if let Some(window) = window_entity {
-                    if let Some(mut events) = self.app.get_resource_mut::<WindowEvents>() {
-                        events.push(if focused {
+                    if let Some(mut events) =
+                        self.app.get_resource_mut::<Messages<WindowEventKind>>()
+                    {
+                        events.write(if focused {
                             WindowEventKind::FocusGained { window }
                         } else {
                             WindowEventKind::FocusLost { window }
@@ -610,14 +595,10 @@ impl WinitHandler<'_> {
         // editor) draw into the frame here, mirroring Bevy's render schedule.
         self.app.render();
         // The frame's input has been consumed — clear frame-scoped state.
+        // (The message channels need no manual clearing: their buffers are
+        // swapped by the message update system in `First`.)
         if let Some(mut input) = self.app.get_resource_mut::<InputState>() {
             input.end_frame();
-        }
-        if let Some(mut events) = self.app.get_resource_mut::<WindowEvents>() {
-            events.end_frame();
-        }
-        if let Some(mut raw) = self.app.get_resource_mut::<RawWindowEvents>() {
-            raw.end_frame();
         }
         self.last_frame = std::time::Instant::now();
         self.redraw_pending = false;
@@ -633,12 +614,10 @@ mod tests {
     use super::*;
 
     #[test]
-    fn raw_window_events_are_frame_scoped() {
-        let mut raw = RawWindowEvents::default();
-        // Synthetic event — Resized with a zero size is enough to exercise the queue.
-        raw.push(WindowEvent::Resized(winit::dpi::PhysicalSize::new(0, 0)));
-        assert_eq!(raw.events().len(), 1);
-        raw.end_frame();
-        assert!(raw.events().is_empty());
+    fn plugin_registers_window_event_message_channels() {
+        let mut app = App::new();
+        app.add_plugin(WinitPlugin::default());
+        assert!(app.world().contains_resource::<Messages<WindowEventKind>>());
+        assert!(app.world().contains_resource::<Messages<WindowEvent>>());
     }
 }

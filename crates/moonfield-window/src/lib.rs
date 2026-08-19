@@ -7,7 +7,8 @@
 //! depending on a specific windowing backend. This crate additionally
 //! provides the backend-agnostic [`InputState`] resource / [`InputEvent`]
 //! types, the strongly-typed [`KeyCode`] / [`MouseButton`] mirror enums, and
-//! the frame-scoped [`WindowEvents`] lifecycle queue.
+//! the [`WindowEventKind`] lifecycle events (delivered through the
+//! `Messages<WindowEventKind>` channel).
 
 use raw_window_handle::{RawDisplayHandle, RawWindowHandle};
 
@@ -18,7 +19,7 @@ pub mod modifiers;
 pub mod mouse;
 pub mod window;
 
-pub use events::{WindowControl, WindowEventKind, WindowEvents};
+pub use events::{WindowControl, WindowEventKind};
 pub use input::{CursorMode, InputEvent, InputState, MOUSE_SCROLL_PIXELS_PER_LINE};
 pub use keyboard::{KeyCode, NativeKeyCode};
 pub use modifiers::Modifiers;

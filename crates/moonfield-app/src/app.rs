@@ -5,6 +5,10 @@ use std::collections::{HashMap, HashSet};
 
 /// Schedule label for systems that run once at app startup.
 pub struct Startup;
+/// Schedule label for systems that run first in every update phase, before
+/// [`Update`]. The message buffer swap ([`moonfield_ecs::message_update_system`])
+/// runs here, wired by [`App::add_message`].
+pub struct First;
 /// Schedule label for systems that run every frame, during [`App::update`].
 pub struct Update;
 /// Schedule label for render-phase systems, run by [`App::render`] after the
@@ -14,6 +18,7 @@ pub struct Render;
 pub struct Shutdown;
 
 impl ScheduleLabel for Startup {}
+impl ScheduleLabel for First {}
 impl ScheduleLabel for Update {}
 impl ScheduleLabel for Render {}
 impl ScheduleLabel for Shutdown {}
@@ -124,6 +129,33 @@ impl App {
         self.world.register_component_hooks::<T>()
     }
 
+    /// Initialize [`Message`](moonfield_ecs::Message) handling for `M`:
+    /// inserts the `Messages<M>` resource and registers its buffers for the
+    /// once-per-frame swap, which runs in the [`First`] schedule (the swap
+    /// system itself is added on the first `add_message` call).
+    ///
+    /// After this, systems can use `MessageReader<M>` / `MessageWriter<M>`
+    /// params; messages live for two frames (see [`moonfield_ecs::Messages`]).
+    pub fn add_message<M: moonfield_ecs::Message>(&mut self) -> &mut Self {
+        if !self.world.contains_resource::<moonfield_ecs::Messages<M>>() {
+            self.world
+                .insert_resource(moonfield_ecs::Messages::<M>::default());
+        }
+        if !self
+            .world
+            .contains_resource::<moonfield_ecs::MessageRegistry>()
+        {
+            self.world
+                .insert_resource(moonfield_ecs::MessageRegistry::default());
+            self.add_systems(First, moonfield_ecs::message_update_system);
+        }
+        self.world
+            .get_resource_mut::<moonfield_ecs::MessageRegistry>()
+            .expect("MessageRegistry was just ensured")
+            .register::<M>();
+        self
+    }
+
     /// Gets an immutable reference to a previously inserted resource.
     pub fn get_resource<R: moonfield_ecs::Resource>(&self) -> Option<std::cell::Ref<'_, R>> {
         self.world.get_resource::<R>()
@@ -145,7 +177,6 @@ impl App {
     }
 
     /// Register one or more systems into the schedule identified by `label`.
-    ///
     /// Accepts a single system, a `.before()`/`.after()` ordering chain, or a
     /// tuple of either. Systems are ordinary functions whose parameters are
     /// system params (`Res<T>`, `ResMut<T>`, `Query<Q>`, `Local<T>`,
@@ -217,8 +248,8 @@ impl App {
         self.run_schedule(Startup);
     }
 
-    /// Run a single update tick: the [`Update`] schedule once. Returns `false`
-    /// if an [`AppExit`] resource was inserted (e.g. via
+    /// Run a single update tick: the [`First`] then [`Update`] schedules.
+    /// Returns `false` if an [`AppExit`] resource was inserted (e.g. via
     /// `Commands::insert_resource`), signaling the loop should end.
     ///
     /// This is the per-frame counterpart of [`run_updates`]; it runs startup
@@ -227,6 +258,7 @@ impl App {
         if !self.initialized {
             self.startup();
         }
+        self.run_schedule(First);
         self.run_schedule(Update);
         !self.world.contains_resource::<AppExit>()
     }

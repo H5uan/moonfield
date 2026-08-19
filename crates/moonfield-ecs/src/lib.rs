@@ -46,6 +46,7 @@ mod entities;
 mod entity_ref;
 mod hierarchy;
 mod hooks;
+mod message;
 mod name;
 mod query;
 mod relationship;
@@ -61,6 +62,10 @@ pub use component::Component;
 pub use entities::Entity;
 pub use hierarchy::{ensure_global_transforms, propagate_transforms, ChildOf, Children};
 pub use hooks::{ComponentHook, ComponentHooks};
+pub use message::{
+    message_update_system, Message, MessageCursor, MessageId, MessageReader, MessageRegistry,
+    MessageWriter, Messages,
+};
 pub use name::Name;
 pub use query::{EntityMut, EntityRef, WorldQuery};
 pub use relationship::{Relationship, RelationshipTarget};
@@ -76,8 +81,9 @@ pub use world2::World2 as World;
 pub mod prelude {
     pub use crate::{
         ChildOf, Children, Commands, Component, ComponentHooks, Entity, EntityCommands, IntoSystem,
-        IntoSystemConfigs, Local, Name, Query, Relationship, RelationshipTarget, Res, ResMut,
-        Resource, Schedule, ScheduleLabel, System, World, WorldQuery,
+        IntoSystemConfigs, Local, Message, MessageCursor, MessageId, MessageReader, MessageWriter,
+        Messages, Name, Query, Relationship, RelationshipTarget, Res, ResMut, Resource, Schedule,
+        ScheduleLabel, System, World, WorldQuery,
     };
 }
 

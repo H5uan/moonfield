@@ -11,7 +11,7 @@
 //! Composition: add `WinitPlugin` first (it owns the window + event loop,
 //! spawns the primary window entity with its `Window` /
 //! `RawHandleWrapper` components, and registers [`WinitWindow`],
-//! [`InputState`], [`WindowControl`], [`RawWindowEvents`]), plus
+//! [`InputState`], [`WindowControl`], the raw-event message channel), plus
 //! `RenderPlugin` (it creates the shared [`RenderDevice`] world resource —
 //! the Vulkan instance + logical device singletons), then `EditorPlugin`.
 //! The editor reads those resources and lazily builds its window-bound
@@ -25,11 +25,12 @@ mod viewport;
 
 use moonfield_app::prelude::{Render, World};
 use moonfield_app::{App, Plugin};
+use moonfield_ecs::{MessageCursor, Messages};
 use moonfield_log::error;
 use moonfield_render::{RenderDevice, WindowRenderer};
 use moonfield_renderer::splat::cloud::SplatCloud;
 use moonfield_window::WindowControl;
-use moonfield_winit::{RawWindowEvents, WinitWindow};
+use moonfield_winit::WinitWindow;
 use ui::{Tab, TabContext};
 use viewport::Viewport;
 
@@ -88,6 +89,9 @@ struct EditorState {
     egui_state: egui_winit::State,
     dock_state: egui_dock::DockState<Tab>,
     window: Arc<winit::window::Window>,
+    /// Cursor over the raw-event message channel: which winit events have
+    /// already been fed into egui.
+    raw_event_cursor: MessageCursor<WindowEvent>,
     /// Texture ids pending destruction, ring-buffered per in-flight frame.
     free_ring: [Vec<egui::TextureId>; 2],
     frame_counter: usize,
@@ -165,6 +169,7 @@ impl EditorState {
             egui_state,
             dock_state: ui::initial_dock_state(),
             window,
+            raw_event_cursor: MessageCursor::default(),
             free_ring: [Vec::new(), Vec::new()],
             frame_counter: 0,
             viewport_panel_points: None,
@@ -228,13 +233,13 @@ fn editor_render(world: &mut World) {
         state
     };
 
-    // Drain raw window events into egui before building the UI.
-    let raw_events: Vec<WindowEvent> = world
-        .get_resource::<RawWindowEvents>()
-        .map(|r| r.events().to_vec())
-        .unwrap_or_default();
-    for event in &raw_events {
-        let _ = state.egui_state.on_window_event(&state.window, event);
+    // Drain new raw window events into egui before building the UI. The
+    // editor keeps its own cursor over the message channel (it is an
+    // exclusive render system, not a MessageReader param).
+    if let Some(messages) = world.get_resource::<Messages<WindowEvent>>() {
+        for event in state.raw_event_cursor.read(&messages) {
+            let _ = state.egui_state.on_window_event(&state.window, event);
+        }
     }
 
     if let Err(e) = render_frame(world, &mut state) {
