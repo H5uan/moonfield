@@ -10,6 +10,7 @@ rt = []
 gi = []
 
 [dependencies]
+moonfield-asset = { workspace = true }
 moonfield-math = { workspace = true }
 moonfield-render = { workspace = true }
 thiserror = { workspace = true }

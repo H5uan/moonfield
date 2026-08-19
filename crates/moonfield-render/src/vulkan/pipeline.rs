@@ -22,12 +22,15 @@ impl GraphicsPipeline {
     /// set from the render area when a render pass is begun (see
     /// [`CommandBuffer::begin_render_pass`](crate::CommandBuffer::begin_render_pass)),
     /// so the pipeline is independent of the target extent.
+    /// `push_constant_ranges` declares the push-constant blocks the shaders
+    /// read (empty for none).
     pub fn new(
         device: &Device,
         render_pass: &RenderPass,
         vertex_shader: &ShaderModule,
         fragment_shader: &ShaderModule,
         vertex_layout: &VertexBufferLayout,
+        push_constant_ranges: &[vk::PushConstantRange],
     ) -> Result<Self> {
         let vertex_entry = std::ffi::CString::new("main").unwrap();
         let fragment_entry = std::ffi::CString::new("main").unwrap();
@@ -98,7 +101,8 @@ impl GraphicsPipeline {
             .logic_op_enable(false)
             .attachments(&color_blend_attachments);
 
-        let pipeline_layout_info = vk::PipelineLayoutCreateInfo::default();
+        let pipeline_layout_info =
+            vk::PipelineLayoutCreateInfo::default().push_constant_ranges(push_constant_ranges);
         let layout = unsafe {
             device
                 .raw()

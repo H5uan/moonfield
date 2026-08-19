@@ -7,3 +7,6 @@ edition.workspace = true
 moonfield-base = { workspace = true }
 moonfield-ecs = { workspace = true }
 thiserror = { workspace = true }
+
+[dev-dependencies]
+moonfield-math = { workspace = true }

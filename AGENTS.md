@@ -13,15 +13,19 @@ Cargo-managed monorepo under `crates/`:
 ```
 moonfield/          # Binary crate — main executable entry point
 moonfield-app/      # Plugin-based App/Plugin framework (Plugin, PluginGroup, App, Resources)
+moonfield-asset/    # Sync-only Assets<T> store + Handle<T> (index+generation); no deps, no async
 moonfield-base/     # Shared base types and utilities
+moonfield-ecs/      # ECS world implementation (archetype storage, system params, schedules, hooks, relationships)
 moonfield-editor/   # Editor plugin (egui + egui_dock + egui-ash-renderer): dock panels, offscreen viewport
-moonfield-math/     # The workspace math single entry: glam re-export + domain types (Dir3/Ray3d)
+moonfield-log/      # Logging utilities
+moonfield-math/     # The workspace math single entry: glam re-export + domain types (Dir3/Ray3d, Transform)
+moonfield-reflect/  # Mini reflection for the editor: named fields, dynamic read/write, nesting
+moonfield-reflect-derive/ # #[derive(Reflect)] proc-macro (the one sanctioned proc-macro crate)
 moonfield-render/   # Lunar Mare — Vulkan-only rendering RHI (ash); see crates/moonfield-render/AGENTS.md
 moonfield-renderer/ # Lunaris — scene rendering & algorithms (splat/rt/gi), RenderAlgorithm phases
+moonfield-time/     # Time<Real>/Time<Virtual>/Time clocks + TimePlugin; the backend advances them per frame
 moonfield-window/   # Abstract windowing types (Window components, KeyCode/MouseButton mirrors, InputState)
 moonfield-winit/    # Windowing backend (winit): bridges winit Window to moonfield-window components
-moonfield-ecs/      # ECS world implementation
-moonfield-log/      # Logging utilities
 ```
 
 The egui stack is anchored to egui-ash-renderer's compatibility table (egui

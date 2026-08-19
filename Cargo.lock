@@ -873,6 +873,7 @@ dependencies = [
  "moonfield-base",
  "moonfield-log",
  "moonfield-render",
+ "moonfield-time",
  "moonfield-window",
  "moonfield-winit",
 ]
@@ -883,7 +884,15 @@ version = "0.1.0"
 dependencies = [
  "moonfield-base",
  "moonfield-ecs",
+ "moonfield-math",
  "thiserror 2.0.20",
+]
+
+[[package]]
+name = "moonfield-asset"
+version = "0.1.0"
+dependencies = [
+ "moonfield-ecs",
 ]
 
 [[package]]
@@ -896,6 +905,7 @@ version = "0.1.0"
 dependencies = [
  "foldhash",
  "moonfield-base",
+ "moonfield-math",
  "serde",
 ]
 
@@ -904,14 +914,20 @@ name = "moonfield-editor"
 version = "0.1.0"
 dependencies = [
  "ash",
+ "bytemuck",
  "egui",
  "egui-ash-renderer",
  "egui-winit",
  "egui_dock",
  "gpu-allocator",
  "moonfield-app",
+ "moonfield-asset",
+ "moonfield-ecs",
  "moonfield-log",
+ "moonfield-math",
+ "moonfield-reflect",
  "moonfield-render",
+ "moonfield-renderer",
  "moonfield-window",
  "moonfield-winit",
  "winit",
@@ -934,6 +950,24 @@ version = "0.1.0"
 dependencies = [
  "bytemuck",
  "glam",
+ "moonfield-reflect",
+]
+
+[[package]]
+name = "moonfield-reflect"
+version = "0.1.0"
+dependencies = [
+ "glam",
+ "moonfield-reflect-derive",
+]
+
+[[package]]
+name = "moonfield-reflect-derive"
+version = "0.1.0"
+dependencies = [
+ "proc-macro2",
+ "quote",
+ "syn 2.0.119",
 ]
 
 [[package]]
@@ -949,6 +983,7 @@ dependencies = [
  "moonfield-ecs",
  "moonfield-log",
  "moonfield-math",
+ "moonfield-reflect",
  "raw-window-handle",
  "shader-slang-rs",
 ]
@@ -957,9 +992,18 @@ dependencies = [
 name = "moonfield-renderer"
 version = "0.1.0"
 dependencies = [
+ "moonfield-asset",
  "moonfield-math",
  "moonfield-render",
  "thiserror 2.0.20",
+]
+
+[[package]]
+name = "moonfield-time"
+version = "0.1.0"
+dependencies = [
+ "moonfield-app",
+ "moonfield-ecs",
 ]
 
 [[package]]
@@ -977,6 +1021,7 @@ dependencies = [
  "moonfield-app",
  "moonfield-ecs",
  "moonfield-log",
+ "moonfield-time",
  "moonfield-window",
  "raw-window-handle",
  "winit",

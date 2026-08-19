@@ -1,11 +1,13 @@
 //! Windowed rendering: swapchain frame loop.
 //!
-//! Provides [`WindowRenderer`], which owns the full windowed Vulkan setup —
-//! instance with surface extensions, surface, device, swapchain, per-image
-//! framebuffers, and per-frame-in-flight synchronization — and drives the
-//! acquire → record → submit → present cycle. A UI renderer (e.g.
-//! egui-ash-renderer) records its draw commands into the frame's command
-//! buffer between [`WindowRenderer::begin_frame`] and
+//! Provides [`WindowRenderer`], which owns the window-bound Vulkan objects —
+//! surface, swapchain, per-image framebuffers, and per-frame-in-flight
+//! synchronization — and drives the acquire → record → submit → present
+//! cycle. The device-level singletons (instance, logical device) are shared:
+//! they come from the world's [`RenderDevice`](crate::RenderDevice) resource
+//! (created by [`RenderPlugin`](crate::RenderPlugin)) and are held as `Arc`s.
+//! A UI renderer (e.g. egui-ash-renderer) records its draw commands into the
+//! frame's command buffer between [`WindowRenderer::begin_frame`] and
 //! [`WindowRenderer::end_frame`].
 
 use crate::error::{Error, Result};
@@ -15,10 +17,10 @@ use crate::vulkan::framebuffer::Framebuffer;
 use crate::vulkan::instance::Instance;
 use crate::vulkan::render_pass::RenderPass;
 use crate::vulkan::swapchain::{Surface, Swapchain};
-use crate::{CommandBuffer, CommandPool, Fence, Semaphore};
+use crate::{CommandBuffer, CommandPool, Fence, RenderDevice, Semaphore};
 use ash::vk;
 use raw_window_handle::{HasDisplayHandle, HasWindowHandle};
-use std::ffi::CStr;
+use std::sync::Arc;
 
 /// Number of frames that may be in flight concurrently.
 const MAX_FRAMES_IN_FLIGHT: usize = 2;
@@ -27,8 +29,11 @@ const MAX_FRAMES_IN_FLIGHT: usize = 2;
 ///
 /// Fields are ordered so that Rust drops them in the correct Vulkan
 /// dependency order: per-frame sync and command objects first, then
-/// framebuffers, render pass, swapchain, device, surface, and finally the
-/// instance.
+/// framebuffers, render pass, swapchain, and surface. The shared instance and
+/// device come last as `Arc`s — their actual destruction happens when the
+/// last referrer (usually the world's [`RenderDevice`] resource) drops, so
+/// the swapchain and surface are always destroyed while the device and
+/// instance are still alive.
 pub struct WindowRenderer {
     image_available: Vec<Semaphore>,
     render_finished: Vec<Semaphore>,
@@ -40,42 +45,48 @@ pub struct WindowRenderer {
     framebuffers: Vec<Framebuffer>,
     render_pass: RenderPass,
     swapchain: Swapchain,
-    device: Device,
     surface: Surface,
-    instance: Instance,
+    device: Arc<Device>,
+    instance: Arc<Instance>,
     current_frame: usize,
     current_image: Option<u32>,
     needs_recreate: bool,
 }
 
 impl WindowRenderer {
-    /// Create a renderer presenting to the given window.
+    /// Create a renderer presenting to the given window, on the shared
+    /// [`RenderDevice`]'s instance and device.
+    ///
+    /// The shared device is created without a surface, so its graphics queue
+    /// family's presentation support is validated against this window's
+    /// surface here; creation fails if the device cannot present to it.
     pub fn new(
+        render_device: &RenderDevice,
         window: &(impl HasWindowHandle + HasDisplayHandle),
         width: u32,
         height: u32,
     ) -> Result<Self> {
-        let display_handle = window
-            .display_handle()
-            .map_err(|e| Error::Backend(format!("failed to get display handle: {e}")))?;
-        let extension_ptrs = ash_window::enumerate_required_extensions(display_handle.as_raw())
-            .map_err(|e| Error::Backend(format!("failed to enumerate extensions: {e}")))?;
-        // SAFETY: ash-window returns pointers to static extension name strings.
-        let extensions: Vec<&CStr> = extension_ptrs
-            .iter()
-            .map(|ptr| unsafe { CStr::from_ptr(*ptr) })
-            .collect();
+        let instance = render_device.instance().clone();
+        let device = render_device.device().clone();
 
-        let instance = Instance::new(&extensions)?;
         let surface = Surface::from_window(instance.entry(), &instance, window)?;
-        let device = Device::new(&instance, Some(surface.raw()))?;
+        let queue_families = device.queue_family_indices();
+        if !instance.get_physical_device_surface_support(
+            device.physical_device(),
+            queue_families.graphics,
+            surface.raw(),
+        ) {
+            return Err(Error::Backend(
+                "the shared render device cannot present to this window's surface".to_string(),
+            ));
+        }
         let swapchain = Swapchain::new(&instance, &device, &surface, [width, height])?;
         let render_pass_format =
             Format::from_vk(swapchain.format().format).ok_or(Error::Unsupported)?;
         let render_pass = RenderPass::new(&device, render_pass_format)?;
         let framebuffers = create_framebuffers(&device, &render_pass, &swapchain)?;
 
-        let command_pool = CommandPool::new(&device, device.queue_family_indices().graphics)?;
+        let command_pool = CommandPool::new(&device, queue_families.graphics)?;
         let mut command_buffers = Vec::with_capacity(MAX_FRAMES_IN_FLIGHT);
         let mut image_available = Vec::with_capacity(MAX_FRAMES_IN_FLIGHT);
         let mut render_finished = Vec::with_capacity(MAX_FRAMES_IN_FLIGHT);
@@ -96,8 +107,8 @@ impl WindowRenderer {
             framebuffers,
             render_pass,
             swapchain,
-            device,
             surface,
+            device,
             instance,
             current_frame: 0,
             current_image: None,

@@ -1,35 +1,53 @@
-//! Editor viewport: renders the scene into an offscreen target and exposes
-//! it as an egui texture.
+//! Editor viewport: renders the ECS scene into an offscreen target and
+//! exposes it as an egui texture.
+//!
+//! The scene is queried straight from the [`World`] (the render seam:
+//! single-threaded, no extract layer): the entity with
+//! [`Camera`] + [`PrimaryCamera`] + `GlobalTransform` provides view and
+//! projection (aspect follows the offscreen target's extent), and every
+//! entity with [`MeshRenderer`] + `GlobalTransform` is drawn as a colored
+//! unit cube. Per-cube transform and color go through push constants — no
+//! descriptor management.
+//!
+//! Known slice limitations: no depth attachment on the offscreen target yet
+//! (overlapping cubes don't occlude correctly), and all cubes share one mesh.
 
 use ash::vk;
+use moonfield_asset::Assets;
+use moonfield_math::{Affine3A, GlobalTransform, Mat4, Quat, Vec3};
 use moonfield_render::bind::{
     BindGroup, BindGroupEntry, BindGroupLayout, BindGroupLayoutEntry, BindingResource, BindingType,
     ShaderStage,
 };
 use moonfield_render::{
-    Buffer, BufferUsage, CommandBuffer, Compiler, Device, Format, GraphicsPipeline,
-    OffscreenTarget, Result, ShaderModule, VertexAttribute, VertexBufferLayout, VertexFormat,
+    view_matrix, Buffer, BufferUsage, Camera, CommandBuffer, Compiler, Device, Format,
+    GraphicsPipeline, MeshRenderer, OffscreenTarget, PrimaryCamera, Result, ShaderModule,
+    VertexAttribute, VertexBufferLayout, VertexFormat,
 };
+use moonfield_renderer::splat::cloud::{SplatCloud, SplatCloudHandle};
 
 /// Initial offscreen target size; the viewport panel reports its real size
 /// on the first frame.
 const INITIAL_WIDTH: u32 = 1280;
 const INITIAL_HEIGHT: u32 = 720;
 
+/// Per-draw push constants: model-view-projection matrix + flat color.
 #[repr(C)]
-#[derive(Clone, Copy)]
-struct Vertex {
-    position: [f32; 3],
-    color: [f32; 3],
+#[derive(Clone, Copy, bytemuck::Pod, bytemuck::Zeroable)]
+struct ScenePushConstants {
+    mvp: [f32; 16],
+    color: [f32; 4],
 }
 
-/// The viewport scene: an offscreen render target, a demo triangle pipeline,
-/// and the egui texture bindings pointing at the target.
+const PUSH_CONSTANT_SIZE: u32 = std::mem::size_of::<ScenePushConstants>() as u32;
+
+/// The viewport scene: an offscreen render target, the cube pipeline, the
+/// shared cube mesh, and the egui texture bindings pointing at the target.
 ///
 /// Fields are ordered for Vulkan-safe destruction: the bind group and layout
-/// first, then the pipeline, then the offscreen target (which waits for
-/// device idle). The bind group/layout own their own descriptor objects and
-/// drop themselves.
+/// first, then the pipeline and mesh buffers, then the offscreen target
+/// (which waits for device idle). The bind group/layout own their own
+/// descriptor objects and drop themselves.
 pub struct Viewport {
     bind_group: BindGroup,
     /// Held to keep the layout alive for the lifetime of the bind group;
@@ -38,6 +56,7 @@ pub struct Viewport {
     bind_group_layout: BindGroupLayout,
     pipeline: GraphicsPipeline,
     vertex_buffer: Buffer,
+    index_buffer: Buffer,
     target: OffscreenTarget,
     texture_id: Option<egui::TextureId>,
 }
@@ -57,27 +76,20 @@ impl Viewport {
             OffscreenTarget::new(device, INITIAL_WIDTH, INITIAL_HEIGHT, Format::B8G8R8A8Unorm)?;
         let pipeline = create_pipeline(device, &target, &vertex_shader, &fragment_shader)?;
 
-        let vertices = [
-            Vertex {
-                position: [0.0, -0.5, 0.0],
-                color: [1.0, 0.0, 0.0],
-            },
-            Vertex {
-                position: [0.5, 0.5, 0.0],
-                color: [0.0, 1.0, 0.0],
-            },
-            Vertex {
-                position: [-0.5, 0.5, 0.0],
-                color: [0.0, 0.0, 1.0],
-            },
-        ];
         let vertex_buffer = Buffer::new(
             device,
-            std::mem::size_of_val(&vertices) as u64,
+            std::mem::size_of_val(CUBE_VERTICES) as u64,
             BufferUsage::VERTEX,
             gpu_allocator::MemoryLocation::CpuToGpu,
         )?;
-        vertex_buffer.upload(device, &vertices)?;
+        vertex_buffer.upload(device, CUBE_VERTICES)?;
+        let index_buffer = Buffer::new(
+            device,
+            std::mem::size_of_val(CUBE_INDICES) as u64,
+            BufferUsage::INDEX,
+            gpu_allocator::MemoryLocation::CpuToGpu,
+        )?;
+        index_buffer.upload(device, CUBE_INDICES)?;
 
         let (bind_group_layout, bind_group) = create_bind_group(device, &target)?;
 
@@ -86,6 +98,7 @@ impl Viewport {
             bind_group_layout,
             pipeline,
             vertex_buffer,
+            index_buffer,
             target,
             texture_id: None,
         })
@@ -127,11 +140,67 @@ impl Viewport {
         Ok(())
     }
 
-    /// Record the scene pass into the given command buffer.
-    pub fn record_scene(&self, command_buffer: &CommandBuffer) {
+    /// Record the scene pass into the given command buffer: clear to the
+    /// primary camera's clear color, then draw every
+    /// [`MeshRenderer`] + `GlobalTransform` entity as a cube.
+    ///
+    /// With no primary camera in the world, the target is cleared to a dim
+    /// placeholder color.
+    pub fn record_scene(&self, world: &moonfield_ecs::World, command_buffer: &CommandBuffer) {
+        // The primary camera: first entity with Camera + PrimaryCamera +
+        // GlobalTransform. Copy the data out so later queries don't fight
+        // the iteration borrows.
+        let mut camera = None;
+        for (entity, (cam, global)) in world.query::<(&Camera, &GlobalTransform)>() {
+            if world.get_component::<PrimaryCamera>(entity).is_some() {
+                camera = Some((*cam, *global));
+                break;
+            }
+        }
+
+        // Collect the draw items up front for the same reason.
+        let mut items: Vec<(Mat4, [f32; 4])> = world
+            .query::<(&MeshRenderer, &GlobalTransform)>()
+            .map(|(_, (mesh, global))| (Mat4::from(global.affine()), mesh.color))
+            .collect();
+
+        // Splat entities render as an axis-aligned placeholder box (the
+        // cloud's AABB in a fixed green) until the real 3DGS rasterizer
+        // lands — `splat::rasterize` is still a stub.
+        if let Some(clouds) = world.get_resource::<Assets<SplatCloud>>() {
+            for (_, (handle, global)) in world.query::<(&SplatCloudHandle, &GlobalTransform)>() {
+                let Some(cloud) = clouds.get(&handle.0) else {
+                    continue;
+                };
+                let (min, max) = cloud.aabb();
+                let (min, max) = (Vec3::from(min), Vec3::from(max));
+                let center = (min + max) * 0.5;
+                let size = (max - min).max(Vec3::splat(0.01));
+                let model = Mat4::from(global.affine())
+                    * Mat4::from(Affine3A::from_scale_rotation_translation(
+                        size,
+                        Quat::IDENTITY,
+                        center,
+                    ));
+                items.push((model, [0.3, 0.8, 0.4, 1.0]));
+            }
+        }
+
+        let (clear_color, view_proj) = match camera {
+            Some((cam, global)) => {
+                let (width, height) = self.target.extent();
+                let aspect = width as f32 / height.max(1) as f32;
+                (
+                    cam.clear_color,
+                    cam.projection_matrix(aspect) * view_matrix(&global),
+                )
+            }
+            None => ([0.05, 0.0, 0.08, 1.0], Mat4::IDENTITY),
+        };
+
         let clear_values = [vk::ClearValue {
             color: vk::ClearColorValue {
-                float32: [0.02, 0.02, 0.03, 1.0],
+                float32: clear_color,
             },
         }];
         let (width, height) = self.target.extent();
@@ -145,9 +214,35 @@ impl Viewport {
             .clear_values(&clear_values);
 
         command_buffer.begin_render_pass(&begin_info, vk::SubpassContents::INLINE);
-        command_buffer.bind_graphics_pipeline(self.pipeline.raw());
-        command_buffer.bind_vertex_buffers(0, &[self.vertex_buffer.raw()], &[0]);
-        command_buffer.draw(3, 1, 0, 0);
+        if camera.is_some() {
+            // The engine's projection is Y-up NDC; Vulkan framebuffers are
+            // top-left origin. The negative-height viewport performs the flip
+            // at the Vulkan boundary (see AGENTS.md clip-space note).
+            command_buffer.set_viewport(vk::Viewport {
+                x: 0.0,
+                y: height as f32,
+                width: width as f32,
+                height: -(height as f32),
+                min_depth: 0.0,
+                max_depth: 1.0,
+            });
+            command_buffer.bind_graphics_pipeline(self.pipeline.raw());
+            command_buffer.bind_vertex_buffers(0, &[self.vertex_buffer.raw()], &[0]);
+            command_buffer.bind_index_buffer(self.index_buffer.raw(), 0, vk::IndexType::UINT16);
+            for (model, color) in items {
+                let push = ScenePushConstants {
+                    mvp: (view_proj * model).to_cols_array(),
+                    color,
+                };
+                command_buffer.push_constants(
+                    self.pipeline.layout(),
+                    vk::ShaderStageFlags::VERTEX | vk::ShaderStageFlags::FRAGMENT,
+                    0,
+                    bytemuck::bytes_of(&push),
+                );
+                command_buffer.draw_indexed(CUBE_INDICES.len() as u32, 1, 0, 0, 0);
+            }
+        }
         command_buffer.end_render_pass();
     }
 }
@@ -159,20 +254,18 @@ fn create_pipeline(
     fragment_shader: &ShaderModule,
 ) -> Result<GraphicsPipeline> {
     let vertex_layout = VertexBufferLayout {
-        stride: std::mem::size_of::<Vertex>() as u32,
-        attributes: vec![
-            VertexAttribute {
-                location: 0,
-                format: VertexFormat::Float32x3,
-                offset: 0,
-            },
-            VertexAttribute {
-                location: 1,
-                format: VertexFormat::Float32x3,
-                offset: std::mem::size_of::<[f32; 3]>() as u32,
-            },
-        ],
+        stride: std::mem::size_of::<[f32; 3]>() as u32,
+        attributes: vec![VertexAttribute {
+            location: 0,
+            format: VertexFormat::Float32x3,
+            offset: 0,
+        }],
     };
+    let push_constants = [vk::PushConstantRange {
+        stage_flags: vk::ShaderStageFlags::VERTEX | vk::ShaderStageFlags::FRAGMENT,
+        offset: 0,
+        size: PUSH_CONSTANT_SIZE,
+    }];
 
     GraphicsPipeline::new(
         device,
@@ -180,6 +273,7 @@ fn create_pipeline(
         vertex_shader,
         fragment_shader,
         &vertex_layout,
+        &push_constants,
     )
 }
 
@@ -214,45 +308,84 @@ fn create_bind_group(
     Ok((layout, bind_group))
 }
 
+/// Unit cube (side 1, centered on the origin), positions only. Faces are
+/// wound counter-clockwise seen from outside; with the Y-flip viewport that
+/// matches the pipeline's clockwise-front-face culling.
+const CUBE_VERTICES: &[[f32; 3]] = &[
+    [-0.5, -0.5, -0.5], // 0
+    [0.5, -0.5, -0.5],  // 1
+    [0.5, 0.5, -0.5],   // 2
+    [-0.5, 0.5, -0.5],  // 3
+    [-0.5, -0.5, 0.5],  // 4
+    [0.5, -0.5, 0.5],   // 5
+    [0.5, 0.5, 0.5],    // 6
+    [-0.5, 0.5, 0.5],   // 7
+];
+
+#[rustfmt::skip]
+const CUBE_INDICES: &[u16] = &[
+    0, 3, 2, 2, 1, 0, // -Z face
+    4, 5, 6, 6, 7, 4, // +Z face
+    0, 1, 5, 5, 4, 0, // -Y face
+    2, 3, 7, 7, 6, 2, // +Y face
+    0, 4, 7, 7, 3, 0, // -X face
+    1, 2, 6, 6, 5, 1, // +X face
+];
+
 const VERTEX_SHADER: &str = r#"
+struct PushConstants
+{
+    float4x4 mvp;
+    float4 color;
+};
+
+[[vk::push_constant]]
+PushConstants push;
+
 struct VsInput
 {
     float3 position : POSITION;
-    float3 color : COLOR;
 };
 
 struct VsOutput
 {
     float4 position : SV_POSITION;
-    float3 color : COLOR;
+    float3 local_pos : TEXCOORD0;
 };
 
 [shader("vertex")]
 VsOutput main(VsInput input)
 {
     VsOutput output;
-    output.position = float4(input.position, 1.0);
-    output.color = input.color;
+    output.position = mul(push.mvp, float4(input.position, 1.0));
+    output.local_pos = input.position;
     return output;
 }
 "#;
 
 const FRAGMENT_SHADER: &str = r#"
-struct PsInput
+struct PushConstants
 {
-    float3 color : COLOR;
+    float4x4 mvp;
+    float4 color;
 };
 
-struct PsOutput
+[[vk::push_constant]]
+PushConstants push;
+
+struct PsInput
 {
-    float4 color : SV_TARGET;
+    float3 local_pos : TEXCOORD0;
 };
 
 [shader("fragment")]
-PsOutput main(PsInput input)
+float4 main(PsInput input) : SV_TARGET
 {
-    PsOutput output;
-    output.color = float4(input.color, 1.0);
-    return output;
+    // Cheap flat shading: reconstruct the face normal from screen-space
+    // derivatives of the local position and light it with a fixed direction.
+    float3 normal = normalize(cross(ddx(input.local_pos), ddy(input.local_pos)));
+    float3 light_dir = normalize(float3(0.4, 0.8, 0.6));
+    float shade = 0.35 + 0.65 * abs(dot(normal, light_dir));
+    return float4(push.color.rgb * shade, push.color.a);
 }
 "#;

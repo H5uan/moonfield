@@ -8,18 +8,27 @@
 #![forbid(unsafe_code)]
 
 mod app;
+mod hierarchy;
 mod plugin;
 mod plugin_group;
 
-pub use app::{App, AppError, Plugins, Runner};
+pub use app::{App, AppError, AppExit, Plugins, Render, Runner, Shutdown, Startup, Update};
+pub use hierarchy::HierarchyPlugin;
 pub use moonfield_ecs::Resource;
 pub use plugin::Plugin;
 pub use plugin_group::{PluginGroup, PluginGroupBuilder};
 
 /// Common imports.
 pub mod prelude {
-    pub use crate::{App, Plugin, PluginGroup, PluginGroupBuilder, Resource};
-    pub use moonfield_ecs::prelude::{Component, Entity, IntoSystem, Query, System, World};
+    pub use crate::{
+        App, AppExit, HierarchyPlugin, Plugin, PluginGroup, PluginGroupBuilder, Render, Resource,
+        Shutdown, Startup, Update,
+    };
+    pub use moonfield_ecs::prelude::{
+        ChildOf, Children, Commands, Component, Entity, EntityCommands, IntoSystem,
+        IntoSystemConfigs, Local, Name, Query, Relationship, RelationshipTarget, Res, ResMut,
+        Schedule, ScheduleLabel, System, World, WorldQuery,
+    };
 }
 
 #[cfg(test)]
@@ -204,7 +213,7 @@ mod tests {
     fn render_systems_run_after_update() {
         let (mut app, events) = make_app();
         app.add_plugins(A);
-        app.add_render_system(|world: &mut World| {
+        app.add_systems(Render, |world: &mut World| {
             world
                 .get_resource_mut::<Arc<Mutex<Vec<String>>>>()
                 .unwrap()
@@ -226,7 +235,7 @@ mod tests {
     fn render_initializes_lazily_without_update() {
         let (mut app, events) = make_app();
         app.add_plugins(A);
-        app.add_render_system(|world: &mut World| {
+        app.add_systems(Render, |world: &mut World| {
             world
                 .get_resource_mut::<Arc<Mutex<Vec<String>>>>()
                 .unwrap()
@@ -242,6 +251,29 @@ mod tests {
             events.lock().unwrap().as_slice(),
             &["A::build".to_string(), "render".to_string()]
         );
+    }
+
+    #[test]
+    fn update_loop_exits_on_app_exit_resource() {
+        use crate::{AppExit, Update};
+        use moonfield_ecs::{Commands, ResMut};
+
+        struct Frames(usize);
+
+        fn count_frame(mut frames: ResMut<Frames>, commands: Commands) {
+            frames.0 += 1;
+            if frames.0 == 3 {
+                commands.insert_resource(AppExit);
+            }
+        }
+
+        let mut app = App::new();
+        app.insert_resource(Frames(0));
+        app.add_systems(Update, count_frame);
+        app.run_updates();
+
+        // Three update ticks ran; the AppExit queued in the third ended the loop.
+        assert_eq!(app.world().get_resource::<Frames>().unwrap().0, 3);
     }
 
     #[test]

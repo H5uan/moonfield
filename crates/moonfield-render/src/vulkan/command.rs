@@ -139,6 +139,31 @@ impl CommandBuffer {
         }
     }
 
+    /// Override the dynamic viewport (e.g. a negative height to map the
+    /// engine's Y-up NDC convention onto Vulkan's top-left framebuffer
+    /// origin). `begin_render_pass` resets the viewport to the render area,
+    /// so call this after it.
+    pub fn set_viewport(&self, viewport: vk::Viewport) {
+        unsafe {
+            self.device
+                .cmd_set_viewport(self.buffer, 0, std::slice::from_ref(&viewport));
+        }
+    }
+
+    /// Push raw bytes into the pipeline layout's push-constant block.
+    pub fn push_constants(
+        &self,
+        layout: vk::PipelineLayout,
+        stages: vk::ShaderStageFlags,
+        offset: u32,
+        data: &[u8],
+    ) {
+        unsafe {
+            self.device
+                .cmd_push_constants(self.buffer, layout, stages, offset, data);
+        }
+    }
+
     /// Bind a graphics pipeline.
     pub fn bind_graphics_pipeline(&self, pipeline: vk::Pipeline) {
         unsafe {

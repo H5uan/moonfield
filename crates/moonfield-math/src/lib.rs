@@ -34,6 +34,7 @@ pub mod bounding;
 pub mod direction;
 pub mod gpu;
 pub mod ray;
+pub mod transform;
 pub mod volumes;
 
 pub use bounding::{
@@ -41,6 +42,7 @@ pub use bounding::{
 };
 pub use direction::{Dir3, DirError};
 pub use ray::Ray3d;
+pub use transform::{GlobalTransform, Transform};
 pub use volumes::{Aabb3d, BoundingSphere, Frustum, Plane};
 
 pub use glam::*;

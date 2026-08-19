@@ -275,7 +275,7 @@ impl ApplicationHandler<WinitUserEvent> for WinitHandler<'_> {
         // Adopt a pre-spawned window entity (Bevy-style: user code may spawn
         // a `Window` component at startup), or spawn the primary window
         // entity from the plugin config.
-        let existing = <&Window as moonfield_ecs::Query>::fetch(self.app.world())
+        let existing = <&Window as moonfield_ecs::WorldQuery>::fetch(self.app.world())
             .next()
             .map(|(e, _)| e);
         let entity = match existing {
@@ -599,6 +599,9 @@ impl WinitHandler<'_> {
     /// Run one frame: update, apply window diffs, render, then clear the
     /// frame-scoped state. Called from `RedrawRequested`.
     fn run_frame(&mut self, event_loop: &ActiveEventLoop) {
+        // Advance the Time resources first, so systems in the update see this
+        // frame's delta.
+        moonfield_time::update_time(self.app.world_mut());
         self.app.update();
         // Apply ECS-side window mutations (title, cursor mode) via the
         // CachedWindow field diff, after the update has settled.

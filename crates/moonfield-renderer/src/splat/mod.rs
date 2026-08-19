@@ -1,6 +1,7 @@
 //! 3D Gaussian splatting: scene data, I/O, rasterization, and training.
 
 pub mod backward;
+pub mod cloud;
 pub mod io;
 pub mod rasterize;
 pub mod scene;

@@ -6,11 +6,20 @@
 
 use moonfield_render::vulkan::bindless::{GpuAllocation, Memory};
 use moonfield_render::{Device, Instance};
+use std::sync::Mutex;
+
+/// Serializes the tests in this binary. Each test creates its own Vulkan
+/// instance, device, and allocator; doing so concurrently on one GPU
+/// access-violates on some Windows drivers, and the crate confines Vulkan
+/// objects to a single thread by rule — tests must not create devices in
+/// parallel.
+static DEVICE_LOCK: Mutex<()> = Mutex::new(());
 
 /// A CPU-side view must exist for host-visible classes and be absent for
 /// GPU-only memory; the GPU address must be non-zero for every class.
 #[test]
 fn bindless_allocation_views_and_addresses() {
+    let _guard = DEVICE_LOCK.lock().unwrap();
     let instance = match Instance::new_headless() {
         Ok(instance) => instance,
         Err(err) => {
@@ -58,6 +67,7 @@ fn bindless_allocation_views_and_addresses() {
 /// A full allocation can be CPU-written and dropped without panic.
 #[test]
 fn bindless_allocation_write_and_drop() {
+    let _guard = DEVICE_LOCK.lock().unwrap();
     let instance = match Instance::new_headless() {
         Ok(instance) => instance,
         Err(err) => {
