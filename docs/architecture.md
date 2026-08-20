@@ -98,14 +98,28 @@ channel; `InputState` stays latched state with its own frame-scoped clearing.
 
 ## Time
 
-`moonfield-time` provides the `Time<Real>` / `Time<Virtual>` / generic `Time`
-clock resources: delta and elapsed as `Duration` plus f32/f64 seconds, wrapped
-elapsed, and on the virtual clock pause, relative speed, and a `max_delta`
-clamp. `TimePlugin` inserts the resources; the winit backend advances them via
-`moonfield_time::update_time` once per frame at frame start, before
+`moonfield-time` provides the `Time<Real>` / `Time<Virtual>` / `Time<Fixed>` /
+generic `Time` clock resources: delta and elapsed as `Duration` plus f32/f64
+seconds, wrapped elapsed, and on the virtual clock pause, relative speed, and
+a `max_delta` clamp. `TimePlugin` (in `moonfield-app`, next to
+`HierarchyPlugin` — the app crate depends on the time crate so `App::update`
+can drive the fixed loop) inserts the resources; the winit backend advances
+them via `moonfield_time::update_time` once per frame at frame start, before
 `App::update`, lazily inserting missing clocks so the editor path works
-without the plugin. `Time<Fixed>` is deferred together with the fixed-update
-schedule; `Timer`/`Stopwatch` are not ported.
+without the plugin. `Timer`/`Stopwatch` are not ported.
+
+## Fixed update
+
+`App::update` runs `First`, then the fixed-timestep loop, then `Update`. The
+loop (`moonfield_time::run_fixed_main_schedule`) accumulates the virtual delta
+into `Time<Fixed>`'s overstep and, once per full `timestep()` (default 64
+Hz), runs `FixedFirst` → `FixedPreUpdate` → `FixedUpdate` → `FixedPostUpdate`
+→ `FixedLast` (plus anything registered directly under the `FixedMain`
+umbrella) — so fixed schedules run 0, 1, or N times per frame. During each
+iteration the generic `Time` resource mirrors `Time<Fixed>` (delta ==
+timestep); afterwards it is restored to virtual time. Without `TimePlugin`
+there is no `Time<Fixed>` and the loop is a no-op. The winit backend does no
+fixed-step-specific input latching for now.
 
 ## Windows are ECS entities
 
@@ -142,7 +156,8 @@ presses and via the `Modifiers` bitflags convenience; scroll deltas keep their
 original `MouseScrollUnit` (no px→line folding; convert with
 `MOUSE_SCROLL_PIXELS_PER_LINE` = 100). `just_pressed`/`just_released` edges are
 frame-scoped: cleared by `InputState::end_frame` once per frame after the
-update has consumed them. There is no fixed-update schedule yet.
+update has consumed them. Input is not latched separately for fixed steps:
+fixed systems read the same per-frame `InputState`.
 
 ## Renderer and editor composition
 

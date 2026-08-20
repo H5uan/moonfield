@@ -1,10 +1,10 @@
 //! Moonfield sample application entry point.
 
 use moonfield_app::prelude::Res;
-use moonfield_app::{App, Startup, Update};
+use moonfield_app::{App, Startup, TimePlugin, Update};
 use moonfield_log::info;
 use moonfield_render::RenderPlugin;
-use moonfield_time::{Time, TimePlugin};
+use moonfield_time::Time;
 use moonfield_winit::WinitPlugin;
 
 fn main() {

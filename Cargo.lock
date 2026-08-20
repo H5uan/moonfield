@@ -885,6 +885,7 @@ dependencies = [
  "moonfield-base",
  "moonfield-ecs",
  "moonfield-math",
+ "moonfield-time",
  "thiserror 2.0.20",
 ]
 
@@ -1002,7 +1003,6 @@ dependencies = [
 name = "moonfield-time"
 version = "0.1.0"
 dependencies = [
- "moonfield-app",
  "moonfield-ecs",
 ]
 

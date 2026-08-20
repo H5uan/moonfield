@@ -104,7 +104,7 @@ The roadmap landed as eight milestones:
   cycle).
 - Known debts, recorded but not scheduled: the render-world/extract split, an
   async `AssetServer` plus task pool, real splat rasterization in the editor
-  viewport (AABB placeholder today), a multi-threaded executor, a
-  fixed-update schedule (`Time<Fixed>`), full observers, full reflection
+  viewport (AABB placeholder today), a multi-threaded executor, full
+  observers, full reflection
   (`DynamicStruct`), strong/weak handle refcounting, and the
   audio/physics/serialization/networking layers.

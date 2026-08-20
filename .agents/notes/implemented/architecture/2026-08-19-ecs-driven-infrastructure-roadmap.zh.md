@@ -36,4 +36,4 @@ Status: implemented
 - 一切游戏可见的东西现在都是编辑器可检查、可编辑的 ECS 数据:Hierarchy 面板显示实时实体树,Inspector 可编辑任何已注册组件,时间/相机/资产都是普通的 resource 与 component。
 - 渲染器不再属于编辑器:共享的 `RenderDevice` resource 同时服务游戏与编辑器路径,无头运行时退化为无设备而非 panic。
 - 依赖方向在构造上保持无环:数学类型不认识 ECS,渲染器 crate 不认识 ECS,反射位于两者之下(`moonfield-reflect` 直接依赖 glam,以避免 math↔reflect 循环)。
-- 已知欠债(已记录,未排期):渲染世界/extract 分离、异步 `AssetServer` 加任务池、编辑器视口中的真实 splat 光栅化(今天是 AABB 占位)、多线程执行器、固定更新 schedule(`Time<Fixed>`)、完整 observer、完整反射(`DynamicStruct`)、强/弱句柄引用计数,以及音频/物理/序列化/网络层。
+- 已知欠债(已记录,未排期):渲染世界/extract 分离、异步 `AssetServer` 加任务池、编辑器视口中的真实 splat 光栅化(今天是 AABB 占位)、多线程执行器、完整 observer、完整反射(`DynamicStruct`)、强/弱句柄引用计数,以及音频/物理/序列化/网络层。

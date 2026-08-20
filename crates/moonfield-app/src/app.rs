@@ -9,6 +9,25 @@ pub struct Startup;
 /// [`Update`]. The message buffer swap ([`moonfield_ecs::message_update_system`])
 /// runs here, wired by [`App::add_message`].
 pub struct First;
+/// Schedule label for the fixed-timestep umbrella: [`App::update`] runs the
+/// fixed loop zero or more times per frame (accumulated
+/// [`moonfield_time::Time<Fixed>`](moonfield_time::Fixed) overstep divided by
+/// the timestep), each iteration running [`FixedFirst`], [`FixedPreUpdate`],
+/// [`FixedUpdate`], [`FixedPostUpdate`], [`FixedLast`] in order. Systems
+/// registered directly under `FixedMain` run after those, inside every
+/// iteration.
+pub struct FixedMain;
+/// Schedule label run first in every fixed-timestep iteration.
+pub struct FixedFirst;
+/// Schedule label run before [`FixedUpdate`] in every fixed iteration.
+pub struct FixedPreUpdate;
+/// Schedule label for fixed-timestep systems (physics, simulation) — the one
+/// most callers want.
+pub struct FixedUpdate;
+/// Schedule label run after [`FixedUpdate`] in every fixed iteration.
+pub struct FixedPostUpdate;
+/// Schedule label run last in every fixed-timestep iteration.
+pub struct FixedLast;
 /// Schedule label for systems that run every frame, during [`App::update`].
 pub struct Update;
 /// Schedule label for render-phase systems, run by [`App::render`] after the
@@ -19,6 +38,12 @@ pub struct Shutdown;
 
 impl ScheduleLabel for Startup {}
 impl ScheduleLabel for First {}
+impl ScheduleLabel for FixedMain {}
+impl ScheduleLabel for FixedFirst {}
+impl ScheduleLabel for FixedPreUpdate {}
+impl ScheduleLabel for FixedUpdate {}
+impl ScheduleLabel for FixedPostUpdate {}
+impl ScheduleLabel for FixedLast {}
 impl ScheduleLabel for Update {}
 impl ScheduleLabel for Render {}
 impl ScheduleLabel for Shutdown {}
@@ -248,9 +273,10 @@ impl App {
         self.run_schedule(Startup);
     }
 
-    /// Run a single update tick: the [`First`] then [`Update`] schedules.
-    /// Returns `false` if an [`AppExit`] resource was inserted (e.g. via
-    /// `Commands::insert_resource`), signaling the loop should end.
+    /// Run a single update tick: the [`First`] schedule, the fixed-timestep
+    /// loop (zero or more [`FixedMain`] iterations), then the [`Update`]
+    /// schedule. Returns `false` if an [`AppExit`] resource was inserted
+    /// (e.g. via `Commands::insert_resource`), signaling the loop should end.
     ///
     /// This is the per-frame counterpart of [`run_updates`]; it runs startup
     /// once on the first call.
@@ -259,8 +285,34 @@ impl App {
             self.startup();
         }
         self.run_schedule(First);
+        self.run_fixed_main_loop();
         self.run_schedule(Update);
         !self.world.contains_resource::<AppExit>()
+    }
+
+    /// Accumulate the frame's virtual delta into `Time<Fixed>` and run the
+    /// fixed schedules once per full timestep (see
+    /// [`moonfield_time::run_fixed_main_schedule`]). No-op without the time
+    /// resources (`TimePlugin`).
+    fn run_fixed_main_loop(&mut self) {
+        let world = &mut self.world;
+        let schedules = &mut self.schedules;
+        moonfield_time::run_fixed_main_schedule(world, |world| {
+            for label in [
+                TypeId::of::<FixedFirst>(),
+                TypeId::of::<FixedPreUpdate>(),
+                TypeId::of::<FixedUpdate>(),
+                TypeId::of::<FixedPostUpdate>(),
+                TypeId::of::<FixedLast>(),
+                // Systems registered directly under the umbrella label run
+                // last in every iteration.
+                TypeId::of::<FixedMain>(),
+            ] {
+                if let Some(schedule) = schedules.get_mut(&label) {
+                    schedule.run(world);
+                }
+            }
+        });
     }
 
     /// Run one render tick: the [`Render`] schedule once. Called by the

@@ -11,8 +11,8 @@ use std::time::Duration;
 /// A generic clock resource that tracks how much it has advanced since its
 /// previous update and since its creation.
 ///
-/// The instances used by the engine (inserted by [`TimePlugin`](crate::TimePlugin)
-/// and advanced once per frame by the windowing backend via
+/// The instances used by the engine (inserted by `TimePlugin` in
+/// moonfield-app and advanced once per frame by the windowing backend via
 /// [`update_time`](crate::update_time)):
 ///
 /// - [`Time<Real>`](crate::Real) tracks real wall-clock time elapsed.
