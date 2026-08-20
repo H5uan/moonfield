@@ -11,18 +11,24 @@ mod app;
 mod hierarchy;
 mod plugin;
 mod plugin_group;
+mod time;
 
-pub use app::{App, AppError, AppExit, Plugins, Render, Runner, Shutdown, Startup, Update};
+pub use app::{
+    App, AppError, AppExit, First, FixedFirst, FixedLast, FixedMain, FixedPostUpdate,
+    FixedPreUpdate, FixedUpdate, Plugins, Render, Runner, Shutdown, Startup, Update,
+};
 pub use hierarchy::HierarchyPlugin;
 pub use moonfield_ecs::Resource;
 pub use plugin::Plugin;
 pub use plugin_group::{PluginGroup, PluginGroupBuilder};
+pub use time::TimePlugin;
 
 /// Common imports.
 pub mod prelude {
     pub use crate::{
-        App, AppExit, HierarchyPlugin, Plugin, PluginGroup, PluginGroupBuilder, Render, Resource,
-        Shutdown, Startup, Update,
+        App, AppExit, First, FixedFirst, FixedLast, FixedMain, FixedPostUpdate, FixedPreUpdate,
+        FixedUpdate, HierarchyPlugin, Plugin, PluginGroup, PluginGroupBuilder, Render, Resource,
+        Shutdown, Startup, TimePlugin, Update,
     };
     pub use moonfield_ecs::prelude::{
         ChildOf, Children, Commands, Component, Entity, EntityCommands, IntoSystem,
@@ -292,5 +298,181 @@ mod tests {
         let (mut app, events) = make_app();
         app.add_plugins((D, D));
         assert_eq!(events.lock().unwrap().as_slice(), &["D::build", "D::build"]);
+    }
+
+    #[test]
+    fn add_message_enables_reader_writer_params_with_frame_retention() {
+        use moonfield_ecs::{IntoSystemConfigs, MessageReader, MessageWriter, ResMut};
+
+        struct Ping(u32);
+
+        #[derive(Default)]
+        struct Outbox(u32);
+        #[derive(Default)]
+        struct Seen(Vec<u32>);
+
+        fn write_ping(mut outbox: ResMut<Outbox>, mut writer: MessageWriter<Ping>) {
+            outbox.0 += 1;
+            writer.write(Ping(outbox.0));
+        }
+        fn read_pings(mut reader: MessageReader<Ping>, mut seen: ResMut<Seen>) {
+            for ping in reader.read() {
+                seen.0.push(ping.0);
+            }
+        }
+
+        let mut app = App::new();
+        app.insert_resource(Outbox::default());
+        app.insert_resource(Seen::default());
+        app.add_message::<Ping>();
+        app.add_systems(Update, (write_ping, read_pings.after(&write_ping)));
+
+        app.update();
+        app.update();
+        // Each written ping was consumed by the reader exactly once.
+        assert_eq!(app.world().get_resource::<Seen>().unwrap().0, vec![1, 2]);
+
+        app.update();
+        assert_eq!(app.world().get_resource::<Seen>().unwrap().0, vec![1, 2, 3]);
+    }
+
+    #[test]
+    fn fixed_update_runs_zero_one_many_times_per_frame() {
+        use moonfield_ecs::{Res, ResMut};
+        use moonfield_time::{Fixed, Time, Virtual};
+        use std::time::Duration;
+
+        #[derive(Default)]
+        struct FixedRuns(u32);
+        #[derive(Default)]
+        struct FixedDeltas(Vec<(Duration, Duration)>);
+        #[derive(Default)]
+        struct UmbrellaRuns(u32);
+
+        fn count_fixed(
+            mut runs: ResMut<FixedRuns>,
+            mut deltas: ResMut<FixedDeltas>,
+            time: Res<Time>,
+        ) {
+            runs.0 += 1;
+            deltas.0.push((time.delta(), time.elapsed()));
+        }
+        fn count_umbrella(mut runs: ResMut<UmbrellaRuns>) {
+            runs.0 += 1;
+        }
+
+        let mut app = App::new();
+        app.add_plugin(TimePlugin);
+        app.insert_resource(FixedRuns::default());
+        app.insert_resource(FixedDeltas::default());
+        app.insert_resource(UmbrellaRuns::default());
+        app.add_systems(FixedUpdate, count_fixed);
+        // Systems registered directly under the FixedMain umbrella run inside
+        // every iteration too.
+        app.add_systems(FixedMain, count_umbrella);
+        app.world_mut()
+            .get_resource_mut::<Time<Fixed>>()
+            .unwrap()
+            .set_timestep_hz(2.0); // 500 ms steps
+
+        let advance = |app: &mut App, ms: u64| {
+            app.world_mut()
+                .get_resource_mut::<Time<Virtual>>()
+                .unwrap()
+                .advance_by(Duration::from_millis(ms));
+        };
+
+        // 400 ms of virtual time: no full step.
+        advance(&mut app, 400);
+        app.update();
+        assert_eq!(app.world().get_resource::<FixedRuns>().unwrap().0, 0);
+        assert_eq!(app.world().get_resource::<UmbrellaRuns>().unwrap().0, 0);
+
+        // +200 ms → 600 ms accumulated: exactly one step.
+        advance(&mut app, 200);
+        app.update();
+        assert_eq!(app.world().get_resource::<FixedRuns>().unwrap().0, 1);
+        assert_eq!(app.world().get_resource::<UmbrellaRuns>().unwrap().0, 1);
+        // During the fixed run the generic Time was the fixed clock.
+        assert_eq!(
+            app.world().get_resource::<FixedDeltas>().unwrap().0,
+            vec![(Duration::from_millis(500), Duration::from_millis(500))]
+        );
+        // …and afterwards it is virtual time again.
+        assert_eq!(
+            app.world().get_resource::<Time>().unwrap().delta(),
+            Duration::from_millis(200)
+        );
+
+        // +1.1 s → two more steps; 200 ms stays in the overstep accumulator.
+        advance(&mut app, 1100);
+        app.update();
+        assert_eq!(app.world().get_resource::<FixedRuns>().unwrap().0, 3);
+        assert_eq!(
+            app.world()
+                .get_resource::<Time<Fixed>>()
+                .unwrap()
+                .overstep(),
+            Duration::from_millis(200)
+        );
+        // Fixed elapsed only ever advances by whole timesteps.
+        assert_eq!(
+            app.world().get_resource::<Time<Fixed>>().unwrap().elapsed(),
+            Duration::from_millis(1500)
+        );
+    }
+
+    #[test]
+    fn fixed_update_respects_virtual_pause() {
+        use moonfield_ecs::ResMut;
+        use moonfield_time::{Time, Virtual};
+        use std::time::Duration;
+
+        #[derive(Default)]
+        struct FixedRuns(u32);
+        fn count_fixed(mut runs: ResMut<FixedRuns>) {
+            runs.0 += 1;
+        }
+
+        let mut app = App::new();
+        app.add_plugin(TimePlugin);
+        app.insert_resource(FixedRuns::default());
+        app.add_systems(FixedUpdate, count_fixed);
+
+        app.world_mut()
+            .get_resource_mut::<Time<Virtual>>()
+            .unwrap()
+            .advance_by(Duration::from_secs(1));
+        app.update();
+        assert_eq!(app.world().get_resource::<FixedRuns>().unwrap().0, 64);
+
+        // Paused virtual time: no delta, no fixed steps.
+        app.world_mut()
+            .get_resource_mut::<Time<Virtual>>()
+            .unwrap()
+            .pause();
+        app.world_mut()
+            .get_resource_mut::<Time<Virtual>>()
+            .unwrap()
+            .advance_by(Duration::ZERO);
+        app.update();
+        assert_eq!(app.world().get_resource::<FixedRuns>().unwrap().0, 64);
+    }
+
+    #[test]
+    fn fixed_schedules_never_run_without_time_plugin() {
+        use moonfield_ecs::ResMut;
+
+        #[derive(Default)]
+        struct FixedRuns(u32);
+        fn count_fixed(mut runs: ResMut<FixedRuns>) {
+            runs.0 += 1;
+        }
+
+        let mut app = App::new();
+        app.insert_resource(FixedRuns::default());
+        app.add_systems(FixedUpdate, count_fixed);
+        app.update();
+        assert_eq!(app.world().get_resource::<FixedRuns>().unwrap().0, 0);
     }
 }

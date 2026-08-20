@@ -22,7 +22,7 @@ use std::cell::{Ref, RefMut};
 use std::marker::PhantomData;
 use std::ops::{Deref, DerefMut};
 
-use crate::{query::WorldQuery, Entity, Resource, World};
+use crate::{filter::QueryFilter, query::WorldQuery, Entity, Resource, World};
 
 /// A unit of work that operates on a [`World`].
 ///
@@ -249,10 +249,11 @@ impl<T: Default + Send + Sync + 'static> SystemParam for Local<'_, T> {
 // ---------------------------------------------------------------------
 
 /// Component query as a system param, over the archetype [`WorldQuery`]
-/// machinery.
+/// machinery, with an optional archetype filter `F`
+/// ([`With`](crate::With)/[`Without`](crate::Without)/[`Or`](crate::Or)).
 ///
 /// ```ignore
-/// fn integrate(mut query: Query<(&mut Position, &Velocity)>) {
+/// fn integrate(mut query: Query<(&mut Position, &Velocity), Without<Frozen>>) {
 ///     for (_, (mut pos, vel)) in query.iter_mut() {
 ///         pos.x += vel.x;
 ///     }
@@ -262,36 +263,47 @@ impl<T: Default + Send + Sync + 'static> SystemParam for Local<'_, T> {
 /// Conflicting access (e.g. two live iterators over the same mutable column)
 /// is caught by the archetype borrow flags and panics, exactly like
 /// [`World::query_mut`].
-pub struct Query<'w, Q: WorldQuery> {
+pub struct Query<'w, Q: WorldQuery, F: QueryFilter = ()> {
     world: &'w World,
-    _marker: PhantomData<fn() -> Q>,
+    _marker: PhantomData<fn() -> (Q, F)>,
 }
 
-impl<'w, Q: WorldQuery> Query<'w, Q> {
+impl<'w, Q: WorldQuery, F: QueryFilter> Query<'w, Q, F> {
     /// Iterate all matching entities with shared access.
     pub fn iter(&self) -> Q::Iter<'_> {
-        Q::fetch(self.world)
+        Q::fetch_with(self.world, &archetype_matches::<F>)
     }
 
     /// Iterate all matching entities with mutable access.
     pub fn iter_mut(&mut self) -> Q::Iter<'_> {
-        Q::fetch_mut_cell(self.world)
+        Q::fetch_mut_cell_with(self.world, &archetype_matches::<F>)
     }
 
-    /// Fetch the item for a single entity, if it matches the query.
+    /// Fetch the item for a single entity, if it matches the query *and* the
+    /// filter.
     ///
     /// Returns a guard that releases the column's borrow flag on drop
     /// ([`EntityRef`](crate::EntityRef) for `&T` queries,
     /// [`EntityMut`](crate::EntityMut) for `&mut T` queries). Only the
     /// single-component query shapes support per-entity access for now.
     pub fn get(&self, entity: Entity) -> Option<Q::EntityFetch<'_>> {
+        let (arch_i, _) = self.world.locate_entity(entity)?;
+        if !archetype_matches::<F>(&self.world.raw_archetypes()[arch_i]) {
+            return None;
+        }
         Q::get_entity(self.world, entity)
     }
 }
 
-impl<Q: WorldQuery> SystemParam for Query<'_, Q> {
+/// The `QueryFilter` evaluation bridge: an archetype matches if its component
+/// type set satisfies `F`.
+pub(crate) fn archetype_matches<F: QueryFilter>(archetype: &crate::archetype::Archetype) -> bool {
+    F::matches_component_set(&|t| archetype.has_in_runtime(t))
+}
+
+impl<Q: WorldQuery, F: QueryFilter> SystemParam for Query<'_, Q, F> {
     type State = ();
-    type Item<'w, 's> = Query<'w, Q>;
+    type Item<'w, 's> = Query<'w, Q, F>;
 
     fn init_state() -> Self::State {}
 

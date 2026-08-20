@@ -24,7 +24,8 @@ runtime. External threads and UI toolkits wake an idle Reactive loop via the
 `moonfield-ecs` is a single-threaded, archetype-storage ECS in the style of a
 mainstream retained-mode ECS. Systems declare their data access through system
 params: `Res<T>`/`ResMut<T>` (resources), `Query<Q>` (archetype queries),
-`Local<T>` (per-system state), `Commands` (deferred world mutations), plus
+`Local<T>` (per-system state), `Commands` (deferred world mutations),
+`MessageReader<M>`/`MessageWriter<M>` (buffered messages), plus
 `Option<Res<T>>` and tuples up to 8; exclusive `FnMut(&mut World)` systems are
 still supported. `Component` and `Resource` are blanket impls — no derive.
 
@@ -33,11 +34,20 @@ A `Schedule` groups systems under a `ScheduleLabel` and orders them with
 executor). `Commands` queue into a world-global buffer that
 `World::apply_commands` drains after **every** system run, so a system's
 commands are visible to later systems in the same run; the world's change tick
-advances once per schedule run. `App` drives four schedules —
-`Startup`/`Update`/`Render`/`Shutdown`. Exit is signaled by inserting the
-`AppExit` resource (e.g. via `Commands::insert_resource`), not by a system
-return value. The low-level archetype query trait is `WorldQuery`, distinct
-from the `Query<Q>` system param.
+advances once per schedule run. `App` drives five schedules —
+`Startup`/`First`/`Update`/`Render`/`Shutdown` (`First` runs at the start of
+every update phase; the message buffer swap lives there). Exit is signaled by
+inserting the `AppExit` resource (e.g. via `Commands::insert_resource`), not
+by a system return value. The low-level archetype query trait is `WorldQuery`,
+distinct from the `Query<Q>` system param.
+
+Queries accept an optional second type parameter — the filter:
+`Query<&Transform, With<MeshRenderer>>`, `Query<&mut Transform,
+Without<ChildOf>>`, `Query<&T, Or<(With<A>, With<B>)>>` (tuples of filters
+conjoin, `Or` disjoins, `()` is no filter). Filters are archetypal: each is
+evaluated once per archetype against its component type set at iterator
+construction, never per entity. The same filtering is available imperatively
+via `World::query_filtered::<Q, F>()` / `query_filtered_mut`.
 
 ## Component hooks
 
@@ -70,16 +80,46 @@ dependency directions acyclic). `ensure_global_transforms` and
 `propagate_transforms` run as normal param systems in `Update`, wired by
 `moonfield_app::HierarchyPlugin`.
 
+## Messages
+
+`moonfield-ecs::message` is the buffered-event channel (the reference
+implementation's current dev branch calls these *messages* rather than
+*events*). `App::add_message::<M>()` inserts the `Messages<M>` resource and
+registers the type in the `MessageRegistry` resource; `message_update_system`
+runs in `First` and swaps each registered store's double buffer once per
+frame, giving every message a two-frame lifetime. Writers use the
+`MessageWriter<M>` param; readers use `MessageReader<M>`, whose per-system
+cursor (`MessageCursor<M>`, held as the param's persistent state) tracks
+which messages that system has seen — each reader consumes each message
+exactly once. Exclusive systems and non-system consumers (the editor's
+render loop) hold a `MessageCursor` directly. The windowing backend's
+lifecycle events (`WindowEventKind`) and raw winit events travel on this
+channel; `InputState` stays latched state with its own frame-scoped clearing.
+
 ## Time
 
-`moonfield-time` provides the `Time<Real>` / `Time<Virtual>` / generic `Time`
-clock resources: delta and elapsed as `Duration` plus f32/f64 seconds, wrapped
-elapsed, and on the virtual clock pause, relative speed, and a `max_delta`
-clamp. `TimePlugin` inserts the resources; the winit backend advances them via
-`moonfield_time::update_time` once per frame at frame start, before
+`moonfield-time` provides the `Time<Real>` / `Time<Virtual>` / `Time<Fixed>` /
+generic `Time` clock resources: delta and elapsed as `Duration` plus f32/f64
+seconds, wrapped elapsed, and on the virtual clock pause, relative speed, and
+a `max_delta` clamp. `TimePlugin` (in `moonfield-app`, next to
+`HierarchyPlugin` — the app crate depends on the time crate so `App::update`
+can drive the fixed loop) inserts the resources; the winit backend advances
+them via `moonfield_time::update_time` once per frame at frame start, before
 `App::update`, lazily inserting missing clocks so the editor path works
-without the plugin. `Time<Fixed>` is deferred together with the fixed-update
-schedule; `Timer`/`Stopwatch` are not ported.
+without the plugin. `Timer`/`Stopwatch` are not ported.
+
+## Fixed update
+
+`App::update` runs `First`, then the fixed-timestep loop, then `Update`. The
+loop (`moonfield_time::run_fixed_main_schedule`) accumulates the virtual delta
+into `Time<Fixed>`'s overstep and, once per full `timestep()` (default 64
+Hz), runs `FixedFirst` → `FixedPreUpdate` → `FixedUpdate` → `FixedPostUpdate`
+→ `FixedLast` (plus anything registered directly under the `FixedMain`
+umbrella) — so fixed schedules run 0, 1, or N times per frame. During each
+iteration the generic `Time` resource mirrors `Time<Fixed>` (delta ==
+timestep); afterwards it is restored to virtual time. Without `TimePlugin`
+there is no `Time<Fixed>` and the loop is a no-op. The winit backend does no
+fixed-step-specific input latching for now.
 
 ## Windows are ECS entities
 
@@ -95,9 +135,11 @@ cache (a per-field cached-window diff, without change detection). `WinitWindows`
 channel — mutate the component.
 
 Window lifecycle events (`close_requested`/`resized`/`focus_*`/
-`scale_factor_changed`) travel on a separate channel — the `WindowEvents` world
-resource; every entry carries the window `Entity` (multi-window-shaped,
-single-window today). Exit policy mirrors the `auto_accept_quit` convention:
+`scale_factor_changed`) travel on the message channel — the
+`Messages<WindowEventKind>` resource, written by the backend as events arrive
+and read with per-reader cursors (see Messages); every entry carries the
+window `Entity` (multi-window-shaped, single-window today). Exit policy
+mirrors the `auto_accept_quit` convention:
 `CloseRequested` exits immediately by default; a caller sets
 `WindowControl::set_auto_exit_on_close(false)` to take over and later
 `WindowControl::request_exit()`.
@@ -114,7 +156,8 @@ presses and via the `Modifiers` bitflags convenience; scroll deltas keep their
 original `MouseScrollUnit` (no px→line folding; convert with
 `MOUSE_SCROLL_PIXELS_PER_LINE` = 100). `just_pressed`/`just_released` edges are
 frame-scoped: cleared by `InputState::end_frame` once per frame after the
-update has consumed them. There is no fixed-update schedule yet.
+update has consumed them. Input is not latched separately for fixed steps:
+fixed systems read the same per-frame `InputState`.
 
 ## Renderer and editor composition
 
@@ -133,8 +176,8 @@ window.
 The editor is a library crate providing `EditorPlugin`, a regular plugin
 composing the engine crates. `EditorPlugin` does **not** own the event
 loop or the window — it layers on top of `WinitPlugin` (which must be added
-first), reading the `WinitWindow`/`InputState`/`WindowControl`/`RawWindowEvents`
-resources the backend registers, and lazily building the `WindowRenderer` +
+first), reading the `WinitWindow`/`InputState`/`WindowControl` resources and
+the raw-event message channel the backend registers, and lazily building the `WindowRenderer` +
 egui state (`EditorState` keeps only editor-only state) on the first render
 tick. Render-phase systems register via `App::add_systems(Render, ...)`; the
 winit backend calls `App::render` every frame after `App::update`, which drives

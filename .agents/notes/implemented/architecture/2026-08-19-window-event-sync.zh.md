@@ -16,7 +16,7 @@ Status: implemented
 - **ECS→winit 每帧差分一次**:`App::update` 之后,`sync_windows`(`windows.rs`)把实时 `Window` 字段与 `CachedWindow` 组件做 diff,`diff_window` 返回 `WindowDiff`(标题、光标模式),由后端应用到原生窗口。这是 `CachedWindow` diff 模式(无变更检测)。
 - `WinitWindows`(resource)维护 `Entity ↔ WindowId` 映射;主窗口实体在 `resumed` 中生成,若存在预创建的 `Window` 实体会收养它。
 - **没有 `WindowRequests` 通道** —— 直接改组件。
-- 生命周期事件(`close_requested`/`resized`/`focus_*`/`scale_factor_changed`)走独立通道 `WindowEvents` world resource,因此即使消费方不逐帧轮询也不会漏事件。
+- 生命周期事件(`close_requested`/`resized`/`focus_*`/`scale_factor_changed`)走消息通道——`Messages<WindowEventKind>` resource(见[缓冲消息](../feature/2026-08-19-buffered-messages.zh.md))——因此即使消费方不逐帧轮询也不会漏事件。
 - 退出策略镜像 `auto_accept_quit` 约定:`CloseRequested` 默认退出;`WindowControl::set_auto_exit_on_close(false)` 接管控制,之后 `WindowControl::request_exit()` 退出。
 
 ## Alternatives considered
@@ -29,4 +29,4 @@ Status: implemented
 
 - 任何改变窗口状态的人都必须修改 `Window` 组件——没有别的门,错误用法一眼可见。
 - diff 每帧运行一次,因此突发快速变更会塌缩为最终值:这是有意为之,但测试光标/标题突发行为时要记住。
-- `WindowEvents` 必须由消费方(编辑器或 app)每帧排空,否则条目会积压。
+- `WindowEventKind` 消息保留两帧;消费方用各自的游标读取,帧末无需手动排空。
