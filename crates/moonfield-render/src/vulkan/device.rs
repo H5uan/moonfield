@@ -231,7 +231,7 @@ impl Device {
 
     /// Shared GPU memory allocator for buffers and images. Resources allocate
     /// through this and free their allocations on drop. Exposed so downstream
-    /// code (e.g. `egui-ash-renderer`) can share the same allocator.
+    /// code (e.g. the editor's egui backend) can share the same allocator.
     pub fn allocator(&self) -> &Arc<Mutex<Allocator>> {
         &self.allocator
     }

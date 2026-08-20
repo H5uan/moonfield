@@ -424,19 +424,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "egui-ash-renderer"
-version = "0.11.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "598d16e7691705baf20e797a377890a16db80806b30648c0c002f6d6cbd0a28d"
-dependencies = [
- "ash",
- "egui",
- "gpu-allocator",
- "log",
- "thiserror 2.0.20",
-]
-
-[[package]]
 name = "egui-winit"
 version = "0.33.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -866,19 +853,6 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "68354c5c6bd36d73ff3feceb05efa59b6acb7626617f4962be322a825e61f79a"
 
 [[package]]
-name = "moonfield"
-version = "0.1.0"
-dependencies = [
- "moonfield-app",
- "moonfield-base",
- "moonfield-log",
- "moonfield-render",
- "moonfield-time",
- "moonfield-window",
- "moonfield-winit",
-]
-
-[[package]]
 name = "moonfield-app"
 version = "0.1.0"
 dependencies = [
@@ -917,7 +891,6 @@ dependencies = [
  "ash",
  "bytemuck",
  "egui",
- "egui-ash-renderer",
  "egui-winit",
  "egui_dock",
  "gpu-allocator",

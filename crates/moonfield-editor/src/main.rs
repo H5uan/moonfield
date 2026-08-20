@@ -1,4 +1,4 @@
-//! Minimal editor smoke target.
+//! The moonfield editor binary — the workspace's only executable entry point.
 //!
 //! Wires `RenderPlugin` (shared `RenderDevice`) + `WinitPlugin` (continuous
 //! update mode for redraws) + `HierarchyPlugin` (transform propagation) +
@@ -8,7 +8,7 @@
 //! on machines with a display and a Vulkan driver.
 //!
 //! ```sh
-//! MOONFIELD_EDITOR_AUTO_CLOSE=5 cargo run --example editor -p moonfield-editor
+//! MOONFIELD_EDITOR_AUTO_CLOSE=5 cargo run
 //! ```
 
 use moonfield_app::prelude::{ChildOf, HierarchyPlugin, Name, Startup, World};

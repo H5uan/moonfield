@@ -18,6 +18,7 @@
 //! Vulkan objects (surface, swapchain, frame loop) + egui state on the
 //! first render tick, once the window actually exists.
 
+pub mod egui_vk;
 mod registry;
 mod scene_io;
 mod ui;
@@ -82,9 +83,8 @@ struct EditorStateSlot(Option<EditorState>);
 /// through `Arc`s) and outlives this struct by refcounting. `Drop` waits for
 /// the device to go idle before any field is destroyed.
 struct EditorState {
-    egui_renderer: egui_ash_renderer::Renderer,
+    egui_renderer: egui_vk::EguiRenderer,
     viewport: Viewport,
-    upload_pool: moonfield_render::CommandPool,
     window_renderer: WindowRenderer,
     egui_state: egui_winit::State,
     dock_state: egui_dock::DockState<Tab>,
@@ -120,37 +120,31 @@ impl EditorState {
             "RenderDevice resource missing — add RenderPlugin before EditorPlugin".to_string()
         })?;
 
+        // Debug bisect: build the viewport BEFORE the window renderer, so its
+        // pipeline/target predate any swapchain state.
+        let mut viewport = Viewport::new(render_device.device()).map_err(|e| e.to_string())?;
+
         let size = window.inner_size();
         let window_renderer =
             WindowRenderer::new(&render_device, window.as_ref(), size.width, size.height)
                 .map_err(|e| e.to_string())?;
 
-        // The egui renderer needs the same GPU allocator the device owns.
-        let allocator = window_renderer.device().allocator().clone();
-
-        let mut egui_renderer = egui_ash_renderer::Renderer::with_gpu_allocator(
-            allocator,
-            window_renderer.device().raw().clone(),
-            window_renderer.render_pass().raw(),
-            egui_ash_renderer::Options {
-                in_flight_frames: 2,
-                enable_depth_test: false,
-                enable_depth_write: false,
-                // The swapchain uses an UNORM format, so the egui shader
-                // outputs sRGB-encoded colors itself.
-                srgb_framebuffer: false,
-            },
+        // The swapchain uses an UNORM format, so the egui shader's gamma
+        // output is written verbatim (srgb_framebuffer = false).
+        let srgb_framebuffer = matches!(
+            window_renderer.format().format,
+            vk::Format::B8G8R8A8_SRGB | vk::Format::R8G8B8A8_SRGB
+        );
+        let mut egui_renderer = egui_vk::EguiRenderer::new(
+            window_renderer.device(),
+            window_renderer.render_pass(),
+            srgb_framebuffer,
+            window_renderer.frames_in_flight(),
+            egui_vk::RendererOptions::default(),
         )
         .map_err(|e| format!("failed to create egui renderer: {e}"))?;
 
-        let mut viewport = Viewport::new(window_renderer.device()).map_err(|e| e.to_string())?;
-        viewport.register_texture(&mut egui_renderer);
-
-        let upload_pool = moonfield_render::CommandPool::new(
-            window_renderer.device(),
-            window_renderer.device().queue_family_indices().graphics,
-        )
-        .map_err(|e| e.to_string())?;
+        viewport.register_texture(window_renderer.device(), &mut egui_renderer);
 
         let egui_state = egui_winit::State::new(
             egui::Context::default(),
@@ -164,7 +158,6 @@ impl EditorState {
         Ok(Self {
             egui_renderer,
             viewport,
-            upload_pool,
             window_renderer,
             egui_state,
             dock_state: ui::initial_dock_state(),
@@ -298,7 +291,9 @@ fn render_frame(world: &mut World, state: &mut EditorState) -> Result<(), String
                 .viewport
                 .resize(state.window_renderer.device(), width, height)
                 .map_err(|e| e.to_string())?;
-            state.viewport.register_texture(&mut state.egui_renderer);
+            state
+                .viewport
+                .register_texture(state.window_renderer.device(), &mut state.egui_renderer);
         }
     }
 
@@ -349,6 +344,19 @@ fn render_frame(world: &mut World, state: &mut EditorState) -> Result<(), String
     );
     finish_frame(state, result)?;
 
+    // Debug seam: MOONFIELD_EDITOR_DUMP_VIEWPORT=<frame> dumps the viewport
+    // target's pixels (raw BGRA) to target/tmp/viewport_dump_<w>x<h>.raw
+    // once that many frames have been rendered.
+    if std::env::var("MOONFIELD_EDITOR_DUMP_VIEWPORT")
+        .ok()
+        .and_then(|v| v.parse::<u64>().ok())
+        == Some(state.frames_rendered + 1)
+    {
+        if let Err(e) = dump_viewport_target(state) {
+            error!("failed to dump viewport target: {e}");
+        }
+    }
+
     // Queue this frame's texture frees; they become safe to destroy once the
     // fence for this frame slot passes again.
     let ring_index = state.frame_counter % state.free_ring.len();
@@ -366,36 +374,76 @@ fn record_frame(
     shapes: Vec<egui::epaint::ClippedShape>,
     textures_delta: &egui::TexturesDelta,
     pixels_per_point: f32,
-) -> Result<(), RecordError> {
+) -> Result<(), String> {
     // The fence for this frame slot just passed: textures freed by egui two
     // frames ago are no longer sampled.
     let ring_index = state.frame_counter % state.free_ring.len();
     let pending = std::mem::take(&mut state.free_ring[ring_index]);
-    if !pending.is_empty() {
-        state
-            .egui_renderer
-            .free_textures(&pending)
-            .map_err(|e| RecordError::BeforePass(e.to_string()))?;
-    }
+    state.egui_renderer.free_textures(&pending);
 
     // Upload egui-managed textures (fonts, …) before recording.
-    state
-        .egui_renderer
-        .set_textures(
-            state.window_renderer.device().graphics_queue(),
-            state.upload_pool.raw(),
-            &textures_delta.set,
-        )
-        .map_err(|e| RecordError::BeforePass(e.to_string()))?;
+    for (id, delta) in &textures_delta.set {
+        state
+            .egui_renderer
+            .update_texture(state.window_renderer.device(), *id, delta)?;
+    }
 
-    // — Scene pass into the viewport's offscreen target —
-    state
-        .viewport
-        .record_scene(world, state.window_renderer.command_buffer());
-
-    // — UI pass into the swapchain image —
+    // Upload this frame's mesh data into the current slot's buffers.
     let primitives = egui_ctx.tessellate(shapes, pixels_per_point);
     let extent = state.window_renderer.extent();
+    let screen_size_points = [
+        extent.width as f32 / pixels_per_point,
+        extent.height as f32 / pixels_per_point,
+    ];
+    let frame_slot = state.window_renderer.current_frame_index();
+    state.egui_renderer.update_buffers(
+        state.window_renderer.device(),
+        frame_slot,
+        &primitives,
+        screen_size_points,
+    )?;
+
+    // — Scene pass into the viewport's offscreen target —
+    if std::env::var_os("MOONFIELD_EDITOR_SCENE_ONESHOT").is_some() {
+        // Debug seam: record the scene into a fresh one-shot command buffer
+        // instead of the frame's, to isolate command-buffer context effects.
+        let device = state.window_renderer.device();
+        let pool = moonfield_render::CommandPool::new(device, device.queue_family_indices().graphics)
+            .map_err(|e| e.to_string())?;
+        let mut cmd = pool.allocate_command_buffer().map_err(|e| e.to_string())?;
+        cmd.begin(vk::CommandBufferUsageFlags::ONE_TIME_SUBMIT)
+            .map_err(|e| e.to_string())?;
+        state.viewport.record_scene(world, &cmd);
+        cmd.end().map_err(|e| e.to_string())?;
+        let command_buffers = [cmd.raw()];
+        let submit_info = vk::SubmitInfo::default().command_buffers(&command_buffers);
+        // SAFETY: the command buffer is fully recorded and the queue is valid.
+        unsafe {
+            device
+                .raw()
+                .queue_submit(
+                    device.graphics_queue(),
+                    std::slice::from_ref(&submit_info),
+                    vk::Fence::null(),
+                )
+                .map_err(|e| format!("scene one-shot submit: {e:?}"))?;
+            device
+                .raw()
+                .queue_wait_idle(device.graphics_queue())
+                .map_err(|e| format!("scene one-shot wait: {e:?}"))?;
+        }
+    } else {
+        state
+            .viewport
+            .record_scene(world, state.window_renderer.command_buffer());
+    }
+
+    // Debug seam: MOONFIELD_EDITOR_SKIP_UI=1 records only the scene pass.
+    if std::env::var_os("MOONFIELD_EDITOR_SKIP_UI").is_some() {
+        return Ok(());
+    }
+
+    // — UI pass into the swapchain image —
     let framebuffer = state.window_renderer.framebuffer().raw();
     let clear_values = [vk::ClearValue {
         color: vk::ClearColorValue {
@@ -412,38 +460,141 @@ fn record_frame(
         .clear_values(&clear_values);
     let command_buffer = state.window_renderer.command_buffer();
     command_buffer.begin_render_pass(&begin_info, vk::SubpassContents::INLINE);
-    state
-        .egui_renderer
-        .cmd_draw(command_buffer.raw(), extent, pixels_per_point, &primitives)
-        .map_err(|e| RecordError::InsidePass(e.to_string()))?;
+    state.egui_renderer.render(
+        command_buffer,
+        frame_slot,
+        extent,
+        pixels_per_point,
+        &primitives,
+    );
     command_buffer.end_render_pass();
     Ok(())
 }
 
-/// Errors during frame recording, tracking whether the UI render pass is
-/// still open and needs closing before the command buffer can be ended.
-enum RecordError {
-    BeforePass(String),
-    InsidePass(String),
-}
-
 /// Complete the in-progress frame regardless of recording errors, so the
 /// renderer never gets stuck with a dangling acquired image.
-fn finish_frame(state: &mut EditorState, result: Result<(), RecordError>) -> Result<(), String> {
-    let (ui_pass_open, recording_error) = match result {
-        Ok(()) => (false, None),
-        Err(RecordError::BeforePass(e)) => (false, Some(e)),
-        Err(RecordError::InsidePass(e)) => (true, Some(e)),
-    };
-    if ui_pass_open {
-        state.window_renderer.command_buffer().end_render_pass();
-    }
+fn finish_frame(state: &mut EditorState, result: Result<(), String>) -> Result<(), String> {
     state
         .window_renderer
         .end_frame()
         .map_err(|e| e.to_string())?;
-    match recording_error {
-        Some(e) => Err(e),
-        None => Ok(()),
+    result
+}
+
+/// Copy the viewport's offscreen target into a host buffer and write the raw
+/// BGRA pixels to `target/tmp/viewport_dump_<w>x<h>.raw`. Debug seam for the
+/// `MOONFIELD_EDITOR_DUMP_VIEWPORT` env var.
+fn dump_viewport_target(state: &EditorState) -> Result<(), String> {
+    use moonfield_render::{BufferUsage, CommandPool};
+
+    let device = state.window_renderer.device();
+    let target = state.viewport.target();
+    let (width, height) = target.extent();
+    let readback = moonfield_render::Buffer::new(
+        device,
+        (width * height * 4) as u64,
+        BufferUsage::COPY_DST,
+        gpu_allocator::MemoryLocation::GpuToCpu,
+    )
+    .map_err(|e| e.to_string())?;
+
+    let command_pool = CommandPool::new(device, device.queue_family_indices().graphics)
+        .map_err(|e| e.to_string())?;
+    let mut command_buffer = command_pool
+        .allocate_command_buffer()
+        .map_err(|e| e.to_string())?;
+    command_buffer
+        .begin(vk::CommandBufferUsageFlags::ONE_TIME_SUBMIT)
+        .map_err(|e| e.to_string())?;
+    let subresource = vk::ImageSubresourceRange::default()
+        .aspect_mask(vk::ImageAspectFlags::COLOR)
+        .base_mip_level(0)
+        .level_count(1)
+        .base_array_layer(0)
+        .layer_count(1);
+    let to_transfer = vk::ImageMemoryBarrier::default()
+        .src_access_mask(vk::AccessFlags::SHADER_READ)
+        .dst_access_mask(vk::AccessFlags::TRANSFER_READ)
+        .old_layout(vk::ImageLayout::SHADER_READ_ONLY_OPTIMAL)
+        .new_layout(vk::ImageLayout::TRANSFER_SRC_OPTIMAL)
+        .src_queue_family_index(vk::QUEUE_FAMILY_IGNORED)
+        .dst_queue_family_index(vk::QUEUE_FAMILY_IGNORED)
+        .image(target.image())
+        .subresource_range(subresource);
+    command_buffer.pipeline_barrier(
+        vk::PipelineStageFlags::FRAGMENT_SHADER,
+        vk::PipelineStageFlags::TRANSFER,
+        vk::DependencyFlags::empty(),
+        &[],
+        &[],
+        &[to_transfer],
+    );
+    let region = vk::BufferImageCopy::default()
+        .image_subresource(
+            vk::ImageSubresourceLayers::default()
+                .aspect_mask(vk::ImageAspectFlags::COLOR)
+                .mip_level(0)
+                .base_array_layer(0)
+                .layer_count(1),
+        )
+        .image_extent(vk::Extent3D {
+            width,
+            height,
+            depth: 1,
+        });
+    // SAFETY: the target is in TRANSFER_SRC_OPTIMAL and the buffer fits it.
+    unsafe {
+        device.raw().cmd_copy_image_to_buffer(
+            command_buffer.raw(),
+            target.image(),
+            vk::ImageLayout::TRANSFER_SRC_OPTIMAL,
+            readback.raw(),
+            std::slice::from_ref(&region),
+        );
     }
+    let back = vk::ImageMemoryBarrier::default()
+        .src_access_mask(vk::AccessFlags::TRANSFER_READ)
+        .dst_access_mask(vk::AccessFlags::SHADER_READ)
+        .old_layout(vk::ImageLayout::TRANSFER_SRC_OPTIMAL)
+        .new_layout(vk::ImageLayout::SHADER_READ_ONLY_OPTIMAL)
+        .src_queue_family_index(vk::QUEUE_FAMILY_IGNORED)
+        .dst_queue_family_index(vk::QUEUE_FAMILY_IGNORED)
+        .image(target.image())
+        .subresource_range(subresource);
+    command_buffer.pipeline_barrier(
+        vk::PipelineStageFlags::TRANSFER,
+        vk::PipelineStageFlags::FRAGMENT_SHADER,
+        vk::DependencyFlags::empty(),
+        &[],
+        &[],
+        &[back],
+    );
+    command_buffer.end().map_err(|e| e.to_string())?;
+
+    let command_buffers = [command_buffer.raw()];
+    let submit_info = vk::SubmitInfo::default().command_buffers(&command_buffers);
+    // SAFETY: the command buffer is fully recorded and the queue is valid.
+    unsafe {
+        device
+            .raw()
+            .queue_submit(
+                device.graphics_queue(),
+                std::slice::from_ref(&submit_info),
+                vk::Fence::null(),
+            )
+            .map_err(|e| format!("failed to submit viewport dump: {e:?}"))?;
+        device
+            .raw()
+            .queue_wait_idle(device.graphics_queue())
+            .map_err(|e| format!("failed to wait for viewport dump: {e:?}"))?;
+    }
+
+    let mut pixels = vec![0u8; (width * height * 4) as usize];
+    readback.read(&mut pixels).map_err(|e| e.to_string())?;
+    std::fs::create_dir_all("target/tmp").map_err(|e| e.to_string())?;
+    std::fs::write(
+        format!("target/tmp/viewport_dump_{width}x{height}.raw"),
+        pixels,
+    )
+    .map_err(|e| e.to_string())
 }

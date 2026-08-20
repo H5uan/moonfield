@@ -2,8 +2,8 @@
 //!
 //! The Vulkan backend owns a `vk::DescriptorSet` (with a per-set pool) and
 //! exposes `raw_vk()` as a controlled escape hatch
-//! for interop with libraries that take raw Vulkan handles (e.g.
-//! `egui_ash_renderer`).
+//! for interop with code that takes raw Vulkan handles (e.g. the editor's
+//! egui backend).
 //!
 //! The shape is intentionally minimal — a single combined-image-sampler or
 //! buffer binding per layout, grown on demand — enough to back the editor
@@ -109,7 +109,7 @@ pub(crate) mod vulkan_impl {
     impl Sampler {
         /// Wrap a sampler this wrapper owns; `Drop` destroys it.
         #[allow(dead_code)]
-        pub(crate) fn from_raw(sampler: vk::Sampler, device: ash::Device) -> Self {
+        pub fn from_raw(sampler: vk::Sampler, device: ash::Device) -> Self {
             Self {
                 sampler,
                 device,
@@ -117,7 +117,7 @@ pub(crate) mod vulkan_impl {
             }
         }
         /// Borrow a sampler owned elsewhere; `Drop` does not destroy it.
-        pub(crate) fn borrow_raw(sampler: vk::Sampler, device: ash::Device) -> Self {
+        pub fn borrow_raw(sampler: vk::Sampler, device: ash::Device) -> Self {
             Self {
                 sampler,
                 device,
@@ -152,7 +152,7 @@ pub(crate) mod vulkan_impl {
     impl TextureView {
         /// Wrap an image view this wrapper owns; `Drop` destroys it.
         #[allow(dead_code)]
-        pub(crate) fn from_raw(view: vk::ImageView, device: ash::Device) -> Self {
+        pub fn from_raw(view: vk::ImageView, device: ash::Device) -> Self {
             Self {
                 view,
                 device,
@@ -160,7 +160,7 @@ pub(crate) mod vulkan_impl {
             }
         }
         /// Borrow an image view owned elsewhere; `Drop` does not destroy it.
-        pub(crate) fn borrow_raw(view: vk::ImageView, device: ash::Device) -> Self {
+        pub fn borrow_raw(view: vk::ImageView, device: ash::Device) -> Self {
             Self {
                 view,
                 device,
@@ -187,6 +187,9 @@ pub(crate) mod vulkan_impl {
     pub struct BindGroupLayout {
         layout: vk::DescriptorSetLayout,
         device: ash::Device,
+        /// The declared entries, kept so [`BindGroup::new`] can resolve the
+        /// descriptor type of buffer bindings from the layout.
+        entries: Vec<BindGroupLayoutEntry>,
     }
 
     impl BindGroupLayout {
@@ -222,6 +225,7 @@ pub(crate) mod vulkan_impl {
             Ok(Self {
                 layout,
                 device: device.raw().clone(),
+                entries: entries.to_vec(),
             })
         }
 
@@ -260,7 +264,7 @@ pub(crate) mod vulkan_impl {
                 let mut map: std::collections::HashMap<vk::DescriptorType, u32> =
                     std::collections::HashMap::new();
                 for e in entries {
-                    let ty = match resource_type(&e.resource) {
+                    let ty = match resource_type(e.binding, &e.resource, layout) {
                         BindingType::SampledTexture => vk::DescriptorType::COMBINED_IMAGE_SAMPLER,
                         BindingType::StorageBuffer => vk::DescriptorType::STORAGE_BUFFER,
                         BindingType::UniformBuffer => vk::DescriptorType::UNIFORM_BUFFER,
@@ -336,7 +340,11 @@ pub(crate) mod vulkan_impl {
                             offset,
                             range: size,
                         });
-                        pending.push((e.binding, vk::DescriptorType::STORAGE_BUFFER, idx, false));
+                        let ty = match resource_type(e.binding, &e.resource, layout) {
+                            BindingType::UniformBuffer => vk::DescriptorType::UNIFORM_BUFFER,
+                            _ => vk::DescriptorType::STORAGE_BUFFER,
+                        };
+                        pending.push((e.binding, ty, idx, false));
                     }
                 }
             }
@@ -364,7 +372,7 @@ pub(crate) mod vulkan_impl {
             })
         }
 
-        /// Raw Vulkan handle, for interop (e.g. `egui_ash_renderer`).
+        /// Raw Vulkan handle, for interop (e.g. the editor's egui backend).
         pub fn raw_vk(&self) -> vk::DescriptorSet {
             self.set
         }
@@ -382,10 +390,23 @@ pub(crate) mod vulkan_impl {
         }
     }
 
-    fn resource_type(resource: &BindingResource<'_>) -> BindingType {
+    /// Resolve the descriptor type of a binding. Texture bindings are always
+    /// combined image samplers; buffer bindings take the type declared by the
+    /// layout entry for the same binding (storage vs uniform), defaulting to
+    /// storage when the layout has no matching entry.
+    fn resource_type(
+        binding: u32,
+        resource: &BindingResource<'_>,
+        layout: &BindGroupLayout,
+    ) -> BindingType {
         match resource {
             BindingResource::Texture { .. } => BindingType::SampledTexture,
-            BindingResource::Buffer { .. } => BindingType::StorageBuffer,
+            BindingResource::Buffer { .. } => layout
+                .entries
+                .iter()
+                .find(|entry| entry.binding == binding)
+                .map(|entry| entry.ty)
+                .unwrap_or(BindingType::StorageBuffer),
         }
     }
 }

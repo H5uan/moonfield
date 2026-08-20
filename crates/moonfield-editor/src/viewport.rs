@@ -15,16 +15,14 @@
 use ash::vk;
 use moonfield_asset::Assets;
 use moonfield_math::{Affine3A, GlobalTransform, Mat4, Quat, Vec3};
-use moonfield_render::bind::{
-    BindGroup, BindGroupEntry, BindGroupLayout, BindGroupLayoutEntry, BindingResource, BindingType,
-    ShaderStage,
-};
 use moonfield_render::{
     view_matrix, Buffer, BufferUsage, Camera, CommandBuffer, Compiler, Device, Format,
     GraphicsPipeline, MeshRenderer, OffscreenTarget, PrimaryCamera, Result, ShaderModule,
     VertexAttribute, VertexBufferLayout, VertexFormat,
 };
 use moonfield_renderer::splat::cloud::{SplatCloud, SplatCloudHandle};
+
+use crate::egui_vk::EguiRenderer;
 
 /// Initial offscreen target size; the viewport panel reports its real size
 /// on the first frame.
@@ -42,18 +40,8 @@ struct ScenePushConstants {
 const PUSH_CONSTANT_SIZE: u32 = std::mem::size_of::<ScenePushConstants>() as u32;
 
 /// The viewport scene: an offscreen render target, the cube pipeline, the
-/// shared cube mesh, and the egui texture bindings pointing at the target.
-///
-/// Fields are ordered for Vulkan-safe destruction: the bind group and layout
-/// first, then the pipeline and mesh buffers, then the offscreen target
-/// (which waits for device idle). The bind group/layout own their own
-/// descriptor objects and drop themselves.
+/// shared cube mesh, and the egui texture id pointing at the target.
 pub struct Viewport {
-    bind_group: BindGroup,
-    /// Held to keep the layout alive for the lifetime of the bind group;
-    /// the bind group references it but does not own it.
-    #[allow(dead_code)]
-    bind_group_layout: BindGroupLayout,
     pipeline: GraphicsPipeline,
     vertex_buffer: Buffer,
     index_buffer: Buffer,
@@ -91,11 +79,7 @@ impl Viewport {
         )?;
         index_buffer.upload(device, CUBE_INDICES)?;
 
-        let (bind_group_layout, bind_group) = create_bind_group(device, &target)?;
-
         Ok(Self {
-            bind_group,
-            bind_group_layout,
             pipeline,
             vertex_buffer,
             index_buffer,
@@ -104,13 +88,22 @@ impl Viewport {
         })
     }
 
-    /// Register the offscreen image as an egui user texture. Must be called
-    /// once after creation and again after every [`resize`](Self::resize).
-    pub fn register_texture(&mut self, egui_renderer: &mut egui_ash_renderer::Renderer) {
-        if let Some(id) = self.texture_id.take() {
-            egui_renderer.remove_user_texture(id);
+    /// Register the offscreen image with the egui renderer (or rebind the
+    /// existing id after a [`resize`](Self::resize)). Must be called once
+    /// after creation and again after every resize.
+    pub fn register_texture(&mut self, device: &Device, egui_renderer: &mut EguiRenderer) {
+        let view = self.target.texture_view();
+        let sampler = self.target.sampler_view();
+        let result = match self.texture_id {
+            Some(id) => egui_renderer
+                .update_native_texture(device, id, &view, &sampler)
+                .map(|_| id),
+            None => egui_renderer.register_native_texture(device, &view, &sampler),
+        };
+        match result {
+            Ok(id) => self.texture_id = Some(id),
+            Err(e) => moonfield_log::error!("failed to register viewport texture: {e}"),
         }
-        self.texture_id = Some(egui_renderer.add_user_texture(self.bind_group.raw_vk()));
     }
 
     /// The egui texture id of the offscreen image, if registered.
@@ -123,21 +116,20 @@ impl Viewport {
         self.target.extent()
     }
 
-    /// Resize the offscreen target to match the viewport panel, recreating
-    /// the texture bind group. The pipeline is untouched: its viewport
-    /// and scissor are dynamic and follow the render area.
+    /// Access the offscreen target (debug readback).
+    pub fn target(&self) -> &OffscreenTarget {
+        &self.target
+    }
+
+    /// Resize the offscreen target to match the viewport panel. The pipeline
+    /// is untouched: its viewport and scissor are dynamic and follow the
+    /// render area. The egui texture rebind happens in
+    /// [`register_texture`](Self::register_texture) after the resize.
     pub fn resize(&mut self, device: &Device, width: u32, height: u32) -> Result<()> {
         if (width, height) == self.target.extent() {
             return Ok(());
         }
-        self.target.resize(device, width, height)?;
-
-        // The bind group references the old image view; recreate it. The
-        // target waited for device idle during resize, so the old set is no
-        // longer in use; `BindGroup::Drop` frees it from its own pool.
-        let (_, bind_group) = create_bind_group(device, &self.target)?;
-        self.bind_group = bind_group;
-        Ok(())
+        self.target.resize(device, width, height)
     }
 
     /// Record the scene pass into the given command buffer: clear to the
@@ -197,6 +189,27 @@ impl Viewport {
             }
             None => ([0.05, 0.0, 0.08, 1.0], Mat4::IDENTITY),
         };
+
+        // Debug seam: MOONFIELD_EDITOR_DEBUG_SCENE=1 logs the scene contents.
+        if std::env::var_os("MOONFIELD_EDITOR_DEBUG_SCENE").is_some() {
+            static ONCE: std::sync::Once = std::sync::Once::new();
+            ONCE.call_once(|| {
+                let camera_pos = camera.map(|(_, g)| {
+                    let t = g.affine().translation;
+                    (t.x, t.y, t.z)
+                });
+                moonfield_log::info!(
+                    "scene: camera={camera:?} items={} extent={:?}",
+                    items.len(),
+                    self.target.extent(),
+                    camera = camera_pos,
+                );
+                moonfield_log::info!("  view_proj: {:?}", view_proj.to_cols_array());
+                for (model, _) in &items {
+                    moonfield_log::info!("  item mvp: {:?}", (view_proj * model).to_cols_array());
+                }
+            });
+        }
 
         let clear_values = [vk::ClearValue {
             color: vk::ClearColorValue {
@@ -267,45 +280,18 @@ fn create_pipeline(
         size: PUSH_CONSTANT_SIZE,
     }];
 
-    GraphicsPipeline::new(
+    GraphicsPipeline::new_with_options(
         device,
         target.render_pass(),
         vertex_shader,
         fragment_shader,
         &vertex_layout,
         &push_constants,
+        &moonfield_render::PipelineOptions {
+            cull_mode: moonfield_render::CullMode::None,
+            ..Default::default()
+        },
     )
-}
-
-fn create_bind_group(
-    device: &Device,
-    target: &OffscreenTarget,
-) -> Result<(BindGroupLayout, BindGroup)> {
-    // Borrow neutral views of the target's image view + sampler. The bind
-    // group only holds the descriptor set; the underlying view/sampler stay
-    // owned by the target.
-    let view = target.texture_view();
-    let sampler = target.sampler_view();
-    let layout = BindGroupLayout::new(
-        device,
-        &[BindGroupLayoutEntry {
-            binding: 0,
-            ty: BindingType::SampledTexture,
-            visibility: ShaderStage::Fragment,
-        }],
-    )?;
-    let bind_group = BindGroup::new(
-        device,
-        &layout,
-        &[BindGroupEntry {
-            binding: 0,
-            resource: BindingResource::Texture {
-                view: &view,
-                sampler: &sampler,
-            },
-        }],
-    )?;
-    Ok((layout, bind_group))
 }
 
 /// Unit cube (side 1, centered on the origin), positions only. Faces are
@@ -357,7 +343,7 @@ struct VsOutput
 VsOutput main(VsInput input)
 {
     VsOutput output;
-    output.position = mul(push.mvp, float4(input.position, 1.0));
+    output.position = float4(input.position.xy * 0.5, 0.0, 1.0); // DEBUG bypass mvp
     output.local_pos = input.position;
     return output;
 }
@@ -389,3 +375,177 @@ float4 main(PsInput input) : SV_TARGET
     return float4(push.color.rgb * shade, push.color.a);
 }
 "#;
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use moonfield_math::Transform;
+    use moonfield_render::{CommandPool, Instance};
+
+    /// The scene pass must actually rasterize cubes: render a red cube in
+    /// front of the primary camera and read the target back.
+    #[test]
+    fn test_record_scene_draws_cube() {
+        let instance = match Instance::new_headless() {
+            Ok(instance) => instance,
+            Err(err) => {
+                eprintln!("skipping: no Vulkan instance available ({err})");
+                return;
+            }
+        };
+        let device = match Device::new(&instance, None) {
+            Ok(device) => device,
+            Err(err) => {
+                eprintln!("skipping: no Vulkan device available ({err})");
+                return;
+            }
+        };
+
+        let viewport = Viewport::new(&device).expect("viewport");
+
+        // The demo scene's exact poses: camera looking at the cubes.
+        let mut world = moonfield_ecs::World::new();
+        world.spawn((
+            Camera::default(),
+            PrimaryCamera,
+            GlobalTransform::from(
+                Transform::from_xyz(0.0, 2.5, 6.0).looking_at(Vec3::new(0.0, 0.5, 0.0), Vec3::Y),
+            ),
+        ));
+        world.spawn((
+            MeshRenderer::colored([1.0, 0.0, 0.0, 1.0]),
+            GlobalTransform::from(Transform::from_xyz(-0.75, 0.0, 0.0)),
+        ));
+
+        let command_pool = CommandPool::new(&device, device.queue_family_indices().graphics)
+            .expect("command pool");
+        let mut command_buffer = command_pool
+            .allocate_command_buffer()
+            .expect("command buffer");
+        command_buffer
+            .begin(vk::CommandBufferUsageFlags::ONE_TIME_SUBMIT)
+            .expect("begin");
+        viewport.record_scene(&world, &command_buffer);
+
+        // Replicate the editor's command stream: a second render pass (the
+        // egui UI pass) follows the scene pass in the same command buffer.
+        let ui_target = OffscreenTarget::new(&device, 64, 64, Format::B8G8R8A8Unorm)
+            .expect("ui target");
+        let ui_begin = vk::RenderPassBeginInfo::default()
+            .render_pass(ui_target.render_pass().raw())
+            .framebuffer(ui_target.framebuffer().raw())
+            .render_area(vk::Rect2D {
+                offset: vk::Offset2D { x: 0, y: 0 },
+                extent: vk::Extent2D {
+                    width: 64,
+                    height: 64,
+                },
+            })
+            .clear_values(&[vk::ClearValue {
+                color: vk::ClearColorValue {
+                    float32: [0.0, 0.0, 0.0, 1.0],
+                },
+            }]);
+        command_buffer.begin_render_pass(&ui_begin, vk::SubpassContents::INLINE);
+        command_buffer.end_render_pass();
+
+        // Read the target back in the same submission.
+        let (width, height) = viewport.extent();
+        let readback = Buffer::new(
+            &device,
+            (width * height * 4) as u64,
+            BufferUsage::COPY_DST,
+            gpu_allocator::MemoryLocation::GpuToCpu,
+        )
+        .expect("readback buffer");
+        let subresource = vk::ImageSubresourceRange::default()
+            .aspect_mask(vk::ImageAspectFlags::COLOR)
+            .base_mip_level(0)
+            .level_count(1)
+            .base_array_layer(0)
+            .layer_count(1);
+        let to_transfer = vk::ImageMemoryBarrier::default()
+            .src_access_mask(vk::AccessFlags::SHADER_READ)
+            .dst_access_mask(vk::AccessFlags::TRANSFER_READ)
+            .old_layout(vk::ImageLayout::SHADER_READ_ONLY_OPTIMAL)
+            .new_layout(vk::ImageLayout::TRANSFER_SRC_OPTIMAL)
+            .image(viewport.target().image())
+            .subresource_range(subresource);
+        command_buffer.pipeline_barrier(
+            vk::PipelineStageFlags::FRAGMENT_SHADER,
+            vk::PipelineStageFlags::TRANSFER,
+            vk::DependencyFlags::empty(),
+            &[],
+            &[],
+            &[to_transfer],
+        );
+        let region = vk::BufferImageCopy::default()
+            .image_subresource(
+                vk::ImageSubresourceLayers::default()
+                    .aspect_mask(vk::ImageAspectFlags::COLOR)
+                    .mip_level(0)
+                    .base_array_layer(0)
+                    .layer_count(1),
+            )
+            .image_extent(vk::Extent3D {
+                width,
+                height,
+                depth: 1,
+            });
+        // SAFETY: the target is in TRANSFER_SRC_OPTIMAL and the buffer fits it.
+        unsafe {
+            device.raw().cmd_copy_image_to_buffer(
+                command_buffer.raw(),
+                viewport.target().image(),
+                vk::ImageLayout::TRANSFER_SRC_OPTIMAL,
+                readback.raw(),
+                std::slice::from_ref(&region),
+            );
+        }
+        command_buffer.end().expect("end");
+
+        let command_buffers = [command_buffer.raw()];
+        let submit_info = vk::SubmitInfo::default().command_buffers(&command_buffers);
+        // SAFETY: the command buffer is fully recorded and the queue is valid.
+        unsafe {
+            device
+                .raw()
+                .queue_submit(
+                    device.graphics_queue(),
+                    std::slice::from_ref(&submit_info),
+                    vk::Fence::null(),
+                )
+                .expect("submit");
+            device
+                .raw()
+                .queue_wait_idle(device.graphics_queue())
+                .expect("wait idle");
+        }
+
+        let mut pixels = vec![0u8; (width * height * 4) as usize];
+        readback.read(&mut pixels).expect("readback");
+        if std::env::var_os("MOONFIELD_EDITOR_DEBUG_SCENE").is_some() {
+            std::fs::create_dir_all("../../target/tmp").unwrap();
+            std::fs::write(
+                format!("../../target/tmp/scene_test_{width}x{height}.raw"),
+                &pixels,
+            )
+            .unwrap();
+        }
+        // Compare against the clear color with rounding tolerance (the GPU
+        // rounds unorm values, `(x * 255.0) as u8` truncates).
+        let clear = Camera::default().clear_color;
+        let is_clear = |px: &[u8]| {
+            let (b, g, r, a) = (px[0] as i32, px[1] as i32, px[2] as i32, px[3]);
+            (b - (clear[2] * 255.0).round() as i32).abs() <= 1
+                && (g - (clear[1] * 255.0).round() as i32).abs() <= 1
+                && (r - (clear[0] * 255.0).round() as i32).abs() <= 1
+                && a == 255
+        };
+        let non_clear = pixels.chunks_exact(4).filter(|px| !is_clear(px)).count();
+        assert!(
+            non_clear > 1000,
+            "cube did not rasterize: only {non_clear} non-clear pixels"
+        );
+    }
+}

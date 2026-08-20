@@ -112,6 +112,9 @@ jobs:
       - name: Run Vulkan headless smoke test
         run: cargo test -p moonfield-render --test headless_triangle --locked
 
+      - name: Run egui backend headless smoke test
+        run: cargo test -p moonfield-editor --test egui_headless --locked
+
   agent-docs:
     name: Agent notes gate
     runs-on: ubuntu-latest

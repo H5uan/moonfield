@@ -109,6 +109,12 @@ impl OffscreenTarget {
         Ok(())
     }
 
+    /// Access the color image (for readback copies; the current layout is
+    /// `SHADER_READ_ONLY_OPTIMAL` outside of a render pass).
+    pub fn image(&self) -> vk::Image {
+        self.image
+    }
+
     /// Access the color image view (for sampling in a UI renderer).
     pub fn image_view(&self) -> vk::ImageView {
         self.image_view
@@ -200,7 +206,11 @@ fn create_color_image(
         .array_layers(1)
         .samples(vk::SampleCountFlags::TYPE_1)
         .tiling(vk::ImageTiling::OPTIMAL)
-        .usage(vk::ImageUsageFlags::COLOR_ATTACHMENT | vk::ImageUsageFlags::SAMPLED)
+        .usage(
+            vk::ImageUsageFlags::COLOR_ATTACHMENT
+                | vk::ImageUsageFlags::SAMPLED
+                | vk::ImageUsageFlags::TRANSFER_SRC,
+        )
         .sharing_mode(vk::SharingMode::EXCLUSIVE)
         .initial_layout(vk::ImageLayout::UNDEFINED);
 

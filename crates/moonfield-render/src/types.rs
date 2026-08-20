@@ -114,6 +114,8 @@ pub enum VertexFormat {
     Float32x3,
     /// Four 32-bit floats.
     Float32x4,
+    /// One 32-bit unsigned integer (e.g. a packed RGBA color).
+    Uint32,
 }
 
 impl VertexFormat {
@@ -123,6 +125,7 @@ impl VertexFormat {
             Self::Float32x2 => ash::vk::Format::R32G32_SFLOAT,
             Self::Float32x3 => ash::vk::Format::R32G32B32_SFLOAT,
             Self::Float32x4 => ash::vk::Format::R32G32B32A32_SFLOAT,
+            Self::Uint32 => ash::vk::Format::R32_UINT,
         }
     }
 }

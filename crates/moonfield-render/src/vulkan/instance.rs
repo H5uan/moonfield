@@ -34,6 +34,14 @@ impl Instance {
         let extensions: Vec<*const c_char> =
             required_extensions.iter().map(|ext| ext.as_ptr()).collect();
 
+        // Debug seam: MOONFIELD_VK_VALIDATION=1 enables the Khronos
+        // validation layer (needs the Vulkan SDK installed).
+        let layers: Vec<*const c_char> = if std::env::var_os("MOONFIELD_VK_VALIDATION").is_some() {
+            vec![c"VK_LAYER_KHRONOS_validation".as_ptr()]
+        } else {
+            Vec::new()
+        };
+
         let flags = if required_extensions.contains(&ash::khr::portability_enumeration::NAME) {
             vk::InstanceCreateFlags::ENUMERATE_PORTABILITY_KHR
         } else {
@@ -43,6 +51,7 @@ impl Instance {
         let create_info = vk::InstanceCreateInfo::default()
             .application_info(&app_info)
             .enabled_extension_names(&extensions)
+            .enabled_layer_names(&layers)
             .flags(flags);
 
         let instance = unsafe { entry.create_instance(&create_info, None) }

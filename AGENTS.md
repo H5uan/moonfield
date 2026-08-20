@@ -11,13 +11,13 @@ and [.agents/notes/README.md](.agents/notes/README.md) owns decision records.
 Cargo-managed monorepo under `crates/`:
 
 ```
-moonfield/          # Binary crate — main executable entry point
 moonfield-app/      # Plugin-based App/Plugin framework (Plugin, PluginGroup, App, Resources);
                     # HierarchyPlugin + TimePlugin, schedules incl. the fixed-timestep loop
 moonfield-asset/    # Sync-only Assets<T> store + Handle<T> (index+generation); no deps, no async
 moonfield-base/     # Shared base types and utilities
 moonfield-ecs/      # ECS world implementation (archetype storage, system params, schedules, hooks, relationships)
-moonfield-editor/   # Editor plugin (egui + egui_dock + egui-ash-renderer): dock panels, offscreen viewport
+moonfield-editor/   # The editor — the workspace's only binary (src/main.rs). EditorPlugin
+                    # (egui + egui_dock + in-house Vulkan backend in src/egui_vk.rs): dock panels, offscreen viewport
 moonfield-log/      # Logging utilities
 moonfield-math/     # The workspace math single entry: glam re-export + domain types (Dir3/Ray3d, Transform)
 moonfield-reflect/  # Mini reflection for the editor: named fields, dynamic read/write, nesting
@@ -30,16 +30,18 @@ moonfield-window/   # Abstract windowing types (Window components, KeyCode/Mouse
 moonfield-winit/    # Windowing backend (winit): bridges winit Window to moonfield-window components
 ```
 
-The egui stack is anchored to egui-ash-renderer's compatibility table (egui
-0.33 / egui-winit 0.33 / egui-ash-renderer 0.11 + gpu-allocator / egui_dock
-0.18, ash 0.38, winit 0.30) — **bump them together**.
+The egui stack is anchored to egui_dock's compatibility table (egui 0.33 /
+egui-winit 0.33 / egui_dock 0.18, ash 0.38, winit 0.30) — **bump them
+together**. The egui→Vulkan backend is in-house
+(`crates/moonfield-editor/src/egui_vk.rs`); its feature spec is egui-wgpu
+0.33.
 
 ## Commands
 
 | Command | Description |
 |---|---|
 | `cargo build` | Compile all workspace crates. |
-| `cargo run` | Build and run the `moonfield` binary. |
+| `cargo run` | Build and run the editor (the workspace's only binary, `moonfield-editor`). |
 | `cargo test` | Run all unit and integration tests across the workspace. |
 | `cargo clippy` | Lint the codebase with Clippy. |
 | `cargo fmt` | Format all Rust source files. |

@@ -6,7 +6,7 @@
 //! cycle. The device-level singletons (instance, logical device) are shared:
 //! they come from the world's [`RenderDevice`](crate::RenderDevice) resource
 //! (created by [`RenderPlugin`](crate::RenderPlugin)) and are held as `Arc`s.
-//! A UI renderer (e.g. egui-ash-renderer) records its draw commands into the
+//! A UI renderer (the editor's egui backend) records its draw commands into the
 //! frame's command buffer between [`WindowRenderer::begin_frame`] and
 //! [`WindowRenderer::end_frame`].
 
@@ -275,6 +275,18 @@ impl WindowRenderer {
     /// The swapchain surface format.
     pub fn format(&self) -> vk::SurfaceFormatKHR {
         self.swapchain.format()
+    }
+
+    /// Number of frames that may be in flight concurrently; per-slot GPU
+    /// resources (buffers, deferred frees) key off this.
+    pub fn frames_in_flight(&self) -> usize {
+        MAX_FRAMES_IN_FLIGHT
+    }
+
+    /// The current frame slot (0..frames_in_flight). Per-slot GPU resources
+    /// key off this so writers don't race a frame still on the GPU.
+    pub fn current_frame_index(&self) -> usize {
+        self.current_frame
     }
 
     /// Access the logical device (e.g. to hand to a UI renderer).

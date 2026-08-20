@@ -26,7 +26,7 @@ pub use device::{Device, QueueFamilyIndices};
 pub use framebuffer::Framebuffer;
 pub use instance::Instance;
 pub use offscreen::OffscreenTarget;
-pub use pipeline::GraphicsPipeline;
+pub use pipeline::{BlendMode, CullMode, GraphicsPipeline, PipelineOptions};
 pub use plugin::{RenderDevice, RenderPlugin};
 pub use render_pass::RenderPass;
 pub use shader::Compiler;

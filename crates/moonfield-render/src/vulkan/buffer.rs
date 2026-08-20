@@ -121,6 +121,45 @@ impl Buffer {
         }
     }
 
+    /// Read data out of a host-visible buffer (test readback, debug dumps).
+    ///
+    /// Device-local (`GpuOnly`) buffers cannot be mapped; this returns an
+    /// error for them.
+    pub fn read<T: Copy>(&self, data: &mut [T]) -> Result<()> {
+        let bytes = std::mem::size_of_val(data) as vk::DeviceSize;
+        if bytes > self.size {
+            return Err(Error::Validation(
+                "read range exceeds buffer size".to_string(),
+            ));
+        }
+        if self.location == MemoryLocation::GpuOnly {
+            return Err(Error::Validation(
+                "cannot read a device-local buffer".to_string(),
+            ));
+        }
+        let allocation = self.allocation.as_ref().ok_or(Error::InvalidHandle)?;
+        unsafe {
+            let ptr = self
+                .device
+                .map_memory(
+                    allocation.memory(),
+                    allocation.offset(),
+                    bytes,
+                    vk::MemoryMapFlags::empty(),
+                )
+                .map_err(|e| Error::Backend(format!("failed to map buffer memory: {:?}", e)))?;
+
+            std::ptr::copy_nonoverlapping(
+                ptr as *const u8,
+                data.as_mut_ptr() as *mut u8,
+                bytes as usize,
+            );
+
+            self.device.unmap_memory(allocation.memory());
+        }
+        Ok(())
+    }
+
     fn upload_host_visible<T: Copy>(&self, bytes: vk::DeviceSize, data: &[T]) -> Result<()> {
         let allocation = self.allocation.as_ref().ok_or(Error::InvalidHandle)?;
         unsafe {

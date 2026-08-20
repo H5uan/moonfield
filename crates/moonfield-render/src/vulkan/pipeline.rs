@@ -1,11 +1,75 @@
 //! Vulkan graphics pipeline abstraction.
 
+use crate::bind::BindGroupLayout;
 use crate::error::{Error, Result};
 use crate::types::VertexBufferLayout;
 use crate::vulkan::device::Device;
 use crate::vulkan::render_pass::RenderPass;
 use crate::vulkan::shader_module::ShaderModule;
 use ash::vk;
+
+/// How the pipeline's single color attachment blends with existing pixels.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum BlendMode {
+    /// Blending disabled; the fragment color overwrites the target.
+    #[default]
+    Off,
+    /// Premultiplied-alpha blending: color `One, OneMinusSrcAlpha, Add`;
+    /// alpha `OneMinusDstAlpha, One, Add`. What egui expects.
+    PremultipliedAlpha,
+}
+
+impl BlendMode {
+    fn to_vk(self) -> vk::PipelineColorBlendAttachmentState {
+        let state = vk::PipelineColorBlendAttachmentState::default()
+            .color_write_mask(vk::ColorComponentFlags::RGBA);
+        match self {
+            Self::Off => state.blend_enable(false),
+            Self::PremultipliedAlpha => state
+                .blend_enable(true)
+                .src_color_blend_factor(vk::BlendFactor::ONE)
+                .dst_color_blend_factor(vk::BlendFactor::ONE_MINUS_SRC_ALPHA)
+                .color_blend_op(vk::BlendOp::ADD)
+                .src_alpha_blend_factor(vk::BlendFactor::ONE_MINUS_DST_ALPHA)
+                .dst_alpha_blend_factor(vk::BlendFactor::ONE)
+                .alpha_blend_op(vk::BlendOp::ADD),
+        }
+    }
+}
+
+/// Which triangle faces the rasterizer culls.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum CullMode {
+    /// Cull back faces (front face = clockwise, matching the engine's
+    /// negative-height viewport convention).
+    #[default]
+    Back,
+    /// No culling — for 2D UI meshes that are all front-facing.
+    None,
+}
+
+impl CullMode {
+    fn to_vk(self) -> vk::CullModeFlags {
+        match self {
+            Self::Back => vk::CullModeFlags::BACK,
+            Self::None => vk::CullModeFlags::NONE,
+        }
+    }
+}
+
+/// Optional pipeline configuration beyond the [`GraphicsPipeline::new`]
+/// defaults. `Default` reproduces the pre-options behavior exactly (blend
+/// off, back-face culling, no descriptor sets).
+#[derive(Default)]
+pub struct PipelineOptions<'a> {
+    /// Color attachment blend mode.
+    pub blend: BlendMode,
+    /// Face culling mode.
+    pub cull_mode: CullMode,
+    /// Descriptor set layouts baked into the pipeline layout (set 0, 1, …).
+    /// Borrowed; the caller keeps them alive as long as sets are bound.
+    pub set_layouts: &'a [&'a BindGroupLayout],
+}
 
 /// A Vulkan graphics pipeline and its layout.
 pub struct GraphicsPipeline {
@@ -31,6 +95,29 @@ impl GraphicsPipeline {
         fragment_shader: &ShaderModule,
         vertex_layout: &VertexBufferLayout,
         push_constant_ranges: &[vk::PushConstantRange],
+    ) -> Result<Self> {
+        Self::new_with_options(
+            device,
+            render_pass,
+            vertex_shader,
+            fragment_shader,
+            vertex_layout,
+            push_constant_ranges,
+            &PipelineOptions::default(),
+        )
+    }
+
+    /// Create a graphics pipeline with explicit [`PipelineOptions`] (blend
+    /// mode, cull mode, descriptor set layouts).
+    #[allow(clippy::too_many_arguments)]
+    pub fn new_with_options(
+        device: &Device,
+        render_pass: &RenderPass,
+        vertex_shader: &ShaderModule,
+        fragment_shader: &ShaderModule,
+        vertex_layout: &VertexBufferLayout,
+        push_constant_ranges: &[vk::PushConstantRange],
+        options: &PipelineOptions,
     ) -> Result<Self> {
         let vertex_entry = std::ffi::CString::new("main").unwrap();
         let fragment_entry = std::ffi::CString::new("main").unwrap();
@@ -84,7 +171,7 @@ impl GraphicsPipeline {
             .rasterizer_discard_enable(false)
             .polygon_mode(vk::PolygonMode::FILL)
             .line_width(1.0)
-            .cull_mode(vk::CullModeFlags::BACK)
+            .cull_mode(options.cull_mode.to_vk())
             .front_face(vk::FrontFace::CLOCKWISE)
             .depth_bias_enable(false);
 
@@ -92,17 +179,19 @@ impl GraphicsPipeline {
             .sample_shading_enable(false)
             .rasterization_samples(vk::SampleCountFlags::TYPE_1);
 
-        let color_blend_attachment = vk::PipelineColorBlendAttachmentState::default()
-            .color_write_mask(vk::ColorComponentFlags::RGBA)
-            .blend_enable(false);
-
-        let color_blend_attachments = [color_blend_attachment];
+        let color_blend_attachments = [options.blend.to_vk()];
         let color_blending = vk::PipelineColorBlendStateCreateInfo::default()
             .logic_op_enable(false)
             .attachments(&color_blend_attachments);
 
-        let pipeline_layout_info =
-            vk::PipelineLayoutCreateInfo::default().push_constant_ranges(push_constant_ranges);
+        let set_layouts: Vec<vk::DescriptorSetLayout> = options
+            .set_layouts
+            .iter()
+            .map(|layout| layout.raw_vk())
+            .collect();
+        let pipeline_layout_info = vk::PipelineLayoutCreateInfo::default()
+            .push_constant_ranges(push_constant_ranges)
+            .set_layouts(&set_layouts);
         let layout = unsafe {
             device
                 .raw()

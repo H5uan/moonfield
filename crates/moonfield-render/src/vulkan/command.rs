@@ -150,6 +150,35 @@ impl CommandBuffer {
         }
     }
 
+    /// Override the dynamic scissor rectangle (e.g. per-primitive clip rects
+    /// in a UI renderer). `begin_render_pass` resets the scissor to the render
+    /// area, so call this after it.
+    pub fn set_scissor(&self, scissor: vk::Rect2D) {
+        unsafe {
+            self.device
+                .cmd_set_scissor(self.buffer, 0, std::slice::from_ref(&scissor));
+        }
+    }
+
+    /// Bind descriptor sets to the graphics bind point.
+    pub fn bind_graphics_descriptor_sets(
+        &self,
+        layout: vk::PipelineLayout,
+        first_set: u32,
+        sets: &[vk::DescriptorSet],
+    ) {
+        unsafe {
+            self.device.cmd_bind_descriptor_sets(
+                self.buffer,
+                vk::PipelineBindPoint::GRAPHICS,
+                layout,
+                first_set,
+                sets,
+                &[],
+            );
+        }
+    }
+
     /// Push raw bytes into the pipeline layout's push-constant block.
     pub fn push_constants(
         &self,
