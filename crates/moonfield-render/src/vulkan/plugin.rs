@@ -93,6 +93,7 @@ fn platform_surface_extensions() -> &'static [&'static CStr] {
     {
         &[
             ash::khr::surface::NAME,
+            ash::khr::xlib_surface::NAME,
             ash::khr::xcb_surface::NAME,
             ash::khr::wayland_surface::NAME,
         ]
