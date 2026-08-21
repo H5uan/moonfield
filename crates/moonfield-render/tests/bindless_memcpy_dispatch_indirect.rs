@@ -10,6 +10,7 @@ use moonfield_render::indirect::DispatchIndirectArgs;
 use moonfield_render::vulkan::bindless::{ComputePipeline, GpuAllocation, Memory, Stage};
 use moonfield_render::{CommandPool, Compiler, Device, Instance, ShaderModule};
 use std::sync::Mutex;
+mod common;
 
 /// Serializes the tests in this binary. Each test creates its own Vulkan
 /// instance, device, and allocator; doing so concurrently on one GPU
@@ -40,6 +41,9 @@ fn bindless_memcpy_roundtrip() {
             return;
         }
     };
+    if common::skip_if_descriptor_heap_missing(&instance) {
+        return;
+    }
     let device = match Device::new(&instance, None) {
         Ok(device) => device,
         Err(err) => {
@@ -103,6 +107,9 @@ fn bindless_dispatch_indirect_roundtrip() {
             return;
         }
     };
+    if common::skip_if_descriptor_heap_missing(&instance) {
+        return;
+    }
     let device = match Device::new(&instance, None) {
         Ok(device) => device,
         Err(err) => {

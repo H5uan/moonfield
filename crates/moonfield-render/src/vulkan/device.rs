@@ -8,7 +8,9 @@ use gpu_allocator::vulkan::{Allocator, AllocatorCreateDesc};
 use std::ffi::{c_char, CStr};
 use std::sync::{Arc, Mutex};
 
-const DEVICE_EXTENSIONS: &[&CStr] = &[ash::khr::swapchain::NAME];
+// `VK_EXT_descriptor_heap` is required unconditionally: the RHI targets
+// current NVIDIA drivers only, so there is no fallback when it is missing.
+const DEVICE_EXTENSIONS: &[&CStr] = &[ash::khr::swapchain::NAME, ash::ext::descriptor_heap::NAME];
 
 /// Queue family indices selected for graphics and presentation.
 #[derive(Debug, Clone, Copy)]
@@ -151,13 +153,20 @@ impl Device {
             .descriptor_binding_variable_descriptor_count(true)
             .runtime_descriptor_array(true)
             .shader_sampled_image_array_non_uniform_indexing(true);
-        let mut vulkan_13_features =
-            vk::PhysicalDeviceVulkan13Features::default().synchronization2(true);
+        let mut vulkan_13_features = vk::PhysicalDeviceVulkan13Features::default()
+            .synchronization2(true)
+            .dynamic_rendering(true);
+        let mut vulkan_14_features =
+            vk::PhysicalDeviceVulkan14Features::default().dynamic_rendering_local_read(true);
+        let mut descriptor_heap_features =
+            vk::PhysicalDeviceDescriptorHeapFeaturesEXT::default().descriptor_heap(true);
         let mut features2 =
             vk::PhysicalDeviceFeatures2::default().features(vk::PhysicalDeviceFeatures::default());
         let _ = features2
             .push(&mut vulkan_12_features)
-            .push(&mut vulkan_13_features);
+            .push(&mut vulkan_13_features)
+            .push(&mut vulkan_14_features)
+            .push(&mut descriptor_heap_features);
 
         let create_info = vk::DeviceCreateInfo::default()
             .queue_create_infos(&queue_create_infos)

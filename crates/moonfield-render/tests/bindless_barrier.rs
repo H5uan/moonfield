@@ -8,6 +8,7 @@
 
 use moonfield_render::vulkan::bindless::{ComputePipeline, GpuAllocation, Memory, Stage};
 use moonfield_render::{CommandPool, Compiler, Device, Instance, ShaderModule};
+mod common;
 
 /// Dispatch A: write all ones into `payload`.
 const WRITE_KERNEL: &str = r#"
@@ -39,8 +40,8 @@ void main(uint3 tid : SV_DispatchThreadID,
 
 #[test]
 fn bindless_barrier_orders_dispatch() {
-    // CI runners without a GPU/Vulkan driver (Windows, macOS) skip this test;
-    // Linux CI runs it against lavapipe (Mesa software Vulkan).
+    // CI runners without the engine's required `VK_EXT_descriptor_heap`
+    // (lavapipe, most drivers) skip this test.
     let instance = match Instance::new_headless() {
         Ok(instance) => instance,
         Err(err) => {
@@ -48,6 +49,10 @@ fn bindless_barrier_orders_dispatch() {
             return;
         }
     };
+    if common::skip_if_descriptor_heap_missing(&instance) {
+        return;
+    }
+
     let device = match Device::new(&instance, None) {
         Ok(device) => device,
         Err(err) => {

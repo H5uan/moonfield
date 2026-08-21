@@ -10,6 +10,7 @@ use moonfield_render::{
     RenderPass, ShaderModule, VertexAttribute, VertexBufferLayout, VertexFormat,
 };
 
+mod common;
 #[repr(C)]
 #[derive(Clone, Copy)]
 struct Vertex {
@@ -19,8 +20,9 @@ struct Vertex {
 
 #[test]
 fn headless_pipeline_and_command_buffer() {
-    // CI runners without a GPU/Vulkan driver (Windows, macOS) skip this test;
-    // Linux CI runs it against lavapipe (Mesa software Vulkan).
+    // CI runners without the engine's required `VK_EXT_descriptor_heap`
+    // (lavapipe, most machines) skip this test; it runs on recent NVIDIA
+    // drivers with real hardware.
     let instance = match Instance::new_headless() {
         Ok(instance) => instance,
         Err(err) => {
@@ -28,6 +30,10 @@ fn headless_pipeline_and_command_buffer() {
             return;
         }
     };
+    if common::skip_if_descriptor_heap_missing(&instance) {
+        return;
+    }
+
     let device = match Device::new(&instance, None) {
         Ok(device) => device,
         Err(err) => {

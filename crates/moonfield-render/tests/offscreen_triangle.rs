@@ -10,6 +10,7 @@ use moonfield_render::{
     OffscreenTarget, ShaderModule, VertexAttribute, VertexBufferLayout, VertexFormat,
 };
 
+mod common;
 const SIZE: u32 = 64;
 
 #[repr(C)]
@@ -28,6 +29,10 @@ fn offscreen_triangle_rasterizes() {
             return;
         }
     };
+    if common::skip_if_descriptor_heap_missing(&instance) {
+        return;
+    }
+
     let device = match Device::new(&instance, None) {
         Ok(device) => device,
         Err(err) => {

@@ -11,6 +11,7 @@ use moonfield_render::{
     Instance, RenderPass, ShaderModule, VertexAttribute, VertexBufferLayout, VertexFormat,
 };
 
+mod common;
 #[repr(C)]
 #[derive(Clone, Copy)]
 struct Vertex {
@@ -20,8 +21,8 @@ struct Vertex {
 
 #[test]
 fn indirect_draw_records_without_panic() {
-    // CI runners without a GPU/Vulkan driver (Windows, macOS) skip this test;
-    // Linux CI runs it against lavapipe (Mesa software Vulkan).
+    // CI runners without the engine's required `VK_EXT_descriptor_heap`
+    // (lavapipe, most drivers) skip this test; mirrors `headless_triangle.rs`.
     let instance = match Instance::new_headless() {
         Ok(instance) => instance,
         Err(err) => {
@@ -29,6 +30,10 @@ fn indirect_draw_records_without_panic() {
             return;
         }
     };
+    if common::skip_if_descriptor_heap_missing(&instance) {
+        return;
+    }
+
     let device = match Device::new(&instance, None) {
         Ok(device) => device,
         Err(err) => {

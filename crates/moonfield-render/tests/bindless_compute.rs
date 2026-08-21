@@ -7,6 +7,7 @@
 
 use moonfield_render::vulkan::bindless::{ComputePipeline, GpuAllocation, Memory};
 use moonfield_render::{CommandPool, Compiler, Device, Instance, ShaderModule};
+mod common;
 
 /// `+1` kernel: out[tid] = in[tid] + 1. Root data is two 64-bit addresses
 /// (input @ offset 0, output @ offset 8) pushed as one push-constant struct.
@@ -23,8 +24,8 @@ void main(uint3 tid : SV_DispatchThreadID,
 
 #[test]
 fn bindless_compute_roundtrip() {
-    // CI runners without a GPU/Vulkan driver (Windows, macOS) skip this test;
-    // Linux CI runs it against lavapipe (Mesa software Vulkan).
+    // CI runners without the engine's required `VK_EXT_descriptor_heap`
+    // (lavapipe, most drivers) skip this test.
     let instance = match Instance::new_headless() {
         Ok(instance) => instance,
         Err(err) => {
@@ -32,6 +33,10 @@ fn bindless_compute_roundtrip() {
             return;
         }
     };
+    if common::skip_if_descriptor_heap_missing(&instance) {
+        return;
+    }
+
     let device = match Device::new(&instance, None) {
         Ok(device) => device,
         Err(err) => {
