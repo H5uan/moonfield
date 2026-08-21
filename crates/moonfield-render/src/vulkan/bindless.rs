@@ -156,7 +156,11 @@ impl GpuAllocation {
                 .create_buffer(
                     &vk::BufferCreateInfo::default()
                         .size(size)
-                        .usage(vk::BufferUsageFlags::SHADER_DEVICE_ADDRESS)
+                        .usage(
+                            vk::BufferUsageFlags::SHADER_DEVICE_ADDRESS
+                                | vk::BufferUsageFlags::TRANSFER_SRC
+                                | vk::BufferUsageFlags::TRANSFER_DST,
+                        )
                         .sharing_mode(vk::SharingMode::EXCLUSIVE),
                     None,
                 )
@@ -218,6 +222,10 @@ impl GpuAllocation {
     /// Size in bytes.
     pub fn size(&self) -> u64 {
         self.size
+    }
+
+    pub fn buffer(&self) -> vk::Buffer {
+        self.buffer
     }
 }
 

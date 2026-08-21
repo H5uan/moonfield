@@ -1,6 +1,6 @@
 //! Vulkan command pool and command buffer abstractions.
 
-use crate::bindless::{GpuPtr, Stage};
+use crate::bindless::{GpuAllocation, GpuPtr, Stage};
 use crate::error::{Error, Result};
 use crate::vulkan::device::Device;
 use ash::vk;
@@ -236,6 +236,28 @@ impl CommandBuffer {
     /// pointer set via [`set_bindless_root`] ahead of the call.
     pub fn dispatch(&self, x: u32, y: u32, z: u32) {
         unsafe { self.device.cmd_dispatch(self.buffer, x, y, z) };
+    }
+
+    /// Launch a compute kernel whose workgroup counts are read from GPU memory.
+    pub fn dispatch_indirect(&self, args: &GpuAllocation) {
+        unsafe {
+            self.device
+                .cmd_dispatch_indirect(self.buffer, args.buffer(), 0);
+        }
+    }
+
+    pub fn cmd_memcpy(&self, dst: &GpuAllocation, src: &GpuAllocation, size: u64) {
+        let region = vk::BufferCopy2::default()
+            .src_offset(0)
+            .dst_offset(0)
+            .size(size);
+        let copy_info = vk::CopyBufferInfo2::default()
+            .src_buffer(src.buffer())
+            .dst_buffer(dst.buffer())
+            .regions(std::slice::from_ref(&region));
+        unsafe {
+            self.device.cmd_copy_buffer2(self.buffer, &copy_info);
+        }
     }
 
     /// Order the end of `before` against the start of `after` without naming
