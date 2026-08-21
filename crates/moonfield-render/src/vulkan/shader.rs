@@ -163,9 +163,12 @@ impl Reflection {
     /// Look up a struct type by name and return its layout.
     pub fn struct_layout(&self, name: &str) -> RenderResult<Layout<'_>> {
         let reflection = unsafe { &*self.reflection };
-        let ty = reflection.find_type_by_name(name).ok_or_else(|| {
-            RenderError::Backend(format!("type '{name}' not found in reflection"))
-        })?;
+        let ty = reflection
+            .find_type_by_name(name)
+            .map_err(|e| RenderError::Backend(format!("failed to find type '{name}': {e}")))?
+            .ok_or_else(|| {
+                RenderError::Backend(format!("type '{name}' not found in reflection"))
+            })?;
         let layout = reflection
             .type_layout(ty, shader_slang::LayoutRules::Default)
             .ok_or_else(|| RenderError::Backend(format!("no layout for type '{name}'")))?;

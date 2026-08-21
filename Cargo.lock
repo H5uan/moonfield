@@ -1706,7 +1706,7 @@ dependencies = [
 [[package]]
 name = "shader-slang-rs"
 version = "0.2.0"
-source = "git+https://github.com/H5uan/shader-slang-rs#cfb51758fa4f15cfa32faf9fb8b8853fa205195c"
+source = "git+https://github.com/H5uan/shader-slang-rs#374b76cce9af73674b18bcd07e2f3ccad96f540d"
 dependencies = [
  "shader-slang-rs-sys",
 ]
@@ -1714,7 +1714,7 @@ dependencies = [
 [[package]]
 name = "shader-slang-rs-sys"
 version = "0.2.0"
-source = "git+https://github.com/H5uan/shader-slang-rs#cfb51758fa4f15cfa32faf9fb8b8853fa205195c"
+source = "git+https://github.com/H5uan/shader-slang-rs#374b76cce9af73674b18bcd07e2f3ccad96f540d"
 dependencies = [
  "bindgen",
 ]
