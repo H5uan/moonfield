@@ -80,7 +80,7 @@ impl WindowRenderer {
                 "the shared render device cannot present to this window's surface".to_string(),
             ));
         }
-        let swapchain = Swapchain::new(&instance, &device, &surface, [width, height])?;
+        let swapchain = Swapchain::new(&instance, &device, &surface, [width, height], None)?;
         let render_pass_format =
             Format::from_vk(swapchain.format().format).ok_or(Error::Unsupported)?;
         let render_pass = RenderPass::new(&device, render_pass_format)?;
@@ -258,10 +258,19 @@ impl WindowRenderer {
                 .map_err(|e| Error::Backend(format!("failed to wait for device idle: {:?}", e)))?;
         }
 
-        // The old swapchain is dropped after the new one is created; multiple
-        // swapchains per surface are legal, and the device is idle.
-        self.swapchain =
-            Swapchain::new(&self.instance, &self.device, &self.surface, [width, height])?;
+        // Pass the current swapchain as `oldSwapchain` so the driver recycles
+        // the surface's images; MoltenVK rejects creation unless the new
+        // swapchain names the one currently in use by the surface. The old
+        // swapchain is dropped after the new one is created and the device is
+        // idle.
+        let old_swapchain = self.swapchain.raw();
+        self.swapchain = Swapchain::new(
+            &self.instance,
+            &self.device,
+            &self.surface,
+            [width, height],
+            Some(old_swapchain),
+        )?;
         self.framebuffers = create_framebuffers(&self.device, &self.render_pass, &self.swapchain)?;
         self.needs_recreate = false;
         Ok(())

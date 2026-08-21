@@ -86,8 +86,7 @@ float4 main(PsInput input) : SV_TARGET
     let vertex_shader = ShaderModule::from_spirv(&device, &vertex_spirv).expect("vs module");
     let fragment_shader = ShaderModule::from_spirv(&device, &fragment_spirv).expect("fs module");
 
-    let target =
-        OffscreenTarget::new(&device, SIZE, SIZE, Format::B8G8R8A8Unorm).expect("target");
+    let target = OffscreenTarget::new(&device, SIZE, SIZE, Format::B8G8R8A8Unorm).expect("target");
     let pipeline = GraphicsPipeline::new(
         &device,
         target.render_pass(),

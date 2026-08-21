@@ -126,11 +126,18 @@ pub struct Swapchain {
 
 impl Swapchain {
     /// Create a swapchain for the given surface and window size.
+    ///
+    /// `old_swapchain` is the swapchain currently in use by the surface, if
+    /// any (i.e. when recreating on resize/suboptimal). It is passed as
+    /// `oldSwapchain` so the driver can recycle the surface's images — some
+    /// backends (MoltenVK) reject recreation unless the new swapchain names
+    /// the one currently bound to the surface.
     pub fn new(
         instance: &Instance,
         device: &Device,
         surface: &Surface,
         window_size: [u32; 2],
+        old_swapchain: Option<vk::SwapchainKHR>,
     ) -> Result<Self> {
         let physical_device = device.physical_device();
         let capabilities = surface.capabilities(physical_device)?;
@@ -190,6 +197,7 @@ impl Swapchain {
 
         let create_info = vk::SwapchainCreateInfoKHR::default()
             .surface(surface.raw())
+            .old_swapchain(old_swapchain.unwrap_or(vk::SwapchainKHR::null()))
             .min_image_count(image_count)
             .image_format(format.format)
             .image_color_space(format.color_space)

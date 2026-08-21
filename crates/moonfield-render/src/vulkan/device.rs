@@ -87,8 +87,9 @@ pub struct Device {
     queue_family_indices: QueueFamilyIndices,
     /// Shared GPU memory allocator for buffers and images. Wrapped in
     /// `Arc<Mutex>` so resources can hold clones and free their allocations
-    /// on drop without a borrow on the device.
-    allocator: Arc<Mutex<Allocator>>,
+    /// on drop without a borrow on the device. `Option` so `Drop` can take it
+    /// out and destroy it while the device handle is still valid.
+    allocator: Option<Arc<Mutex<Allocator>>>,
 }
 
 impl Device {
@@ -188,7 +189,7 @@ impl Device {
             compute_queue,
             present_queue,
             queue_family_indices,
-            allocator: Arc::new(Mutex::new(allocator)),
+            allocator: Some(Arc::new(Mutex::new(allocator))),
         })
     }
 
@@ -233,12 +234,25 @@ impl Device {
     /// through this and free their allocations on drop. Exposed so downstream
     /// code (e.g. the editor's egui backend) can share the same allocator.
     pub fn allocator(&self) -> &Arc<Mutex<Allocator>> {
-        &self.allocator
+        self.allocator
+            .as_ref()
+            .expect("allocator taken only during device drop")
     }
 }
 
 impl Drop for Device {
     fn drop(&mut self) {
+        // The shared allocator's memory blocks must be freed while the logical
+        // device is still alive (they call vkFreeMemory / vkUnmapMemory through
+        // it), so the allocator is destroyed before vkDestroyDevice. Resources
+        // (`Buffer`, images) drop before their owning device and release their
+        // allocator `Arc`s, so by the time the device drops it is the last
+        // referent and `try_unwrap` succeeds.
+        if let Some(allocator) = self.allocator.take() {
+            if let Ok(allocator) = Arc::try_unwrap(allocator) {
+                drop(allocator);
+            }
+        }
         unsafe {
             self.device.destroy_device(None);
         }

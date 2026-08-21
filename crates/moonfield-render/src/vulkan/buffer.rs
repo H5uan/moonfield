@@ -138,48 +138,81 @@ impl Buffer {
             ));
         }
         let allocation = self.allocation.as_ref().ok_or(Error::InvalidHandle)?;
+        // SAFETY: gpu-allocator keeps host-visible memory blocks persistently
+        // mapped, and `mapped_ptr` already points at the allocation's offset.
+        // MoltenVK rejects a second vkMapMemory on the same block, so only
+        // fall back to a manual map/unmap when the allocation is not mapped.
+        let ptr = match allocation.mapped_ptr() {
+            Some(ptr) => ptr.as_ptr(),
+            None => {
+                unsafe {
+                    let ptr = self
+                        .device
+                        .map_memory(
+                            allocation.memory(),
+                            allocation.offset(),
+                            bytes,
+                            vk::MemoryMapFlags::empty(),
+                        )
+                        .map_err(|e| {
+                            Error::Backend(format!("failed to map buffer memory: {:?}", e))
+                        })?;
+                    std::ptr::copy_nonoverlapping(
+                        ptr as *const u8,
+                        data.as_mut_ptr() as *mut u8,
+                        bytes as usize,
+                    );
+                    self.device.unmap_memory(allocation.memory());
+                }
+                return Ok(());
+            }
+        };
         unsafe {
-            let ptr = self
-                .device
-                .map_memory(
-                    allocation.memory(),
-                    allocation.offset(),
-                    bytes,
-                    vk::MemoryMapFlags::empty(),
-                )
-                .map_err(|e| Error::Backend(format!("failed to map buffer memory: {:?}", e)))?;
-
             std::ptr::copy_nonoverlapping(
                 ptr as *const u8,
                 data.as_mut_ptr() as *mut u8,
                 bytes as usize,
             );
-
-            self.device.unmap_memory(allocation.memory());
         }
         Ok(())
     }
 
     fn upload_host_visible<T: Copy>(&self, bytes: vk::DeviceSize, data: &[T]) -> Result<()> {
         let allocation = self.allocation.as_ref().ok_or(Error::InvalidHandle)?;
+        // SAFETY: same persistent-mapping rule as `read` above — reuse the
+        // allocation's mapped pointer, only manual map/unmap when absent
+        // (MoltenVK rejects a second vkMapMemory on one block).
+        let ptr = match allocation.mapped_ptr() {
+            Some(ptr) => ptr.as_ptr(),
+            None => {
+                unsafe {
+                    let ptr = self
+                        .device
+                        .map_memory(
+                            allocation.memory(),
+                            allocation.offset(),
+                            bytes,
+                            vk::MemoryMapFlags::empty(),
+                        )
+                        .map_err(|e| {
+                            Error::Backend(format!("failed to map buffer memory: {:?}", e))
+                        })?;
+                    std::ptr::copy_nonoverlapping(
+                        data.as_ptr() as *const u8,
+                        ptr as *mut u8,
+                        bytes as usize,
+                    );
+                    self.device.unmap_memory(allocation.memory());
+                }
+                return Ok(());
+            }
+        };
         unsafe {
-            let ptr = self
-                .device
-                .map_memory(
-                    allocation.memory(),
-                    allocation.offset(),
-                    bytes,
-                    vk::MemoryMapFlags::empty(),
-                )
-                .map_err(|e| Error::Backend(format!("failed to map buffer memory: {:?}", e)))?;
-
             std::ptr::copy_nonoverlapping(
                 data.as_ptr() as *const u8,
                 ptr as *mut u8,
                 bytes as usize,
             );
-
-            self.device.unmap_memory(allocation.memory());
         }
         Ok(())
     }
