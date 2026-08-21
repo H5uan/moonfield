@@ -408,8 +408,9 @@ fn record_frame(
         // Debug seam: record the scene into a fresh one-shot command buffer
         // instead of the frame's, to isolate command-buffer context effects.
         let device = state.window_renderer.device();
-        let pool = moonfield_render::CommandPool::new(device, device.queue_family_indices().graphics)
-            .map_err(|e| e.to_string())?;
+        let pool =
+            moonfield_render::CommandPool::new(device, device.queue_family_indices().graphics)
+                .map_err(|e| e.to_string())?;
         let mut cmd = pool.allocate_command_buffer().map_err(|e| e.to_string())?;
         cmd.begin(vk::CommandBufferUsageFlags::ONE_TIME_SUBMIT)
             .map_err(|e| e.to_string())?;

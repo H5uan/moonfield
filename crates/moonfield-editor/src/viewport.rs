@@ -429,8 +429,8 @@ mod tests {
 
         // Replicate the editor's command stream: a second render pass (the
         // egui UI pass) follows the scene pass in the same command buffer.
-        let ui_target = OffscreenTarget::new(&device, 64, 64, Format::B8G8R8A8Unorm)
-            .expect("ui target");
+        let ui_target =
+            OffscreenTarget::new(&device, 64, 64, Format::B8G8R8A8Unorm).expect("ui target");
         let ui_begin = vk::RenderPassBeginInfo::default()
             .render_pass(ui_target.render_pass().raw())
             .framebuffer(ui_target.framebuffer().raw())

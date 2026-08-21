@@ -10,7 +10,9 @@
 
 use ash::vk;
 use moonfield_editor::egui_vk::{EguiRenderer, RendererOptions};
-use moonfield_render::{Buffer, BufferUsage, CommandPool, Device, Format, Instance, OffscreenTarget};
+use moonfield_render::{
+    Buffer, BufferUsage, CommandPool, Device, Format, Instance, OffscreenTarget,
+};
 
 const WIDTH: u32 = 256;
 const HEIGHT: u32 = 256;
@@ -66,7 +68,9 @@ fn egui_headless_frame_is_not_blank() {
     // viewport-resize flow.
     for frame in 0..2 {
         if frame == 1 {
-            user_image.resize(&device, 16, 16).expect("resize user image");
+            user_image
+                .resize(&device, 16, 16)
+                .expect("resize user image");
             renderer
                 .update_native_texture(
                     &device,
@@ -103,7 +107,9 @@ fn egui_headless_frame_is_not_blank() {
             .update_buffers(&device, 0, &primitives, [WIDTH as f32, HEIGHT as f32])
             .expect("buffer upload");
 
-        let mut command_buffer = command_pool.allocate_command_buffer().expect("command buffer");
+        let mut command_buffer = command_pool
+            .allocate_command_buffer()
+            .expect("command buffer");
         command_buffer
             .begin(vk::CommandBufferUsageFlags::ONE_TIME_SUBMIT)
             .expect("begin");
@@ -214,7 +220,9 @@ fn read_back(device: &Device, command_pool: &CommandPool, target: &OffscreenTarg
         gpu_allocator::MemoryLocation::GpuToCpu,
     )
     .expect("readback buffer");
-    let mut command_buffer = command_pool.allocate_command_buffer().expect("command buffer");
+    let mut command_buffer = command_pool
+        .allocate_command_buffer()
+        .expect("command buffer");
     command_buffer
         .begin(vk::CommandBufferUsageFlags::ONE_TIME_SUBMIT)
         .expect("begin");
