@@ -414,6 +414,11 @@ impl World2 {
         self.entities.contains(entity)
     }
 
+    /// Iterate over all currently live entities.
+    pub fn iter_entities(&self) -> impl Iterator<Item = Entity> + '_ {
+        self.entities.iter()
+    }
+
     pub fn reserve<T: Bundle + 'static>(&mut self, additional: u32) {
         self.reserve_inner::<T>(additional);
     }
@@ -932,5 +937,36 @@ impl World2 {
 
         self.fire_hook(HookKind::Remove, TypeId::of::<T>(), entity);
         Some(value)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_iter_entities_reflects_spawn_and_despawn() {
+        let mut world = World2::new();
+        let a = world.spawn_empty();
+        let b = world.spawn_empty();
+        let c = world.spawn_empty();
+
+        world.despawn(b).unwrap();
+        // Reuses b's freed id with a bumped generation.
+        let d = world.spawn_empty();
+
+        let live: Vec<Entity> = world.iter_entities().collect();
+        assert_eq!(live.len(), 3);
+        assert!(live.contains(&a));
+        assert!(live.contains(&c));
+        assert!(live.contains(&d));
+        assert!(!live.contains(&b));
+        assert!(world.iter_entities().all(|e| world.contains(e)));
+    }
+
+    #[test]
+    fn test_iter_entities_empty_world() {
+        let world = World2::new();
+        assert_eq!(world.iter_entities().count(), 0);
     }
 }

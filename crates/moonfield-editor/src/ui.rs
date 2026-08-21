@@ -6,6 +6,7 @@
 
 use egui_dock::{DockArea, DockState, NodeIndex, TabViewer};
 use moonfield_ecs::{ChildOf, Children, Entity, Name, RelationshipTarget, World};
+use moonfield_scene::SceneRegistry;
 
 /// Editor panel tabs.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -23,6 +24,8 @@ pub struct TabContext<'w> {
     pub selection: &'w mut Option<Entity>,
     /// Hierarchy panel's PLY-load field state.
     pub load_state: &'w mut LoadSplatState,
+    /// Hierarchy panel's scene Save/Load field state.
+    pub scene_state: &'w mut SceneIoState,
     /// The viewport scene texture, once registered with the egui renderer.
     pub viewport_texture: Option<egui::TextureId>,
     /// The viewport panel size in points, reported back to the runner so it
@@ -41,6 +44,20 @@ pub struct LoadSplatState {
     /// The PLY path to load.
     pub path: String,
     /// Status of the last load attempt.
+    pub message: Option<String>,
+}
+
+/// Hierarchy panel state for scene save/load: a `.gltf` path field and the
+/// last operation's status message (error or success).
+///
+/// Save/load go through the world's `SceneRegistry` resource via
+/// moonfield-scene's file APIs, synchronously on the UI thread (same known
+/// debt as the PLY loader).
+#[derive(Default)]
+pub struct SceneIoState {
+    /// The scene path to save to / load from.
+    pub path: String,
+    /// Status of the last save/load attempt.
     pub message: Option<String>,
 }
 
@@ -83,6 +100,7 @@ impl TabViewer for EditorTabViewer<'_, '_> {
                 self.context.world,
                 self.context.selection,
                 self.context.load_state,
+                self.context.scene_state,
             ),
             Tab::Inspector => inspector_panel(ui, self.context.world, self.context.selection),
             Tab::Viewport => viewport_panel(ui, self.context),
@@ -149,6 +167,7 @@ fn hierarchy_panel(
     world: &mut World,
     selection: &mut Option<Entity>,
     load_state: &mut LoadSplatState,
+    scene_state: &mut SceneIoState,
 ) {
     // Splat loading: type/paste a PLY path, load it synchronously into the
     // world (asset store + entity with SplatCloudHandle).
@@ -171,6 +190,53 @@ fn hierarchy_panel(
         }
     });
     if let Some(message) = &load_state.message {
+        ui.small(message);
+    }
+
+    // Scene save/load: the world's registered entities ⇄ a .gltf document
+    // via moonfield-scene, using the SceneRegistry resource.
+    ui.horizontal(|ui| {
+        ui.label("Scene:");
+        ui.add(
+            egui::TextEdit::singleline(&mut scene_state.path)
+                .hint_text("scene.gltf")
+                .desired_width(f32::INFINITY),
+        );
+        let path_is_empty = scene_state.path.trim().is_empty();
+        if ui.button("Save").clicked() && !path_is_empty {
+            let path = std::path::PathBuf::from(scene_state.path.trim());
+            scene_state.message = Some(match world.get_resource::<SceneRegistry>() {
+                Some(registry) => {
+                    match moonfield_scene::save_scene_to_file(world, &registry, &path) {
+                        Ok(()) => format!("Saved {}", path.display()),
+                        Err(e) => format!("Save failed: {e}"),
+                    }
+                }
+                None => "Save failed: SceneRegistry resource missing".to_string(),
+            });
+        }
+        if ui.button("Load").clicked() && !path_is_empty {
+            let path = std::path::PathBuf::from(scene_state.path.trim());
+            // `load_scene_from_file` needs `&mut World` while the registry
+            // lives inside the world's resource storage: take the registry
+            // out, use it, and put it back (also on the error path).
+            scene_state.message = Some(match world.remove_resource::<SceneRegistry>() {
+                Some(registry) => {
+                    let result = moonfield_scene::load_scene_from_file(world, &registry, &path);
+                    world.insert_resource(registry);
+                    match result {
+                        Ok(roots) => {
+                            *selection = roots.first().copied();
+                            format!("Loaded {} ({} roots)", path.display(), roots.len())
+                        }
+                        Err(e) => format!("Load failed: {e}"),
+                    }
+                }
+                None => "Load failed: SceneRegistry resource missing".to_string(),
+            });
+        }
+    });
+    if let Some(message) = &scene_state.message {
         ui.small(message);
     }
     ui.separator();

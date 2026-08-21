@@ -4,9 +4,10 @@
 //!
 //! Deliberately tiny (Bevy's `bevy_asset` shape, minus the machinery):
 //!
-//! - **Synchronous only.** The caller loads bytes and inserts the asset
-//!   ([`Assets::add`]) itself; there is no `AssetServer`, no task pool, no
-//!   async. Those are roadmap known-debts.
+//! - **Synchronous only.** [`AssetServer`] (in [`server`]) dispatches loads
+//!   to registered [`AssetLoader`]s by file extension and caches by path,
+//!   but everything happens on the calling thread; there is no task pool,
+//!   no async, no hot reload. Those are roadmap known-debts.
 //! - **Handles are plain ids** (index + generation), not reference counted.
 //!   [`Assets::remove`] invalidates a handle by bumping the slot's
 //!   generation; a stale handle simply resolves to `None`
@@ -18,6 +19,10 @@
 
 use std::fmt;
 use std::marker::PhantomData;
+
+pub mod server;
+
+pub use server::{AssetError, AssetLoader, AssetServer};
 
 /// Index + generation identifier of an asset inside an [`Assets<T>`] store.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord)]
@@ -37,7 +42,9 @@ pub struct Handle<T: 'static> {
 }
 
 impl<T: 'static> Handle<T> {
-    fn new(id: AssetId) -> Self {
+    /// Rebuild a handle from a raw [`AssetId`]. Used by
+    /// [`server::AssetServer`] to serve cache hits.
+    pub(crate) fn from_id(id: AssetId) -> Self {
         Self {
             id,
             marker: PhantomData,
@@ -117,7 +124,7 @@ impl<T: 'static> Assets<T> {
             debug_assert!(slot.asset.is_none());
             slot.asset = Some(asset);
             self.len += 1;
-            Handle::new(AssetId {
+            Handle::from_id(AssetId {
                 index,
                 generation: slot.generation,
             })
@@ -128,7 +135,7 @@ impl<T: 'static> Assets<T> {
                 asset: Some(asset),
             });
             self.len += 1;
-            Handle::new(AssetId {
+            Handle::from_id(AssetId {
                 index,
                 generation: 0,
             })
@@ -179,7 +186,7 @@ impl<T: 'static> Assets<T> {
         self.slots.iter().enumerate().filter_map(|(index, slot)| {
             slot.asset.as_ref().map(|asset| {
                 (
-                    Handle::new(AssetId {
+                    Handle::from_id(AssetId {
                         index: index as u32,
                         generation: slot.generation,
                     }),

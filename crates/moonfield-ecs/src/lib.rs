@@ -54,6 +54,7 @@ mod relationship;
 mod resource;
 mod schedule;
 mod system;
+mod template;
 mod world2;
 
 pub use bundle::{Bundle, DynamicBundle};
@@ -77,6 +78,7 @@ pub use system::{
     IntoSystem, Local, Query, Res, ResMut, System, SystemParam, SystemParamFunction,
     SystemParamItem,
 };
+pub use template::{Template, TemplateContext, TemplateError};
 pub use world2::World2 as World;
 
 /// Common ECS imports.
@@ -85,7 +87,8 @@ pub mod prelude {
         ChildOf, Children, Commands, Component, ComponentHooks, Entity, EntityCommands, IntoSystem,
         IntoSystemConfigs, Local, Message, MessageCursor, MessageId, MessageReader, MessageWriter,
         Messages, Name, Or, Query, QueryFilter, Relationship, RelationshipTarget, Res, ResMut,
-        Resource, Schedule, ScheduleLabel, System, With, Without, World, WorldQuery,
+        Resource, Schedule, ScheduleLabel, System, Template, TemplateContext, TemplateError, With,
+        Without, World, WorldQuery,
     };
 }
 
