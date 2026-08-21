@@ -153,7 +153,12 @@ fn egui_headless_frame_is_not_blank() {
 
     // Read back the second frame and verify.
     let pixels = read_back(&device, &command_pool, &target);
-    let non_clear = pixels.chunks_exact(4).filter(|px| *px != CLEAR).count();
+    let non_clear = pixels
+        .as_chunks::<4>()
+        .0
+        .iter()
+        .filter(|px| **px != CLEAR)
+        .count();
     assert!(
         non_clear > 0,
         "egui frame read back as uniform clear color — nothing was drawn"
@@ -161,7 +166,9 @@ fn egui_headless_frame_is_not_blank() {
     // The user-texture image is opaque red; the `ui.image` quad must show up
     // as red pixels (BGRA byte order) after the resize + rebind.
     let red = pixels
-        .chunks_exact(4)
+        .as_chunks::<4>()
+        .0
+        .iter()
         .filter(|px| px[2] > 200 && px[0] < 60 && px[1] < 60 && px[3] == 255)
         .count();
     assert!(

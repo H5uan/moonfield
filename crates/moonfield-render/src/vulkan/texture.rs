@@ -1,5 +1,7 @@
 use ash::vk;
 
+/// Owned image + view + sampler for bindless texture usage.
+#[allow(dead_code)] // integration point for the bindless texture heap
 pub struct Texture {
     device: ash::Device,
     image: vk::Image,

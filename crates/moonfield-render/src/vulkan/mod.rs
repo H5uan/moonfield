@@ -18,8 +18,8 @@ pub mod shader;
 pub mod shader_module;
 pub mod swapchain;
 pub mod sync;
-pub mod window_target;
 pub mod texture;
+pub mod window_target;
 
 pub use buffer::Buffer;
 pub use command::{CommandBuffer, CommandPool};

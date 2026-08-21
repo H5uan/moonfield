@@ -238,7 +238,9 @@ float4 main(PsInput input) : SV_TARGET
     let mut pixels = vec![0u8; (SIZE * SIZE * 4) as usize];
     readback.read(&mut pixels).expect("readback");
     let red = pixels
-        .chunks_exact(4)
+        .as_chunks::<4>()
+        .0
+        .iter()
         .filter(|px| px[2] > 200 && px[0] < 60 && px[1] < 60 && px[3] == 255)
         .count();
     assert!(red > 100, "triangle did not rasterize: {red} red pixels");

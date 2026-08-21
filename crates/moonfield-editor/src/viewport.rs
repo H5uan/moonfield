@@ -542,7 +542,12 @@ mod tests {
                 && (r - (clear[0] * 255.0).round() as i32).abs() <= 1
                 && a == 255
         };
-        let non_clear = pixels.chunks_exact(4).filter(|px| !is_clear(px)).count();
+        let non_clear = pixels
+            .as_chunks::<4>()
+            .0
+            .iter()
+            .filter(|px| !is_clear(px.as_slice()))
+            .count();
         assert!(
             non_clear > 1000,
             "cube did not rasterize: only {non_clear} non-clear pixels"
