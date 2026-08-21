@@ -65,7 +65,13 @@ pub struct PrimaryCamera;
 /// The mesh is the scene renderer's shared cube until the asset system
 /// (roadmap milestone 8) provides real mesh handles; the flat color stands in
 /// for a material.
-#[derive(Debug, Clone, Copy, PartialEq, moonfield_reflect::Reflect)]
+///
+/// Serde support exists so `moonfield-scene` can carry the component through
+/// the glTF `extras` channel; `Transform`/`Camera` deliberately have no
+/// derives — they map onto native glTF node/camera fields instead.
+#[derive(
+    Debug, Clone, Copy, PartialEq, moonfield_reflect::Reflect, serde::Serialize, serde::Deserialize,
+)]
 pub struct MeshRenderer {
     /// The cube's flat color, linear RGBA.
     pub color: [f32; 4],
@@ -85,6 +91,14 @@ mod tests {
 
     fn assert_vec3_close(a: Vec3, b: Vec3) {
         assert!((a - b).length() < 1e-4, "{a} != {b}");
+    }
+
+    #[test]
+    fn test_mesh_renderer_serde_roundtrip() {
+        let renderer = MeshRenderer::colored([1.0, 0.5, 0.25, 1.0]);
+        let json = serde_json::to_string(&renderer).unwrap();
+        let parsed: MeshRenderer = serde_json::from_str(&json).unwrap();
+        assert_eq!(parsed, renderer);
     }
 
     #[test]

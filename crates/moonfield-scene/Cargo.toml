@@ -1,0 +1,14 @@
+[package]
+name = "moonfield-scene"
+version.workspace = true
+edition.workspace = true
+
+[dependencies]
+moonfield-asset = { workspace = true }
+moonfield-ecs = { workspace = true }
+moonfield-math = { workspace = true }
+moonfield-render = { workspace = true }
+gltf-json = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+thiserror.workspace = true

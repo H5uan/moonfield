@@ -250,6 +250,23 @@ impl Entities {
         self.len
     }
 
+    /// Iterate over all currently live entities.
+    ///
+    /// Freed IDs and reserved-but-not-yet-flushed IDs are skipped, so the
+    /// iterator reflects exactly the spawn/despawn history applied so far.
+    pub fn iter(&self) -> impl Iterator<Item = Entity> + '_ {
+        self.meta.iter().enumerate().filter_map(|(id, meta)| {
+            if meta.location.index == u32::MAX {
+                None
+            } else {
+                Some(Entity {
+                    generation: meta.generation,
+                    id: id as u32,
+                })
+            }
+        })
+    }
+
     pub fn freelist(&self) -> impl ExactSizeIterator<Item = Entity> + '_ {
         let free = self.free_cursor.load(Ordering::Relaxed);
         let ids = match usize::try_from(free) {

@@ -226,18 +226,78 @@ is a slot-map store held as one world resource per asset type
 (add/get/get_mut/remove/iter; freed slots are reused with a bumped generation
 so stale handles resolve to `None`), and `Handle<T>` is an index+generation
 handle that is `Copy` regardless of `T` and a component/resource through the
-blanket impls. Loading is synchronous by the caller; there is no async
-`AssetServer` or task pool yet.
+blanket impls.
+
+On top of the stores sits `AssetServer`, also a world resource: an
+extension-dispatching, path-caching loader. `AssetLoader` implementors declare
+the extensions they handle and return the payload type-erased (`Send + Sync`,
+because the blanket `Resource` impl requires it); `AssetServer::load` picks a
+loader by the path's extension, downcasts the payload to the requested `T`,
+and inserts it into the caller's `Assets<T>`. The cache keys on `(TypeId,
+PathBuf)`, so a path loads at most once per asset type and the same file as
+two types stays distinct; a cached id that no longer resolves (the asset was
+removed) triggers a reload. Loading happens on the calling thread — there is
+no task pool, no async, no hot reload.
 
 `SplatCloud` is the first real asset: plain data in
 `moonfield-renderer::splat::cloud` (wraps the Gaussian scene plus source path
 and a precomputed AABB; the crate stays ECS-free, so `SplatCloudHandle` is a
 plain newtype that is a component through the blanket impl). The editor's
-Hierarchy panel loads PLY files through a path field + Load button, and the
-loaded entity appears in the tree named after the file. Viewport rendering of
-splats is a placeholder — the cloud's AABB drawn as a fixed-color box through
-the existing cube pipeline — until real splat rasterization lands.
-Training/optimizer state stays outside the `World`.
+Hierarchy panel loads PLY files through a path field + Load button routed
+through the `AssetServer` (loading the same file twice reuses the asset
+slot), and the loaded entity appears in the tree named after the file.
+Viewport rendering of splats is a placeholder — the cloud's AABB drawn as a
+fixed-color box through the existing cube pipeline — until real splat
+rasterization lands. Training/optimizer state stays outside the `World`.
+
+## Scenes and templates
+
+Scene save/load is a synchronous miniature of the reference implementation's
+0.20 template pipeline, split across `moonfield-ecs` and `moonfield-scene`;
+there is no runtime reflection anywhere in it. `moonfield-ecs` holds the
+typed half: a `Template` is plain data that builds its `Output` inside a
+`TemplateContext { world: &mut World }`, and every `Clone` type is its own
+template (building clones). `moonfield-scene` adds `HandleTemplate<T>` — a
+path to load through the `AssetServer`, or an already-resolved handle — and
+the two-phase scene form: a `ResolvedScene` bundles one entity's type-erased
+templates (`SceneTemplate`, blanket-implemented for every `Template` with
+`Component` output) plus its children's resolved scenes, and `apply` spawns
+the subtree, linking children with `ChildOf` (the world must have called
+`register_hierarchy`). Building is immediate, on the calling thread; there is
+no async queue.
+
+The text carrier is glTF 2.0 JSON (`.gltf`, via `gltf-json`), written and
+read by `save_scene`/`load_scene` (plus `_to_file`/`_from_file` helpers). The
+node tree carries the hierarchy, node TRS fields carry `Transform` (glTF is
+Y-up right-handed like the engine, so values cross verbatim), and perspective
+cameras ride the root `cameras` array. Which components participate is
+decided by a `SceneRegistry` world resource under stable short names
+(`"transform"`, `"mesh_renderer"`, `"splat_cloud"` — never a Rust type path,
+so renames don't break files). Entries come in two kinds: native mappings
+(transform, camera, hierarchy) that read and write node fields directly, and
+extras-channel entries that serialize into `node.extras.components.<name>` —
+generic for `Clone + Serialize + DeserializeOwned` components, custom
+save/load hooks for cases like `Name` (routed to `node.name`) and path-backed
+handles (save resolves the handle to its source path; load builds a
+`HandleTemplate::Path`, so scene load resolves assets through the
+`AssetServer` cache). Savable roots are entities with at least one registered
+component and no `ChildOf`; unregistered components and component-less
+subtrees are skipped, `GlobalTransform` is never registered (propagation
+recomputes it after load), and unknown extras keys skip rather than error, so
+a scene written by a newer registry still loads.
+
+Versus the vendored 0.20-dev source, deliberately skipped: the `bsn!`
+proc-macro DSL, `ScenePatch` caching, `QueuedScenes`/`WaitingScenes`
+(async-only), the `BundleWriter` bump arena, and named entity references; on
+the glTF side only the node/camera scaffold participates — mesh and material
+import is untouched.
+
+The editor wires both halves: `EditorPlugin` inserts `editor_asset_server()`
+(the `.ply` → `SplatCloud` loader) and `editor_scene_registry()` (native
+transform/camera/hierarchy, `Name` on `node.name`, `MeshRenderer` as plain
+extras, `SplatCloudHandle` as a path-backed handle) as world resources, and
+the Hierarchy panel carries a Scene path field with Save/Load buttons
+(`SceneIoState`).
 
 ## Threading model
 

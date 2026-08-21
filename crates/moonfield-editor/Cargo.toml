@@ -12,6 +12,7 @@ moonfield-math = { workspace = true }
 moonfield-reflect = { workspace = true }
 moonfield-render = { workspace = true }
 moonfield-renderer = { workspace = true, features = ["splat"] }
+moonfield-scene = { workspace = true }
 moonfield-window = { workspace = true }
 moonfield-winit = { workspace = true }
 ash = "0.38.0"
@@ -21,3 +22,4 @@ winit = "0.30"
 egui = "0.33"
 egui-winit = { version = "0.33", default-features = false }
 egui_dock = "0.18"
+serde_json = { workspace = true }

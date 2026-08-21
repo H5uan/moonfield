@@ -62,6 +62,10 @@ impl Plugin for EditorPlugin {
         // The splat asset store: PLY files loaded through the editor land
         // here, entities reference them via SplatCloudHandle components.
         app.insert_resource(moonfield_asset::Assets::<SplatCloud>::default());
+        // Synchronous asset loading (PLY → SplatCloud, path-deduped) and the
+        // scene registry behind the hierarchy panel's Save/Load buttons.
+        app.insert_resource(scene_io::editor_asset_server());
+        app.insert_resource(scene_io::editor_scene_registry());
         app.add_systems(Render, editor_render);
     }
 }
@@ -103,6 +107,8 @@ struct EditorState {
     selection: Option<moonfield_ecs::Entity>,
     /// Hierarchy panel state: the PLY load path field and last status.
     load_state: ui::LoadSplatState,
+    /// Hierarchy panel state: the scene Save/Load path field and last status.
+    scene_state: ui::SceneIoState,
     /// Frames rendered, for the MOONFIELD_EDITOR_AUTO_CLOSE debug helper.
     frames_rendered: u64,
 }
@@ -168,6 +174,7 @@ impl EditorState {
             viewport_panel_points: None,
             selection: None,
             load_state: ui::LoadSplatState::default(),
+            scene_state: ui::SceneIoState::default(),
             frames_rendered: 0,
         })
     }
@@ -304,6 +311,7 @@ fn render_frame(world: &mut World, state: &mut EditorState) -> Result<(), String
         world: &mut *world,
         selection: &mut state.selection,
         load_state: &mut state.load_state,
+        scene_state: &mut state.scene_state,
         viewport_texture: state.viewport.texture_id(),
         viewport_size_points: None,
     };
