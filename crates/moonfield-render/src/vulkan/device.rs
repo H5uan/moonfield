@@ -3,7 +3,7 @@
 use crate::bindless;
 use crate::error::{Error, Result};
 use crate::vulkan::instance::Instance;
-use ash::vk;
+use ash::vk::{self, TaggedStructure as _};
 use gpu_allocator::vulkan::{Allocator, AllocatorCreateDesc};
 use std::ffi::{c_char, CStr};
 use std::sync::{Arc, Mutex};
@@ -156,13 +156,13 @@ impl Device {
         let mut features2 =
             vk::PhysicalDeviceFeatures2::default().features(vk::PhysicalDeviceFeatures::default());
         let _ = features2
-            .push_next(&mut vulkan_12_features)
-            .push_next(&mut vulkan_13_features);
+            .push(&mut vulkan_12_features)
+            .push(&mut vulkan_13_features);
 
         let create_info = vk::DeviceCreateInfo::default()
             .queue_create_infos(&queue_create_infos)
             .enabled_extension_names(&device_extension_names)
-            .push_next(&mut features2);
+            .push(&mut features2);
 
         let device = unsafe {
             instance

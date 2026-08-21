@@ -7,6 +7,18 @@ resolver = "2"
 version = "0.1.0"
 edition = "2021"
 
+# ash master (0.38.0+1.4.352, Vulkan-Headers 1.4.352) provides Vulkan 1.4
+# API_VERSION_1_4 / Vulkan14 structures; the published crate tops out at 1.3.281.
+# Version stays 0.38.x so the patch satisfies every `ash = "0.38"` requirement
+# in the graph, including ash-window 0.13, without touching per-crate manifests.
+# ash master replaced extension `Instance::new` with `load` and renamed the pNext
+# builder method push_next -> push; ash-window (same repo) and gpu-allocator
+# (ash-next branch) are patched from sources already migrated to that API.
+[patch.crates-io]
+ash = { git = "https://github.com/ash-rs/ash", rev = "f4c2ca3e4f6b998d5254ad101a32f024d87cdec2" }
+ash-window = { git = "https://github.com/ash-rs/ash", rev = "f4c2ca3e4f6b998d5254ad101a32f024d87cdec2" }
+gpu-allocator = { git = "https://github.com/Traverse-Research/gpu-allocator", rev = "6a68a5b4c233361c07dfa8865043a16ade7512db" }
+
 [workspace.dependencies]
 moonfield-app = { path = "crates/moonfield-app" }
 moonfield-asset = { path = "crates/moonfield-asset" }

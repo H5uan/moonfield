@@ -25,18 +25,16 @@ impl Surface {
         display_handle: DisplayHandle,
     ) -> Result<Self> {
         let ash_instance = instance.raw();
-        let surface = ash_window::create_surface(
-            entry,
-            ash_instance,
-            display_handle.as_raw(),
-            window_handle.as_raw(),
-            None,
-        )
-        .map_err(|e| Error::Backend(format!("failed to create surface: {:?}", e)))?;
+        let surface_factory =
+            ash_window::SurfaceFactory::new(entry, ash_instance, display_handle.as_raw()).map_err(
+                |e| Error::Backend(format!("failed to load surface extension: {:?}", e)),
+            )?;
+        let surface = unsafe { surface_factory.create_surface(window_handle.as_raw(), None) }
+            .map_err(|e| Error::Backend(format!("failed to create surface: {:?}", e)))?;
 
         Ok(Self {
             surface,
-            surface_instance: ash::khr::surface::Instance::new(entry, ash_instance),
+            surface_instance: ash::khr::surface::Instance::load(entry, ash_instance),
         })
     }
 
@@ -211,7 +209,7 @@ impl Swapchain {
             .present_mode(present_mode)
             .clipped(true);
 
-        let loader = ash::khr::swapchain::Device::new(instance.raw(), device.raw());
+        let loader = ash::khr::swapchain::Device::load(instance.raw(), device.raw());
         let swapchain = unsafe { loader.create_swapchain(&create_info, None) }
             .map_err(|e| Error::Backend(format!("failed to create swapchain: {:?}", e)))?;
 

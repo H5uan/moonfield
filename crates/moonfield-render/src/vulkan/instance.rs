@@ -29,7 +29,7 @@ impl Instance {
             .application_version(vk::make_api_version(0, 0, 1, 0))
             .engine_name(&engine_name)
             .engine_version(vk::make_api_version(0, 0, 1, 0))
-            .api_version(vk::API_VERSION_1_3);
+            .api_version(vk::API_VERSION_1_4);
 
         let extensions: Vec<*const c_char> =
             required_extensions.iter().map(|ext| ext.as_ptr()).collect();
@@ -57,7 +57,7 @@ impl Instance {
         let instance = unsafe { entry.create_instance(&create_info, None) }
             .map_err(|e| Error::Backend(format!("failed to create Vulkan instance: {:?}", e)))?;
 
-        let surface_instance = ash::khr::surface::Instance::new(&entry, &instance);
+        let surface_instance = ash::khr::surface::Instance::load(&entry, &instance);
 
         Ok(Self {
             entry,

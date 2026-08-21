@@ -2,7 +2,7 @@
 
 use crate::error::{Error, Result};
 use crate::vulkan::device::Device;
-use ash::vk;
+use ash::vk::{self, TaggedStructure as _};
 
 /// A Vulkan semaphore.
 pub struct Semaphore {
@@ -36,7 +36,7 @@ impl Semaphore {
         let mut type_info = vk::SemaphoreTypeCreateInfo::default()
             .semaphore_type(vk::SemaphoreType::TIMELINE)
             .initial_value(initial_value);
-        let create_info = vk::SemaphoreCreateInfo::default().push_next(&mut type_info);
+        let create_info = vk::SemaphoreCreateInfo::default().push(&mut type_info);
         let semaphore = unsafe {
             device
                 .raw()
