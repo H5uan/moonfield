@@ -19,7 +19,7 @@ ash = "0.38.0"
 bytemuck = { workspace = true }
 gpu-allocator = "0.28.0"
 winit = "0.30"
-egui = "0.33"
-egui-winit = { version = "0.33", default-features = false }
-egui_dock = "0.18"
+egui = "0.36.1"
+egui-winit = { version = "0.36.1", default-features = false }
+egui_dock = "0.21.1"
 serde_json = { workspace = true }

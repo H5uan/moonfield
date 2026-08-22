@@ -9,7 +9,7 @@ use moonfield_ecs::{ChildOf, Children, Entity, Name, RelationshipTarget, World};
 use moonfield_scene::SceneRegistry;
 
 /// Editor panel tabs.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum Tab {
     Hierarchy,
     Inspector,
@@ -72,10 +72,17 @@ pub fn initial_dock_state() -> DockState<Tab> {
 }
 
 /// Render the dock area covering the whole window.
-pub fn show(ctx: &egui::Context, dock_state: &mut DockState<Tab>, context: &mut TabContext) {
-    DockArea::new(dock_state)
-        .style(egui_dock::Style::from_egui(ctx.style().as_ref()))
-        .show(ctx, &mut EditorTabViewer { context });
+///
+/// egui_dock 0.21 dropped `DockArea::show(ctx, …)`; the 0.18 equivalent was
+/// a transparent, margin-less `CentralPanel` around `show_inside`, mirrored
+/// here (`Frame::NONE` is transparent and margin-less). `show_inside`
+/// derives the dock style from the egui style when none is set.
+pub fn show(ui: &mut egui::Ui, dock_state: &mut DockState<Tab>, context: &mut TabContext) {
+    egui::CentralPanel::default()
+        .frame(egui::Frame::NONE)
+        .show(ui, |ui| {
+            DockArea::new(dock_state).show_inside(ui, &mut EditorTabViewer { context });
+        });
 }
 
 struct EditorTabViewer<'a, 'w> {
@@ -84,6 +91,10 @@ struct EditorTabViewer<'a, 'w> {
 
 impl TabViewer for EditorTabViewer<'_, '_> {
     type Tab = Tab;
+
+    fn id(&mut self, tab: &mut Self::Tab) -> egui::Id {
+        egui::Id::new(*tab)
+    }
 
     fn title(&mut self, tab: &mut Self::Tab) -> egui::WidgetText {
         match tab {

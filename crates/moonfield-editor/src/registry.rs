@@ -230,11 +230,12 @@ mod tests {
     fn test_reflect_ui_runs_headless() {
         let mut transform = Transform::from_xyz(1.0, 0.0, 0.0);
         let ctx = egui::Context::default();
-        let _ = ctx.run(egui::RawInput::default(), |ctx| {
-            egui::CentralPanel::default().show(ctx, |ui| {
-                reflect_ui(ui, &mut transform);
-            });
-        });
+        // The output's texture deltas are irrelevant here; epaint 0.36
+        // debug-asserts that a dropped `TexturesDelta` was fully applied.
+        ctx.run_ui(egui::RawInput::default(), |ui| {
+            reflect_ui(ui, &mut transform);
+        })
+        .drop_without_applying_deltas();
         assert_eq!(transform.translation, Vec3::new(1.0, 0.0, 0.0));
     }
 }

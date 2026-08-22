@@ -33,11 +33,11 @@ moonfield-window/   # Abstract windowing types (Window components, KeyCode/Mouse
 moonfield-winit/    # Windowing backend (winit): bridges winit Window to moonfield-window components
 ```
 
-The egui stack is anchored to egui_dock's compatibility table (egui 0.33 /
-egui-winit 0.33 / egui_dock 0.18, ash 0.38, winit 0.30) — **bump them
+The egui stack is anchored to egui_dock's compatibility table (egui 0.36 /
+egui-winit 0.36 / egui_dock 0.21, ash 0.38, winit 0.30) — **bump them
 together**. The egui→Vulkan backend is in-house
 (`crates/moonfield-editor/src/egui_vk.rs`); its feature spec is egui-wgpu
-0.33.
+0.36.
 
 ## Commands
 

@@ -354,12 +354,12 @@ fn render_frame(world: &mut World, state: &mut EditorState) -> Result<(), String
         viewport_texture: state.viewport.texture_id(),
         viewport_size_points: None,
     };
-    let full_output = egui_ctx.run(raw_input, |ctx| {
-        ui::show(ctx, &mut state.dock_state, &mut tab_context);
+    let full_output = egui_ctx.run_ui(raw_input, |ui| {
+        ui::show(ui, &mut state.dock_state, &mut tab_context);
     });
     let egui::FullOutput {
         platform_output,
-        textures_delta,
+        mut textures_delta,
         shapes,
         pixels_per_point,
         ..
@@ -386,7 +386,7 @@ fn render_frame(world: &mut World, state: &mut EditorState) -> Result<(), String
         state,
         &egui_ctx,
         shapes,
-        &textures_delta,
+        &mut textures_delta,
         pixels_per_point,
     );
     finish_frame(state, result)?;
@@ -405,9 +405,11 @@ fn render_frame(world: &mut World, state: &mut EditorState) -> Result<(), String
     }
 
     // Queue this frame's texture frees; they become safe to destroy once the
-    // fence for this frame slot passes again.
+    // fence for this frame slot passes again. Draining `free` empties the
+    // delta: epaint 0.36 debug-asserts that a dropped `TexturesDelta` was
+    // fully applied.
     let ring_index = state.frame_counter % state.free_ring.len();
-    state.free_ring[ring_index].extend(textures_delta.free.iter().copied());
+    state.free_ring[ring_index].extend(textures_delta.free.drain());
     state.frame_counter += 1;
     Ok(())
 }
@@ -419,7 +421,7 @@ fn record_frame(
     state: &mut EditorState,
     egui_ctx: &egui::Context,
     shapes: Vec<egui::epaint::ClippedShape>,
-    textures_delta: &egui::TexturesDelta,
+    textures_delta: &mut egui::TexturesDelta,
     pixels_per_point: f32,
 ) -> Result<(), String> {
     // The fence for this frame slot just passed: textures freed by egui two
@@ -428,11 +430,16 @@ fn record_frame(
     let pending = std::mem::take(&mut state.free_ring[ring_index]);
     state.egui_renderer.free_textures(&pending);
 
-    // Upload egui-managed textures (fonts, …) before recording.
-    for (id, delta) in &textures_delta.set {
-        state
-            .egui_renderer
-            .update_texture(state.window_renderer.device(), *id, delta)?;
+    // Upload egui-managed textures (fonts, …) before recording. Each texture
+    // can carry several deltas in one frame (epaint 0.36: partial updates
+    // arrive as a list per texture); draining marks the delta as applied
+    // (egui-wgpu parity).
+    for (id, deltas) in textures_delta.set.drain() {
+        for delta in deltas {
+            state
+                .egui_renderer
+                .update_texture(state.window_renderer.device(), id, &delta)?;
+        }
     }
 
     // Upload this frame's mesh data into the current slot's buffers.
