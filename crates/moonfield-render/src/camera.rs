@@ -7,14 +7,15 @@
 //! Projection construction is a camera concern, so it lives in the render
 //! crate (mirroring `bevy_render::camera`), not in `moonfield-math`.
 
-use moonfield_math::Mat4;
+use moonfield_math::{camera, Mat4};
 
 /// Right-handed **reverse infinite-Z** perspective projection with moonfield's
 /// single clip convention: the camera looks down -Z, NDC Y points *up*, and
 /// depth is reversed — `near -> 1`, `far -> -infinity` (clipped to 0).
 ///
-/// Built on [`Mat4::perspective_infinite_reverse_rh`]. This is the only
-/// projection matrix Moonfield produces.
+/// Built on [`camera::rh::proj::directx::perspective_infinite_reverse`] (glam's
+/// Y-up, `[0, 1]`-depth variant — the engine convention, not the Vulkan NDC
+/// convention). This is the only projection matrix Moonfield produces.
 ///
 /// # Infinite far plane
 ///
@@ -23,7 +24,7 @@ use moonfield_math::Mat4;
 /// the camera, which is where it matters most.
 #[must_use]
 pub fn perspective_reverse_z(fov_y_radians: f32, aspect: f32, near: f32, _far: f32) -> Mat4 {
-    Mat4::perspective_infinite_reverse_rh(fov_y_radians, aspect, near)
+    camera::rh::proj::directx::perspective_infinite_reverse(fov_y_radians, aspect, near)
 }
 
 #[cfg(test)]

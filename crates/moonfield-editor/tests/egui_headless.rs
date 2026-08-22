@@ -88,20 +88,30 @@ fn egui_headless_frame_is_not_blank() {
             )),
             ..Default::default()
         };
-        let full_output = ctx.run(raw_input, |ctx| {
-            egui::CentralPanel::default().show(ctx, |ui| {
-                ui.heading("egui_vk smoke test");
-                ui.image((user_texture, egui::vec2(64.0, 64.0)));
-            });
+        let full_output = ctx.run_ui(raw_input, |ui| {
+            ui.heading("egui_vk smoke test");
+            ui.image((user_texture, egui::vec2(64.0, 64.0)));
         });
+        let egui::FullOutput {
+            mut textures_delta,
+            shapes,
+            ..
+        } = full_output;
 
-        for (id, delta) in &full_output.textures_delta.set {
-            renderer
-                .update_texture(&device, *id, delta)
-                .expect("texture upload");
+        // Draining marks the delta as applied; epaint 0.36 debug-asserts
+        // that a dropped `TexturesDelta` is empty. The test never defers
+        // frees (each frame is submitted synchronously), so `free` is
+        // discarded here.
+        for (id, deltas) in textures_delta.set.drain() {
+            for delta in deltas {
+                renderer
+                    .update_texture(&device, id, &delta)
+                    .expect("texture upload");
+            }
         }
+        textures_delta.free.clear();
         let pixels_per_point = 1.0;
-        let primitives = ctx.tessellate(full_output.shapes, pixels_per_point);
+        let primitives = ctx.tessellate(shapes, pixels_per_point);
         assert!(!primitives.is_empty(), "egui produced no primitives");
         renderer
             .update_buffers(&device, 0, &primitives, [WIDTH as f32, HEIGHT as f32])
