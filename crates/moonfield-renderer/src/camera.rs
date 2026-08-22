@@ -4,7 +4,7 @@
 //! reverse-Z depth (`far -> 0`). Vulkan-specific viewport adjustments are
 //! applied at the renderer boundary, never in this shared matrix.
 
-use moonfield_math::{Mat4, Vec3};
+use moonfield_math::{camera, Mat4, Vec3};
 
 /// A perspective camera positioned by `position` and oriented by `yaw` /
 /// `pitch` (radians). `yaw = 0, pitch = 0` looks down -Z, positive yaw turns
@@ -36,7 +36,7 @@ impl Camera {
     /// Right-handed view matrix (camera looks down -Z in view space).
     #[must_use]
     pub fn view(&self) -> Mat4 {
-        Mat4::look_at_rh(self.position, self.position + self.forward(), Vec3::Y)
+        camera::rh::view::look_at_mat4(self.position, self.position + self.forward(), Vec3::Y)
     }
 
     /// Perspective projection using moonfield's single convention: reverse-Z,
