@@ -13,10 +13,12 @@
 
 use moonfield_app::prelude::{ChildOf, HierarchyPlugin, Name, Startup, World};
 use moonfield_app::App;
-use moonfield_editor::EditorPlugin;
+use moonfield_asset::Assets;
+use moonfield_editor::{unit_cube_mesh, EditorPlugin};
 use moonfield_log::LogPlugin;
 use moonfield_math::{Transform, Vec3};
-use moonfield_render::{Camera, MeshRenderer, PrimaryCamera, RenderPlugin};
+use moonfield_render::{Camera, PrimaryCamera, RenderPlugin};
+use moonfield_renderer::mesh::{Mesh, MeshHandle, MeshRenderer};
 use moonfield_winit::{WinitPlugin, WinitSettings};
 
 fn main() {
@@ -31,7 +33,8 @@ fn main() {
 }
 
 /// The demo scene: a primary camera and a parent cube carrying a smaller,
-/// offset child cube (exercises hierarchy propagation in the viewport).
+/// offset child cube (exercises hierarchy propagation in the viewport). The
+/// cubes share the built-in unit-cube mesh asset.
 fn spawn_demo_scene(world: &mut World) {
     world.spawn((
         Name::new("Main Camera"),
@@ -40,14 +43,21 @@ fn spawn_demo_scene(world: &mut World) {
         Transform::from_xyz(0.0, 2.5, 6.0).looking_at(Vec3::new(0.0, 0.5, 0.0), Vec3::Y),
     ));
 
+    let cube = MeshHandle(
+        world
+            .get_resource_mut::<Assets<Mesh>>()
+            .expect("EditorPlugin inserts Assets<Mesh>")
+            .add(unit_cube_mesh()),
+    );
+
     let parent = world.spawn((
         Name::new("Parent Cube"),
-        MeshRenderer::colored([0.35, 0.5, 0.9, 1.0]),
+        MeshRenderer::new(cube, [0.35, 0.5, 0.9, 1.0]),
         Transform::from_xyz(-0.75, 0.0, 0.0),
     ));
     world.spawn((
         Name::new("Child Cube"),
-        MeshRenderer::colored([0.9, 0.55, 0.25, 1.0]),
+        MeshRenderer::new(cube, [0.9, 0.55, 0.25, 1.0]),
         Transform {
             translation: Vec3::new(1.5, 1.0, 0.0),
             scale: Vec3::splat(0.5),

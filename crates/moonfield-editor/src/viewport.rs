@@ -5,21 +5,30 @@
 //! single-threaded, no extract layer): the entity with
 //! [`Camera`] + [`PrimaryCamera`] + `GlobalTransform` provides view and
 //! projection (aspect follows the offscreen target's extent), and every
-//! entity with [`MeshRenderer`] + `GlobalTransform` is drawn as a colored
-//! unit cube. Per-cube transform and color go through push constants — no
-//! descriptor management.
+//! entity with [`MeshRenderer`] + `GlobalTransform` is drawn with its mesh
+//! from the world's `Assets<Mesh>` resource. Per-draw transform and color go
+//! through push constants — no descriptor management.
 //!
-//! Known slice limitations: no depth attachment on the offscreen target yet
-//! (overlapping cubes don't occlude correctly), and all cubes share one mesh.
+//! Meshes are uploaded to the GPU lazily: the viewport keeps a
+//! `AssetId → GpuMesh` cache and uploads a mesh the first time an entity
+//! references it. Splat entities render as a unit-cube AABB placeholder
+//! until the real 3DGS rasterizer lands (`splat::rasterize` is still a
+//! stub).
+//!
+//! The offscreen target carries a depth attachment (reverse-Z: clear 0.0,
+//! `GREATER_OR_EQUAL`), so overlapping meshes occlude correctly.
+
+use std::collections::HashMap;
 
 use ash::vk;
-use moonfield_asset::Assets;
+use moonfield_asset::{AssetId, Assets};
 use moonfield_math::{Affine3A, GlobalTransform, Mat4, Quat, Vec3};
 use moonfield_render::{
     view_matrix, Buffer, BufferUsage, Camera, CommandBuffer, Compiler, Device, Format,
-    GraphicsPipeline, MeshRenderer, OffscreenTarget, PrimaryCamera, Result, ShaderModule,
-    VertexAttribute, VertexBufferLayout, VertexFormat,
+    GraphicsPipeline, OffscreenTarget, PrimaryCamera, Result, ShaderModule, VertexAttribute,
+    VertexBufferLayout, VertexFormat,
 };
+use moonfield_renderer::mesh::{Mesh, MeshRenderer};
 use moonfield_renderer::splat::cloud::{SplatCloud, SplatCloudHandle};
 
 use crate::egui_vk::EguiRenderer;
@@ -39,12 +48,62 @@ struct ScenePushConstants {
 
 const PUSH_CONSTANT_SIZE: u32 = std::mem::size_of::<ScenePushConstants>() as u32;
 
-/// The viewport scene: an offscreen render target, the cube pipeline, the
-/// shared cube mesh, and the egui texture id pointing at the target.
+/// A mesh uploaded to the GPU: positions + u32 indices.
+struct GpuMesh {
+    vertex: Buffer,
+    index: Buffer,
+    index_count: u32,
+}
+
+/// Upload positions + u32 indices into GPU-side buffers.
+fn upload_geometry(device: &Device, positions: &[[f32; 3]], indices: &[u32]) -> Result<GpuMesh> {
+    let vertex = Buffer::new(
+        device,
+        std::mem::size_of_val(positions) as u64,
+        BufferUsage::VERTEX,
+        gpu_allocator::MemoryLocation::CpuToGpu,
+    )?;
+    vertex.upload(device, positions)?;
+    let index = Buffer::new(
+        device,
+        std::mem::size_of_val(indices) as u64,
+        BufferUsage::INDEX,
+        gpu_allocator::MemoryLocation::CpuToGpu,
+    )?;
+    index.upload(device, indices)?;
+    Ok(GpuMesh {
+        vertex,
+        index,
+        index_count: indices.len() as u32,
+    })
+}
+
+/// Which mesh a draw item renders.
+#[derive(Clone, Copy)]
+enum DrawMesh {
+    /// A mesh from the world's `Assets<Mesh>`, resolved through the
+    /// viewport's GPU cache.
+    Asset(AssetId),
+    /// The viewport's internal unit cube (splat AABB placeholder).
+    UnitCube,
+}
+
+/// One draw in the scene pass: model matrix, flat color, and the mesh.
+struct DrawItem {
+    model: Mat4,
+    color: [f32; 4],
+    mesh: DrawMesh,
+}
+
+/// The viewport scene: a depth-tested offscreen render target, the flat-lit
+/// mesh pipeline, the GPU mesh cache, and the egui texture id pointing at
+/// the target.
 pub struct Viewport {
     pipeline: GraphicsPipeline,
-    vertex_buffer: Buffer,
-    index_buffer: Buffer,
+    /// GPU uploads of world's `Assets<Mesh>` entries, filled on first use.
+    gpu_meshes: HashMap<AssetId, GpuMesh>,
+    /// The unit cube the splat AABB placeholder draws with.
+    unit_cube: GpuMesh,
     target: OffscreenTarget,
     texture_id: Option<egui::TextureId>,
 }
@@ -60,29 +119,21 @@ impl Viewport {
         let vertex_shader = ShaderModule::from_spirv(device, &vertex_spirv)?;
         let fragment_shader = ShaderModule::from_spirv(device, &fragment_spirv)?;
 
-        let target =
-            OffscreenTarget::new(device, INITIAL_WIDTH, INITIAL_HEIGHT, Format::B8G8R8A8Unorm)?;
+        let target = OffscreenTarget::new_with_depth(
+            device,
+            INITIAL_WIDTH,
+            INITIAL_HEIGHT,
+            Format::B8G8R8A8Unorm,
+        )?;
         let pipeline = create_pipeline(device, &target, &vertex_shader, &fragment_shader)?;
 
-        let vertex_buffer = Buffer::new(
-            device,
-            std::mem::size_of_val(CUBE_VERTICES) as u64,
-            BufferUsage::VERTEX,
-            gpu_allocator::MemoryLocation::CpuToGpu,
-        )?;
-        vertex_buffer.upload(device, CUBE_VERTICES)?;
-        let index_buffer = Buffer::new(
-            device,
-            std::mem::size_of_val(CUBE_INDICES) as u64,
-            BufferUsage::INDEX,
-            gpu_allocator::MemoryLocation::CpuToGpu,
-        )?;
-        index_buffer.upload(device, CUBE_INDICES)?;
+        let unit_cube =
+            upload_geometry(device, crate::UNIT_CUBE_VERTICES, crate::UNIT_CUBE_INDICES)?;
 
         Ok(Self {
             pipeline,
-            vertex_buffer,
-            index_buffer,
+            gpu_meshes: HashMap::new(),
+            unit_cube,
             target,
             texture_id: None,
         })
@@ -132,13 +183,19 @@ impl Viewport {
         self.target.resize(device, width, height)
     }
 
-    /// Record the scene pass into the given command buffer: clear to the
-    /// primary camera's clear color, then draw every
-    /// [`MeshRenderer`] + `GlobalTransform` entity as a cube.
+    /// Record the scene pass into the given command buffer: clear color and
+    /// depth, then draw every [`MeshRenderer`] + `GlobalTransform` entity
+    /// with its mesh (uploading meshes not yet in the GPU cache), and every
+    /// [`SplatCloudHandle`] entity as a unit-cube AABB placeholder.
     ///
     /// With no primary camera in the world, the target is cleared to a dim
     /// placeholder color.
-    pub fn record_scene(&self, world: &moonfield_ecs::World, command_buffer: &CommandBuffer) {
+    pub fn record_scene(
+        &mut self,
+        device: &Device,
+        world: &moonfield_ecs::World,
+        command_buffer: &CommandBuffer,
+    ) {
         // The primary camera: first entity with Camera + PrimaryCamera +
         // GlobalTransform. Copy the data out so later queries don't fight
         // the iteration borrows.
@@ -150,11 +207,37 @@ impl Viewport {
             }
         }
 
-        // Collect the draw items up front for the same reason.
-        let mut items: Vec<(Mat4, [f32; 4])> = world
-            .query::<(&MeshRenderer, &GlobalTransform)>()
-            .map(|(_, (mesh, global))| (Mat4::from(global.affine()), mesh.color))
-            .collect();
+        // Collect the draw items up front for the same reason, uploading
+        // meshes the cache has not seen yet.
+        let mut items: Vec<DrawItem> = Vec::new();
+        if let Some(meshes) = world.get_resource::<Assets<Mesh>>() {
+            for (_, (renderer, global)) in world.query::<(&MeshRenderer, &GlobalTransform)>() {
+                let Some(mesh) = meshes.get(&renderer.mesh.0) else {
+                    continue;
+                };
+                if mesh.indices().is_empty() {
+                    continue;
+                }
+                let id = renderer.mesh.0.id();
+                if let std::collections::hash_map::Entry::Vacant(entry) = self.gpu_meshes.entry(id)
+                {
+                    match upload_geometry(device, mesh.positions(), mesh.indices()) {
+                        Ok(gpu) => {
+                            entry.insert(gpu);
+                        }
+                        Err(e) => {
+                            moonfield_log::error!("failed to upload mesh {id:?}: {e}");
+                            continue;
+                        }
+                    }
+                }
+                items.push(DrawItem {
+                    model: Mat4::from(global.affine()),
+                    color: renderer.color,
+                    mesh: DrawMesh::Asset(id),
+                });
+            }
+        }
 
         // Splat entities render as an axis-aligned placeholder box (the
         // cloud's AABB in a fixed green) until the real 3DGS rasterizer
@@ -174,7 +257,11 @@ impl Viewport {
                         Quat::IDENTITY,
                         center,
                     ));
-                items.push((model, [0.3, 0.8, 0.4, 1.0]));
+                items.push(DrawItem {
+                    model,
+                    color: [0.3, 0.8, 0.4, 1.0],
+                    mesh: DrawMesh::UnitCube,
+                });
             }
         }
 
@@ -205,17 +292,29 @@ impl Viewport {
                     camera = camera_pos,
                 );
                 moonfield_log::info!("  view_proj: {:?}", view_proj.to_cols_array());
-                for (model, _) in &items {
-                    moonfield_log::info!("  item mvp: {:?}", (view_proj * model).to_cols_array());
+                for item in &items {
+                    moonfield_log::info!(
+                        "  item mvp: {:?}",
+                        (view_proj * item.model).to_cols_array()
+                    );
                 }
             });
         }
 
-        let clear_values = [vk::ClearValue {
-            color: vk::ClearColorValue {
-                float32: clear_color,
+        // Color first, then depth: reverse-Z clears to 0.0 (near → 1).
+        let clear_values = [
+            vk::ClearValue {
+                color: vk::ClearColorValue {
+                    float32: clear_color,
+                },
             },
-        }];
+            vk::ClearValue {
+                depth_stencil: vk::ClearDepthStencilValue {
+                    depth: 0.0,
+                    stencil: 0,
+                },
+            },
+        ];
         let (width, height) = self.target.extent();
         let begin_info = vk::RenderPassBeginInfo::default()
             .render_pass(self.target.render_pass().raw())
@@ -240,12 +339,16 @@ impl Viewport {
                 max_depth: 1.0,
             });
             command_buffer.bind_graphics_pipeline(self.pipeline.raw());
-            command_buffer.bind_vertex_buffers(0, &[self.vertex_buffer.raw()], &[0]);
-            command_buffer.bind_index_buffer(self.index_buffer.raw(), 0, vk::IndexType::UINT16);
-            for (model, color) in items {
+            for item in &items {
+                let gpu = match item.mesh {
+                    DrawMesh::Asset(id) => &self.gpu_meshes[&id],
+                    DrawMesh::UnitCube => &self.unit_cube,
+                };
+                command_buffer.bind_vertex_buffers(0, &[gpu.vertex.raw()], &[0]);
+                command_buffer.bind_index_buffer(gpu.index.raw(), 0, vk::IndexType::UINT32);
                 let push = ScenePushConstants {
-                    mvp: (view_proj * model).to_cols_array(),
-                    color,
+                    mvp: (view_proj * item.model).to_cols_array(),
+                    color: item.color,
                 };
                 command_buffer.push_constants(
                     self.pipeline.layout(),
@@ -253,7 +356,7 @@ impl Viewport {
                     0,
                     bytemuck::bytes_of(&push),
                 );
-                command_buffer.draw_indexed(CUBE_INDICES.len() as u32, 1, 0, 0, 0);
+                command_buffer.draw_indexed(gpu.index_count, 1, 0, 0, 0);
             }
         }
         command_buffer.end_render_pass();
@@ -289,39 +392,18 @@ fn create_pipeline(
         &push_constants,
         &moonfield_render::PipelineOptions {
             cull_mode: moonfield_render::CullMode::None,
+            depth_test: true,
             ..Default::default()
         },
     )
 }
 
-/// Unit cube (side 1, centered on the origin), positions only. Faces are
-/// wound counter-clockwise seen from outside; with the Y-flip viewport that
-/// matches the pipeline's clockwise-front-face culling.
-const CUBE_VERTICES: &[[f32; 3]] = &[
-    [-0.5, -0.5, -0.5], // 0
-    [0.5, -0.5, -0.5],  // 1
-    [0.5, 0.5, -0.5],   // 2
-    [-0.5, 0.5, -0.5],  // 3
-    [-0.5, -0.5, 0.5],  // 4
-    [0.5, -0.5, 0.5],   // 5
-    [0.5, 0.5, 0.5],    // 6
-    [-0.5, 0.5, 0.5],   // 7
-];
-
-#[rustfmt::skip]
-const CUBE_INDICES: &[u16] = &[
-    0, 3, 2, 2, 1, 0, // -Z face
-    4, 5, 6, 6, 7, 4, // +Z face
-    0, 1, 5, 5, 4, 0, // -Y face
-    2, 3, 7, 7, 6, 2, // +Y face
-    0, 4, 7, 7, 3, 0, // -X face
-    1, 2, 6, 6, 5, 1, // +X face
-];
-
 const VERTEX_SHADER: &str = r#"
 struct PushConstants
 {
-    float4x4 mvp;
+    // Slang packs matrices row-major by default; glam's `to_cols_array` is
+    // column-major, so the layout must be declared explicitly.
+    column_major float4x4 mvp;
     float4 color;
 };
 
@@ -343,7 +425,7 @@ struct VsOutput
 VsOutput main(VsInput input)
 {
     VsOutput output;
-    output.position = float4(input.position.xy * 0.5, 0.0, 1.0); // DEBUG bypass mvp
+    output.position = mul(push.mvp, float4(input.position, 1.0));
     output.local_pos = input.position;
     return output;
 }
@@ -352,7 +434,7 @@ VsOutput main(VsInput input)
 const FRAGMENT_SHADER: &str = r#"
 struct PushConstants
 {
-    float4x4 mvp;
+    column_major float4x4 mvp;
     float4 color;
 };
 
@@ -381,29 +463,30 @@ mod tests {
     use super::*;
     use moonfield_math::Transform;
     use moonfield_render::{CommandPool, Instance};
+    use moonfield_renderer::mesh::MeshHandle;
 
-    /// The scene pass must actually rasterize cubes: render a red cube in
-    /// front of the primary camera and read the target back.
-    #[test]
-    fn test_record_scene_draws_cube() {
+    /// A headless Vulkan device, or `None` (test skips) when no driver is
+    /// available.
+    fn headless_device() -> Option<(Instance, Device)> {
         let instance = match Instance::new_headless() {
             Ok(instance) => instance,
             Err(err) => {
                 eprintln!("skipping: no Vulkan instance available ({err})");
-                return;
+                return None;
             }
         };
-        let device = match Device::new(&instance, None) {
-            Ok(device) => device,
+        match Device::new(&instance, None) {
+            Ok(device) => Some((instance, device)),
             Err(err) => {
                 eprintln!("skipping: no Vulkan device available ({err})");
-                return;
+                None
             }
-        };
+        }
+    }
 
-        let viewport = Viewport::new(&device).expect("viewport");
-
-        // The demo scene's exact poses: camera looking at the cubes.
+    /// The demo scene's camera pose plus one unit-cube entity per
+    /// `(color, transform)`, drawn in slice order.
+    fn cube_world(cubes: &[([f32; 4], Transform)]) -> moonfield_ecs::World {
         let mut world = moonfield_ecs::World::new();
         world.spawn((
             Camera::default(),
@@ -412,25 +495,38 @@ mod tests {
                 Transform::from_xyz(0.0, 2.5, 6.0).looking_at(Vec3::new(0.0, 0.5, 0.0), Vec3::Y),
             ),
         ));
-        world.spawn((
-            MeshRenderer::colored([1.0, 0.0, 0.0, 1.0]),
-            GlobalTransform::from(Transform::from_xyz(-0.75, 0.0, 0.0)),
-        ));
+        let mut meshes = Assets::<Mesh>::default();
+        let cube = MeshHandle(meshes.add(crate::unit_cube_mesh()));
+        world.insert_resource(meshes);
+        for &(color, transform) in cubes {
+            world.spawn((
+                MeshRenderer::new(cube, color),
+                GlobalTransform::from(transform),
+            ));
+        }
+        world
+    }
 
-        let command_pool = CommandPool::new(&device, device.queue_family_indices().graphics)
-            .expect("command pool");
+    /// Record the scene pass and read the target's BGRA pixels back. The
+    /// editor's command stream is replicated: a second render pass (the egui
+    /// UI pass) follows the scene pass in the same command buffer.
+    fn record_and_readback(
+        viewport: &mut Viewport,
+        device: &Device,
+        world: &moonfield_ecs::World,
+    ) -> Vec<u8> {
+        let command_pool =
+            CommandPool::new(device, device.queue_family_indices().graphics).expect("command pool");
         let mut command_buffer = command_pool
             .allocate_command_buffer()
             .expect("command buffer");
         command_buffer
             .begin(vk::CommandBufferUsageFlags::ONE_TIME_SUBMIT)
             .expect("begin");
-        viewport.record_scene(&world, &command_buffer);
+        viewport.record_scene(device, world, &command_buffer);
 
-        // Replicate the editor's command stream: a second render pass (the
-        // egui UI pass) follows the scene pass in the same command buffer.
         let ui_target =
-            OffscreenTarget::new(&device, 64, 64, Format::B8G8R8A8Unorm).expect("ui target");
+            OffscreenTarget::new(device, 64, 64, Format::B8G8R8A8Unorm).expect("ui target");
         let ui_begin = vk::RenderPassBeginInfo::default()
             .render_pass(ui_target.render_pass().raw())
             .framebuffer(ui_target.framebuffer().raw())
@@ -452,7 +548,7 @@ mod tests {
         // Read the target back in the same submission.
         let (width, height) = viewport.extent();
         let readback = Buffer::new(
-            &device,
+            device,
             (width * height * 4) as u64,
             BufferUsage::COPY_DST,
             gpu_allocator::MemoryLocation::GpuToCpu,
@@ -524,6 +620,22 @@ mod tests {
 
         let mut pixels = vec![0u8; (width * height * 4) as usize];
         readback.read(&mut pixels).expect("readback");
+        pixels
+    }
+
+    /// The scene pass must actually rasterize meshes: render a red cube in
+    /// front of the primary camera and read the target back.
+    #[test]
+    fn test_record_scene_draws_cube() {
+        let Some((_instance, device)) = headless_device() else {
+            return;
+        };
+        let mut viewport = Viewport::new(&device).expect("viewport");
+
+        let world = cube_world(&[([1.0, 0.0, 0.0, 1.0], Transform::from_xyz(-0.75, 0.0, 0.0))]);
+        let pixels = record_and_readback(&mut viewport, &device, &world);
+
+        let (width, height) = viewport.extent();
         if std::env::var_os("MOONFIELD_EDITOR_DEBUG_SCENE").is_some() {
             std::fs::create_dir_all("../../target/tmp").unwrap();
             std::fs::write(
@@ -551,6 +663,40 @@ mod tests {
         assert!(
             non_clear > 1000,
             "cube did not rasterize: only {non_clear} non-clear pixels"
+        );
+    }
+
+    /// Depth direction: a near red cube and a far (larger) blue cube overlap
+    /// at screen center; the center pixel must be red even though the blue
+    /// cube is drawn second.
+    #[test]
+    fn test_record_scene_depth_occludes() {
+        let Some((_instance, device)) = headless_device() else {
+            return;
+        };
+        let mut viewport = Viewport::new(&device).expect("viewport");
+
+        let world = cube_world(&[
+            ([1.0, 0.0, 0.0, 1.0], Transform::from_xyz(0.0, 0.5, 2.0)),
+            (
+                [0.0, 0.0, 1.0, 1.0],
+                Transform {
+                    translation: Vec3::new(0.0, 0.5, -3.0),
+                    scale: Vec3::splat(4.0),
+                    ..Transform::IDENTITY
+                },
+            ),
+        ]);
+        let pixels = record_and_readback(&mut viewport, &device, &world);
+
+        let (width, height) = viewport.extent();
+        let center = ((height / 2) * width + width / 2) as usize;
+        let px = &pixels[center * 4..center * 4 + 4];
+        // BGRA: the near red cube wins; the flat shading dims but never
+        // swaps channels (red shade ≥ 0.35 → r ≥ 89).
+        assert!(
+            px[2] > 80 && px[0] < 40 && px[1] < 40,
+            "center pixel must be red (near cube occludes), got BGRA {px:?}"
         );
     }
 }

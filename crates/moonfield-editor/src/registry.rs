@@ -43,7 +43,7 @@ impl InspectorRegistry {
         let mut registry = Self::default();
         registry.register::<moonfield_math::Transform>();
         registry.register::<moonfield_render::Camera>();
-        registry.register::<moonfield_render::MeshRenderer>();
+        registry.register::<moonfield_renderer::mesh::MeshRenderer>();
         registry
     }
 

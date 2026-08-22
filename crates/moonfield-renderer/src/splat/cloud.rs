@@ -4,7 +4,7 @@
 //! The ECS glue is the [`SplatCloudHandle`] component wrapper (a component
 //! through the blanket `Component` impl), and the store is the
 //! `Assets<SplatCloud>` world resource; the caller loads files synchronously
-//! (see [`SplatCloud::from_ply_file`]) and inserts them.
+//! (see [`SplatCloud::from_gltf_file`]) and inserts them.
 //!
 //! Training/optimizer state deliberately stays outside the `World` (see
 //! [`crate::splat::train`]) — the asset is the immutable cloud a scene entity
@@ -14,7 +14,7 @@ use std::path::Path;
 
 use moonfield_asset::Handle;
 
-use crate::splat::io::ply::{parse_ply, PlyError};
+use crate::splat::io::gltf::{load_splat_gltf, SplatGltfError};
 use crate::splat::scene::GaussianScene;
 
 /// Errors loading a [`SplatCloud`] from a file.
@@ -28,11 +28,11 @@ pub enum SplatLoadError {
         /// The file that failed.
         path: std::path::PathBuf,
     },
-    /// The file is not a valid 3DGS PLY.
+    /// The file is not a valid `KHR_gaussian_splatting` glTF.
     #[error("failed to parse `{path}`: {source}")]
-    Ply {
+    Gltf {
         /// The parse error.
-        source: PlyError,
+        source: SplatGltfError,
         /// The file that failed.
         path: std::path::PathBuf,
     },
@@ -45,7 +45,7 @@ pub enum SplatLoadError {
 /// a precomputed axis-aligned bounding box.
 pub struct SplatCloud {
     scene: GaussianScene,
-    /// What the cloud was loaded from (e.g. the PLY path), for display.
+    /// What the cloud was loaded from (e.g. the glTF path), for display.
     source: Option<String>,
     aabb_min: [f32; 3],
     aabb_max: [f32; 3],
@@ -64,23 +64,28 @@ impl SplatCloud {
         }
     }
 
-    /// Parse a 3DGS PLY from memory.
-    pub fn from_ply_bytes(bytes: &[u8], source: Option<String>) -> Result<Self, PlyError> {
-        parse_ply(bytes).map(|scene| Self::new(scene, source))
+    /// Parse a `KHR_gaussian_splatting` glTF/GLB from memory. External buffer
+    /// references are not resolvable here — use [`SplatCloud::from_gltf_file`]
+    /// for files that have them.
+    pub fn from_gltf_bytes(bytes: &[u8], source: Option<String>) -> Result<Self, SplatGltfError> {
+        load_splat_gltf(bytes, None).map(|scene| Self::new(scene, source))
     }
 
-    /// Load and parse a 3DGS PLY file (synchronous).
-    pub fn from_ply_file(path: impl AsRef<Path>) -> Result<Self, SplatLoadError> {
+    /// Load and parse a `KHR_gaussian_splatting` glTF/GLB file (synchronous).
+    pub fn from_gltf_file(path: impl AsRef<Path>) -> Result<Self, SplatLoadError> {
         let path = path.as_ref();
         let bytes = std::fs::read(path).map_err(|e| SplatLoadError::Io {
             source: e,
             path: path.to_path_buf(),
         })?;
         let source = Some(path.display().to_string());
-        Self::from_ply_bytes(&bytes, source).map_err(|e| SplatLoadError::Ply {
-            source: e,
-            path: path.to_path_buf(),
-        })
+        // External buffers resolve relative to the file's directory.
+        load_splat_gltf(&bytes, path.parent())
+            .map(|scene| Self::new(scene, source))
+            .map_err(|e| SplatLoadError::Gltf {
+                source: e,
+                path: path.to_path_buf(),
+            })
     }
 
     /// The underlying Gaussian scene.
@@ -154,11 +159,78 @@ mod tests {
         }
     }
 
+    /// A minimal one-splat GLB (degree-0 SH only) at position [1, 2, 3].
+    fn one_splat_glb() -> Vec<u8> {
+        let f32_bytes = |values: &[f32]| {
+            values
+                .iter()
+                .flat_map(|v| v.to_le_bytes())
+                .collect::<Vec<u8>>()
+        };
+        let mut bin = f32_bytes(&[1.0, 2.0, 3.0]);
+        bin.extend_from_slice(&f32_bytes(&[0.0, 0.0, 0.0, 1.0]));
+        bin.extend_from_slice(&f32_bytes(&[1.0, 1.0, 1.0]));
+        bin.extend_from_slice(&f32_bytes(&[0.5]));
+        bin.extend_from_slice(&f32_bytes(&[0.1, 0.2, 0.3]));
+
+        let json = format!(
+            r#"{{
+                "asset": {{"version": "2.0"}},
+                "buffers": [{{"byteLength": {}}}],
+                "bufferViews": [
+                    {{"buffer": 0, "byteOffset": 0, "byteLength": 12}},
+                    {{"buffer": 0, "byteOffset": 12, "byteLength": 16}},
+                    {{"buffer": 0, "byteOffset": 28, "byteLength": 12}},
+                    {{"buffer": 0, "byteOffset": 40, "byteLength": 4}},
+                    {{"buffer": 0, "byteOffset": 44, "byteLength": 12}}
+                ],
+                "accessors": [
+                    {{"bufferView": 0, "componentType": 5126, "count": 1, "type": "VEC3",
+                      "min": [1.0, 2.0, 3.0], "max": [1.0, 2.0, 3.0]}},
+                    {{"bufferView": 1, "componentType": 5126, "count": 1, "type": "VEC4"}},
+                    {{"bufferView": 2, "componentType": 5126, "count": 1, "type": "VEC3"}},
+                    {{"bufferView": 3, "componentType": 5126, "count": 1, "type": "SCALAR"}},
+                    {{"bufferView": 4, "componentType": 5126, "count": 1, "type": "VEC3"}}
+                ],
+                "meshes": [{{"primitives": [{{
+                    "attributes": {{
+                        "POSITION": 0,
+                        "KHR_gaussian_splatting:ROTATION": 1,
+                        "KHR_gaussian_splatting:SCALE": 2,
+                        "KHR_gaussian_splatting:OPACITY": 3,
+                        "KHR_gaussian_splatting:SH_DEGREE_0_COEF_0": 4
+                    }},
+                    "mode": 0,
+                    "extensions": {{"KHR_gaussian_splatting": {{"kernel": "ellipse", "colorSpace": "srgb_rec709_display"}}}}
+                }}]}}]
+            }}"#,
+            bin.len()
+        );
+        let mut json = json.into_bytes();
+        while !json.len().is_multiple_of(4) {
+            json.push(b' ');
+        }
+        while !bin.len().is_multiple_of(4) {
+            bin.push(0);
+        }
+        let total = 12 + 8 + json.len() + 8 + bin.len();
+        let mut out = b"glTF".to_vec();
+        out.extend_from_slice(&2u32.to_le_bytes());
+        out.extend_from_slice(&(total as u32).to_le_bytes());
+        out.extend_from_slice(&(json.len() as u32).to_le_bytes());
+        out.extend_from_slice(b"JSON");
+        out.extend_from_slice(&json);
+        out.extend_from_slice(&(bin.len() as u32).to_le_bytes());
+        out.extend_from_slice(b"BIN\0");
+        out.extend_from_slice(&bin);
+        out
+    }
+
     #[test]
     fn test_splat_cloud_aabb_and_accessors() {
-        let cloud = SplatCloud::new(sample_scene(), Some("test.ply".into()));
+        let cloud = SplatCloud::new(sample_scene(), Some("test.gltf".into()));
         assert_eq!(cloud.len(), 2);
-        assert_eq!(cloud.source(), Some("test.ply"));
+        assert_eq!(cloud.source(), Some("test.gltf"));
         assert_eq!(cloud.aabb(), ([0.0, -1.0, 0.0], [2.0, 0.0, 4.0]));
         assert_eq!(cloud.scene().positions.len(), 2);
     }
@@ -171,7 +243,15 @@ mod tests {
     }
 
     #[test]
-    fn test_from_ply_bytes_invalid_is_rejected() {
-        assert!(SplatCloud::from_ply_bytes(b"not a ply", None).is_err());
+    fn test_from_gltf_bytes_loads_cloud() {
+        let cloud = SplatCloud::from_gltf_bytes(&one_splat_glb(), Some("one.glb".into())).unwrap();
+        assert_eq!(cloud.len(), 1);
+        assert_eq!(cloud.source(), Some("one.glb"));
+        assert_eq!(cloud.aabb(), ([1.0, 2.0, 3.0], [1.0, 2.0, 3.0]));
+    }
+
+    #[test]
+    fn test_from_gltf_bytes_invalid_is_rejected() {
+        assert!(SplatCloud::from_gltf_bytes(b"not a gltf", None).is_err());
     }
 }

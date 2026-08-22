@@ -1,4 +1,5 @@
-//! Input parsers for splat training data: 3DGS PLY scenes and COLMAP reconstructions.
+//! Input parsers for splat data: `KHR_gaussian_splatting` glTF scenes and
+//! COLMAP reconstructions (the training-data entry point).
 
 pub mod colmap;
-pub mod ply;
+pub mod gltf;

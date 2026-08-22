@@ -303,6 +303,7 @@ impl EguiRenderer {
             &PipelineOptions {
                 blend: BlendMode::PremultipliedAlpha,
                 cull_mode: CullMode::None,
+                depth_test: false,
                 set_layouts: &[&uniform_layout, &texture_layout],
             },
         )

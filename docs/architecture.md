@@ -187,11 +187,22 @@ the same swapchain.
 The viewport renders the ECS scene, queried straight from the `World`
 (single-threaded render seam — no extract/snapshot layer), into an
 `OffscreenTarget` (final layout `SHADER_READ_ONLY_OPTIMAL`) that egui samples
-as a user texture in the Viewport dock panel. The scene components live in
+as a user texture in the Viewport dock panel. The camera components live in
 `moonfield-render::scene`: the `Camera` + `PrimaryCamera` + `GlobalTransform`
-entity provides view/projection (aspect follows the panel size), and every
-`MeshRenderer` + `GlobalTransform` entity is drawn as a colored unit cube via
-push constants (no depth attachment yet — overlapping cubes don't occlude).
+entity provides view/projection (aspect follows the panel size). Every
+`MeshRenderer` + `GlobalTransform` entity (the component lives in
+`moonfield-renderer::mesh`) is drawn with its mesh from the world's
+`Assets<Mesh>` resource, uploaded lazily into the viewport's
+`AssetId → GpuMesh` cache (positions + u32 indices); the per-draw model
+matrix and flat color go through push constants. The offscreen target carries
+a depth attachment (`OffscreenTarget::new_with_depth`; reverse-Z — depth
+clears to 0.0, the compare op is `GREATER_OR_EQUAL`, and a begun pass takes
+two clear values: color, then depth), so overlapping meshes occlude. Splat
+entities render as an AABB placeholder drawn with the viewport's internal
+unit-cube mesh until real splat rasterization lands. One layout rule the
+viewport shaders obey: Slang packs push-constant matrices row-major while
+glam's `to_cols_array()` is column-major, so the matrix is declared
+`column_major float4x4 mvp;`.
 The Hierarchy dock panel lists the entity tree (from `ChildOf`/`Children`,
 labeled by `Name`) and selects an entity; the Inspector panel renders
 auto-generated editing UI for the selected entity's registered components.
@@ -239,16 +250,44 @@ two types stays distinct; a cached id that no longer resolves (the asset was
 removed) triggers a reload. Loading happens on the calling thread — there is
 no task pool, no async, no hot reload.
 
-`SplatCloud` is the first real asset: plain data in
-`moonfield-renderer::splat::cloud` (wraps the Gaussian scene plus source path
-and a precomputed AABB; the crate stays ECS-free, so `SplatCloudHandle` is a
-plain newtype that is a component through the blanket impl). The editor's
-Hierarchy panel loads PLY files through a path field + Load button routed
-through the `AssetServer` (loading the same file twice reuses the asset
-slot), and the loaded entity appears in the tree named after the file.
-Viewport rendering of splats is a placeholder — the cloud's AABB drawn as a
-fixed-color box through the existing cube pipeline — until real splat
-rasterization lands. Training/optimizer state stays outside the `World`.
+Two real asset types sit on these stores, both plain data in
+`moonfield-renderer` (the crate stays ECS-free, so `MeshHandle` and
+`SplatCloudHandle` are plain newtypes that are components through the blanket
+impl): `Mesh` (`moonfield-renderer::mesh`) is merged triangle geometry with a
+precomputed AABB and the source path, and `SplatCloud`
+(`moonfield-renderer::splat::cloud`) wraps the Gaussian scene the same way.
+
+glTF 2.0 (`.gltf`/`.glb`) is the sole asset source format, parsed with the
+`gltf` crate. Mesh import merges every TRIANGLE primitive in the file into
+one positions + indices pair (vertex offsets applied; non-indexed primitives
+get sequential indices) and drops POINTS primitives, node transforms, and
+materials — known slices: no per-primitive split and no materials, so a file
+imports as one flat-colored mesh. Splat import reads the Khronos
+`KHR_gaussian_splatting` extension: a POINTS primitive carrying
+`KHR_gaussian_splatting:*` attributes, float component types only (the
+quantized int variants are rejected), kernel `"ellipse"` only, no SPZ
+compression sub-extensions. The loader converts the glTF render-space values
+into the training-space conventions `GaussianScene` keeps: scale → ln,
+opacity → logit, quaternion xyzw → wxyz, degree-0 SH verbatim into `f_dc`
+(the `0.282·c + 0.5` bias is a shading-time op, never stored), and
+higher-degree SH — one RGB VEC3 per coefficient — transposed into the
+channel-blocked `f_rest` layout (coefficient `c = l*l − 1 + n` of channel
+`ch` lands at `f_rest[ch * 15 + c]`), zero-filling missing degrees. Because
+gltf-json maps the unknown extension semantics to `Checked::Invalid`, the
+splat loader parses without validation and reads the attribute map from the
+raw JSON, while mesh loading uses validated `gltf::import`. The PLY loader is
+removed; training-side interop will be served by a
+`KHR_gaussian_splatting` exporter.
+
+The editor's `GltfLoader` dispatches on content: it sniffs the file bytes for
+the `"KHR_gaussian_splatting"` JSON key and produces a `SplatCloud` or a
+`Mesh`. The Hierarchy panel loads either through a path field + Load button
+routed through the `AssetServer` (loading the same file twice reuses the
+asset slot), and the loaded entity appears in the tree named after the file —
+splat entities carry `SplatCloudHandle`, mesh entities carry `MeshRenderer`
+in `DEFAULT_MESH_COLOR`. Viewport rendering of splats is a placeholder — the
+cloud's AABB drawn as a fixed-color box — until real splat rasterization
+lands. Training/optimizer state stays outside the `World`.
 
 ## Scenes and templates
 
@@ -289,14 +328,17 @@ a scene written by a newer registry still loads.
 Versus the vendored 0.20-dev source, deliberately skipped: the `bsn!`
 proc-macro DSL, `ScenePatch` caching, `QueuedScenes`/`WaitingScenes`
 (async-only), the `BundleWriter` bump arena, and named entity references; on
-the glTF side only the node/camera scaffold participates — mesh and material
-import is untouched.
+the glTF side the scene document uses only the node/camera scaffold —
+asset-level mesh import lives in `moonfield-renderer` (see Assets), and
+material import is untouched.
 
 The editor wires both halves: `EditorPlugin` inserts `editor_asset_server()`
-(the `.ply` → `SplatCloud` loader) and `editor_scene_registry()` (native
-transform/camera/hierarchy, `Name` on `node.name`, `MeshRenderer` as plain
-extras, `SplatCloudHandle` as a path-backed handle) as world resources, and
-the Hierarchy panel carries a Scene path field with Save/Load buttons
+(the content-sniffing `GltfLoader`) and `editor_scene_registry()` (native
+transform/camera/hierarchy, `Name` on `node.name`, and `mesh_renderer` /
+`splat_cloud` as path-string custom entries — save writes the asset's source
+path, load rebuilds the component through the `AssetServer` cache, and a
+scene-loaded `MeshRenderer` gets `DEFAULT_MESH_COLOR`) as world resources,
+and the Hierarchy panel carries a Scene path field with Save/Load buttons
 (`SceneIoState`).
 
 ## Threading model

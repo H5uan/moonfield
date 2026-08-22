@@ -12,7 +12,7 @@ pub mod types;
 pub mod vulkan;
 
 pub use camera::perspective_reverse_z;
-pub use scene::{view_matrix, Camera, MeshRenderer, PrimaryCamera};
+pub use scene::{view_matrix, Camera, PrimaryCamera};
 
 pub use bind::{
     BindGroup, BindGroupEntry, BindGroupLayout, BindGroupLayoutEntry, BindingResource, BindingType,

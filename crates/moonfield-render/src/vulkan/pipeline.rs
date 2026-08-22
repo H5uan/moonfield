@@ -59,13 +59,18 @@ impl CullMode {
 
 /// Optional pipeline configuration beyond the [`GraphicsPipeline::new`]
 /// defaults. `Default` reproduces the pre-options behavior exactly (blend
-/// off, back-face culling, no descriptor sets).
+/// off, back-face culling, no depth test, no descriptor sets).
 #[derive(Default)]
 pub struct PipelineOptions<'a> {
     /// Color attachment blend mode.
     pub blend: BlendMode,
     /// Face culling mode.
     pub cull_mode: CullMode,
+    /// Enable depth testing and depth writes. The engine uses reverse-Z
+    /// (near → 1, far → 0), so the compare op is `GREATER_OR_EQUAL` and the
+    /// depth clear value is 0.0. Requires a render pass with a depth
+    /// attachment (see [`RenderPass::new_with_depth`](crate::vulkan::render_pass::RenderPass::new_with_depth)).
+    pub depth_test: bool,
     /// Descriptor set layouts baked into the pipeline layout (set 0, 1, …).
     /// Borrowed; the caller keeps them alive as long as sets are bound.
     pub set_layouts: &'a [&'a BindGroupLayout],
@@ -179,6 +184,16 @@ impl GraphicsPipeline {
             .sample_shading_enable(false)
             .rasterization_samples(vk::SampleCountFlags::TYPE_1);
 
+        // Reverse-Z: depth clears to 0.0 and "closer" is a larger value, so
+        // the compare op is GREATER_OR_EQUAL. With `depth_test` off the state
+        // is inert, which also keeps passes without a depth attachment valid.
+        let depth_stencil = vk::PipelineDepthStencilStateCreateInfo::default()
+            .depth_test_enable(options.depth_test)
+            .depth_write_enable(options.depth_test)
+            .depth_compare_op(vk::CompareOp::GREATER_OR_EQUAL)
+            .depth_bounds_test_enable(false)
+            .stencil_test_enable(false);
+
         let color_blend_attachments = [options.blend.to_vk()];
         let color_blending = vk::PipelineColorBlendStateCreateInfo::default()
             .logic_op_enable(false)
@@ -206,6 +221,7 @@ impl GraphicsPipeline {
             .viewport_state(&viewport_state)
             .rasterization_state(&rasterizer)
             .multisample_state(&multisampling)
+            .depth_stencil_state(&depth_stencil)
             .color_blend_state(&color_blending)
             .dynamic_state(&dynamic_state)
             .layout(layout)

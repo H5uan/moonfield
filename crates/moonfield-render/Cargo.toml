@@ -10,13 +10,9 @@ moonfield-ecs = { workspace = true }
 moonfield-log = { workspace = true }
 moonfield-math = { workspace = true }
 moonfield-reflect = { workspace = true }
-serde = { workspace = true }
 ash = "0.38.0"
 ash-window = "0.13.0"
 bytemuck = { version = "1.23", features = ["derive"] }
 gpu-allocator = "0.28.0"
 raw-window-handle = "0.6.2"
 shader-slang = { package = "shader-slang-rs", git = "https://github.com/H5uan/shader-slang-rs" }
-
-[dev-dependencies]
-serde_json = { workspace = true }
