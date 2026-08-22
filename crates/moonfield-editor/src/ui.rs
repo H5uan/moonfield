@@ -22,8 +22,8 @@ pub struct TabContext<'w> {
     pub world: &'w mut World,
     /// The entity the inspector edits; set by hierarchy clicks.
     pub selection: &'w mut Option<Entity>,
-    /// Hierarchy panel's PLY-load field state.
-    pub load_state: &'w mut LoadSplatState,
+    /// Hierarchy panel's asset-load field state.
+    pub load_state: &'w mut LoadAssetState,
     /// Hierarchy panel's scene Save/Load field state.
     pub scene_state: &'w mut SceneIoState,
     /// The viewport scene texture, once registered with the egui renderer.
@@ -33,15 +33,15 @@ pub struct TabContext<'w> {
     pub viewport_size_points: Option<egui::Vec2>,
 }
 
-/// Hierarchy panel state for loading splat clouds: a path field and the
-/// last load's status message (error or success).
+/// Hierarchy panel state for loading assets: a path field and the last
+/// load's status message (error or success).
 ///
 /// File dialogs need a native-dialog dependency; for now the path is typed
-/// (or pasted) directly. The load itself is synchronous — large PLYs will
+/// (or pasted) directly. The load itself is synchronous — large glTFs will
 /// stall the frame (async loading is a known debt).
 #[derive(Default)]
-pub struct LoadSplatState {
-    /// The PLY path to load.
+pub struct LoadAssetState {
+    /// The asset path to load (`.gltf`/`.glb`; splat or mesh by content).
     pub path: String,
     /// Status of the last load attempt.
     pub message: Option<String>,
@@ -52,7 +52,7 @@ pub struct LoadSplatState {
 ///
 /// Save/load go through the world's `SceneRegistry` resource via
 /// moonfield-scene's file APIs, synchronously on the UI thread (same known
-/// debt as the PLY loader).
+/// debt as the asset loader).
 #[derive(Default)]
 pub struct SceneIoState {
     /// The scene path to save to / load from.
@@ -166,21 +166,22 @@ fn hierarchy_panel(
     ui: &mut egui::Ui,
     world: &mut World,
     selection: &mut Option<Entity>,
-    load_state: &mut LoadSplatState,
+    load_state: &mut LoadAssetState,
     scene_state: &mut SceneIoState,
 ) {
-    // Splat loading: type/paste a PLY path, load it synchronously into the
-    // world (asset store + entity with SplatCloudHandle).
+    // Asset loading: type/paste a glTF path, load it synchronously into the
+    // world (asset store + entity with the matching handle component —
+    // splat cloud or mesh, decided by file content).
     ui.horizontal(|ui| {
-        ui.label("PLY:");
+        ui.label("Asset:");
         ui.add(
             egui::TextEdit::singleline(&mut load_state.path)
-                .hint_text("path/to/cloud.ply")
+                .hint_text("path/to/asset.gltf")
                 .desired_width(f32::INFINITY),
         );
         if ui.button("Load").clicked() && !load_state.path.trim().is_empty() {
             let path = std::path::PathBuf::from(load_state.path.trim());
-            load_state.message = Some(match crate::scene_io::load_splat_cloud(world, &path) {
+            load_state.message = Some(match crate::scene_io::load_asset(world, &path) {
                 Ok(entity) => {
                     *selection = Some(entity);
                     format!("Loaded {}", path.display())

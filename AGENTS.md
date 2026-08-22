@@ -24,7 +24,8 @@ moonfield-math/     # The workspace math single entry: glam re-export + domain t
 moonfield-reflect/  # Mini reflection for the editor: named fields, dynamic read/write, nesting
 moonfield-reflect-derive/ # #[derive(Reflect)] proc-macro (the one sanctioned proc-macro crate)
 moonfield-render/   # Lunar Mare — Vulkan-only rendering RHI (ash); see crates/moonfield-render/AGENTS.md
-moonfield-renderer/ # Lunaris — scene rendering & algorithms (splat/rt/gi), RenderAlgorithm phases
+moonfield-renderer/ # Lunaris — scene rendering & algorithms (splat/rt/gi), RenderAlgorithm phases;
+                    # Mesh + SplatCloud assets, glTF import (incl. KHR_gaussian_splatting)
 moonfield-scene/    # BSN-miniature scene save/load: ResolvedScene + SceneRegistry, glTF 2.0 JSON carrier
 moonfield-time/     # Time<Real>/Time<Virtual>/Time<Fixed>/Time clocks + run_fixed_main_schedule;
                     # the backend advances them per frame; TimePlugin lives in moonfield-app

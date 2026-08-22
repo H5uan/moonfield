@@ -10,7 +10,10 @@ rt = []
 gi = []
 
 [dependencies]
+gltf = { workspace = true }
 moonfield-asset = { workspace = true }
 moonfield-math = { workspace = true }
+moonfield-reflect = { workspace = true }
 moonfield-render = { workspace = true }
+serde_json = { workspace = true }
 thiserror = { workspace = true }

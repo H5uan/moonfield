@@ -5,6 +5,9 @@
 //! a UI toolkit (e.g. egui) samples it afterwards. The render pass finishes in
 //! `SHADER_READ_ONLY_OPTIMAL`, so the image is ready for sampling at the end
 //! of every render pass without explicit transitions.
+//!
+//! [`OffscreenTarget::new_with_depth`] adds a `D32Sfloat` depth attachment for
+//! depth-tested scene rendering (reverse-Z: the depth clear value is 0.0).
 
 use crate::error::{Error, Result};
 use crate::types::Format;
@@ -20,7 +23,9 @@ use gpu_allocator::MemoryLocation;
 ///
 /// Fields are ordered so that Rust drops them in the correct Vulkan
 /// dependency order: framebuffer and render pass first, then view, sampler,
-/// image and its allocation, and finally the device-owning handles.
+/// image and its allocation, and finally the device-owning handles. The
+/// optional depth image/view/allocation are destroyed explicitly in
+/// [`OffscreenTarget::destroy_image_resources`] alongside the color ones.
 pub struct OffscreenTarget {
     framebuffer: Framebuffer,
     render_pass: RenderPass,
@@ -28,10 +33,14 @@ pub struct OffscreenTarget {
     sampler: vk::Sampler,
     image: vk::Image,
     allocation: Option<Allocation>,
+    depth_image_view: Option<vk::ImageView>,
+    depth_image: Option<vk::Image>,
+    depth_allocation: Option<Allocation>,
     device: ash::Device,
     allocator: std::sync::Arc<std::sync::Mutex<gpu_allocator::vulkan::Allocator>>,
     format: Format,
     extent: vk::Extent2D,
+    has_depth: bool,
 }
 
 impl OffscreenTarget {
@@ -39,6 +48,32 @@ impl OffscreenTarget {
     /// format. The image is transitioned to `SHADER_READ_ONLY_OPTIMAL` so it
     /// can be sampled before the first frame is rendered.
     pub fn new(device: &Device, width: u32, height: u32, format: Format) -> Result<Self> {
+        Self::create(device, width, height, format, false)
+    }
+
+    /// Create an offscreen target with an additional `D32Sfloat` depth
+    /// attachment (framebuffer attachment index 1).
+    ///
+    /// The render pass clears depth to 0.0 (reverse-Z: near → 1, far → 0) and
+    /// leaves it in `DEPTH_STENCIL_ATTACHMENT_OPTIMAL`; pair it with a
+    /// pipeline created with `depth_test: true`. A begun pass must supply two
+    /// clear values: color first, then depth 0.0.
+    pub fn new_with_depth(
+        device: &Device,
+        width: u32,
+        height: u32,
+        format: Format,
+    ) -> Result<Self> {
+        Self::create(device, width, height, format, true)
+    }
+
+    fn create(
+        device: &Device,
+        width: u32,
+        height: u32,
+        format: Format,
+        with_depth: bool,
+    ) -> Result<Self> {
         if width == 0 || height == 0 {
             return Err(Error::Validation(format!(
                 "offscreen target dimensions must be non-zero, got {}x{}",
@@ -50,14 +85,34 @@ impl OffscreenTarget {
         let extent = vk::Extent2D { width, height };
         let allocator = device.allocator().clone();
         let (image, allocation) = create_color_image(device, &allocator, extent, format_vk)?;
-        let image_view = create_image_view(device, image, format_vk)?;
+        let image_view = create_image_view(device, image, format_vk, vk::ImageAspectFlags::COLOR)?;
         let sampler = create_sampler(device)?;
-        let render_pass = RenderPass::new_with_final_layout(
-            device,
-            format,
-            vk::ImageLayout::SHADER_READ_ONLY_OPTIMAL,
-        )?;
-        let framebuffer = Framebuffer::new(device, &render_pass, &[image_view], extent)?;
+        let render_pass = if with_depth {
+            RenderPass::new_with_depth(device, format, vk::ImageLayout::SHADER_READ_ONLY_OPTIMAL)?
+        } else {
+            RenderPass::new_with_final_layout(
+                device,
+                format,
+                vk::ImageLayout::SHADER_READ_ONLY_OPTIMAL,
+            )?
+        };
+        let (depth_image, depth_allocation, depth_image_view) = if with_depth {
+            let (image, allocation) = create_depth_image(device, &allocator, extent)?;
+            let view = create_image_view(
+                device,
+                image,
+                vk::Format::D32_SFLOAT,
+                vk::ImageAspectFlags::DEPTH,
+            )?;
+            (Some(image), Some(allocation), Some(view))
+        } else {
+            (None, None, None)
+        };
+        let attachments = match depth_image_view {
+            Some(depth_view) => vec![image_view, depth_view],
+            None => vec![image_view],
+        };
+        let framebuffer = Framebuffer::new(device, &render_pass, &attachments, extent)?;
 
         transition_to_shader_read(device, image)?;
 
@@ -68,10 +123,14 @@ impl OffscreenTarget {
             sampler,
             image,
             allocation: Some(allocation),
+            depth_image_view,
+            depth_image,
+            depth_allocation,
             device: device.raw().clone(),
             allocator,
             format,
             extent,
+            has_depth: with_depth,
         })
     }
 
@@ -99,14 +158,35 @@ impl OffscreenTarget {
         let extent = vk::Extent2D { width, height };
         let format_vk = self.format.to_vk();
         let (image, allocation) = create_color_image(device, &self.allocator, extent, format_vk)?;
-        self.image_view = create_image_view(device, image, format_vk)?;
+        self.image_view = create_image_view(device, image, format_vk, vk::ImageAspectFlags::COLOR)?;
         self.image = image;
         self.allocation = Some(allocation);
         self.extent = extent;
-        self.framebuffer = Framebuffer::new(device, &self.render_pass, &[self.image_view], extent)?;
+        if self.has_depth {
+            let (depth_image, depth_allocation) =
+                create_depth_image(device, &self.allocator, extent)?;
+            self.depth_image_view = Some(create_image_view(
+                device,
+                depth_image,
+                vk::Format::D32_SFLOAT,
+                vk::ImageAspectFlags::DEPTH,
+            )?);
+            self.depth_image = Some(depth_image);
+            self.depth_allocation = Some(depth_allocation);
+        }
+        let attachments = match self.depth_image_view {
+            Some(depth_view) => vec![self.image_view, depth_view],
+            None => vec![self.image_view],
+        };
+        self.framebuffer = Framebuffer::new(device, &self.render_pass, &attachments, extent)?;
 
         transition_to_shader_read(device, image)?;
         Ok(())
+    }
+
+    /// Whether this target has a depth attachment (see [`Self::new_with_depth`]).
+    pub fn has_depth(&self) -> bool {
+        self.has_depth
     }
 
     /// Access the color image (for readback copies; the current layout is
@@ -156,18 +236,31 @@ impl OffscreenTarget {
         (self.extent.width, self.extent.height)
     }
 
-    /// Destroy image, view and free the allocation. The caller must ensure
-    /// the GPU is idle (see [`resize`] and `Drop`).
+    /// Destroy image, view and free the allocation (color and, when present,
+    /// depth). The caller must ensure the GPU is idle (see [`resize`] and
+    /// `Drop`).
     fn destroy_image_resources(&mut self) {
         // SAFETY: the GPU is idle by contract of the callers, so these
         // handles are no longer in use.
         unsafe {
             self.device.destroy_image_view(self.image_view, None);
             self.device.destroy_image(self.image, None);
+            if let Some(depth_view) = self.depth_image_view.take() {
+                self.device.destroy_image_view(depth_view, None);
+            }
+            if let Some(depth_image) = self.depth_image.take() {
+                self.device.destroy_image(depth_image, None);
+            }
         }
         if let Some(allocation) = self.allocation.take() {
             let mut allocator = self.allocator.lock().unwrap_or_else(|e| e.into_inner());
             if let Err(e) = allocator.free(allocation) {
+                log_free_error(&e);
+            }
+        }
+        if let Some(depth_allocation) = self.depth_allocation.take() {
+            let mut allocator = self.allocator.lock().unwrap_or_else(|e| e.into_inner());
+            if let Err(e) = allocator.free(depth_allocation) {
                 log_free_error(&e);
             }
         }
@@ -253,6 +346,7 @@ fn create_image_view(
     device: &Device,
     image: vk::Image,
     format: vk::Format,
+    aspect: vk::ImageAspectFlags,
 ) -> Result<vk::ImageView> {
     let create_info = vk::ImageViewCreateInfo::default()
         .image(image)
@@ -260,7 +354,7 @@ fn create_image_view(
         .format(format)
         .subresource_range(
             vk::ImageSubresourceRange::default()
-                .aspect_mask(vk::ImageAspectFlags::COLOR)
+                .aspect_mask(aspect)
                 .base_mip_level(0)
                 .level_count(1)
                 .base_array_layer(0)
@@ -273,6 +367,63 @@ fn create_image_view(
             .create_image_view(&create_info, None)
             .map_err(|e| Error::Backend(format!("failed to create offscreen image view: {:?}", e)))
     }
+}
+
+/// Create a `D32Sfloat` depth attachment image. No explicit transition is
+/// needed: the render pass moves it from `UNDEFINED` to
+/// `DEPTH_STENCIL_ATTACHMENT_OPTIMAL`.
+fn create_depth_image(
+    device: &Device,
+    allocator: &std::sync::Arc<std::sync::Mutex<gpu_allocator::vulkan::Allocator>>,
+    extent: vk::Extent2D,
+) -> Result<(vk::Image, Allocation)> {
+    let image_info = vk::ImageCreateInfo::default()
+        .image_type(vk::ImageType::TYPE_2D)
+        .format(vk::Format::D32_SFLOAT)
+        .extent(vk::Extent3D {
+            width: extent.width,
+            height: extent.height,
+            depth: 1,
+        })
+        .mip_levels(1)
+        .array_layers(1)
+        .samples(vk::SampleCountFlags::TYPE_1)
+        .tiling(vk::ImageTiling::OPTIMAL)
+        .usage(vk::ImageUsageFlags::DEPTH_STENCIL_ATTACHMENT)
+        .sharing_mode(vk::SharingMode::EXCLUSIVE)
+        .initial_layout(vk::ImageLayout::UNDEFINED);
+
+    // SAFETY: the device is valid and the create info describes a legal image.
+    let image = unsafe {
+        device
+            .raw()
+            .create_image(&image_info, None)
+            .map_err(|e| Error::Backend(format!("failed to create depth image: {:?}", e)))?
+    };
+
+    // SAFETY: the image was just created and has no bound memory yet.
+    let requirements = unsafe { device.raw().get_image_memory_requirements(image) };
+    let allocation = allocator
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+        .allocate(&AllocationCreateDesc {
+            name: "offscreen-depth",
+            requirements,
+            location: MemoryLocation::GpuOnly,
+            linear: false,
+            allocation_scheme: AllocationScheme::GpuAllocatorManaged,
+        })
+        .map_err(|e| Error::Backend(format!("failed to allocate depth image memory: {e}")))?;
+
+    // SAFETY: the allocation satisfies the image's memory requirements.
+    unsafe {
+        device
+            .raw()
+            .bind_image_memory(image, allocation.memory(), allocation.offset())
+            .map_err(|e| Error::Backend(format!("failed to bind depth image memory: {:?}", e)))?;
+    }
+
+    Ok((image, allocation))
 }
 
 fn create_sampler(device: &Device) -> Result<vk::Sampler> {

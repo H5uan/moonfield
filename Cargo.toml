@@ -41,3 +41,7 @@ thiserror = "2.0.18"
 serde = { version = "1", features = ["derive"] }
 serde_json = { version = "1", features = ["raw_value"] }
 gltf-json = { version = "1.4", features = ["extras", "names"] }
+# Minimal feature set: `import` provides `gltf::import`/`import_slice` and
+# `import_buffers` (pulls in the transitive `image` dependency); `utils`
+# provides the mesh `Reader` (`read_positions` / `read_indices`).
+gltf = { version = "1.4", default-features = false, features = ["import", "utils"] }

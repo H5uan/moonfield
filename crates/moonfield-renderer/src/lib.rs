@@ -3,8 +3,11 @@
 //! This crate is the unified container for every high-level rendering
 //! algorithm built on top of the Lunar Mare RHI (`moonfield-render`):
 //!
+//! - `mesh` — the triangle-mesh asset (`Mesh` / `MeshHandle` / `MeshRenderer`)
+//!   and its glTF import.
 //! - `splat` (default feature) — 3D Gaussian splatting: scene representation,
-//!   PLY / COLMAP input, GPU rasterization and per-scene training.
+//!   `KHR_gaussian_splatting` glTF / COLMAP input, GPU rasterization and
+//!   per-scene training.
 //! - `rt` — ray tracing (placeholder).
 //! - `gi` — global illumination (placeholder).
 //!
@@ -20,6 +23,7 @@ pub mod frame;
 #[cfg(feature = "gi")]
 pub mod gi;
 pub mod gpu_util;
+pub mod mesh;
 #[cfg(feature = "rt")]
 pub mod rt;
 #[cfg(feature = "splat")]

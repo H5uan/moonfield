@@ -5,10 +5,12 @@ use crate::types::Format;
 use crate::vulkan::device::Device;
 use ash::vk;
 
-/// A Vulkan render pass with a single color attachment.
+/// A Vulkan render pass with a single color attachment and, optionally, a
+/// depth attachment (`D32Sfloat`).
 pub struct RenderPass {
     render_pass: vk::RenderPass,
     device: ash::Device,
+    has_depth: bool,
 }
 
 impl RenderPass {
@@ -32,6 +34,32 @@ impl RenderPass {
         color_format: Format,
         final_layout: vk::ImageLayout,
     ) -> Result<Self> {
+        Self::create(device, color_format, final_layout, false)
+    }
+
+    /// Create a render pass with an additional depth attachment
+    /// (`D32Sfloat`, attachment index 1).
+    ///
+    /// The engine uses reverse-Z (near → 1, far → 0), so the depth attachment
+    /// clears to 0.0; pair it with a `GREATER_OR_EQUAL` depth compare (see
+    /// [`PipelineOptions::depth_test`](crate::vulkan::pipeline::PipelineOptions)).
+    /// The depth attachment's store op is `DONT_CARE` and its final layout is
+    /// `DEPTH_STENCIL_ATTACHMENT_OPTIMAL`. A pass begun against this render
+    /// pass must supply two clear values: color first, then depth 0.0.
+    pub fn new_with_depth(
+        device: &Device,
+        color_format: Format,
+        final_layout: vk::ImageLayout,
+    ) -> Result<Self> {
+        Self::create(device, color_format, final_layout, true)
+    }
+
+    fn create(
+        device: &Device,
+        color_format: Format,
+        final_layout: vk::ImageLayout,
+        with_depth: bool,
+    ) -> Result<Self> {
         let color_attachment = vk::AttachmentDescription::default()
             .format(color_format.to_vk())
             .samples(vk::SampleCountFlags::TYPE_1)
@@ -42,23 +70,64 @@ impl RenderPass {
             .initial_layout(vk::ImageLayout::UNDEFINED)
             .final_layout(final_layout);
 
+        let depth_attachment = vk::AttachmentDescription::default()
+            .format(vk::Format::D32_SFLOAT)
+            .samples(vk::SampleCountFlags::TYPE_1)
+            .load_op(vk::AttachmentLoadOp::CLEAR)
+            .store_op(vk::AttachmentStoreOp::DONT_CARE)
+            .stencil_load_op(vk::AttachmentLoadOp::DONT_CARE)
+            .stencil_store_op(vk::AttachmentStoreOp::DONT_CARE)
+            .initial_layout(vk::ImageLayout::UNDEFINED)
+            .final_layout(vk::ImageLayout::DEPTH_STENCIL_ATTACHMENT_OPTIMAL);
+
         let color_attachment_ref = vk::AttachmentReference::default()
             .attachment(0)
             .layout(vk::ImageLayout::COLOR_ATTACHMENT_OPTIMAL);
 
+        let depth_attachment_ref = vk::AttachmentReference::default()
+            .attachment(1)
+            .layout(vk::ImageLayout::DEPTH_STENCIL_ATTACHMENT_OPTIMAL);
+
         let subpass = vk::SubpassDescription::default()
             .pipeline_bind_point(vk::PipelineBindPoint::GRAPHICS)
             .color_attachments(std::slice::from_ref(&color_attachment_ref));
+        let subpass = if with_depth {
+            subpass.depth_stencil_attachment(&depth_attachment_ref)
+        } else {
+            subpass
+        };
 
-        let dependency = vk::SubpassDependency::default()
+        let mut dependency = vk::SubpassDependency::default()
             .src_subpass(vk::SUBPASS_EXTERNAL)
             .dst_subpass(0)
             .src_stage_mask(vk::PipelineStageFlags::COLOR_ATTACHMENT_OUTPUT)
             .dst_stage_mask(vk::PipelineStageFlags::COLOR_ATTACHMENT_OUTPUT)
             .src_access_mask(vk::AccessFlags::empty())
             .dst_access_mask(vk::AccessFlags::COLOR_ATTACHMENT_WRITE);
+        if with_depth {
+            dependency = dependency
+                .src_stage_mask(
+                    vk::PipelineStageFlags::COLOR_ATTACHMENT_OUTPUT
+                        | vk::PipelineStageFlags::EARLY_FRAGMENT_TESTS
+                        | vk::PipelineStageFlags::LATE_FRAGMENT_TESTS,
+                )
+                .dst_stage_mask(
+                    vk::PipelineStageFlags::COLOR_ATTACHMENT_OUTPUT
+                        | vk::PipelineStageFlags::EARLY_FRAGMENT_TESTS
+                        | vk::PipelineStageFlags::LATE_FRAGMENT_TESTS,
+                )
+                .dst_access_mask(
+                    vk::AccessFlags::COLOR_ATTACHMENT_WRITE
+                        | vk::AccessFlags::DEPTH_STENCIL_ATTACHMENT_READ
+                        | vk::AccessFlags::DEPTH_STENCIL_ATTACHMENT_WRITE,
+                );
+        }
 
-        let attachments = [color_attachment];
+        let attachments = if with_depth {
+            vec![color_attachment, depth_attachment]
+        } else {
+            vec![color_attachment]
+        };
         let subpasses = [subpass];
         // When the attachment is sampled after the pass (offscreen targets),
         // add an external dependency so the layout transition to
@@ -91,12 +160,20 @@ impl RenderPass {
         Ok(Self {
             render_pass,
             device: device.raw().clone(),
+            has_depth: with_depth,
         })
     }
 
     /// Access the raw `vk::RenderPass` handle.
     pub fn raw(&self) -> vk::RenderPass {
         self.render_pass
+    }
+
+    /// Whether this render pass has a depth attachment. When true, a begun
+    /// pass must supply two clear values (color, then depth 0.0) and its
+    /// framebuffer must include a depth view as attachment 1.
+    pub fn has_depth(&self) -> bool {
+        self.has_depth
     }
 }
 

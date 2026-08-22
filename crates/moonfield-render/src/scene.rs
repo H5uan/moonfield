@@ -1,5 +1,4 @@
-//! Scene-facing ECS components for rendering: [`Camera`] + [`PrimaryCamera`]
-//! and the slice's renderable, [`MeshRenderer`].
+//! Scene-facing ECS components for rendering: [`Camera`] + [`PrimaryCamera`].
 //!
 //! These are plain components (the blanket `Component` impl covers them); the
 //! editor's viewport render path queries them directly from the world. The
@@ -59,31 +58,6 @@ pub fn view_matrix(camera_global: &GlobalTransform) -> Mat4 {
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub struct PrimaryCamera;
 
-/// Renders the entity as a colored unit cube (1×1×1, centered on the origin),
-/// transformed by its [`GlobalTransform`].
-///
-/// The mesh is the scene renderer's shared cube until the asset system
-/// (roadmap milestone 8) provides real mesh handles; the flat color stands in
-/// for a material.
-///
-/// Serde support exists so `moonfield-scene` can carry the component through
-/// the glTF `extras` channel; `Transform`/`Camera` deliberately have no
-/// derives — they map onto native glTF node/camera fields instead.
-#[derive(
-    Debug, Clone, Copy, PartialEq, moonfield_reflect::Reflect, serde::Serialize, serde::Deserialize,
-)]
-pub struct MeshRenderer {
-    /// The cube's flat color, linear RGBA.
-    pub color: [f32; 4],
-}
-
-impl MeshRenderer {
-    /// A cube of the given color.
-    pub fn colored(color: [f32; 4]) -> Self {
-        Self { color }
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -91,14 +65,6 @@ mod tests {
 
     fn assert_vec3_close(a: Vec3, b: Vec3) {
         assert!((a - b).length() < 1e-4, "{a} != {b}");
-    }
-
-    #[test]
-    fn test_mesh_renderer_serde_roundtrip() {
-        let renderer = MeshRenderer::colored([1.0, 0.5, 0.25, 1.0]);
-        let json = serde_json::to_string(&renderer).unwrap();
-        let parsed: MeshRenderer = serde_json::from_str(&json).unwrap();
-        assert_eq!(parsed, renderer);
     }
 
     #[test]

@@ -29,6 +29,7 @@ use moonfield_app::{App, Plugin};
 use moonfield_ecs::{MessageCursor, Messages};
 use moonfield_log::error;
 use moonfield_render::{RenderDevice, WindowRenderer};
+use moonfield_renderer::mesh::Mesh;
 use moonfield_renderer::splat::cloud::SplatCloud;
 use moonfield_window::WindowControl;
 use moonfield_winit::WinitWindow;
@@ -38,6 +39,41 @@ use viewport::Viewport;
 use ash::vk;
 use std::sync::Arc;
 use winit::event::WindowEvent;
+
+/// Unit cube (side 1, centered on the origin), positions only. Faces are
+/// wound counter-clockwise seen from outside; with the Y-flip viewport that
+/// matches the pipeline's clockwise-front-face culling. Shared by the demo
+/// scene and the viewport's splat AABB placeholder.
+pub(crate) const UNIT_CUBE_VERTICES: &[[f32; 3]] = &[
+    [-0.5, -0.5, -0.5], // 0
+    [0.5, -0.5, -0.5],  // 1
+    [0.5, 0.5, -0.5],   // 2
+    [-0.5, 0.5, -0.5],  // 3
+    [-0.5, -0.5, 0.5],  // 4
+    [0.5, -0.5, 0.5],   // 5
+    [0.5, 0.5, 0.5],    // 6
+    [-0.5, 0.5, 0.5],   // 7
+];
+
+#[rustfmt::skip]
+pub(crate) const UNIT_CUBE_INDICES: &[u32] = &[
+    0, 3, 2, 2, 1, 0, // -Z face
+    4, 5, 6, 6, 7, 4, // +Z face
+    0, 1, 5, 5, 4, 0, // -Y face
+    2, 3, 7, 7, 6, 2, // +Y face
+    0, 4, 7, 7, 3, 0, // -X face
+    1, 2, 6, 6, 5, 1, // +X face
+];
+
+/// The engine's built-in unit cube as a [`Mesh`] asset (no source path: it
+/// is not file-backed, so scene save skips entities that reference it).
+pub fn unit_cube_mesh() -> Mesh {
+    Mesh::new(
+        UNIT_CUBE_VERTICES.to_vec(),
+        UNIT_CUBE_INDICES.to_vec(),
+        None,
+    )
+}
 
 /// Plugin that registers the editor render system.
 ///
@@ -59,11 +95,14 @@ impl Plugin for EditorPlugin {
         // `WinitWindow`.
         app.insert_resource(EditorStateSlot::default());
         app.insert_resource(registry::InspectorRegistry::with_engine_types());
-        // The splat asset store: PLY files loaded through the editor land
-        // here, entities reference them via SplatCloudHandle components.
+        // The asset stores: splat clouds and meshes loaded through the
+        // editor land here, entities reference them via SplatCloudHandle /
+        // MeshRenderer components.
         app.insert_resource(moonfield_asset::Assets::<SplatCloud>::default());
-        // Synchronous asset loading (PLY → SplatCloud, path-deduped) and the
-        // scene registry behind the hierarchy panel's Save/Load buttons.
+        app.insert_resource(moonfield_asset::Assets::<Mesh>::default());
+        // Synchronous asset loading (glTF → SplatCloud or Mesh by content,
+        // path-deduped) and the scene registry behind the hierarchy panel's
+        // Save/Load buttons.
         app.insert_resource(scene_io::editor_asset_server());
         app.insert_resource(scene_io::editor_scene_registry());
         app.add_systems(Render, editor_render);
@@ -105,8 +144,8 @@ struct EditorState {
     viewport_panel_points: Option<egui::Vec2>,
     /// The entity selected in the hierarchy panel, edited by the inspector.
     selection: Option<moonfield_ecs::Entity>,
-    /// Hierarchy panel state: the PLY load path field and last status.
-    load_state: ui::LoadSplatState,
+    /// Hierarchy panel state: the asset load path field and last status.
+    load_state: ui::LoadAssetState,
     /// Hierarchy panel state: the scene Save/Load path field and last status.
     scene_state: ui::SceneIoState,
     /// Frames rendered, for the MOONFIELD_EDITOR_AUTO_CLOSE debug helper.
@@ -173,7 +212,7 @@ impl EditorState {
             frame_counter: 0,
             viewport_panel_points: None,
             selection: None,
-            load_state: ui::LoadSplatState::default(),
+            load_state: ui::LoadAssetState::default(),
             scene_state: ui::SceneIoState::default(),
             frames_rendered: 0,
         })
@@ -422,7 +461,7 @@ fn record_frame(
         let mut cmd = pool.allocate_command_buffer().map_err(|e| e.to_string())?;
         cmd.begin(vk::CommandBufferUsageFlags::ONE_TIME_SUBMIT)
             .map_err(|e| e.to_string())?;
-        state.viewport.record_scene(world, &cmd);
+        state.viewport.record_scene(device, world, &cmd);
         cmd.end().map_err(|e| e.to_string())?;
         let command_buffers = [cmd.raw()];
         let submit_info = vk::SubmitInfo::default().command_buffers(&command_buffers);
@@ -442,9 +481,17 @@ fn record_frame(
                 .map_err(|e| format!("scene one-shot wait: {e:?}"))?;
         }
     } else {
-        state
-            .viewport
-            .record_scene(world, state.window_renderer.command_buffer());
+        // `command_buffer()` borrows the window renderer mutably, so the
+        // device comes from the shared `RenderDevice` resource (the same
+        // singleton the window renderer was built from).
+        let render_device = world
+            .get_resource::<RenderDevice>()
+            .expect("RenderDevice registered by RenderPlugin");
+        state.viewport.record_scene(
+            render_device.device(),
+            world,
+            state.window_renderer.command_buffer(),
+        );
     }
 
     // Debug seam: MOONFIELD_EDITOR_SKIP_UI=1 records only the scene pass.

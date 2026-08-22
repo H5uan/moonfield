@@ -377,8 +377,8 @@ mod tests {
     use std::path::PathBuf;
 
     use moonfield_asset::{AssetError, AssetLoader, AssetServer, Assets, Handle};
-    use moonfield_ecs::Name;
-    use moonfield_render::MeshRenderer;
+    use moonfield_ecs::{Name, Template, TemplateContext};
+    use moonfield_renderer::mesh::{Mesh, MeshHandle, MeshRenderer};
 
     use crate::HandleTemplate;
 
@@ -400,12 +400,11 @@ mod tests {
         registry.register_native_camera();
         registry.register_native_hierarchy();
         registry.register_custom(NAME, name_save, name_load);
-        registry.register::<MeshRenderer>("mesh_renderer");
         registry
     }
 
-    /// A scene: root (Name + Transform + MeshRenderer) → child (Name +
-    /// Transform + Camera) → grandchild (Name + Transform).
+    /// A scene: root (Name + Transform) → child (Name + Transform + Camera)
+    /// → grandchild (Name + Transform).
     fn sample_world() -> (World, Entity, Entity, Entity) {
         let mut world = World::new();
         world.register_hierarchy();
@@ -416,7 +415,6 @@ mod tests {
                 rotation: Quat::from_rotation_y(0.5),
                 scale: Vec3::new(2.0, 2.0, 2.0),
             },
-            MeshRenderer::colored([1.0, 0.5, 0.25, 1.0]),
         ));
         let child = world.spawn((
             Name::new("child"),
@@ -461,10 +459,6 @@ mod tests {
         assert_eq!(
             loaded.get_component::<Transform>(loaded_root).unwrap(),
             world.get_component::<Transform>(root).unwrap()
-        );
-        assert_eq!(
-            loaded.get_component::<MeshRenderer>(loaded_root).unwrap(),
-            world.get_component::<MeshRenderer>(root).unwrap()
         );
 
         let children = loaded.get_component::<Children>(loaded_root).unwrap();
@@ -681,5 +675,159 @@ mod tests {
         );
 
         std::fs::remove_file(&path).unwrap();
+    }
+
+    // ---------------------------------------------------------------
+    // MeshRenderer path entry (same shape the editor registers)
+    // ---------------------------------------------------------------
+
+    /// The color a mesh entity loaded from a scene file gets; mirrors the
+    /// editor's default (the path-string entry does not carry color).
+    const DEFAULT_MESH_COLOR: [f32; 4] = [0.7, 0.7, 0.7, 1.0];
+
+    /// Assemble a GLB container from a JSON document and a binary blob.
+    fn glb(json: &str, bin: &[u8]) -> Vec<u8> {
+        let mut json = json.as_bytes().to_vec();
+        while !json.len().is_multiple_of(4) {
+            json.push(b' ');
+        }
+        let mut bin = bin.to_vec();
+        while !bin.len().is_multiple_of(4) {
+            bin.push(0);
+        }
+        let total = 12 + 8 + json.len() + 8 + bin.len();
+        let mut out = b"glTF".to_vec();
+        out.extend_from_slice(&2u32.to_le_bytes());
+        out.extend_from_slice(&(total as u32).to_le_bytes());
+        out.extend_from_slice(&(json.len() as u32).to_le_bytes());
+        out.extend_from_slice(b"JSON");
+        out.extend_from_slice(&json);
+        out.extend_from_slice(&(bin.len() as u32).to_le_bytes());
+        out.extend_from_slice(b"BIN\0");
+        out.extend_from_slice(&bin);
+        out
+    }
+
+    /// A minimal but valid one-triangle GLB (non-indexed).
+    fn test_mesh_glb() -> Vec<u8> {
+        let positions: [f32; 9] = [0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 1.0, 0.0];
+        let bin: Vec<u8> = positions.iter().flat_map(|v| v.to_le_bytes()).collect();
+        let json = format!(
+            r#"{{
+                "asset": {{"version": "2.0"}},
+                "buffers": [{{"byteLength": {}}}],
+                "bufferViews": [{{"buffer": 0, "byteOffset": 0, "byteLength": 36}}],
+                "accessors": [
+                    {{"bufferView": 0, "componentType": 5126, "count": 3, "type": "VEC3",
+                      "min": [0.0, 0.0, 0.0], "max": [1.0, 1.0, 0.0]}}
+                ],
+                "meshes": [{{"primitives": [{{"attributes": {{"POSITION": 0}}}}]}}]
+            }}"#,
+            bin.len()
+        );
+        glb(&json, &bin)
+    }
+
+    /// Loads `.glb` files into `Mesh` assets (the editor's `GltfLoader`
+    /// shape, minus the splat sniffing).
+    struct MeshGlbLoader;
+
+    impl AssetLoader for MeshGlbLoader {
+        fn extensions(&self) -> &'static [&'static str] {
+            &["glb"]
+        }
+
+        fn load(&self, path: &Path) -> Result<Box<dyn Any>, AssetError> {
+            match Mesh::from_gltf_file(path) {
+                Ok(mesh) => Ok(Box::new(mesh)),
+                Err(e) => Err(AssetError::Loader(e.to_string())),
+            }
+        }
+    }
+
+    fn mesh_renderer_save(world: &World, entity: Entity) -> Option<serde_json::Value> {
+        let renderer = world.get_component::<MeshRenderer>(entity)?;
+        let assets = world.get_resource::<Assets<Mesh>>()?;
+        let source = assets.get(&renderer.mesh.0)?.source()?;
+        Some(serde_json::Value::String(source.to_string()))
+    }
+
+    /// Builds a [`MeshRenderer`] from a scene file's path string, resolving
+    /// the asset through the world's `AssetServer`.
+    ///
+    /// Deliberately not `Clone`: moonfield-ecs blanket-implements `Template`
+    /// for every `Clone` type, which would collide with this impl. A bare
+    /// `HandleTemplate<Mesh>` cannot be used directly — its output is
+    /// `Handle<Mesh>`, but the entity component is the `MeshRenderer`
+    /// newtype wrapper the renderer queries.
+    struct MeshRendererTemplate(PathBuf);
+
+    impl Template for MeshRendererTemplate {
+        type Output = MeshRenderer;
+
+        fn build(&self, ctx: &mut TemplateContext) -> Result<Self::Output, TemplateError> {
+            let handle = HandleTemplate::<Mesh>::Path(self.0.clone()).build(ctx)?;
+            Ok(MeshRenderer::new(MeshHandle(handle), DEFAULT_MESH_COLOR))
+        }
+    }
+
+    fn mesh_renderer_load(value: &serde_json::Value) -> Result<Box<dyn SceneTemplate>, SceneError> {
+        let text = value.as_str().ok_or_else(|| {
+            SceneError::Invalid("mesh_renderer must be a path string".to_string())
+        })?;
+        Ok(Box::new(MeshRendererTemplate(PathBuf::from(text))))
+    }
+
+    #[test]
+    fn test_mesh_renderer_path_entry_roundtrip() {
+        let dir =
+            std::env::temp_dir().join(format!("moonfield-scene-test-mesh-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("triangle.glb");
+        std::fs::write(&path, test_mesh_glb()).unwrap();
+
+        // Source world: a mesh asset with a source path + an entity carrying
+        // the MeshRenderer.
+        let mut world = World::new();
+        world.register_hierarchy();
+        let mut meshes = Assets::<Mesh>::default();
+        let handle = meshes.add(Mesh::from_gltf_file(&path).unwrap());
+        world.insert_resource(meshes);
+        let entity = world.spawn((
+            Name::new("mesh"),
+            MeshRenderer::new(MeshHandle(handle), [1.0, 0.0, 0.0, 1.0]),
+        ));
+        assert!(world.get_component::<MeshRenderer>(entity).is_some());
+
+        let mut registry = SceneRegistry::new();
+        registry.register_custom(NAME, name_save, name_load);
+        registry.register_custom("mesh_renderer", mesh_renderer_save, mesh_renderer_load);
+
+        let document = save_scene(&world, &registry).unwrap();
+        let text = document.to_string_pretty().unwrap();
+        // The handle became a plain path string in extras.
+        assert!(text.contains("triangle.glb"), "{text}");
+
+        // Load into a fresh world with its own asset storage.
+        let mut loaded = World::new();
+        loaded.register_hierarchy();
+        let mut server = AssetServer::default();
+        server.register_loader(MeshGlbLoader);
+        loaded.insert_resource(server);
+        loaded.insert_resource(Assets::<Mesh>::default());
+        let roots = load_scene(&mut loaded, &registry, &text).unwrap();
+
+        assert_eq!(roots.len(), 1);
+        let renderer = loaded.get_component::<MeshRenderer>(roots[0]).unwrap();
+        // The entry stores only the path: color comes back as the default.
+        assert_eq!(renderer.color, DEFAULT_MESH_COLOR);
+        let meshes = loaded.get_resource::<Assets<Mesh>>().unwrap();
+        let mesh = meshes.get(&renderer.mesh.0).unwrap();
+        assert_eq!(mesh.positions().len(), 3);
+        assert_eq!(mesh.indices(), &[0, 1, 2]);
+        assert_eq!(mesh.source(), Some(path.display().to_string().as_str()));
+
+        std::fs::remove_file(&path).unwrap();
+        std::fs::remove_dir(&dir).unwrap();
     }
 }
