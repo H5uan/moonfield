@@ -24,6 +24,7 @@ use moonfield_rhi::{
     Viewport,
 };
 use std::collections::HashMap;
+use std::path::PathBuf;
 
 use moonfield_render_core::{DrawFunctions, PhaseItem};
 
@@ -35,6 +36,19 @@ use crate::render_phase::{Opaque3d, PUSH_CONSTANT_SIZE};
 /// the same fallback when computing view aspect ratios.
 pub(crate) const INITIAL_WIDTH: u32 = 1280;
 pub(crate) const INITIAL_HEIGHT: u32 = 720;
+
+/// Resolve a repository shader file under `<repo root>/assets/shaders/`.
+///
+/// `CARGO_MANIFEST_DIR` is a compile-time absolute path, so the file resolves
+/// whichever directory the process runs from (`cargo run` from the workspace
+/// root, `cargo test` from a crate directory).
+fn shader_path(name: &str) -> String {
+    PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+        .join("../../assets/shaders")
+        .join(name)
+        .to_string_lossy()
+        .into_owned()
+}
 
 /// The flat-lit mesh pipeline of the core 3D pass, as a render-world
 /// resource (lazily created by [`main_opaque_pass_3d`] from the
@@ -49,9 +63,10 @@ impl Core3dPipeline {
     pub fn new(render_device: &RenderDevice) -> Result<Self> {
         let device = render_device.device();
         let compiler = Compiler::new()?;
-        let vertex_spirv = compiler.compile_source_to_spirv("core_3d_vs", VERTEX_SHADER, "main")?;
+        let vertex_spirv =
+            compiler.compile_file_to_spirv(&shader_path("core_3d_vs.slang"), "main")?;
         let fragment_spirv =
-            compiler.compile_source_to_spirv("core_3d_fs", FRAGMENT_SHADER, "main")?;
+            compiler.compile_file_to_spirv(&shader_path("core_3d_fs.slang"), "main")?;
         let vertex_shader = ShaderModule::from_spirv(device, &vertex_spirv)?;
         let fragment_shader = ShaderModule::from_spirv(device, &fragment_spirv)?;
 
@@ -278,66 +293,6 @@ pub fn main_opaque_pass_3d(world: &mut World) {
         record_view_pass(&*world, view, target, &draw_functions, command_buffer);
     }
 }
-
-const VERTEX_SHADER: &str = r#"
-struct PushConstants
-{
-    // Slang packs matrices row-major by default; glam's `to_cols_array` is
-    // column-major, so the layout must be declared explicitly.
-    column_major float4x4 mvp;
-    float4 color;
-};
-
-[[vk::push_constant]]
-PushConstants push;
-
-struct VsInput
-{
-    float3 position : POSITION;
-};
-
-struct VsOutput
-{
-    float4 position : SV_POSITION;
-    float3 local_pos : TEXCOORD0;
-};
-
-[shader("vertex")]
-VsOutput main(VsInput input)
-{
-    VsOutput output;
-    output.position = mul(push.mvp, float4(input.position, 1.0));
-    output.local_pos = input.position;
-    return output;
-}
-"#;
-
-const FRAGMENT_SHADER: &str = r#"
-struct PushConstants
-{
-    column_major float4x4 mvp;
-    float4 color;
-};
-
-[[vk::push_constant]]
-PushConstants push;
-
-struct PsInput
-{
-    float3 local_pos : TEXCOORD0;
-};
-
-[shader("fragment")]
-float4 main(PsInput input) : SV_TARGET
-{
-    // Cheap flat shading: reconstruct the face normal from screen-space
-    // derivatives of the local position and light it with a fixed direction.
-    float3 normal = normalize(cross(ddx(input.local_pos), ddy(input.local_pos)));
-    float3 light_dir = normalize(float3(0.4, 0.8, 0.6));
-    float shade = 0.35 + 0.65 * abs(dot(normal, light_dir));
-    return float4(push.color.rgb * shade, push.color.a);
-}
-"#;
 
 #[cfg(test)]
 mod tests {
