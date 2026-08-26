@@ -15,6 +15,7 @@ use crate::interaction::{
     hit_test, screen_to_ray, world_to_screen, world_trs_to_local, GizmoDrag, GizmoFrame,
     GizmoHandle, GizmoMode, OrbitCamera,
 };
+use crate::theme;
 
 /// Editor panel tabs.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
@@ -255,7 +256,7 @@ fn content_panel(
         }
     });
     if let Some(message) = &load_state.message {
-        ui.small(message);
+        ui.colored_label(theme::status_color(message), message);
     }
 
     // Scene save/load: the world's registered entities ⇄ a .gltf document
@@ -302,7 +303,7 @@ fn content_panel(
         }
     });
     if let Some(message) = &scene_state.message {
-        ui.small(message);
+        ui.colored_label(theme::status_color(message), message);
     }
 }
 
@@ -450,7 +451,7 @@ fn viewport_panel(ui: &mut egui::Ui, context: &mut TabContext) {
             egui::Align2::LEFT_TOP,
             line,
             egui::FontId::proportional(12.0),
-            egui::Color32::from_white_alpha(160),
+            theme::TEXT_SECONDARY,
         );
     }
 }

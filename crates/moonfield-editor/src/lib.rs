@@ -26,6 +26,7 @@ pub mod egui_vk;
 mod interaction;
 mod registry;
 mod scene_io;
+mod theme;
 mod ui;
 
 pub use scene_io::{editor_asset_server, load_asset};
@@ -218,8 +219,10 @@ impl EditorMainState {
         })?;
         let window = winit_window.0.clone();
 
+        let egui_ctx = egui::Context::default();
+        theme::install(&egui_ctx);
         let egui_state = egui_winit::State::new(
-            egui::Context::default(),
+            egui_ctx,
             egui::ViewportId::ROOT,
             window.as_ref(),
             Some(window.scale_factor() as f32),
