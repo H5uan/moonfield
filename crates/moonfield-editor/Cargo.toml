@@ -1,0 +1,31 @@
+[package]
+name = "moonfield-editor"
+version.workspace = true
+edition.workspace = true
+
+[features]
+default = ["mesh"]
+mesh = []
+splat = ["moonfield-render-feature/splat"]
+
+[dependencies]
+moonfield-app = { workspace = true }
+moonfield-asset = { workspace = true }
+moonfield-camera = { workspace = true }
+moonfield-ecs = { workspace = true }
+moonfield-log = { workspace = true }
+moonfield-math = { workspace = true }
+moonfield-reflect = { workspace = true }
+moonfield-rhi = { workspace = true }
+moonfield-render-core = { workspace = true }
+moonfield-render-feature = { workspace = true, features = ["mesh"] }
+moonfield-scene = { workspace = true }
+moonfield-window = { workspace = true }
+moonfield-winit = { workspace = true }
+bytemuck = { workspace = true }
+gpu-allocator = "0.28.0"
+winit = "0.30"
+egui = "0.36.1"
+egui-winit = { version = "0.36.1", default-features = false }
+egui_dock = "0.21.1"
+serde_json = { workspace = true }

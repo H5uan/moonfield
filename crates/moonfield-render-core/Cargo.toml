@@ -1,0 +1,14 @@
+[package]
+name = "moonfield-render-core"
+version.workspace = true
+edition.workspace = true
+
+[dependencies]
+moonfield-app = { workspace = true }
+moonfield-camera = { workspace = true }
+moonfield-ecs = { workspace = true }
+moonfield-log = { workspace = true }
+moonfield-math = { workspace = true }
+moonfield-rhi = { workspace = true }
+moonfield-window = { workspace = true }
+raw-window-handle = "0.6.2"

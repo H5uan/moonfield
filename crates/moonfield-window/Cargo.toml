@@ -1,0 +1,8 @@
+[package]
+name = "moonfield-window"
+version.workspace = true
+edition.workspace = true
+
+[dependencies]
+moonfield-ecs = { workspace = true }
+raw-window-handle = "0.6.2"

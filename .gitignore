@@ -1,0 +1,13 @@
+/target/
+*.log
+.DS_Store
+Thumbs.db
+*.swp
+*.swo
+*~
+
+/.slang/
+
+# Python
+__pycache__/
+*.pyc

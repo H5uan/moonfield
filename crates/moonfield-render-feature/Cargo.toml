@@ -1,0 +1,24 @@
+[package]
+name = "moonfield-render-feature"
+version.workspace = true
+edition.workspace = true
+
+[features]
+default = ["mesh"]
+mesh = []
+splat = ["mesh"]
+
+[dependencies]
+bytemuck = { version = "1.23", features = ["derive"] }
+gpu-allocator = "0.28.0"
+gltf = { workspace = true }
+moonfield-app = { workspace = true }
+moonfield-asset = { workspace = true }
+moonfield-camera = { workspace = true }
+moonfield-log = { workspace = true }
+moonfield-math = { workspace = true }
+moonfield-reflect = { workspace = true }
+moonfield-rhi = { workspace = true }
+moonfield-render-core = { workspace = true }
+serde_json = { workspace = true }
+thiserror = { workspace = true }

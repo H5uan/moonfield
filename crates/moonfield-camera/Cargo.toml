@@ -1,0 +1,8 @@
+[package]
+name = "moonfield-camera"
+version.workspace = true
+edition.workspace = true
+
+[dependencies]
+moonfield-math = { workspace = true }
+moonfield-reflect = { workspace = true }

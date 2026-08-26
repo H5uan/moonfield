@@ -1,0 +1,18 @@
+[package]
+name = "moonfield-rhi"
+version.workspace = true
+edition.workspace = true
+
+[features]
+# Enables the Khronos validation layer on the Vulkan instance. Requires the
+# Vulkan SDK to be installed at runtime; intended for development builds only.
+validation = []
+
+[dependencies]
+moonfield-log = { workspace = true }
+ash = "0.38.0"
+ash-window = "0.13.0"
+bytemuck = { version = "1.23", features = ["derive"] }
+gpu-allocator = "0.28.0"
+raw-window-handle = "0.6.2"
+shader-slang = { package = "shader-slang-rs", git = "https://github.com/H5uan/shader-slang-rs" }

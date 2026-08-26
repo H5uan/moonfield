@@ -1,0 +1,49 @@
+[workspace]
+members = ["crates/*"]
+default-members = ["crates/moonfield-editor"]
+resolver = "2"
+
+[workspace.package]
+version = "0.1.0"
+edition = "2021"
+
+# ash master (0.38.0+1.4.352, Vulkan-Headers 1.4.352) provides Vulkan 1.4
+# API_VERSION_1_4 / Vulkan14 structures; the published crate tops out at 1.3.281.
+# Version stays 0.38.x so the patch satisfies every `ash = "0.38"` requirement
+# in the graph, including ash-window 0.13, without touching per-crate manifests.
+# ash master replaced extension `Instance::new` with `load` and renamed the pNext
+# builder method push_next -> push; ash-window (same repo) and gpu-allocator
+# (ash-next branch) are patched from sources already migrated to that API.
+[patch.crates-io]
+ash = { git = "https://github.com/ash-rs/ash", rev = "f4c2ca3e4f6b998d5254ad101a32f024d87cdec2" }
+ash-window = { git = "https://github.com/ash-rs/ash", rev = "f4c2ca3e4f6b998d5254ad101a32f024d87cdec2" }
+gpu-allocator = { git = "https://github.com/Traverse-Research/gpu-allocator", rev = "6a68a5b4c233361c07dfa8865043a16ade7512db" }
+
+[workspace.dependencies]
+moonfield-app = { path = "crates/moonfield-app" }
+moonfield-asset = { path = "crates/moonfield-asset" }
+moonfield-base = { path = "crates/moonfield-base" }
+moonfield-camera = { path = "crates/moonfield-camera" }
+moonfield-ecs = { path = "crates/moonfield-ecs" }
+moonfield-rhi = { path = "crates/moonfield-rhi", default-features = false }
+moonfield-render-core = { path = "crates/moonfield-render-core" }
+moonfield-render-feature = { path = "crates/moonfield-render-feature", default-features = false }
+moonfield-time = { path = "crates/moonfield-time" }
+moonfield-log = { path = "crates/moonfield-log" }
+moonfield-math = { path = "crates/moonfield-math" }
+moonfield-reflect = { path = "crates/moonfield-reflect" }
+moonfield-reflect-derive = { path = "crates/moonfield-reflect-derive" }
+moonfield-window = { path = "crates/moonfield-window" }
+moonfield-winit = { path = "crates/moonfield-winit" }
+moonfield-editor = { path = "crates/moonfield-editor" }
+moonfield-scene = { path = "crates/moonfield-scene" }
+glam = { version = "0.33.4", default-features = false, features = ["bytemuck"] }
+bytemuck = { version = "1.25", default-features = false, features = ["derive"] }
+thiserror = "2.0.18"
+serde = { version = "1", features = ["derive"] }
+serde_json = { version = "1", features = ["raw_value"] }
+gltf-json = { version = "1.4", features = ["extras", "names"] }
+# Minimal feature set: `import` provides `gltf::import`/`import_slice` and
+# `import_buffers` (pulls in the transitive `image` dependency); `utils`
+# provides the mesh `Reader` (`read_positions` / `read_indices`).
+gltf = { version = "1.4", default-features = false, features = ["import", "utils"] }

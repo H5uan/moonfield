@@ -1,0 +1,7 @@
+[package]
+name = "moonfield-time"
+version.workspace = true
+edition.workspace = true
+
+[dependencies]
+moonfield-ecs = { workspace = true }

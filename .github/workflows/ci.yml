@@ -1,0 +1,154 @@
+name: CI
+
+on:
+  push:
+    branches: [master]
+  pull_request:
+  workflow_dispatch:
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  CARGO_TERM_COLOR: always
+  CARGO_NET_RETRY: "10"
+
+jobs:
+  rust-analyzer:
+    name: rust-analyzer
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+
+      # rustup installs the pinned toolchain (+components) from rust-toolchain.toml.
+      - name: Install pinned toolchain
+        run: rustup show
+
+      - name: Verify rust-analyzer
+        run: rust-analyzer --version
+
+  fmt:
+    name: rustfmt
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+
+      # rustup installs the pinned toolchain (+components) from rust-toolchain.toml.
+      - name: Install pinned toolchain
+        run: rustup show
+
+      - name: Check formatting
+        run: cargo fmt --all -- --check
+
+  clippy:
+    name: clippy (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, windows-latest, macos-latest]
+    steps:
+      - uses: actions/checkout@v7
+
+      # rustup installs the pinned toolchain (+components) from rust-toolchain.toml.
+      - name: Install pinned toolchain
+        run: rustup show
+
+      - name: Install libclang (Linux)
+        if: runner.os == 'Linux'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y libclang-dev
+
+      - name: Set LIBCLANG_PATH (Windows)
+        if: runner.os == 'Windows'
+        run: echo "LIBCLANG_PATH=C:\Program Files\LLVM\bin" >> "$env:GITHUB_ENV"
+
+      - uses: ./.github/actions/setup-slang
+
+      - uses: Swatinem/rust-cache@v2
+
+      - name: Clippy
+        run: cargo clippy --workspace --all-targets --locked -- -D warnings
+
+  test:
+    name: test (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, windows-latest, macos-latest]
+    steps:
+      - uses: actions/checkout@v7
+
+      # rustup installs the pinned toolchain (+components) from rust-toolchain.toml.
+      - name: Install pinned toolchain
+        run: rustup show
+
+      - name: Install Linux dependencies
+        if: runner.os == 'Linux'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y libclang-dev libvulkan1 mesa-vulkan-drivers vulkan-tools
+
+      - name: Set LIBCLANG_PATH (Windows)
+        if: runner.os == 'Windows'
+        run: echo "LIBCLANG_PATH=C:\Program Files\LLVM\bin" >> "$env:GITHUB_ENV"
+
+      - uses: ./.github/actions/setup-slang
+
+      - uses: Swatinem/rust-cache@v2
+
+      - name: Vulkan driver info (Linux)
+        if: runner.os == 'Linux'
+        run: vulkaninfo --summary || true
+
+      - name: Run tests
+        run: cargo test --workspace --locked
+
+  vulkan-smoke:
+    name: Vulkan smoke
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+
+      # rustup installs the pinned toolchain (+components) from rust-toolchain.toml.
+      - name: Install pinned toolchain
+        run: rustup show
+
+      - name: Install Vulkan dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y libclang-dev libvulkan1 mesa-vulkan-drivers vulkan-tools
+
+      - uses: ./.github/actions/setup-slang
+
+      - uses: Swatinem/rust-cache@v2
+
+      - name: Run Vulkan headless smoke test
+        run: cargo test -p moonfield-rhi --test headless_triangle --locked
+
+      - name: Run egui backend headless smoke test
+        run: cargo test -p moonfield-editor --test egui_headless --locked
+
+  agent-docs:
+    name: Agent notes gate
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+
+      - name: Verify Agent Notes
+        run: python3 scripts/verify_agents.py
+
+  ci-result:
+    name: CI result
+    needs: [rust-analyzer, fmt, clippy, test, vulkan-smoke, agent-docs]
+    if: always()
+    runs-on: ubuntu-latest
+    steps:
+      - name: Verify all jobs succeeded
+        env:
+          NEEDS: ${{ toJSON(needs) }}
+        run: |
+          echo "$NEEDS" | jq -e 'to_entries | all(.value.result == "success")' > /dev/null
