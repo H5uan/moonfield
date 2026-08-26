@@ -224,8 +224,8 @@ impl OffscreenTarget {
         let to_transfer = vk::ImageMemoryBarrier::default()
             .src_access_mask(vk::AccessFlags::SHADER_READ)
             .dst_access_mask(vk::AccessFlags::TRANSFER_READ)
-            .old_layout(vk::ImageLayout::SHADER_READ_ONLY_OPTIMAL)
-            .new_layout(vk::ImageLayout::TRANSFER_SRC_OPTIMAL)
+            .old_layout(vk::ImageLayout::GENERAL)
+            .new_layout(vk::ImageLayout::GENERAL)
             .src_queue_family_index(vk::QUEUE_FAMILY_IGNORED)
             .dst_queue_family_index(vk::QUEUE_FAMILY_IGNORED)
             .image(self.image)
@@ -256,7 +256,7 @@ impl OffscreenTarget {
             device.raw().cmd_copy_image_to_buffer(
                 command_buffer.raw(),
                 self.image,
-                vk::ImageLayout::TRANSFER_SRC_OPTIMAL,
+                vk::ImageLayout::GENERAL,
                 readback.raw(),
                 std::slice::from_ref(&region),
             );
@@ -264,8 +264,8 @@ impl OffscreenTarget {
         let back = vk::ImageMemoryBarrier::default()
             .src_access_mask(vk::AccessFlags::TRANSFER_READ)
             .dst_access_mask(vk::AccessFlags::SHADER_READ)
-            .old_layout(vk::ImageLayout::TRANSFER_SRC_OPTIMAL)
-            .new_layout(vk::ImageLayout::SHADER_READ_ONLY_OPTIMAL)
+            .old_layout(vk::ImageLayout::GENERAL)
+            .new_layout(vk::ImageLayout::GENERAL)
             .src_queue_family_index(vk::QUEUE_FAMILY_IGNORED)
             .dst_queue_family_index(vk::QUEUE_FAMILY_IGNORED)
             .image(self.image)
@@ -525,7 +525,7 @@ fn transition_to_shader_read(device: &Device, image: vk::Image) -> Result<()> {
         .src_access_mask(vk::AccessFlags::empty())
         .dst_access_mask(vk::AccessFlags::SHADER_READ)
         .old_layout(vk::ImageLayout::UNDEFINED)
-        .new_layout(vk::ImageLayout::SHADER_READ_ONLY_OPTIMAL)
+        .new_layout(vk::ImageLayout::GENERAL)
         .src_queue_family_index(vk::QUEUE_FAMILY_IGNORED)
         .dst_queue_family_index(vk::QUEUE_FAMILY_IGNORED)
         .image(image)

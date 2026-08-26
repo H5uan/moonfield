@@ -347,7 +347,7 @@ pub(crate) mod vulkan_impl {
                         image_infos.push(vk::DescriptorImageInfo {
                             sampler: sampler.raw_vk(),
                             image_view: view.raw_vk(),
-                            image_layout: vk::ImageLayout::SHADER_READ_ONLY_OPTIMAL,
+                            image_layout: vk::ImageLayout::GENERAL,
                         });
                         pending.push((
                             e.binding,

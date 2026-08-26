@@ -144,7 +144,7 @@ impl Texture {
             .layer_count(1);
         let (old_layout, src_access, src_stage) = match offset {
             Some(_) => (
-                vk::ImageLayout::SHADER_READ_ONLY_OPTIMAL,
+                vk::ImageLayout::GENERAL,
                 vk::AccessFlags::SHADER_READ,
                 vk::PipelineStageFlags::FRAGMENT_SHADER,
             ),
@@ -158,7 +158,7 @@ impl Texture {
             .src_access_mask(src_access)
             .dst_access_mask(vk::AccessFlags::TRANSFER_WRITE)
             .old_layout(old_layout)
-            .new_layout(vk::ImageLayout::TRANSFER_DST_OPTIMAL)
+            .new_layout(vk::ImageLayout::GENERAL)
             .src_queue_family_index(vk::QUEUE_FAMILY_IGNORED)
             .dst_queue_family_index(vk::QUEUE_FAMILY_IGNORED)
             .image(self.image)
@@ -197,7 +197,7 @@ impl Texture {
                 command_buffer.raw(),
                 staging.raw(),
                 self.image,
-                vk::ImageLayout::TRANSFER_DST_OPTIMAL,
+                vk::ImageLayout::GENERAL,
                 std::slice::from_ref(&copy_region),
             );
         }
@@ -205,8 +205,8 @@ impl Texture {
         let to_shader_read = vk::ImageMemoryBarrier::default()
             .src_access_mask(vk::AccessFlags::TRANSFER_WRITE)
             .dst_access_mask(vk::AccessFlags::SHADER_READ)
-            .old_layout(vk::ImageLayout::TRANSFER_DST_OPTIMAL)
-            .new_layout(vk::ImageLayout::SHADER_READ_ONLY_OPTIMAL)
+            .old_layout(vk::ImageLayout::GENERAL)
+            .new_layout(vk::ImageLayout::GENERAL)
             .src_queue_family_index(vk::QUEUE_FAMILY_IGNORED)
             .dst_queue_family_index(vk::QUEUE_FAMILY_IGNORED)
             .image(self.image)

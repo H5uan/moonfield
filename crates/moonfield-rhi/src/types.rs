@@ -395,9 +395,8 @@ pub enum AttachmentLayout {
 impl AttachmentLayout {
     pub(crate) fn to_vk(self) -> ash::vk::ImageLayout {
         match self {
-            Self::Present => ash::vk::ImageLayout::PRESENT_SRC_KHR,
-            Self::ShaderRead => ash::vk::ImageLayout::SHADER_READ_ONLY_OPTIMAL,
-            Self::DepthStencil => ash::vk::ImageLayout::DEPTH_STENCIL_ATTACHMENT_OPTIMAL,
+            Self::Present => ash::vk::ImageLayout::PRESENT_SRC_KHR, // still need this layout
+            Self::ShaderRead | Self::DepthStencil => ash::vk::ImageLayout::GENERAL,
         }
     }
 }

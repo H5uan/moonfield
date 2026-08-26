@@ -155,8 +155,27 @@ impl Device {
             })
             .collect();
 
-        let device_extension_names: Vec<*const c_char> =
+        // VK_KHR_unified_image_layouts: on supporting drivers GENERAL is
+        // guaranteed efficient, which is what lets the RHI skip layout
+        // transitions (see AttachmentLayout::to_vk). Optional — GENERAL stays
+        // valid without it, so we only enable the extension when available.
+        let mut unified_layouts = vk::PhysicalDeviceUnifiedImageLayoutsFeaturesKHR::default();
+        let unified_supported = {
+            let mut probe = vk::PhysicalDeviceFeatures2::default().push(&mut unified_layouts);
+            // SAFETY: the probe struct is a valid PhysicalDeviceFeatures2 chain.
+            unsafe {
+                instance
+                    .raw()
+                    .get_physical_device_features2(physical_device, &mut probe)
+            }
+            unified_layouts.unified_image_layouts == vk::TRUE
+        };
+
+        let mut device_extension_names: Vec<*const c_char> =
             DEVICE_EXTENSIONS.iter().map(|name| name.as_ptr()).collect();
+        if unified_supported {
+            device_extension_names.push(vk::KHR_UNIFIED_IMAGE_LAYOUTS_NAME.as_ptr());
+        }
 
         let mut vulkan_12_features = vk::PhysicalDeviceVulkan12Features::default()
             .buffer_device_address(true)
@@ -187,6 +206,10 @@ impl Device {
             .push(&mut vulkan_14_features)
             .push(&mut descriptor_heap_features)
             .push(&mut extended_dynamic_state3_features);
+        if unified_supported {
+            let _ = unified_layouts.unified_image_layouts(true);
+            let _ = features2.push(&mut unified_layouts);
+        }
 
         let create_info = vk::DeviceCreateInfo::default()
             .queue_create_infos(&queue_create_infos)
