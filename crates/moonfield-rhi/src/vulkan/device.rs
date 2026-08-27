@@ -232,6 +232,9 @@ impl Device {
         let mut vertex_input_dynamic_state_features =
             vk::PhysicalDeviceVertexInputDynamicStateFeaturesEXT::default()
                 .vertex_input_dynamic_state(true);
+        let mut device_generate_commands_features =
+            vk::PhysicalDeviceDeviceGeneratedCommandsFeaturesEXT::default()
+                .device_generated_commands(true);
 
         let mut features2 =
             vk::PhysicalDeviceFeatures2::default().features(vk::PhysicalDeviceFeatures::default());
@@ -248,7 +251,8 @@ impl Device {
             .push(&mut position_fetch_features)
             .push(&mut invocation_reorder_features)
             .push(&mut mutable_descriptor_type_features)
-            .push(&mut vertex_input_dynamic_state_features);
+            .push(&mut vertex_input_dynamic_state_features)
+            .push(&mut device_generate_commands_features);
 
         let create_info = vk::DeviceCreateInfo::default()
             .queue_create_infos(&queue_create_infos)
