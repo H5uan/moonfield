@@ -26,7 +26,7 @@ fn default_mesh_path() -> PathBuf {
     PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../assets/models/teapot.glb")
 }
 
-fn main() {
+fn main() -> std::process::ExitCode {
     let mut app = App::new();
     app.add_plugin(LogPlugin::default());
     app.add_plugin(RenderPlugin);
@@ -35,7 +35,7 @@ fn main() {
     app.add_plugin(WinitPlugin::default().with_settings(WinitSettings::continuous()));
     app.add_plugin(EditorPlugin);
     app.add_systems(Startup, spawn_default_scene);
-    app.run();
+    app.run().code
 }
 
 /// The default scene: a primary camera and the repository-managed teapot mesh.

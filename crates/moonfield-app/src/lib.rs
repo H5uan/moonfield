@@ -14,9 +14,9 @@ mod plugin_group;
 mod time;
 
 pub use app::{
-    App, AppError, AppExit, First, FixedFirst, FixedLast, FixedMain, FixedPostUpdate,
-    FixedPreUpdate, FixedUpdate, Plugins, PreRender, Render, RenderPrepare, RenderQueue, Runner,
-    Shutdown, Startup, Update,
+    run_once, App, AppError, AppExit, First, FixedFirst, FixedLast, FixedMain, FixedPostUpdate,
+    FixedPreUpdate, FixedUpdate, Last, Plugins, PreRender, Render, RenderPrepare, RenderQueue,
+    Runner, Shutdown, Startup, Update,
 };
 pub use hierarchy::HierarchyPlugin;
 pub use moonfield_ecs::Resource;
@@ -28,8 +28,8 @@ pub use time::TimePlugin;
 pub mod prelude {
     pub use crate::{
         App, AppExit, First, FixedFirst, FixedLast, FixedMain, FixedPostUpdate, FixedPreUpdate,
-        FixedUpdate, HierarchyPlugin, Plugin, PluginGroup, PluginGroupBuilder, PreRender, Render,
-        RenderPrepare, RenderQueue, Resource, Shutdown, Startup, TimePlugin, Update,
+        FixedUpdate, HierarchyPlugin, Last, Plugin, PluginGroup, PluginGroupBuilder, PreRender,
+        Render, RenderPrepare, RenderQueue, Resource, Shutdown, Startup, TimePlugin, Update,
     };
     pub use moonfield_ecs::prelude::{
         ChildOf, Children, Commands, Component, Entity, EntityCommands, IntoSystem,
@@ -231,8 +231,8 @@ mod tests {
         });
 
         app.update();
-        app.render();
 
+        // update() runs the whole tick, including the render pipeline.
         assert_eq!(
             events.lock().unwrap().as_slice(),
             &["A::build".to_string(), "render".to_string()]
@@ -353,7 +353,7 @@ mod tests {
         fn count_frame(mut frames: ResMut<Frames>, commands: Commands) {
             frames.0 += 1;
             if frames.0 == 3 {
-                commands.insert_resource(AppExit);
+                commands.insert_resource(AppExit::SUCCESS);
             }
         }
 

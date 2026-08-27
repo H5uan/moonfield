@@ -2,6 +2,7 @@ use crate::{Plugin, PluginGroup};
 use moonfield_ecs::{IntoSystemConfigs, Schedule, ScheduleLabel, World};
 use std::any::TypeId;
 use std::collections::{HashMap, HashSet};
+use std::process::ExitCode;
 
 /// Schedule label for systems that run once at app startup.
 pub struct Startup;
@@ -17,6 +18,10 @@ pub struct First;
 /// registered directly under `FixedMain` run after those, inside every
 /// iteration.
 pub struct FixedMain;
+/// Schedule label run last in every update tick, after the [`Update`] and
+/// render pipeline; frame-end bookkeeping (window diff application, input
+/// clearing) lives here (Bevy's `Last`).
+pub struct Last;
 /// Schedule label run first in every fixed-timestep iteration.
 pub struct FixedFirst;
 /// Schedule label run before [`FixedUpdate`] in every fixed iteration.
@@ -53,6 +58,7 @@ impl ScheduleLabel for FixedPreUpdate {}
 impl ScheduleLabel for FixedUpdate {}
 impl ScheduleLabel for FixedPostUpdate {}
 impl ScheduleLabel for FixedLast {}
+impl ScheduleLabel for Last {}
 impl ScheduleLabel for Update {}
 impl ScheduleLabel for PreRender {}
 impl ScheduleLabel for RenderPrepare {}
@@ -60,13 +66,41 @@ impl ScheduleLabel for RenderQueue {}
 impl ScheduleLabel for Render {}
 impl ScheduleLabel for Shutdown {}
 
-/// Resource marking that the app should exit its update loop.
+/// Exit code for the application, mirroring Bevy's `AppExit`.
 ///
-/// Insert it (e.g. via `Commands::insert_resource`) to make [`App::update`]
-/// return `false`. This replaces the old convention of update systems
-/// returning `bool`: systems no longer have return values.
-#[derive(Debug, Default, Clone, Copy)]
-pub struct AppExit;
+/// Also acts as the resource marking that the app should exit its update
+/// loop: insert it (e.g. via `Commands::insert_resource`) to make
+/// [`App::update`] return `false` and the runner return its code. Most
+/// systems just insert [`AppExit::SUCCESS`]; a nonzero code is set for
+/// abnormal exits.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct AppExit {
+    /// The process exit code.
+    pub code: ExitCode,
+}
+
+impl AppExit {
+    /// The default, successful exit.
+    pub const SUCCESS: Self = Self {
+        code: ExitCode::SUCCESS,
+    };
+    /// The generic failure exit.
+    pub const FAILURE: Self = Self {
+        code: ExitCode::FAILURE,
+    };
+
+    /// An exit with the given exit code.
+    pub fn from_code(code: u8) -> Self {
+        Self {
+            code: ExitCode::from(code),
+        }
+    }
+
+    /// The generic failure exit, for error paths.
+    pub fn error() -> Self {
+        Self::FAILURE
+    }
+}
 
 /// Errors that can occur while adding a [`Plugin`] to an [`App`].
 #[derive(Debug, PartialEq, Eq, thiserror::Error)]
@@ -312,25 +346,28 @@ impl App {
             .is_none_or(Schedule::is_empty)
     }
 
-    /// Set a custom runner function that replaces the default update loop.
+    /// Set a custom runner function that replaces the default runner
+    /// ([`run_once`], mirroring Bevy's `RunnerFn`).
     ///
     /// The runner receives `&mut App` and drives the application (typically
-    /// via a winit event loop). It is called once from [`App::run`] after
-    /// all plugins have been finished.
+    /// via a winit event loop), returning the exit code. It is called once
+    /// from [`App::run`] after all plugins have been finished; loop semantics
+    /// are the runner's responsibility.
     ///
     /// # Example
     ///
     /// ```ignore
-    /// app.set_runner(Box::new(|app: &mut App| {
+    /// app.set_runner(|app: &mut App| {
     ///     loop {
     ///         if !app.update() {
     ///             break;
     ///         }
     ///     }
-    /// }));
+    ///     AppExit::SUCCESS
+    /// });
     /// ```
-    pub fn set_runner(&mut self, runner: Runner) -> &mut Self {
-        self.runner = Some(runner);
+    pub fn set_runner(&mut self, runner: impl FnOnce(&mut App) -> AppExit + 'static) -> &mut Self {
+        self.runner = Some(Box::new(runner));
         self
     }
 
@@ -346,13 +383,17 @@ impl App {
         self.run_schedule(Startup);
     }
 
-    /// Run a single update tick: the [`First`] schedule, the fixed-timestep
-    /// loop (zero or more [`FixedMain`] iterations), then the [`Update`]
-    /// schedule. Returns `false` if an [`AppExit`] resource was inserted
-    /// (e.g. via `Commands::insert_resource`), signaling the loop should end.
+    /// Run a single full tick: the [`First`] schedule, the fixed-timestep
+    /// loop (zero or more [`FixedMain`] iterations), the [`Update`] schedule,
+    /// the render pipeline ([`Self::render`]), then the [`Last`] schedule.
+    /// Returns `false` if an [`AppExit`] resource was inserted (e.g. via
+    /// `Commands::insert_resource`), signaling the loop should end.
     ///
     /// This is the per-frame counterpart of [`run_updates`]; it runs startup
-    /// once on the first call.
+    /// once on the first call. Rendering is part of the tick (Bevy's model),
+    /// so a runner only needs to call this one method. The clocks are advanced
+    /// by the windowing backend at the frame boundary (runner responsibility),
+    /// so tests can drive deterministic time manually.
     pub fn update(&mut self) -> bool {
         if !self.initialized {
             self.startup();
@@ -360,6 +401,8 @@ impl App {
         self.run_schedule(First);
         self.run_fixed_main_loop();
         self.run_schedule(Update);
+        self.render();
+        self.run_schedule(Last);
         !self.world.contains_resource::<AppExit>()
     }
 
@@ -407,16 +450,23 @@ impl App {
     }
 
     /// Run the update loop until exit is requested via [`AppExit`] or the
-    /// [`Update`] schedule is empty.
-    pub fn run_updates(&mut self) {
+    /// [`Update`] schedule is empty. Headless apps can use this as their
+    /// runner; windowed apps use `WinitPlugin`'s event-loop runner instead.
+    /// Returns the final exit code.
+    pub fn run_updates(&mut self) -> AppExit {
         loop {
-            if !self.update() {
+            self.update();
+            if self.world.contains_resource::<AppExit>() {
                 break;
             }
             if self.schedule_is_empty::<Update>() {
                 break;
             }
         }
+        self.world()
+            .get_resource::<AppExit>()
+            .map(|exit| *exit)
+            .unwrap_or(AppExit::SUCCESS)
     }
 
     /// Run the [`Shutdown`] schedule once.
@@ -429,31 +479,29 @@ impl App {
         self.initialized = false;
     }
 
-    /// Finishes all plugins, runs the update loop (or a custom runner), then
-    /// cleans up all plugins.
+    /// Finishes all plugins, calls the runner (the default [`run_once`], or
+    /// a custom runner set via [`set_runner`]), then cleans up all plugins.
     ///
-    /// If a runner was set via [`set_runner`], it is called instead of the
-    /// default update loop. The runner receives `&mut App` and drives the
-    /// application.
-    pub fn run(&mut self) {
+    /// The runner receives `&mut App` and drives the application; `App` itself
+    /// never owns a loop. Returns the runner's exit code.
+    pub fn run(&mut self) -> AppExit {
         let plugins = std::mem::take(&mut self.plugins);
 
         for plugin in &plugins {
             plugin.finish(self);
         }
 
-        // If a plugin set a runner, delegate to it.
-        if let Some(runner) = self.runner.take() {
-            runner.0(self);
-        } else {
-            self.run_updates();
-        }
+        // Always run through a runner: the default runs a single tick, a
+        // plugin's runner owns the loop (e.g. winit's event loop).
+        let runner = self.runner.take().unwrap_or_else(|| Box::new(run_once));
+        let exit = runner(self);
 
         for plugin in &plugins {
             plugin.cleanup(self);
         }
 
         self.plugins = plugins;
+        exit
     }
 }
 
@@ -465,12 +513,26 @@ impl Drop for App {
     }
 }
 
-/// A runner function that drives the application.
+/// The default runner: a single [`App::update`] tick, then the exit code
+/// requested via the [`AppExit`] resource (mirrors Bevy's `run_once`).
 ///
-/// A plugin that wants to replace the default update loop can set a runner
-/// via [`App::set_runner`]. The runner is responsible for calling
-/// `app.update()` each frame.
-pub struct Runner(pub Box<dyn FnOnce(&mut App)>);
+/// Loops are the job of runner plugins: `WinitPlugin` replaces this with its
+/// event-loop runner, and headless apps can use [`App::run_updates`] as their
+/// runner.
+pub fn run_once(app: &mut App) -> AppExit {
+    app.update();
+    app.world()
+        .get_resource::<AppExit>()
+        .map(|exit| *exit)
+        .unwrap_or(AppExit::SUCCESS)
+}
+
+/// A runner function that drives the application (mirrors Bevy's `RunnerFn`).
+///
+/// A plugin that wants to control the app loop can set a runner via
+/// [`App::set_runner`]. The runner is responsible for calling `app.update()`
+/// each frame (rendering is part of the tick) and returning the exit code.
+pub type Runner = Box<dyn FnOnce(&mut App) -> AppExit>;
 
 /// Types that can be passed to [`App::add_plugins`].
 pub trait Plugins<Marker>: sealed::Plugins<Marker> {}

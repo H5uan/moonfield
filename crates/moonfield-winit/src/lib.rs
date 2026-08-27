@@ -10,8 +10,8 @@
 //! [`CachedWindow`] field diff (Bevy's `changed_windows` pattern).
 
 use converters::{convert_modifiers, convert_mouse_button, convert_physical_key_code};
-use moonfield_app::{App, Plugin, Runner};
-use moonfield_ecs::{Entity, Messages};
+use moonfield_app::{App, AppExit, Last, Plugin};
+use moonfield_ecs::{Entity, Messages, World};
 use moonfield_log::error;
 use moonfield_window::{
     InputEvent, InputState, MouseScrollUnit, PrimaryWindow, RawHandleWrapper, Window,
@@ -160,6 +160,10 @@ impl Plugin for WinitPlugin {
         app.add_message::<WindowEventKind>();
         app.add_message::<WindowEvent>();
         app.insert_resource(WinitWindows::default());
+        // Frame-end bookkeeping as systems, not runner glue (Bevy's
+        // `changed_windows` runs in `Last` the same way): apply ECS-side
+        // window mutations and clear the frame-scoped input state.
+        app.add_systems(Last, (windows::sync_windows, input_end_frame));
         // The shared exit-policy handle, readable by other plugins (e.g. the
         // editor's MOONFIELD_EDITOR_AUTO_CLOSE helper calls request_exit on
         // this same handle).
@@ -168,10 +172,10 @@ impl Plugin for WinitPlugin {
 
     fn finish(&self, app: &mut App) {
         // Set the Runner so App::run() delegates to the winit event loop
-        // instead of the default update loop.
-        app.set_runner(Runner(Box::new(|app: &mut App| {
-            winit_run(app);
-        })));
+        // instead of the run_once default. The runner drives app.update() per
+        // frame; rendering and the frame's other bookkeeping are part of the
+        // tick and of the `Last` systems registered in `build`.
+        app.set_runner(|app: &mut App| winit_run(app));
     }
 
     fn name(&self) -> &str {
@@ -180,8 +184,10 @@ impl Plugin for WinitPlugin {
 }
 
 /// Creates an [`EventLoop`] + [`Window`] and drives the app via winit events.
-/// Called from the [`Runner`] set by [`WinitPlugin`].
-pub fn winit_run(app: &mut App) {
+/// Called from the [`moonfield_app::Runner`] set by [`WinitPlugin`]. Returns
+/// the exit code requested via the [`AppExit`] resource, or success when no
+/// request was made (e.g. the window was closed through `WindowControl`).
+pub fn winit_run(app: &mut App) -> AppExit {
     let event_loop = EventLoop::<WinitUserEvent>::with_user_event()
         .build()
         .expect("failed to create winit event loop");
@@ -221,7 +227,14 @@ pub fn winit_run(app: &mut App) {
 
     if let Err(e) = event_loop.run_app(&mut handler) {
         error!("event loop exited with error: {e}");
+        return AppExit::error();
     }
+
+    // Read the exit request (if any) after the loop has fully drained.
+    app.world()
+        .get_resource::<AppExit>()
+        .map(|exit| *exit)
+        .unwrap_or(AppExit::SUCCESS)
 }
 
 /// Bridge between winit's [`ApplicationHandler`] and moonfield's [`App`].
@@ -581,31 +594,30 @@ impl WinitHandler<'_> {
         }
     }
 
-    /// Run one frame: update, apply window diffs, render, then clear the
-    /// frame-scoped state. Called from `RedrawRequested`.
+    /// Run one frame: advance the clocks at the frame boundary, then a single
+    /// full `App` tick. Called from `RedrawRequested`; rendering, window-diff
+    /// application, and input clearing are part of the tick or of `Last`
+    /// systems, so the runner only decides *when* to tick. (Time is advanced
+    /// here, not inside the tick, so tests can drive the clocks
+    /// deterministically.)
     fn run_frame(&mut self, event_loop: &ActiveEventLoop) {
-        // Advance the Time resources first, so systems in the update see this
-        // frame's delta.
         moonfield_time::update_time(self.app.world_mut());
         self.app.update();
-        // Apply ECS-side window mutations (title, cursor mode) via the
-        // CachedWindow field diff, after the update has settled.
-        windows::sync_windows(self.app.world_mut());
-        // Render phase: plugins that don't own the event loop (e.g. the
-        // editor) draw into the frame here, mirroring Bevy's render schedule.
-        self.app.render();
-        // The frame's input has been consumed — clear frame-scoped state.
-        // (The message channels need no manual clearing: their buffers are
-        // swapped by the message update system in `First`.)
-        if let Some(mut input) = self.app.get_resource_mut::<InputState>() {
-            input.end_frame();
-        }
         self.last_frame = std::time::Instant::now();
         self.redraw_pending = false;
         // `app_exit()`-style request: a non-event-loop caller asked us to quit.
         if self.config.window_control.exit_requested() {
             event_loop.exit();
         }
+    }
+}
+
+/// `Last` system: clear the frame-scoped input state. Previously called by
+/// the winit runner after rendering; now part of the schedule so any runner
+/// (and headless apps) get it automatically.
+fn input_end_frame(world: &mut World) {
+    if let Some(mut input) = world.get_resource_mut::<InputState>() {
+        input.end_frame();
     }
 }
 
