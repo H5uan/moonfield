@@ -16,6 +16,24 @@ const DEVICE_EXTENSIONS: &[&CStr] = &[
     ash::khr::swapchain::NAME,
     ash::ext::descriptor_heap::NAME,
     ash::ext::extended_dynamic_state3::NAME,
+    ash::ext::mesh_shader::NAME,
+    ash::ext::ray_tracing_invocation_reorder::NAME,
+    ash::khr::ray_tracing_pipeline::NAME,
+    ash::khr::ray_query::NAME,
+    ash::khr::ray_tracing_position_fetch::NAME,
+    // The ray-tracing stack's shared prerequisites (requiredExtensions of the
+    // KHR RT extensions): the acceleration structure is the BVH container,
+    // pipeline library and deferred host operations back RT pipeline creation.
+    ash::khr::acceleration_structure::NAME,
+    ash::khr::pipeline_library::NAME,
+    ash::khr::deferred_host_operations::NAME,
+    // GPU-driven + bindless helpers. `mutable_descriptor_type` lets one
+    // binding reuse a descriptor slot across types (fewer layouts, cheaper
+    // binds); `vertex_input_dynamic_state` decouples vertex layouts from the
+    // pipeline so a small pipeline set can serve many draw shapes.
+    ash::ext::mutable_descriptor_type::NAME,
+    ash::ext::vertex_input_dynamic_state::NAME,
+    ash::ext::device_generated_commands::NAME,
 ];
 
 /// Queue family indices selected for graphics and presentation.
@@ -155,27 +173,8 @@ impl Device {
             })
             .collect();
 
-        // VK_KHR_unified_image_layouts: on supporting drivers GENERAL is
-        // guaranteed efficient, which is what lets the RHI skip layout
-        // transitions (see AttachmentLayout::to_vk). Optional — GENERAL stays
-        // valid without it, so we only enable the extension when available.
-        let mut unified_layouts = vk::PhysicalDeviceUnifiedImageLayoutsFeaturesKHR::default();
-        let unified_supported = {
-            let mut probe = vk::PhysicalDeviceFeatures2::default().push(&mut unified_layouts);
-            // SAFETY: the probe struct is a valid PhysicalDeviceFeatures2 chain.
-            unsafe {
-                instance
-                    .raw()
-                    .get_physical_device_features2(physical_device, &mut probe)
-            }
-            unified_layouts.unified_image_layouts == vk::TRUE
-        };
-
-        let mut device_extension_names: Vec<*const c_char> =
+        let device_extension_names: Vec<*const c_char> =
             DEVICE_EXTENSIONS.iter().map(|name| name.as_ptr()).collect();
-        if unified_supported {
-            device_extension_names.push(vk::KHR_UNIFIED_IMAGE_LAYOUTS_NAME.as_ptr());
-        }
 
         let mut vulkan_12_features = vk::PhysicalDeviceVulkan12Features::default()
             .buffer_device_address(true)
@@ -198,6 +197,42 @@ impl Device {
                 .extended_dynamic_state3_color_blend_enable(true)
                 .extended_dynamic_state3_color_blend_equation(true)
                 .extended_dynamic_state3_color_write_mask(true);
+
+        // Mesh shader features (VK_EXT_mesh_shader). Only `mesh_shader` is
+        // requested: `task_shader` covers the separate task (amplification)
+        // stage, which the RHI does not use yet.
+        let mut mesh_shader_features =
+            vk::PhysicalDeviceMeshShaderFeaturesEXT::default().mesh_shader(true);
+
+        // Ray tracing stack (VK_KHR_acceleration_structure / ray tracing
+        // pipeline / ray query / position fetch / EXT invocation reorder).
+        // Only the core feature bit of each extension is requested; optional
+        // bits (host commands, capture/replay, indirect build, …) stay off so
+        // a device that exposes the extension but not the optional subfeature
+        // can still create the device.
+        let mut acceleration_structure_features =
+            vk::PhysicalDeviceAccelerationStructureFeaturesKHR::default()
+                .acceleration_structure(true);
+        let mut ray_tracing_pipeline_features =
+            vk::PhysicalDeviceRayTracingPipelineFeaturesKHR::default().ray_tracing_pipeline(true);
+        let mut ray_query_features =
+            vk::PhysicalDeviceRayQueryFeaturesKHR::default().ray_query(true);
+        let mut position_fetch_features =
+            vk::PhysicalDeviceRayTracingPositionFetchFeaturesKHR::default()
+                .ray_tracing_position_fetch(true);
+        let mut invocation_reorder_features =
+            vk::PhysicalDeviceRayTracingInvocationReorderFeaturesEXT::default()
+                .ray_tracing_invocation_reorder(true);
+
+        // GPU-driven + bindless: mutable descriptor bindings and dynamic
+        // vertex input (see the extension comment in `DEVICE_EXTENSIONS`).
+        let mut mutable_descriptor_type_features =
+            vk::PhysicalDeviceMutableDescriptorTypeFeaturesEXT::default()
+                .mutable_descriptor_type(true);
+        let mut vertex_input_dynamic_state_features =
+            vk::PhysicalDeviceVertexInputDynamicStateFeaturesEXT::default()
+                .vertex_input_dynamic_state(true);
+
         let mut features2 =
             vk::PhysicalDeviceFeatures2::default().features(vk::PhysicalDeviceFeatures::default());
         let _ = features2
@@ -205,11 +240,15 @@ impl Device {
             .push(&mut vulkan_13_features)
             .push(&mut vulkan_14_features)
             .push(&mut descriptor_heap_features)
-            .push(&mut extended_dynamic_state3_features);
-        if unified_supported {
-            let _ = unified_layouts.unified_image_layouts(true);
-            let _ = features2.push(&mut unified_layouts);
-        }
+            .push(&mut extended_dynamic_state3_features)
+            .push(&mut mesh_shader_features)
+            .push(&mut acceleration_structure_features)
+            .push(&mut ray_tracing_pipeline_features)
+            .push(&mut ray_query_features)
+            .push(&mut position_fetch_features)
+            .push(&mut invocation_reorder_features)
+            .push(&mut mutable_descriptor_type_features)
+            .push(&mut vertex_input_dynamic_state_features);
 
         let create_info = vk::DeviceCreateInfo::default()
             .queue_create_infos(&queue_create_infos)

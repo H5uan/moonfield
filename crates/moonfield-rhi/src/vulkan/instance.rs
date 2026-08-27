@@ -41,6 +41,7 @@ impl Instance {
         #[cfg(not(feature = "validation"))]
         let layers: Vec<*const c_char> = Vec::new();
 
+        // Set for moltenvk compatibility. However, macOS will not be well supported since it will not support all new extensions.
         let flags = if required_extensions.contains(&ash::khr::portability_enumeration::NAME) {
             vk::InstanceCreateFlags::ENUMERATE_PORTABILITY_KHR
         } else {

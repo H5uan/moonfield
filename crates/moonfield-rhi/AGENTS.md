@@ -35,5 +35,7 @@ lives in `moonfield-render-core` (Selene), never here.
 ## Smoke test
 
 - `cargo test -p moonfield-rhi --test headless_triangle` runs the headless
-  Vulkan smoke test (lavapipe on Linux CI); on Windows/macOS it skips
-  gracefully when no Vulkan driver is present.
+  Vulkan smoke test on machines with a compatible driver (the RHI requires
+  `VK_EXT_descriptor_heap` plus the mesh/ray-tracing extensions in
+  [`Device::new`]'s device table, so software renderers like lavapipe skip
+  it); tests skip gracefully when no such device is present.

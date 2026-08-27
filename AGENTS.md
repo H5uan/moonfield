@@ -69,7 +69,6 @@ PRs, across `ubuntu-latest`, `windows-latest`, and `macos-latest`:
 - `clippy` — `cargo clippy --workspace --all-targets -- -D warnings` on all
   three platforms.
 - `test` — `cargo test --workspace` on all three platforms.
-- `vulkan-smoke` — headless Vulkan triangle test on Ubuntu with lavapipe.
 - `agent-docs` — `python3 scripts/verify_agents.py` (Agent Notes gate).
 
 `.github/actions/setup-slang` downloads a pinned Slang release and exports
