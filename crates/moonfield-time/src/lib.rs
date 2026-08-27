@@ -4,7 +4,7 @@
 //! Four clocks, all plain world resources:
 //!
 //! - [`Time<Real>`] — wall-clock time, fed [`Instant`]s once per frame by the
-//!   windowing backend. Unaffected by pause/scaling.
+//!   [`time_update_system`]. Unaffected by pause/scaling.
 //! - [`Time<Virtual>`] — game time, advanced from the real delta with pause,
 //!   relative speed, and a per-update `max_delta` clamp applied.
 //! - [`Time<Fixed>`] — fixed-timestep time for the fixed schedules;
@@ -14,18 +14,16 @@
 //!   refreshed from [`Time<Virtual>`] every frame, and mirrored to
 //!   [`Time<Fixed>`] while the fixed schedules run.
 //!
-//! `TimePlugin` (moonfield-app) inserts the resources; the winit backend
-//! calls [`update_time`] at the start of every frame, before
-//! `App::update`. `update_time` also lazily inserts any missing clock, so
-//! apps that skip the plugin (e.g. the editor path) still get working time.
-//!
-//! # Deferred
-//!
-//! The reference's `Timer`/`Stopwatch` and `TimeUpdateStrategy` are not
-//! ported — tests drive the clocks through [`update_time_with_instant`]
-//! instead.
+//! `TimePlugin` (moonfield-app) inserts the resources and registers
+//! [`time_update_system`] in the `First` schedule, so `App::update` advances
+//! the clocks automatically. The [`TimeUpdateStrategy`] resource selects the
+//! source: the system clock (`Automatic`, the default) or deterministic
+//! values for tests (`ManualInstant`, `ManualDuration`, `FixedTimesteps`).
+//! `update_time`/`update_time_with_instant` remain callable directly for
+//! one-off tests; missing clocks are lazily inserted, so apps that skip the
+//! plugin still get working time.
 
-use std::time::Instant;
+use std::time::{Duration, Instant};
 
 use moonfield_ecs::World;
 
@@ -44,8 +42,50 @@ pub mod prelude {
     pub use crate::{Fixed, Real, Time, Virtual};
 }
 
-/// Advances all time resources from [`Instant::now`]. Called by the windowing
-/// backend once per frame, before the app update.
+/// Configuration resource used to determine how the time system should run,
+/// mirroring Bevy's `TimeUpdateStrategy`.
+///
+/// `Automatic` (the default) is fine for normal use; tests, networking, and
+/// replay scenarios set a deterministic strategy instead.
+#[derive(Debug, Clone, Copy, PartialEq, Default)]
+pub enum TimeUpdateStrategy {
+    /// Update the clocks from the system clock each frame.
+    #[default]
+    Automatic,
+    /// Set the real clock to the specified [`Instant`] each frame. To make
+    /// time progress, this value must be manually updated each frame.
+    ManualInstant(Instant),
+    /// Increment the real clock by the specified [`Duration`] each frame.
+    ManualDuration(Duration),
+    /// Increment the real clock by the fixed timestep times `n` each frame,
+    /// so `App::update` always runs the fixed loop exactly `n` times.
+    FixedTimesteps(u32),
+}
+
+/// The `First` schedule system that advances all clocks according to the
+/// [`TimeUpdateStrategy`] resource (Bevy's `time_system`). Registered by
+/// `TimePlugin`; runs before the fixed loop and `Update`.
+pub fn time_update_system(world: &mut World) {
+    let strategy = world
+        .get_resource::<TimeUpdateStrategy>()
+        .map(|strategy| *strategy)
+        .unwrap_or_default();
+    match strategy {
+        TimeUpdateStrategy::Automatic => update_time(world),
+        TimeUpdateStrategy::ManualInstant(instant) => update_time_with_instant(world, instant),
+        TimeUpdateStrategy::ManualDuration(duration) => update_time_with_duration(world, duration),
+        TimeUpdateStrategy::FixedTimesteps(factor) => {
+            let step = world
+                .get_resource::<Time<Fixed>>()
+                .map(|fixed| fixed.timestep())
+                .unwrap_or_else(|| Time::<Fixed>::default().timestep());
+            update_time_with_duration(world, step * factor);
+        }
+    }
+}
+
+/// Advances all time resources from [`Instant::now`]. Called by
+/// [`time_update_system`] under `Automatic` strategy.
 pub fn update_time(world: &mut World) {
     update_time_with_instant(world, Instant::now());
 }
@@ -55,6 +95,30 @@ pub fn update_time(world: &mut World) {
 /// [`update_time`]; missing clocks are lazily inserted with defaults, so the
 /// function works whether or not `TimePlugin` was added.
 pub fn update_time_with_instant(world: &mut World, instant: Instant) {
+    ensure_clocks(world);
+    world
+        .get_resource_mut::<Time<Real>>()
+        .unwrap()
+        .update_with_instant(instant);
+    refresh_virtual_time(world);
+}
+
+/// Advances all time resources as if `duration` had passed since the last
+/// update (real → virtual → generic). The deterministic counterpart of
+/// [`update_time_with_instant`] used by the `ManualDuration` and
+/// `FixedTimesteps` strategies.
+pub fn update_time_with_duration(world: &mut World, duration: Duration) {
+    ensure_clocks(world);
+    world
+        .get_resource_mut::<Time<Real>>()
+        .unwrap()
+        .update_with_duration(duration);
+    refresh_virtual_time(world);
+}
+
+/// Lazily insert the three clocks `update_time_with_*` drive, so the
+/// functions work whether or not `TimePlugin` was added.
+fn ensure_clocks(world: &mut World) {
     if !world.contains_resource::<Time<Real>>() {
         world.insert_resource(Time::<Real>::default());
     }
@@ -64,10 +128,11 @@ pub fn update_time_with_instant(world: &mut World, instant: Instant) {
     if !world.contains_resource::<Time>() {
         world.insert_resource(Time::<()>::default());
     }
-    world
-        .get_resource_mut::<Time<Real>>()
-        .unwrap()
-        .update_with_instant(instant);
+}
+
+/// Push the real clock's delta through the virtual clock (pause/speed/clamp)
+/// and refresh the generic `Time` resource from it.
+fn refresh_virtual_time(world: &mut World) {
     let real = world.get_resource::<Time<Real>>().unwrap();
     let mut virt = world.get_resource_mut::<Time<Virtual>>().unwrap();
     let mut current = world.get_resource_mut::<Time>().unwrap();

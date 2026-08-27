@@ -33,19 +33,19 @@ main tick.
   clock advance) followed by `app.update()`; `sync_windows` and a new
   `input_end_frame` moved into `Last` systems.
 
-Clock advance stays at the frame boundary (the runner) rather than inside
-the tick: the fixed-timestep tests drive the clocks deterministically via
-`Time<Virtual>::advance_by` + `App::update`, and an in-tick
-`update_time(Instant::now())` would overwrite them. Porting Bevy's
-`TimeUpdateStrategy` is the follow-up that moves time into the schedule.
+Clock advance was initially kept at the frame boundary (the runner)
+because the fixed-timestep tests drove the clocks deterministically via
+`Time<Virtual>::advance_by` + `App::update`. It has since moved into the
+schedule with Bevy's `TimeUpdateStrategy` — see
+[2026-08-27-time-update-strategy.md](2026-08-27-time-update-strategy.md).
 
 ## Alternatives considered
 
 - **Move `update_time` into `App::update`.** Rejected: overwrites the
   deterministically advanced clocks in the fixed-timestep tests.
-- **Introduce `TimeUpdateStrategy` in this commit.** Deferred: it is the
-  correct long-term shape but a separate API change to `moonfield-time`;
-  keep this commit mechanical.
+- **Introduce `TimeUpdateStrategy` in this commit.** Deferred to a follow-up
+  (now landed — see the time-update-strategy note): it is a separate API
+  change to `moonfield-time`; this commit stayed mechanical.
 - **Keep the runner as `FnOnce(&mut App)`.** Rejected: the exit code
   belongs in the runner contract, as in Bevy.
 
@@ -54,8 +54,8 @@ the tick: the fixed-timestep tests drive the clocks deterministically via
 - A runner is the only way to loop; `App::run` without one runs a single
   tick and returns.
 - Any runner gets time advance, rendering, window sync, and input clearing
-  automatically (the latter three schedule-based; time still runner-driven
-  until `TimeUpdateStrategy` lands).
+  automatically; time advance has since moved into a `First` system via
+  `TimeUpdateStrategy`.
 - `App::render()` remains public for tests and embedding; it is the tail of
   `update()`.
 - `run_frame` lost its hand-wired ordering — the frame's steps are now

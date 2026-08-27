@@ -15,17 +15,17 @@ Status: implemented
 - runner 签名现在返回 `AppExit`(镜像 Bevy 的 `RunnerFn`):`set_runner(impl FnOnce(&mut App) -> AppExit)`。`AppExit` 携带 `std::process::ExitCode`(SUCCESS/FAILURE/from_code),同时仍是"插入即退出"的资源。`moonfield-editor` 的 `main` 把它作为进程退出码返回。
 - winit runner 的 `run_frame` 现在是 `update_time(...)`(帧边界推进时钟)+ `app.update()`;`sync_windows` 和新加的 `input_end_frame` 移入 `Last` 系统。
 
-时钟推进保留在帧边界(runner),而不是 tick 内部:固定步长测试通过 `Time<Virtual>::advance_by` + `App::update` 确定性驱动时钟,tick 内调用 `update_time(Instant::now())` 会覆盖它们。移植 Bevy 的 `TimeUpdateStrategy` 是把时间移入调度的后续工作。
+时钟推进最初保留在帧边界(runner),因为固定步长测试通过 `Time<Virtual>::advance_by` + `App::update` 确定性驱动时钟。此后它已借 Bevy 的 `TimeUpdateStrategy` 移入调度——见 [2026-08-27-time-update-strategy.zh.md](2026-08-27-time-update-strategy.zh.md)。
 
 ## Alternatives considered
 
 - **把 `update_time` 移进 `App::update`。** 否决:会覆盖固定步长测试里确定性推进的时钟。
-- **本次提交就引入 `TimeUpdateStrategy`。** 延后:它是正确的长期形态,但属于 `moonfield-time` 的独立 API 改动;保持本次提交机械性。
+- **本次提交就引入 `TimeUpdateStrategy`。** 延后到后续提交(现已落地——见 time-update-strategy note):它属于 `moonfield-time` 的独立 API 改动;本次保持机械性。
 - **保留 runner 为 `FnOnce(&mut App)`。** 否决:退出码属于 runner 契约,与 Bevy 一致。
 
 ## Consequences
 
 - runner 是唯一的循环途径;不带 runner 的 `App::run` 只跑一次 tick 然后返回。
-- 任何 runner 都能自动获得时间推进、渲染、窗口同步和输入清理(后三者基于调度;时间在 `TimeUpdateStrategy` 落地前仍由 runner 驱动)。
+- 任何 runner 都能自动获得时间推进、渲染、窗口同步和输入清理;时间推进此后已通过 `TimeUpdateStrategy` 移入 `First` 系统。
 - `App::render()` 保持公开,供测试和嵌入使用;它是 `update()` 的尾部。
 - `run_frame` 不再有手工编排顺序——帧的步骤现在由调度声明。

@@ -423,7 +423,7 @@ mod tests {
     #[test]
     fn fixed_update_runs_zero_one_many_times_per_frame() {
         use moonfield_ecs::{Res, ResMut};
-        use moonfield_time::{Fixed, Time, Virtual};
+        use moonfield_time::{Fixed, Time, TimeUpdateStrategy, Virtual};
         use std::time::Duration;
 
         #[derive(Default)]
@@ -458,22 +458,32 @@ mod tests {
             .get_resource_mut::<Time<Fixed>>()
             .unwrap()
             .set_timestep_hz(2.0); // 500 ms steps
+                                   // The manual strategy feeds raw deltas through the virtual clock,
+                                   // whose 250 ms max_delta would clamp the large test steps; disable it
+                                   // (the old advance_by path never clamped either).
+        app.world_mut()
+            .get_resource_mut::<Time<Virtual>>()
+            .unwrap()
+            .set_max_delta(Duration::MAX);
 
-        let advance = |app: &mut App, ms: u64| {
-            app.world_mut()
-                .get_resource_mut::<Time<Virtual>>()
-                .unwrap()
-                .advance_by(Duration::from_millis(ms));
+        // Deterministic clocks: ManualInstant — each update sets the real
+        // clock to the given instant, so the virtual delta is the diff. The
+        // first update only seeds the anchor (zero delta).
+        let advance = |app: &mut App, instant: std::time::Instant| {
+            app.insert_resource(TimeUpdateStrategy::ManualInstant(instant));
         };
+        let t0 = std::time::Instant::now();
+        advance(&mut app, t0);
+        app.update();
 
         // 400 ms of virtual time: no full step.
-        advance(&mut app, 400);
+        advance(&mut app, t0 + Duration::from_millis(400));
         app.update();
         assert_eq!(app.world().get_resource::<FixedRuns>().unwrap().0, 0);
         assert_eq!(app.world().get_resource::<UmbrellaRuns>().unwrap().0, 0);
 
         // +200 ms → 600 ms accumulated: exactly one step.
-        advance(&mut app, 200);
+        advance(&mut app, t0 + Duration::from_millis(600));
         app.update();
         assert_eq!(app.world().get_resource::<FixedRuns>().unwrap().0, 1);
         assert_eq!(app.world().get_resource::<UmbrellaRuns>().unwrap().0, 1);
@@ -489,7 +499,7 @@ mod tests {
         );
 
         // +1.1 s → two more steps; 200 ms stays in the overstep accumulator.
-        advance(&mut app, 1100);
+        advance(&mut app, t0 + Duration::from_millis(1700));
         app.update();
         assert_eq!(app.world().get_resource::<FixedRuns>().unwrap().0, 3);
         assert_eq!(
@@ -509,7 +519,7 @@ mod tests {
     #[test]
     fn fixed_update_respects_virtual_pause() {
         use moonfield_ecs::ResMut;
-        use moonfield_time::{Time, Virtual};
+        use moonfield_time::{Time, TimeUpdateStrategy, Virtual};
         use std::time::Duration;
 
         #[derive(Default)]
@@ -522,11 +532,19 @@ mod tests {
         app.add_plugin(TimePlugin);
         app.insert_resource(FixedRuns::default());
         app.add_systems(FixedUpdate, count_fixed);
-
+        // See the zero/one/many test: the 1 s step would otherwise be clamped
+        // by the virtual clock's max_delta.
         app.world_mut()
             .get_resource_mut::<Time<Virtual>>()
             .unwrap()
-            .advance_by(Duration::from_secs(1));
+            .set_max_delta(Duration::MAX);
+
+        let t0 = std::time::Instant::now();
+        app.insert_resource(TimeUpdateStrategy::ManualInstant(t0));
+        app.update(); // seed the real-clock anchor (zero delta)
+        app.insert_resource(TimeUpdateStrategy::ManualInstant(
+            t0 + Duration::from_secs(1),
+        ));
         app.update();
         assert_eq!(app.world().get_resource::<FixedRuns>().unwrap().0, 64);
 
@@ -535,10 +553,9 @@ mod tests {
             .get_resource_mut::<Time<Virtual>>()
             .unwrap()
             .pause();
-        app.world_mut()
-            .get_resource_mut::<Time<Virtual>>()
-            .unwrap()
-            .advance_by(Duration::ZERO);
+        app.insert_resource(TimeUpdateStrategy::ManualInstant(
+            t0 + Duration::from_secs(1),
+        ));
         app.update();
         assert_eq!(app.world().get_resource::<FixedRuns>().unwrap().0, 64);
     }

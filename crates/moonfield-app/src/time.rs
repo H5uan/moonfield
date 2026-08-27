@@ -4,16 +4,18 @@
 //! app → time, so [`App::update`] can drive the fixed-timestep loop); the
 //! composition plugin follows the `HierarchyPlugin` pattern.
 
-use crate::{App, Plugin};
-use moonfield_time::{Fixed, Real, Time, Virtual};
+use crate::{App, First, Plugin};
+use moonfield_time::{Fixed, Real, Time, TimeUpdateStrategy, Virtual};
 
 /// Inserts the [`Time`] / [`Time<Real>`] / [`Time<Virtual>`] /
 /// [`Time<Fixed>`] resources with defaults (existing resources are left
-/// untouched). The per-frame advance is done by the windowing backend, and
-/// the fixed-schedule loop by [`App::update`], not this plugin.
+/// untouched) and registers [`time_update_system`] in `First`, so every
+/// [`App::update`] advances the clocks per the [`TimeUpdateStrategy`]
+/// resource. The fixed-schedule loop is driven by [`App::update`], not this
+/// plugin.
 ///
-/// Without this plugin there is no `Time<Fixed>` resource and the fixed
-/// schedules never run.
+/// Without this plugin the clocks are lazily inserted by
+/// `moonfield-time::update_time_with_*` and the fixed schedules never run.
 pub struct TimePlugin;
 
 impl Plugin for TimePlugin {
@@ -35,6 +37,10 @@ impl Plugin for TimePlugin {
         if !world.contains_resource::<Time>() {
             world.insert_resource(Time::<()>::default());
         }
+        if !world.contains_resource::<TimeUpdateStrategy>() {
+            world.insert_resource(TimeUpdateStrategy::default());
+        }
+        app.add_systems(First, moonfield_time::time_update_system);
     }
 }
 

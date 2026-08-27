@@ -594,14 +594,11 @@ impl WinitHandler<'_> {
         }
     }
 
-    /// Run one frame: advance the clocks at the frame boundary, then a single
-    /// full `App` tick. Called from `RedrawRequested`; rendering, window-diff
-    /// application, and input clearing are part of the tick or of `Last`
-    /// systems, so the runner only decides *when* to tick. (Time is advanced
-    /// here, not inside the tick, so tests can drive the clocks
-    /// deterministically.)
+    /// Run one frame: a single full `App` tick. Called from `RedrawRequested`;
+    /// time advance (a `First` system), rendering, window-diff application,
+    /// and input clearing are all part of the tick or of `Last` systems, so
+    /// the runner only decides *when* to tick.
     fn run_frame(&mut self, event_loop: &ActiveEventLoop) {
-        moonfield_time::update_time(self.app.world_mut());
         self.app.update();
         self.last_frame = std::time::Instant::now();
         self.redraw_pending = false;
