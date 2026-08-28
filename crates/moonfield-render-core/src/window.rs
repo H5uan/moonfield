@@ -9,8 +9,9 @@
 //!
 //! - [`create_window_surfaces`] (`RenderPrepare`): creates/recreates surfaces
 //!   and swapchains to match the extracted windows.
-//! - [`acquire_window_frames`] (`Render`, first): waits the in-flight fence,
-//!   acquires the next swapchain image, and begins the frame's command buffer.
+//! - [`acquire_window_frames`] (`Render`, first): waits the in-flight timeline
+//!   counter, acquires the next swapchain image, and begins the frame's
+//!   command buffer.
 //! - [`submit_window_frames`] (`Render`, last): ends recording, submits to the
 //!   graphics queue, presents, and advances the frame slot.
 //!
@@ -22,8 +23,8 @@ use crate::MainEntity;
 use moonfield_app::prelude::World;
 use moonfield_log::error;
 use moonfield_rhi::{
-    CommandBuffer, CommandBufferUsage, CommandPool, Device, Error, Extent2d, Fence, Format,
-    Instance, RenderDevice, Result, Semaphore, Surface, Swapchain, TextureView,
+    CommandBuffer, CommandBufferUsage, CommandPool, Device, Error, Extent2d, Format, Instance,
+    RenderDevice, Result, Semaphore, Surface, Swapchain, TextureView,
 };
 use moonfield_window::{RawHandleWrapper, Window};
 use raw_window_handle::{
@@ -93,7 +94,7 @@ pub fn extract_windows(world: &World, render_world: &mut World) {
 pub struct WindowSurfaceData {
     image_available: Vec<Semaphore>,
     render_finished: Vec<Semaphore>,
-    in_flight: Vec<Fence>,
+    timeline: Semaphore,
     command_buffers: Vec<CommandBuffer>,
     /// Held for drop order only: the pool must outlive its command buffers.
     #[allow(dead_code)]
@@ -102,7 +103,7 @@ pub struct WindowSurfaceData {
     surface: Surface,
     device: Arc<Device>,
     instance: Arc<Instance>,
-    current_frame: usize,
+    frame_submitted: u64,
     current_image: Option<u32>,
     needs_recreate: bool,
     /// Frames successfully presented; consumers (e.g. the editor's feedback
@@ -144,33 +145,33 @@ impl WindowSurfaceData {
         let mut command_buffers = Vec::with_capacity(MAX_FRAMES_IN_FLIGHT);
         let mut image_available = Vec::with_capacity(MAX_FRAMES_IN_FLIGHT);
         let mut render_finished = Vec::with_capacity(MAX_FRAMES_IN_FLIGHT);
-        let mut in_flight = Vec::with_capacity(MAX_FRAMES_IN_FLIGHT);
         for _ in 0..MAX_FRAMES_IN_FLIGHT {
             command_buffers.push(command_pool.allocate_command_buffer()?);
             image_available.push(Semaphore::new(&device)?);
             render_finished.push(Semaphore::new(&device)?);
-            in_flight.push(Fence::new(&device, true)?);
         }
+        let timeline = Semaphore::new_timeline(&device, 0)?;
 
         Ok(Self {
             image_available,
             render_finished,
-            in_flight,
+            timeline,
             command_buffers,
             command_pool,
             swapchain,
             surface,
             device,
             instance,
-            current_frame: 0,
+            frame_submitted: 1,
             current_image: None,
             needs_recreate: false,
             presented_frames: 0,
         })
     }
 
-    /// Begin a frame: wait for the frame-in-flight fence, acquire the next
-    /// swapchain image, and begin recording the frame's command buffer.
+    /// Begin a frame: wait for the in-flight timeline counter
+    /// (`frame_submitted - MAX_FRAMES_IN_FLIGHT`), acquire the next swapchain
+    /// image, and begin recording the frame's command buffer.
     ///
     /// Returns `false` when the swapchain is out of date and no frame was
     /// started; the surface is flagged for recreation on the next
@@ -182,9 +183,11 @@ impl WindowSurfaceData {
             ));
         }
 
-        let frame = self.current_frame;
-        self.in_flight[frame].wait(u64::MAX)?;
-
+        if self.frame_submitted > MAX_FRAMES_IN_FLIGHT as u64 {
+            self.timeline
+                .wait(self.frame_submitted - MAX_FRAMES_IN_FLIGHT as u64, u64::MAX)?;
+        }
+        let frame = ((self.frame_submitted - 1) % MAX_FRAMES_IN_FLIGHT as u64) as usize;
         let (image_index, suboptimal) = match self
             .swapchain
             .acquire_next_image(u64::MAX, &self.image_available[frame])
@@ -200,7 +203,6 @@ impl WindowSurfaceData {
             self.needs_recreate = true;
         }
 
-        self.in_flight[frame].reset()?;
         self.current_image = Some(image_index);
 
         let command_buffer = &mut self.command_buffers[frame];
@@ -215,15 +217,14 @@ impl WindowSurfaceData {
             .current_image
             .take()
             .expect("no frame in progress; acquire must run first");
-        let frame = self.current_frame;
-
+        let frame = ((self.frame_submitted - 1) % MAX_FRAMES_IN_FLIGHT as u64) as usize;
         self.command_buffers[frame].end()?;
-
-        self.device.submit_frame(
+        self.device.submit_frame_timeline(
             &self.command_buffers[frame],
             &self.image_available[frame],
             &self.render_finished[frame],
-            &self.in_flight[frame],
+            &self.timeline,
+            self.frame_submitted, // signal 值 = 本帧号
         )?;
 
         let render_finished = [&self.render_finished[frame]];
@@ -242,7 +243,7 @@ impl WindowSurfaceData {
             Err(e) => return Err(e),
         }
 
-        self.current_frame = (frame + 1) % MAX_FRAMES_IN_FLIGHT;
+        self.frame_submitted += 1;
         self.presented_frames = self.presented_frames.saturating_add(1);
         Ok(())
     }
@@ -294,7 +295,7 @@ impl WindowSurfaceData {
     /// The current frame slot (0..[`MAX_FRAMES_IN_FLIGHT`]). Per-slot GPU
     /// resources key off this so writers don't race a frame still on the GPU.
     pub fn frame_index(&self) -> usize {
-        self.current_frame
+        ((self.frame_submitted - 1) % MAX_FRAMES_IN_FLIGHT as u64) as usize
     }
 
     /// Frames successfully presented on this surface.
@@ -312,7 +313,8 @@ impl WindowSurfaceData {
     /// [`submit_window_frames`]).
     pub fn current_command_buffer(&mut self) -> Option<&mut CommandBuffer> {
         self.current_image?;
-        Some(&mut self.command_buffers[self.current_frame])
+        let frame = ((self.frame_submitted - 1) % MAX_FRAMES_IN_FLIGHT as u64) as usize;
+        Some(&mut self.command_buffers[frame])
     }
 
     /// The image view of the currently acquired swapchain image, for use as
