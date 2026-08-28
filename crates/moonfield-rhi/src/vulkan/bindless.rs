@@ -101,6 +101,13 @@ impl HostPtr {
     pub fn typed<T>(&self) -> *mut T {
         self.0.cast()
     }
+
+    /// Advance the pointer by `bytes` host bytes — the same offset applied to
+    /// the GPU view, so the CPU/GPU pair stays in lockstep. Callers must keep
+    /// the result inside the same allocation.
+    pub(crate) fn offset(self, bytes: usize) -> Self {
+        Self(self.0.wrapping_add(bytes))
+    }
 }
 
 // Safety: a `HostPtr` is only created for an allocation that remains valid for
@@ -145,6 +152,23 @@ impl GpuAllocation {
     /// it carries no fixed usage, and consumers use the returned pointers
     /// directly.
     pub fn new(device: &crate::vulkan::device::Device, size: u64, memory: Memory) -> Result<Self> {
+        // The allocator's default base alignment (16 bytes) satisfies every
+        // standard use; arena-style carving that needs co-aligned CPU/GPU
+        // sub-allocations past 16 bytes uses [`new_aligned`] instead.
+        Self::new_aligned(device, size, memory, 16)
+    }
+
+    /// Like [`new`], but raises the block's base alignment to at least `align`
+    /// bytes before allocating — the reference implementation's
+    /// `mem_requirements.alignment = max(.., align)`. A host-visible block
+    /// mapped and addressed on an `align` boundary lets one shared offset
+    /// align both the CPU and GPU view of every sub-allocation up to `align`.
+    pub fn new_aligned(
+        device: &crate::vulkan::device::Device,
+        size: u64,
+        memory: Memory,
+        align: u64,
+    ) -> Result<Self> {
         // The buffer is a pure address carrier: Vulkan settles buffer device
         // addresses and memory requirements on an existing buffer object, so
         // one must exist before either can be queried. It is not bound to any
@@ -167,8 +191,12 @@ impl GpuAllocation {
                 .map_err(|e| Error::Backend(format!("failed to create bindless buffer: {:?}", e)))?
         };
         // Query the size/alignment this buffer's memory must satisfy; Vulkan
-        // settles this on the existing buffer object.
-        let requirements = unsafe { device.raw().get_buffer_memory_requirements(buffer) };
+        // settles this on the existing buffer object. Raise the alignment so
+        // the allocator places the block on an `align` boundary, keeping the
+        // CPU/GPU base-pointer delta a multiple of `align` (see
+        // `GpuBumpAllocator::check_co_align`).
+        let mut requirements = unsafe { device.raw().get_buffer_memory_requirements(buffer) };
+        requirements.alignment = requirements.alignment.max(align.max(16));
 
         let allocator = device.allocator().clone();
         // Carve a chunk out of the allocator's pool for the buffer.

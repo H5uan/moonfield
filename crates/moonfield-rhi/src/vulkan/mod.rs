@@ -6,6 +6,7 @@
 
 pub mod bindless;
 pub mod buffer;
+pub mod bump;
 pub mod command;
 pub mod device;
 pub mod instance;
@@ -31,6 +32,7 @@ pub(crate) struct DeviceExtensionFunctions {
 }
 
 pub use buffer::Buffer;
+pub use bump::{BumpAlloc, GpuBumpAllocator};
 pub use command::{
     CommandBuffer, CommandPool, CullState, DepthState, RenderAttachment, RenderPassDesc,
 };
