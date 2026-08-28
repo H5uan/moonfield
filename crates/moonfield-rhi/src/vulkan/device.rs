@@ -3,30 +3,21 @@
 use crate::bindless;
 use crate::error::{Error, Result};
 use crate::vulkan::instance::Instance;
-use crate::vulkan::sync::{Fence, Semaphore};
+use crate::vulkan::sync::Semaphore;
 use ash::vk::{self, TaggedStructure as _};
 use gpu_allocator::vulkan::{Allocator, AllocatorCreateDesc};
 use std::ffi::{c_char, CStr};
 use std::sync::{Arc, Mutex};
 
-// `VK_EXT_descriptor_heap` is required unconditionally: the RHI targets
-// recent drivers that expose it (current NVIDIA and AMD proprietary both
-// do), so there is no fallback when it is missing.
-const DEVICE_EXTENSIONS: &[&CStr] = &[
+// Required extensions are demanded unconditionally: the RHI targets recent
+// drivers (current NVIDIA and AMD proprietary both expose them), so there is
+// no fallback when one is missing — device creation fails with the missing
+// names listed, instead of a bare `ERROR_EXTENSION_NOT_PRESENT`.
+const REQUIRED_DEVICE_EXTENSIONS: &[&CStr] = &[
     ash::khr::swapchain::NAME,
     ash::ext::descriptor_heap::NAME,
     ash::ext::extended_dynamic_state3::NAME,
     ash::ext::mesh_shader::NAME,
-    ash::ext::ray_tracing_invocation_reorder::NAME,
-    ash::khr::ray_tracing_pipeline::NAME,
-    ash::khr::ray_query::NAME,
-    ash::khr::ray_tracing_position_fetch::NAME,
-    // The ray-tracing stack's shared prerequisites (requiredExtensions of the
-    // KHR RT extensions): the acceleration structure is the BVH container,
-    // pipeline library and deferred host operations back RT pipeline creation.
-    ash::khr::acceleration_structure::NAME,
-    ash::khr::pipeline_library::NAME,
-    ash::khr::deferred_host_operations::NAME,
     // GPU-driven + bindless helpers. `mutable_descriptor_type` lets one
     // binding reuse a descriptor slot across types (fewer layouts, cheaper
     // binds); `vertex_input_dynamic_state` decouples vertex layouts from the
@@ -34,6 +25,28 @@ const DEVICE_EXTENSIONS: &[&CStr] = &[
     ash::ext::mutable_descriptor_type::NAME,
     ash::ext::vertex_input_dynamic_state::NAME,
     ash::ext::device_generated_commands::NAME,
+];
+
+// Optional extensions are performance enhancements or whole feature stacks,
+// not prerequisites: they are enabled when the physical device exposes them,
+// skipped with a warning otherwise. Callers query
+// [`Device::optional_extension_enabled`] before relying on the feature.
+//
+// The ray-tracing stack is optional as a group: mesh rendering and the
+// editor's core passes do not need it, and some real cards (Turing-class
+// NVIDIA, e.g. T1000) do not expose the KHR RT extensions at all while
+// software renderers (llvmpipe) do. `invocation_reorder` additionally needs
+// Ampere-or-newer RT cores.
+const OPTIONAL_DEVICE_EXTENSIONS: &[&CStr] = &[
+    // The BVH container backing all RT work.
+    ash::khr::acceleration_structure::NAME,
+    ash::khr::ray_tracing_pipeline::NAME,
+    ash::khr::ray_query::NAME,
+    ash::khr::ray_tracing_position_fetch::NAME,
+    // Shared prerequisites of the RT pipeline extensions.
+    ash::khr::pipeline_library::NAME,
+    ash::khr::deferred_host_operations::NAME,
+    ash::ext::ray_tracing_invocation_reorder::NAME,
 ];
 
 /// Queue family indices selected for graphics and presentation.
@@ -117,6 +130,9 @@ pub struct Device {
     /// once at device creation and shared with command buffers by `Arc` — no
     /// per-command-buffer copies of the function-pointer tables.
     extension_fns: Arc<crate::vulkan::DeviceExtensionFunctions>,
+    /// Optional extensions that were actually enabled at creation (a subset
+    /// of [`OPTIONAL_DEVICE_EXTENSIONS`]); empty on cards that lack them.
+    optional_extensions: Vec<&'static CStr>,
     /// Shared GPU memory allocator for buffers and images. Wrapped in
     /// `Arc<Mutex>` so resources can hold clones and free their allocations
     /// on drop without a borrow on the device. `Option` so `Drop` can take it
@@ -173,8 +189,55 @@ impl Device {
             })
             .collect();
 
-        let device_extension_names: Vec<*const c_char> =
-            DEVICE_EXTENSIONS.iter().map(|name| name.as_ptr()).collect();
+        // Enumerate what the physical device actually exposes, so required
+        // extensions fail with their names listed and optional ones are
+        // skipped with a warning instead of a bare ERROR_EXTENSION_NOT_PRESENT.
+        // SAFETY: the physical device and instance are valid; this is a read-only
+        // enumeration of the device's extension list.
+        let supported_extensions = unsafe {
+            instance
+                .raw()
+                .enumerate_device_extension_properties(physical_device)
+        }
+        .map_err(|e| Error::Backend(format!("failed to enumerate device extensions: {e:?}")))?;
+        let supported: Vec<&CStr> = supported_extensions
+            .iter()
+            .map(|props| unsafe { CStr::from_ptr(props.extension_name.as_ptr()) })
+            .collect();
+
+        let missing: Vec<&CStr> = REQUIRED_DEVICE_EXTENSIONS
+            .iter()
+            .copied()
+            .filter(|name| !supported.contains(name))
+            .collect();
+        if !missing.is_empty() {
+            return Err(Error::DeviceRequest(format!(
+                "physical device is missing required extensions: {missing:?}"
+            )));
+        }
+
+        let mut optional_enabled: Vec<&'static CStr> = Vec::new();
+        for name in OPTIONAL_DEVICE_EXTENSIONS {
+            if supported.contains(name) {
+                optional_enabled.push(name);
+            } else {
+                moonfield_log::warn!(
+                    "device extension {name:?} not supported; its feature is disabled"
+                );
+            }
+        }
+
+        // The final enable list points into the `'static` constants above,
+        // so the `*const c_char` array outlives the local `supported` list.
+        let enabled_extensions: Vec<&'static CStr> = REQUIRED_DEVICE_EXTENSIONS
+            .iter()
+            .chain(optional_enabled.iter())
+            .copied()
+            .collect();
+        let device_extension_names: Vec<*const c_char> = enabled_extensions
+            .iter()
+            .map(|name| name.as_ptr())
+            .collect();
 
         let mut vulkan_12_features = vk::PhysicalDeviceVulkan12Features::default()
             .buffer_device_address(true)
@@ -238,6 +301,26 @@ impl Device {
 
         let mut features2 =
             vk::PhysicalDeviceFeatures2::default().features(vk::PhysicalDeviceFeatures::default());
+        // Feature structures of optional extensions are requested only when the
+        // extension was enabled, so the request matches the enable list
+        // exactly (drivers ignore structures whose extension they never saw).
+        // The RT feature structs are gated as a stack; see
+        // [`OPTIONAL_DEVICE_EXTENSIONS`].
+        if optional_enabled.contains(&ash::khr::acceleration_structure::NAME) {
+            features2 = features2.push(&mut acceleration_structure_features);
+        }
+        if optional_enabled.contains(&ash::khr::ray_tracing_pipeline::NAME) {
+            features2 = features2.push(&mut ray_tracing_pipeline_features);
+        }
+        if optional_enabled.contains(&ash::khr::ray_query::NAME) {
+            features2 = features2.push(&mut ray_query_features);
+        }
+        if optional_enabled.contains(&ash::khr::ray_tracing_position_fetch::NAME) {
+            features2 = features2.push(&mut position_fetch_features);
+        }
+        if optional_enabled.contains(&ash::ext::ray_tracing_invocation_reorder::NAME) {
+            features2 = features2.push(&mut invocation_reorder_features);
+        }
         let _ = features2
             .push(&mut vulkan_12_features)
             .push(&mut vulkan_13_features)
@@ -245,11 +328,6 @@ impl Device {
             .push(&mut descriptor_heap_features)
             .push(&mut extended_dynamic_state3_features)
             .push(&mut mesh_shader_features)
-            .push(&mut acceleration_structure_features)
-            .push(&mut ray_tracing_pipeline_features)
-            .push(&mut ray_query_features)
-            .push(&mut position_fetch_features)
-            .push(&mut invocation_reorder_features)
             .push(&mut mutable_descriptor_type_features)
             .push(&mut vertex_input_dynamic_state_features)
             .push(&mut device_generate_commands_features);
@@ -298,6 +376,7 @@ impl Device {
             present_queue,
             queue_family_indices,
             extension_fns,
+            optional_extensions: optional_enabled,
             allocator: Some(Arc::new(Mutex::new(allocator))),
         })
     }
@@ -305,6 +384,14 @@ impl Device {
     /// Access the raw `ash::Device`.
     pub fn raw(&self) -> &ash::Device {
         &self.device
+    }
+
+    /// Whether the optional extension `name` was enabled at device creation.
+    /// False when the physical device does not expose it — the skip is
+    /// surfaced as a warning during creation, so callers can degrade the
+    /// feature instead of failing.
+    pub fn optional_extension_enabled(&self, name: &CStr) -> bool {
+        self.optional_extensions.contains(&name)
     }
 
     /// The shared aggregated device-extension loaders (see
@@ -347,38 +434,40 @@ impl Device {
         Ok(())
     }
 
-    /// Submit one recorded command buffer for presentation, waiting on
-    /// `wait_semaphore` at the color-attachment stage and signaling
-    /// `signal_semaphore` on completion, gated by `fence`. The canonical
-    /// swapchain frame submit — the wait stage is fixed by the present flow.
-    ///
-    /// The engine layer's window frame loop owns the semaphore/fence cycle;
-    /// this helper keeps the `ash` submit details inside the RHI.
-    pub fn submit_frame(
+    pub fn submit_frame_timeline(
         &self,
         command_buffer: &crate::CommandBuffer,
         wait_semaphore: &Semaphore,
         signal_semaphore: &Semaphore,
-        fence: &Fence,
+        timeline: &Semaphore,
+        signal_value: u64,
     ) -> Result<()> {
-        let wait_semaphores = [wait_semaphore.raw()];
-        let wait_stages = [vk::PipelineStageFlags::COLOR_ATTACHMENT_OUTPUT];
-        let signal_semaphores = [signal_semaphore.raw()];
-        let command_buffers = [command_buffer.raw()];
-        let submit_info = vk::SubmitInfo::default()
-            .wait_semaphores(&wait_semaphores)
-            .wait_dst_stage_mask(&wait_stages)
-            .command_buffers(&command_buffers)
-            .signal_semaphores(&signal_semaphores);
-
-        // SAFETY: the command buffer is fully recorded; the semaphores and
-        // fence are valid and follow the in-flight contract.
+        let wait_infos = [vk::SemaphoreSubmitInfo::default()
+            .semaphore(wait_semaphore.raw())
+            .stage_mask(vk::PipelineStageFlags2::COLOR_ATTACHMENT_OUTPUT)];
+        // binary 的 value 字段被忽略，占位 0；timeline 的 value 就是 signal 值。
+        let signal_infos = [
+            vk::SemaphoreSubmitInfo::default()
+                .semaphore(signal_semaphore.raw())
+                .stage_mask(vk::PipelineStageFlags2::ALL_COMMANDS)
+                .value(0),
+            vk::SemaphoreSubmitInfo::default()
+                .semaphore(timeline.raw())
+                .stage_mask(vk::PipelineStageFlags2::ALL_COMMANDS)
+                .value(signal_value),
+        ];
+        let command_infos =
+            [vk::CommandBufferSubmitInfo::default().command_buffer(command_buffer.raw())];
+        let submit_info = vk::SubmitInfo2::default()
+            .wait_semaphore_infos(&wait_infos)
+            .command_buffer_infos(&command_infos)
+            .signal_semaphore_infos(&signal_infos);
         unsafe {
             self.device
-                .queue_submit(
+                .queue_submit2(
                     self.graphics_queue,
                     std::slice::from_ref(&submit_info),
-                    fence.raw(),
+                    vk::Fence::null(),
                 )
                 .map_err(|e| Error::Backend(format!("failed to submit frame: {e:?}")))?;
         }

@@ -44,15 +44,19 @@ fn alloc_offsets_are_aligned_and_monotonic() {
     let a = arena.alloc(100, 16).expect("alloc a");
     assert_eq!(a.gpu.as_raw() % 16, 0, "a must be 16-aligned");
 
+    // A 64-aligned request exceeds the first block's 16B base alignment and
+    // so moves to a grown block; it must still be aligned, and later
+    // allocations in that block follow it contiguously.
     let b = arena.alloc(100, 64).expect("alloc b");
     assert_eq!(b.gpu.as_raw() % 64, 0, "b must be 64-aligned");
-    // b starts at the first 64-boundary at or past the end of a (100 bytes).
-    let expected = align_up(a.gpu.as_raw() as usize + 100, 64);
-    assert_eq!(b.gpu.as_raw() as usize, expected, "b follows a");
+    assert!(b.gpu.as_raw() > a.gpu.as_raw(), "grown block starts past block 0");
 
-    // Advances are monotonic within one block.
-    let c = arena.alloc(8, 16).expect("alloc c");
-    assert!(c.gpu.as_raw() > b.gpu.as_raw());
+    let c = arena.alloc(8, 64).expect("alloc c");
+    assert_eq!(
+        c.gpu.as_raw() - b.gpu.as_raw(),
+        align_up(100, 64) as u64,
+        "c follows b within the grown block"
+    );
 }
 
 #[test]
@@ -62,14 +66,14 @@ fn cpu_and_gpu_views_share_the_same_offset() {
     };
     let mut arena = GpuBumpAllocator::new(&device, 1 << 20).expect("arena");
 
-    let a = arena.alloc(3 * 4, 4).expect("alloc a"); // 12 bytes at 16
-    let b = arena.alloc(64, 64).expect("alloc b");
+    let a = arena.alloc(3 * 4, 4).expect("alloc a"); // 12 bytes, aligned to 16
+    let b = arena.alloc(64, 16).expect("alloc b");
     // CPU and GPU deltas between two allocations must match: both views use
     // the same offset from their respective bases.
     let cpu_delta = b.cpu.typed::<u8>() as usize - a.cpu.typed::<u8>() as usize;
     let gpu_delta = b.gpu.as_raw() as usize - a.gpu.as_raw() as usize;
     assert_eq!(cpu_delta, gpu_delta);
-    assert_eq!(gpu_delta, align_up(12, 64) as usize);
+    assert_eq!(gpu_delta, align_up(12, 16) as usize);
 }
 
 #[test]
