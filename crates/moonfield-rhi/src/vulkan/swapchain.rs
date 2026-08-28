@@ -148,9 +148,8 @@ impl Swapchain {
     ///
     /// `old_swapchain` is the swapchain currently in use by the surface, if
     /// any (i.e. when recreating on resize/suboptimal). It is passed as
-    /// `oldSwapchain` so the driver can recycle the surface's images — some
-    /// backends (MoltenVK) reject recreation unless the new swapchain names
-    /// the one currently bound to the surface.
+    /// `oldSwapchain` so the driver can recycle the surface's images — the
+    /// replacement must name the swapchain currently bound to the surface.
     pub fn new(
         instance: &Instance,
         device: &Device,

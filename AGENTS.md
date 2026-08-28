@@ -62,13 +62,14 @@ rustup honors it locally, and CI installs it with a plain `rustup show` step.
 a PR (Dependabot does not manage toolchain files).
 
 GitHub Actions (`.github/workflows/ci.yml`) runs on pushes to `master` and on
-PRs, across `ubuntu-latest`, `windows-latest`, and `macos-latest`:
+PRs, across `ubuntu-latest` and `windows-latest` (the supported targets are
+Windows and Linux):
 
 - `rustfmt` — `cargo fmt --all -- --check`
 - `rust-analyzer` — verifies the pinned language-server component is executable.
-- `clippy` — `cargo clippy --workspace --all-targets -- -D warnings` on all
-  three platforms.
-- `test` — `cargo test --workspace` on all three platforms.
+- `clippy` — `cargo clippy --workspace --all-targets -- -D warnings` on both
+  platforms.
+- `test` — `cargo test --workspace` on both platforms.
 - `agent-docs` — `python3 scripts/verify_agents.py` (Agent Notes gate).
 
 `.github/actions/setup-slang` downloads a pinned Slang release and exports

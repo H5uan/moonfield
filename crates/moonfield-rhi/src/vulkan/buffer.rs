@@ -140,8 +140,9 @@ impl Buffer {
         let allocation = self.allocation.as_ref().ok_or(Error::InvalidHandle)?;
         // SAFETY: gpu-allocator keeps host-visible memory blocks persistently
         // mapped, and `mapped_ptr` already points at the allocation's offset.
-        // MoltenVK rejects a second vkMapMemory on the same block, so only
-        // fall back to a manual map/unmap when the allocation is not mapped.
+        // The spec forbids vkMapMemory on an already-mapped VkDeviceMemory,
+        // so only fall back to a manual map/unmap when the allocation is not
+        // mapped.
         let ptr = match allocation.mapped_ptr() {
             Some(ptr) => ptr.as_ptr(),
             None => {
@@ -180,8 +181,7 @@ impl Buffer {
     fn upload_host_visible<T: Copy>(&self, bytes: vk::DeviceSize, data: &[T]) -> Result<()> {
         let allocation = self.allocation.as_ref().ok_or(Error::InvalidHandle)?;
         // SAFETY: same persistent-mapping rule as `read` above — reuse the
-        // allocation's mapped pointer, only manual map/unmap when absent
-        // (MoltenVK rejects a second vkMapMemory on one block).
+        // allocation's mapped pointer, only manual map/unmap when absent.
         let ptr = match allocation.mapped_ptr() {
             Some(ptr) => ptr.as_ptr(),
             None => {

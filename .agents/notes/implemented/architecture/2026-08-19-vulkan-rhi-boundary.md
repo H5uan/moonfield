@@ -44,7 +44,8 @@ vocabulary:
   one offline `slangc -target spirv` compile can also produce embedded bytes via
   `include_bytes!`.
 - `cargo test -p moonfield-rhi --test headless_triangle` runs headless on
-  lavapipe; on Windows/macOS it skips when no Vulkan driver is present.
+  lavapipe; it skips when no Vulkan instance can be created (machines without
+  a usable driver).
 
 ## Alternatives considered
 

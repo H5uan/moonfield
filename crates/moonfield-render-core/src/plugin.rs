@@ -9,8 +9,8 @@
 //! the acquire and submit systems; destruction order is handled by `Arc`
 //! refcounting on the shared device.
 //!
-//! Headless tolerance: if the machine has no Vulkan driver (CI on
-//! Windows/macOS), the plugin logs an error and inserts nothing — the app
+//! Headless tolerance: if the machine has no Vulkan driver (e.g. a CI
+//! runner), the plugin logs an error and inserts nothing — the app
 //! keeps running, and windowed consumers retry gracefully until a
 //! `RenderDevice` appears.
 

@@ -16,7 +16,7 @@ Status: implemented
 - 引擎 clip 约定是 **Y-up + reverse-Z**;任何 Vulkan viewport 调整发生在这条边界(`vulkan::*`),而不是场景或渲染器代码。
 - 所有 Vulkan 对象住在主线程;目前没有任何东西跨线程 `Send`。对象按创建逆序、显式 drop 顺序销毁。
 - Shader:后端在运行时编译 Slang→SPIR-V(`vulkan/shader.rs`),`ShaderModule::from_spirv` 直接加载字节码;一次离线 `slangc -target spirv` 编译也可通过 `include_bytes!` 产出内嵌字节。
-- `cargo test -p moonfield-rhi --test headless_triangle` 在 lavapipe 上无头运行;Windows/macOS 无 Vulkan 驱动时优雅跳过。
+- `cargo test -p moonfield-rhi --test headless_triangle` 在 lavapipe 上无头运行;无法创建 Vulkan 实例时(无可用驱动的机器)优雅跳过。
 
 ## Alternatives considered
 

@@ -49,7 +49,10 @@ fn alloc_offsets_are_aligned_and_monotonic() {
     // allocations in that block follow it contiguously.
     let b = arena.alloc(100, 64).expect("alloc b");
     assert_eq!(b.gpu.as_raw() % 64, 0, "b must be 64-aligned");
-    assert!(b.gpu.as_raw() > a.gpu.as_raw(), "grown block starts past block 0");
+    assert!(
+        b.gpu.as_raw() > a.gpu.as_raw(),
+        "grown block starts past block 0"
+    );
 
     let c = arena.alloc(8, 64).expect("alloc c");
     assert_eq!(

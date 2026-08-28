@@ -260,10 +260,9 @@ impl WindowSurfaceData {
         self.device.wait_idle()?;
 
         // Pass the current swapchain as `oldSwapchain` so the driver recycles
-        // the surface's images; MoltenVK rejects creation unless the new
-        // swapchain names the one currently in use by the surface. The old
-        // swapchain is dropped after the new one is created and the device is
-        // idle.
+        // the surface's images and the replacement names the swapchain
+        // currently in use by the surface. The old swapchain is dropped after
+        // the new one is created and the device is idle.
         let old_swapchain = self.swapchain.raw();
         self.swapchain = Swapchain::new(
             &self.instance,

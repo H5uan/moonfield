@@ -98,13 +98,11 @@ fn platform_surface_extensions() -> &'static [&'static CStr] {
             ash::khr::get_surface_capabilities2::NAME,
         ]
     }
-    #[cfg(target_os = "macos")]
+    // Windows and Linux are the only supported windowing targets; any other
+    // OS requests no surface extensions, so windowed rendering fails at
+    // surface creation and only headless use can work.
+    #[cfg(not(any(target_os = "windows", target_os = "linux")))]
     {
-        &[
-            ash::khr::surface::NAME,
-            ash::ext::metal_surface::NAME,
-            ash::khr::portability_enumeration::NAME,
-            ash::khr::get_surface_capabilities2::NAME,
-        ]
+        &[]
     }
 }

@@ -19,7 +19,6 @@ runs:
       run: |
         case "${{ runner.os }}-${{ runner.arch }}" in
           Linux-X64)    asset="slang-${{ inputs.version }}-linux-x86_64.tar.gz" ;;
-          macOS-ARM64)  asset="slang-${{ inputs.version }}-macos-aarch64.tar.gz" ;;
           Windows-X64)  asset="slang-${{ inputs.version }}-windows-x86_64.tar.gz" ;;
           *)
             echo "unsupported runner: ${{ runner.os }}-${{ runner.arch }}" >&2
@@ -58,9 +57,6 @@ runs:
             ;;
           Linux)
             echo "LD_LIBRARY_PATH=$SLANG_DIR/lib${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}" >> "$GITHUB_ENV"
-            ;;
-          macOS)
-            echo "DYLD_LIBRARY_PATH=$SLANG_DIR/lib${DYLD_LIBRARY_PATH:+:$DYLD_LIBRARY_PATH}" >> "$GITHUB_ENV"
             ;;
         esac
 

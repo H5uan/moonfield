@@ -16,8 +16,6 @@ impl Instance {
     ///
     /// `required_extensions` should contain platform surface extensions such as
     /// `VK_KHR_surface` and the platform-specific `VK_KHR_win32_surface`, etc.
-    /// If `VK_KHR_portability_enumeration` is requested (macOS/MoltenVK), the
-    /// matching `ENUMERATE_PORTABILITY_KHR` create flag is set automatically.
     pub fn new(required_extensions: &[&CStr]) -> Result<Self> {
         let entry = unsafe { ash::Entry::load() }?;
 
@@ -41,18 +39,10 @@ impl Instance {
         #[cfg(not(feature = "validation"))]
         let layers: Vec<*const c_char> = Vec::new();
 
-        // Set for moltenvk compatibility. However, macOS will not be well supported since it will not support all new extensions.
-        let flags = if required_extensions.contains(&ash::khr::portability_enumeration::NAME) {
-            vk::InstanceCreateFlags::ENUMERATE_PORTABILITY_KHR
-        } else {
-            vk::InstanceCreateFlags::empty()
-        };
-
         let create_info = vk::InstanceCreateInfo::default()
             .application_info(&app_info)
             .enabled_extension_names(&extensions)
-            .enabled_layer_names(&layers)
-            .flags(flags);
+            .enabled_layer_names(&layers);
 
         let instance = unsafe { entry.create_instance(&create_info, None) }
             .map_err(|e| Error::Backend(format!("failed to create Vulkan instance: {:?}", e)))?;
