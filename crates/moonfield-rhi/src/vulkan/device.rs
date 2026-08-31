@@ -50,6 +50,20 @@ const OPTIONAL_DEVICE_EXTENSIONS: &[&CStr] = &[
     ash::ext::ray_tracing_invocation_reorder::NAME,
 ];
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct DescriptorHeapProperties {
+    pub max_resource_heap_size: u64,
+    pub resource_heap_alignment: u64,
+    pub image_descriptor_size: u64,
+    pub image_descriptor_alignment: u64,
+    pub max_sampler_heap_size: u64,
+    pub sampler_heap_alignment: u64,
+    pub sampler_descriptor_size: u64,
+    pub sampler_descriptor_alignment: u64,
+    pub min_resource_heap_reserved_range: u64,
+    pub min_sampler_heap_reserved_range: u64,
+}
+
 /// Queue family indices selected for graphics and presentation.
 #[derive(Debug, Clone, Copy)]
 pub struct QueueFamilyIndices {
@@ -127,6 +141,11 @@ pub struct Device {
     compute_queue: vk::Queue,
     present_queue: vk::Queue,
     queue_family_indices: QueueFamilyIndices,
+    /// `VK_EXT_descriptor_heap` limits (its CPU-visible heap semantics). The
+    /// RHI requires descriptor-heap support unconditionally — device creation
+    /// fails where the driver does not implement it, like any missing
+    /// required extension.
+    descriptor_heap_properties: DescriptorHeapProperties,
     /// Aggregated device-extension loaders (blend dynamic state etc.), built
     /// once at device creation and shared with command buffers by `Arc` — no
     /// per-command-buffer copies of the function-pointer tables.
@@ -221,6 +240,44 @@ impl Device {
                 "physical device is missing required extensions: {missing:?}"
             )));
         }
+
+        // `VK_EXT_descriptor_heap` exposes a CPU-visible descriptor heap: the CPU
+        // writes descriptor data straight into host-visible heap buffers
+        // (`write_resource_descriptors`, `cmd_bind_resource_heap`). Some
+        // drivers (e.g. NVIDIA) ship this implementation while reporting the
+        // extension's original spec_version, so support is detected by the
+        // property query itself: a driver that implements the heap fills
+        // these fields, one that does not leaves them zero — and fails device
+        // creation, matching the hard-requirement stance of
+        // `REQUIRED_DEVICE_EXTENSIONS`.
+        let props2 = vk::PhysicalDeviceProperties2::default();
+        let mut heap_props = vk::PhysicalDeviceDescriptorHeapPropertiesEXT::default();
+        // `TaggedStructure::push` consumes `self` and returns the chained
+        // struct — the return value is the one that carries the pNext link,
+        // so it must be rebound, not discarded.
+        let mut props2 = props2.push(&mut heap_props);
+        instance.physical_device_properties2(physical_device, &mut props2);
+        let descriptor_heap_properties =
+            if heap_props.max_resource_heap_size > 0 && heap_props.image_descriptor_size > 0 {
+                DescriptorHeapProperties {
+                    max_resource_heap_size: heap_props.max_resource_heap_size,
+                    resource_heap_alignment: heap_props.resource_heap_alignment,
+                    image_descriptor_size: heap_props.image_descriptor_size,
+                    image_descriptor_alignment: heap_props.image_descriptor_alignment,
+                    max_sampler_heap_size: heap_props.max_sampler_heap_size,
+                    sampler_heap_alignment: heap_props.sampler_heap_alignment,
+                    sampler_descriptor_size: heap_props.sampler_descriptor_size,
+                    sampler_descriptor_alignment: heap_props.sampler_descriptor_alignment,
+                    min_resource_heap_reserved_range: heap_props.min_resource_heap_reserved_range,
+                    min_sampler_heap_reserved_range: heap_props.min_sampler_heap_reserved_range,
+                }
+            } else {
+                return Err(Error::DeviceRequest(
+                    "physical device does not implement the VK_EXT_descriptor_heap \
+                     CPU-visible descriptor heap (properties all zero)"
+                        .to_string(),
+                ));
+            };
 
         let mut optional_enabled: Vec<&'static CStr> = Vec::new();
         for name in OPTIONAL_DEVICE_EXTENSIONS {
@@ -363,6 +420,7 @@ impl Device {
                 instance.raw(),
                 &device,
             ),
+            descriptor_heap: ash::ext::descriptor_heap::Device::load(instance.raw(), &device),
         });
 
         let allocator = Allocator::new(&AllocatorCreateDesc {
@@ -385,6 +443,7 @@ impl Device {
             compute_queue,
             present_queue,
             queue_family_indices,
+            descriptor_heap_properties,
             extension_fns,
             optional_extensions: optional_enabled,
             uploader: OnceLock::new(),
@@ -515,6 +574,13 @@ impl Device {
     /// Access the selected queue family indices.
     pub fn queue_family_indices(&self) -> QueueFamilyIndices {
         self.queue_family_indices
+    }
+
+    /// The physical device's `VK_EXT_descriptor_heap` limits, which the RHI
+    /// requires unconditionally (device creation fails without them).
+    /// `DescriptorHeap` sizes its heaps and computes slot strides from these.
+    pub fn descriptor_heap_properties(&self) -> DescriptorHeapProperties {
+        self.descriptor_heap_properties
     }
 
     /// The shared frame-scoped uploader, built on first use. `Buffer::upload`
