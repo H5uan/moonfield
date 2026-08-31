@@ -14,6 +14,7 @@ use std::sync::{Arc, Mutex};
 // no fallback when one is missing — device creation fails with the missing
 // names listed, instead of a bare `ERROR_EXTENSION_NOT_PRESENT`.
 const REQUIRED_DEVICE_EXTENSIONS: &[&CStr] = &[
+    ash::khr::surface::NAME, // swapchain's required extension; must be enabled with it
     ash::khr::swapchain::NAME,
     ash::ext::descriptor_heap::NAME,
     ash::ext::extended_dynamic_state3::NAME,

@@ -18,6 +18,7 @@ pub mod shader_module;
 pub mod swapchain;
 pub mod sync;
 pub mod texture;
+pub mod upload;
 
 /// Aggregated device-extension loaders, built once at device creation and
 /// shared with command buffers through an `Arc` — the same shape
@@ -46,3 +47,4 @@ pub use shader_module::ShaderModule;
 pub use swapchain::{Surface, Swapchain};
 pub use sync::{Fence, Semaphore};
 pub use texture::Texture;
+pub use upload::{FrameUploader, UPLOAD_ARENA_SIZE, UPLOAD_FRAME_RING};
