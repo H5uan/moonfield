@@ -8,7 +8,6 @@
 use crate::bind::BufferRef;
 use crate::error::{Error, Result};
 use crate::types::BufferUsage;
-use crate::vulkan::command::{CommandBuffer, CommandPool};
 use crate::vulkan::device::Device;
 use ash::vk;
 use gpu_allocator::vulkan::{Allocation, AllocationCreateDesc, AllocationScheme, Allocator};
@@ -113,7 +112,15 @@ impl Buffer {
         }
 
         match self.location {
-            MemoryLocation::GpuOnly => self.upload_via_staging(device, bytes, data),
+            MemoryLocation::GpuOnly => {
+                // Stage through the device's shared frame uploader: the
+                // staging region is carved from its bump arena and the copy
+                // goes out as one submit+wait, with no per-call staging
+                // buffer, command pool, or queue synchronization overhead.
+                let uploader = device.uploader();
+                let mut uploader = uploader.lock().unwrap_or_else(|e| e.into_inner());
+                uploader.upload_and_wait(self, data)
+            }
             // CpuToGpu / Unknown / GpuToCpu all back host-visible memory; map
             // and copy directly. GpuToCpu is unusual for uploads but still
             // host-visible, so the same path applies.
@@ -213,57 +220,6 @@ impl Buffer {
                 ptr as *mut u8,
                 bytes as usize,
             );
-        }
-        Ok(())
-    }
-
-    fn upload_via_staging<T: Copy>(
-        &self,
-        device: &Device,
-        bytes: vk::DeviceSize,
-        data: &[T],
-    ) -> Result<()> {
-        // Temporary host-visible staging buffer.
-        let staging = Self::new(
-            device,
-            bytes,
-            BufferUsage::COPY_SRC,
-            MemoryLocation::CpuToGpu,
-        )?;
-        staging.upload_host_visible(bytes, data)?;
-
-        // One-shot copy command, matching the pattern in
-        // `offscreen::transition_to_shader_read`.
-        let command_pool = CommandPool::new(device, device.queue_family_indices().graphics)?;
-        let mut command_buffer: CommandBuffer = command_pool.allocate_command_buffer()?;
-
-        command_buffer.begin(crate::CommandBufferUsage::ONE_TIME_SUBMIT)?;
-        let copy = vk::BufferCopy::default()
-            .src_offset(0)
-            .dst_offset(0)
-            .size(bytes);
-        unsafe {
-            self.device
-                .cmd_copy_buffer(command_buffer.raw(), staging.buffer, self.buffer, &[copy]);
-        }
-        command_buffer.end()?;
-
-        let command_buffers = [command_buffer.raw()];
-        let submit_info = vk::SubmitInfo::default().command_buffers(&command_buffers);
-        // SAFETY: the command buffer is fully recorded and the queue is valid.
-        unsafe {
-            device
-                .raw()
-                .queue_submit(
-                    device.graphics_queue(),
-                    std::slice::from_ref(&submit_info),
-                    vk::Fence::null(),
-                )
-                .map_err(|e| Error::Backend(format!("failed to submit buffer copy: {:?}", e)))?;
-            device
-                .raw()
-                .queue_wait_idle(device.graphics_queue())
-                .map_err(|e| Error::Backend(format!("failed to wait for buffer copy: {:?}", e)))?;
         }
         Ok(())
     }

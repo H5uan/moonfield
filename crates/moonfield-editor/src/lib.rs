@@ -521,6 +521,10 @@ fn prepare_egui_frame(world: &mut World) {
         }
         let freed: Vec<egui::TextureId> = frame.textures_delta.free.drain().collect();
         textures.defer_free(frame_slot, freed);
+        // One submit carries all texture uploads recorded this frame.
+        if let Err(e) = textures.flush_uploads() {
+            error!("failed to flush egui texture uploads: {e}");
+        }
     }
 
     // (Re)bind the viewport's offscreen target when `prepare_view_targets`

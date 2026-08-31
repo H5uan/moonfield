@@ -28,11 +28,11 @@ use moonfield_render_core::MAX_FRAMES_IN_FLIGHT;
 use moonfield_rhi::types::WrapMode;
 use moonfield_rhi::{
     BindGroup, BindGroupEntry, BindGroupLayout, BindGroupLayoutEntry, BindingResource, BindingType,
-    BlendMode, Buffer, BufferUsage, CommandBuffer, CommandPool, CompareOp, Compiler, CullMode,
-    CullState, DepthState, Device, Extent2d, Filter, Format, FrontFace, GraphicsPipeline,
+    BlendMode, Buffer, BufferUsage, CommandBuffer, CompareOp, Compiler, CullMode, CullState,
+    DepthState, Device, Extent2d, Filter, Format, FrameUploader, FrontFace, GraphicsPipeline,
     IndexFormat, Offset2d, PipelineOptions, Rect2d, RenderDevice, Sampler, SamplerDesc,
     ShaderModule, ShaderStage, Texture, TextureView, VertexAttribute, VertexBufferLayout,
-    VertexFormat,
+    VertexFormat, UPLOAD_ARENA_SIZE,
 };
 use std::collections::HashMap;
 use std::path::PathBuf;
@@ -302,7 +302,9 @@ impl TextureEntry {
 pub struct EguiTextures {
     textures: HashMap<TextureId, TextureEntry>,
     next_user_texture_id: u64,
-    upload_pool: CommandPool,
+    /// Frame-scoped uploader staging this frame's texture deltas; flushed
+    /// once per frame by the caller (one submit).
+    uploader: FrameUploader,
     free_ring: [Vec<TextureId>; MAX_FRAMES_IN_FLIGHT],
     /// Held so `Drop` can idle the device before the textures are destroyed:
     /// render-world resources drop in arbitrary order, and the last presented
@@ -315,15 +317,21 @@ impl EguiTextures {
     /// Create the store on the shared render device.
     pub fn new(render_device: &RenderDevice) -> Result<Self, String> {
         let device = render_device.device();
-        let upload_pool = CommandPool::new(device, device.queue_family_indices().graphics)
-            .map_err(|e| e.to_string())?;
+        let uploader = FrameUploader::new(device, UPLOAD_ARENA_SIZE).map_err(|e| e.to_string())?;
         Ok(Self {
             textures: HashMap::new(),
             next_user_texture_id: 0,
-            upload_pool,
+            uploader,
             free_ring: std::array::from_fn(|_| Vec::new()),
             device: render_device.clone(),
         })
+    }
+
+    /// Submit all texture uploads recorded this frame — one queue submit
+    /// per frame instead of one per texture delta. Idempotent: a frame with
+    /// no uploads submits nothing.
+    pub fn flush_uploads(&mut self) -> Result<(), String> {
+        self.uploader.end_frame().map_err(|e| e.to_string())
     }
 
     /// Create or update an egui-managed texture from an [`ImageDelta`]. A
@@ -365,8 +373,7 @@ impl EguiTextures {
             entry
                 .texture
                 .upload(
-                    device,
-                    &self.upload_pool,
+                    &mut self.uploader,
                     &bytes,
                     Some((pos[0] as i32, pos[1] as i32)),
                     (width, height),
@@ -389,7 +396,7 @@ impl EguiTextures {
         let texture = Texture::new(device, width, height, Format::R8G8B8A8Unorm)
             .map_err(|e| e.to_string())?;
         texture
-            .upload(device, &self.upload_pool, &bytes, None, (width, height))
+            .upload(&mut self.uploader, &bytes, None, (width, height))
             .map_err(|e| e.to_string())?;
         let set = pipeline.texture_bind_group(device, &texture.view(), delta.options)?;
         self.textures.insert(

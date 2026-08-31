@@ -114,8 +114,12 @@ impl HostPtr {
 // the pointer's whole lifetime, and the allocation's bytes are owned by that
 // one pointer — no other thread can write them. Nothing here is synchronized
 // against a second write through the same pointer; callers must use
-// per-frame allocation schemes that avoid aliased writes.
+// per-frame allocation schemes that avoid aliased writes. Sharing a
+// `&HostPtr` across threads is read-only, so `Sync` holds under the same
+// single-writer contract (needed for the uploader to live in an ECS
+// resource).
 unsafe impl Send for HostPtr {}
+unsafe impl Sync for HostPtr {}
 
 /// A bindless GPU allocation: CPU view + device address in one object.
 ///
@@ -169,6 +173,20 @@ impl GpuAllocation {
         memory: Memory,
         align: u64,
     ) -> Result<Self> {
+        Self::from_resources(device.raw(), device.allocator(), size, memory, align)
+    }
+
+    /// Resource-level constructor for long-lived owners that keep their own
+    /// device handle and allocator (e.g. the bump arena): the lifetime-free
+    /// form of [`new_aligned`]. Callers must keep the allocator alive for the
+    /// allocation's whole lifetime.
+    pub(crate) fn from_resources(
+        device: &ash::Device,
+        allocator: &Arc<Mutex<Allocator>>,
+        size: u64,
+        memory: Memory,
+        align: u64,
+    ) -> Result<Self> {
         // The buffer is a pure address carrier: Vulkan settles buffer device
         // addresses and memory requirements on an existing buffer object, so
         // one must exist before either can be queried. It is not bound to any
@@ -176,7 +194,6 @@ impl GpuAllocation {
         // shaders. Exclusive sharing keeps the buffer on one queue family.
         let buffer = unsafe {
             device
-                .raw()
                 .create_buffer(
                     &vk::BufferCreateInfo::default()
                         .size(size)
@@ -195,10 +212,10 @@ impl GpuAllocation {
         // the allocator places the block on an `align` boundary, keeping the
         // CPU/GPU base-pointer delta a multiple of `align` (see
         // `GpuBumpAllocator::check_co_align`).
-        let mut requirements = unsafe { device.raw().get_buffer_memory_requirements(buffer) };
+        let mut requirements = unsafe { device.get_buffer_memory_requirements(buffer) };
         requirements.alignment = requirements.alignment.max(align.max(16));
 
-        let allocator = device.allocator().clone();
+        let allocator = allocator.clone();
         // Carve a chunk out of the allocator's pool for the buffer.
         let allocation = allocator
             .lock()
@@ -215,13 +232,11 @@ impl GpuAllocation {
         // Attach the backing memory to the buffer at the chunk's offset.
         unsafe {
             device
-                .raw()
                 .bind_buffer_memory(buffer, allocation.memory(), allocation.offset())
                 .map_err(|e| Error::Backend(format!("failed to bind bindless memory: {:?}", e)))?;
         }
         let address_info = vk::BufferDeviceAddressInfo::default().buffer(buffer);
-        let gpu_ptr =
-            unsafe { GpuPtr::from_raw(device.raw().get_buffer_device_address(&address_info)) };
+        let gpu_ptr = unsafe { GpuPtr::from_raw(device.get_buffer_device_address(&address_info)) };
         let host = allocation
             .mapped_ptr()
             .map(|ptr| HostPtr(ptr.as_ptr().cast()));
@@ -231,7 +246,7 @@ impl GpuAllocation {
             size,
             host,
             gpu: gpu_ptr,
-            device: device.raw().clone(),
+            device: device.clone(),
             allocator,
         })
     }

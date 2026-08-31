@@ -4,17 +4,17 @@ use crate::bindless;
 use crate::error::{Error, Result};
 use crate::vulkan::instance::Instance;
 use crate::vulkan::sync::Semaphore;
+use crate::{FrameUploader, UPLOAD_ARENA_SIZE};
 use ash::vk::{self, TaggedStructure as _};
 use gpu_allocator::vulkan::{Allocator, AllocatorCreateDesc};
 use std::ffi::{c_char, CStr};
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, Mutex, OnceLock};
 
 // Required extensions are demanded unconditionally: the RHI targets recent
 // drivers (current NVIDIA and AMD proprietary both expose them), so there is
 // no fallback when one is missing — device creation fails with the missing
 // names listed, instead of a bare `ERROR_EXTENSION_NOT_PRESENT`.
 const REQUIRED_DEVICE_EXTENSIONS: &[&CStr] = &[
-    ash::khr::surface::NAME, // swapchain's required extension; must be enabled with it
     ash::khr::swapchain::NAME,
     ash::ext::descriptor_heap::NAME,
     ash::ext::extended_dynamic_state3::NAME,
@@ -134,6 +134,11 @@ pub struct Device {
     /// Optional extensions that were actually enabled at creation (a subset
     /// of [`OPTIONAL_DEVICE_EXTENSIONS`]); empty on cards that lack them.
     optional_extensions: Vec<&'static CStr>,
+    /// Lazily-built shared frame uploader serving `Buffer::upload`'s GpuOnly
+    /// staging path. Declared before `allocator` so it drops first: its
+    /// arenas free chunks through the allocator's `Arc` while the device is
+    /// still alive, then the allocator itself is torn down (see `Drop`).
+    uploader: OnceLock<Arc<Mutex<FrameUploader>>>,
     /// Shared GPU memory allocator for buffers and images. Wrapped in
     /// `Arc<Mutex>` so resources can hold clones and free their allocations
     /// on drop without a borrow on the device. `Option` so `Drop` can take it
@@ -230,6 +235,10 @@ impl Device {
 
         // The final enable list points into the `'static` constants above,
         // so the `*const c_char` array outlives the local `supported` list.
+        // `VK_KHR_surface` is deliberately not listed: it is an *instance*
+        // extension and NVIDIA rejects instance extensions in the device
+        // enable list with ERROR_EXTENSION_NOT_PRESENT, even though the
+        // validation layer's VUID 01387 wants swapchain's dependency named.
         let enabled_extensions: Vec<&'static CStr> = REQUIRED_DEVICE_EXTENSIONS
             .iter()
             .chain(optional_enabled.iter())
@@ -378,6 +387,7 @@ impl Device {
             queue_family_indices,
             extension_fns,
             optional_extensions: optional_enabled,
+            uploader: OnceLock::new(),
             allocator: Some(Arc::new(Mutex::new(allocator))),
         })
     }
@@ -505,6 +515,21 @@ impl Device {
     /// Access the selected queue family indices.
     pub fn queue_family_indices(&self) -> QueueFamilyIndices {
         self.queue_family_indices
+    }
+
+    /// The shared frame-scoped uploader, built on first use. `Buffer::upload`
+    /// stages GpuOnly targets through it; the uploader owns a copy of the
+    /// device handle, so callers may hold the returned `Arc` past this
+    /// `&Device` borrow.
+    pub fn uploader(&self) -> Arc<Mutex<FrameUploader>> {
+        self.uploader
+            .get_or_init(|| {
+                Arc::new(Mutex::new(
+                    FrameUploader::new(self, UPLOAD_ARENA_SIZE)
+                        .expect("failed to create the shared frame uploader"),
+                ))
+            })
+            .clone()
     }
 
     /// Shared GPU memory allocator for buffers and images. Resources allocate

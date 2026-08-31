@@ -8,9 +8,13 @@ pub const UPLOAD_FRAME_RING: usize = 2;
 
 pub const UPLOAD_ARENA_SIZE: u64 = 4 * 1024 * 1024;
 
-pub struct FrameUploader<'a> {
-    device: &'a Device,
-    arenas: Vec<GpuBumpAllocator<'a>>,
+pub struct FrameUploader {
+    // Owned resources pulled from `Device` at construction so the uploader
+    // is lifetime-free: it can live in ECS resources or behind an `Arc` and
+    // outlive the `&Device` that created it.
+    device: ash::Device,
+    queue: vk::Queue,
+    arenas: Vec<GpuBumpAllocator>,
     // One command buffer per slot, like the arenas: re-recording a
     // ONE_TIME_SUBMIT buffer that is still executing is undefined, so the
     // per-slot buffer is only reset after `wait(next_frame - RING)` — the
@@ -30,8 +34,8 @@ pub struct FrameUploader<'a> {
     recording: bool,
 }
 
-impl<'a> FrameUploader<'a> {
-    pub fn new(device: &'a Device, arena_size: u64) -> Result<Self> {
+impl FrameUploader {
+    pub fn new(device: &Device, arena_size: u64) -> Result<Self> {
         let arena_size = arena_size.max(256);
         let mut arenas = Vec::with_capacity(UPLOAD_FRAME_RING);
         for _ in 0..UPLOAD_FRAME_RING {
@@ -44,7 +48,8 @@ impl<'a> FrameUploader<'a> {
         }
         let timeline = Semaphore::new_timeline(device, 0)?;
         Ok(Self {
-            device,
+            device: device.raw().clone(),
+            queue: device.graphics_queue(),
             arenas,
             cb,
             pool,
@@ -55,6 +60,11 @@ impl<'a> FrameUploader<'a> {
     }
 
     pub fn begin_frame(&mut self) -> Result<()> {
+        // Idempotent: a frame boundary may call this once, or each texture
+        // delta may begin it lazily.
+        if self.recording {
+            return Ok(());
+        }
         if self.next_frame > UPLOAD_FRAME_RING as u64 {
             self.timeline
                 .wait(self.next_frame - UPLOAD_FRAME_RING as u64, u64::MAX)?;
@@ -91,15 +101,118 @@ impl<'a> FrameUploader<'a> {
                 .size(bytes);
 
             self.device
-                .raw()
                 .cmd_copy_buffer(self.cb[slot].raw(), mem.src, dst.raw(), &[copy]);
         }
         Ok(())
     }
 
+    /// Upload RGBA8 pixels (`bytes.len()` == `region.0 * region.1 * 4`) into
+    /// `image`, leaving it in a shader-readable layout. `offset: None`
+    /// uploads a fresh (`UNDEFINED`) image; `Some((x, y))` updates a
+    /// sub-region of a shader-readable one — layout transitions mirror
+    /// `Texture::upload`'s contract.
+    pub fn upload_image(
+        &mut self,
+        image: vk::Image,
+        bytes: &[u8],
+        offset: Option<(i32, i32)>,
+        region: (u32, u32),
+    ) -> Result<()> {
+        self.begin_frame()?;
+        let slot = ((self.next_frame - 1) % UPLOAD_FRAME_RING as u64) as usize;
+        let mem = self.arenas[slot].alloc(bytes.len(), 16)?;
+        unsafe {
+            std::ptr::copy_nonoverlapping(bytes.as_ptr(), mem.cpu.as_ptr(), bytes.len());
+        }
+
+        let subresource = vk::ImageSubresourceRange::default()
+            .aspect_mask(vk::ImageAspectFlags::COLOR)
+            .base_mip_level(0)
+            .level_count(1)
+            .base_array_layer(0)
+            .layer_count(1);
+        let (old_layout, src_access, src_stage) = match offset {
+            Some(_) => (
+                vk::ImageLayout::GENERAL,
+                vk::AccessFlags::SHADER_READ,
+                vk::PipelineStageFlags::FRAGMENT_SHADER,
+            ),
+            None => (
+                vk::ImageLayout::UNDEFINED,
+                vk::AccessFlags::empty(),
+                vk::PipelineStageFlags::TOP_OF_PIPE,
+            ),
+        };
+        let to_transfer = vk::ImageMemoryBarrier::default()
+            .src_access_mask(src_access)
+            .dst_access_mask(vk::AccessFlags::TRANSFER_WRITE)
+            .old_layout(old_layout)
+            .new_layout(vk::ImageLayout::GENERAL)
+            .src_queue_family_index(vk::QUEUE_FAMILY_IGNORED)
+            .dst_queue_family_index(vk::QUEUE_FAMILY_IGNORED)
+            .image(image)
+            .subresource_range(subresource);
+        self.cb[slot].pipeline_barrier(
+            src_stage,
+            vk::PipelineStageFlags::TRANSFER,
+            vk::DependencyFlags::empty(),
+            &[],
+            &[],
+            &[to_transfer],
+        );
+
+        let (x, y) = offset.unwrap_or((0, 0));
+        let copy_region = vk::BufferImageCopy::default()
+            .buffer_offset(mem.src_offset)
+            .buffer_row_length(0)
+            .buffer_image_height(0)
+            .image_subresource(
+                vk::ImageSubresourceLayers::default()
+                    .aspect_mask(vk::ImageAspectFlags::COLOR)
+                    .mip_level(0)
+                    .base_array_layer(0)
+                    .layer_count(1),
+            )
+            .image_offset(vk::Offset3D { x, y, z: 0 })
+            .image_extent(vk::Extent3D {
+                width: region.0,
+                height: region.1,
+                depth: 1,
+            });
+        unsafe {
+            self.device.cmd_copy_buffer_to_image(
+                self.cb[slot].raw(),
+                mem.src,
+                image,
+                vk::ImageLayout::GENERAL,
+                std::slice::from_ref(&copy_region),
+            );
+        }
+
+        let to_shader_read = vk::ImageMemoryBarrier::default()
+            .src_access_mask(vk::AccessFlags::TRANSFER_WRITE)
+            .dst_access_mask(vk::AccessFlags::SHADER_READ)
+            .old_layout(vk::ImageLayout::GENERAL)
+            .new_layout(vk::ImageLayout::GENERAL)
+            .src_queue_family_index(vk::QUEUE_FAMILY_IGNORED)
+            .dst_queue_family_index(vk::QUEUE_FAMILY_IGNORED)
+            .image(image)
+            .subresource_range(subresource);
+        self.cb[slot].pipeline_barrier(
+            vk::PipelineStageFlags::TRANSFER,
+            vk::PipelineStageFlags::FRAGMENT_SHADER,
+            vk::DependencyFlags::empty(),
+            &[],
+            &[],
+            &[to_shader_read],
+        );
+        Ok(())
+    }
+
     pub fn end_frame(&mut self) -> Result<()> {
+        // Idempotent: an empty frame (no uploads) submits nothing.
         if !self.recording {
-            return Err(Error::Validation("end_frame without begin_frame".into()));
+            return Ok(());
         }
         let slot = ((self.next_frame - 1) % UPLOAD_FRAME_RING as u64) as usize;
         self.cb[slot].end()?;
@@ -113,8 +226,8 @@ impl<'a> FrameUploader<'a> {
             .command_buffer_infos(&command_infos)
             .signal_semaphore_infos(&signal_infos);
         unsafe {
-            self.device.raw().queue_submit2(
-                self.device.graphics_queue(),
+            self.device.queue_submit2(
+                self.queue,
                 std::slice::from_ref(&submit_info),
                 vk::Fence::null(),
             )?;
