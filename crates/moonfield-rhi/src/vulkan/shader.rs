@@ -21,30 +21,15 @@ impl Compiler {
 
     /// Compile Slang source code to SPIR-V for the given entry point.
     ///
-    /// `module_name` is used for diagnostics and does not need to correspond to
-    /// a file on disk.
+    /// `module_name` is used for diagnostics and as the module's logical name;
+    /// it does not need to correspond to a file on disk.
     pub fn compile_source_to_spirv(
         &self,
         module_name: &str,
         source: &str,
         entry_point: &str,
     ) -> RenderResult<Vec<u8>> {
-        // `shader-slang` 0.1 exposes file-based `load_module`. Compile from
-        // source by writing to a temporary file.
-        let temp_dir = std::env::temp_dir();
-        let file_name = format!("{}.slang", module_name);
-        let temp_path = temp_dir.join(&file_name);
-
-        std::fs::write(&temp_path, source).map_err(|e| {
-            RenderError::Backend(format!("failed to write temp shader file: {}", e))
-        })?;
-
-        let result = self.compile_file_to_spirv(temp_path.to_string_lossy().as_ref(), entry_point);
-
-        // Best-effort cleanup; ignore errors.
-        let _ = std::fs::remove_file(&temp_path);
-
-        result
+        self.compile_source_to_spirv_impl(module_name, source, entry_point, &[])
     }
 
     /// Compile a Slang file to SPIR-V for the given entry point.
@@ -76,24 +61,7 @@ impl Compiler {
         entry_point: &str,
         capabilities: &[&str],
     ) -> RenderResult<Vec<u8>> {
-        let temp_dir = std::env::temp_dir();
-        let file_name = format!("{}.slang", module_name);
-        let temp_path = temp_dir.join(&file_name);
-
-        std::fs::write(&temp_path, source).map_err(|e| {
-            RenderError::Backend(format!("failed to write temp shader file: {}", e))
-        })?;
-
-        let result = self.compile_file_to_spirv_impl(
-            temp_path.to_string_lossy().as_ref(),
-            entry_point,
-            capabilities,
-        );
-
-        // Best-effort cleanup; ignore errors.
-        let _ = std::fs::remove_file(&temp_path);
-
-        result
+        self.compile_source_to_spirv_impl(module_name, source, entry_point, capabilities)
     }
 
     fn compile_file_to_spirv_impl(
@@ -102,6 +70,29 @@ impl Compiler {
         entry_point: &str,
         capabilities: &[&str],
     ) -> RenderResult<Vec<u8>> {
+        let session = self.create_session(capabilities)?;
+        let module = session.load_module(path).map_err(map_slang_error)?;
+        self.finish_compile(&session, module, entry_point)
+    }
+
+    /// Compile in-memory Slang source to SPIR-V. Shared with
+    /// [`compile_source_to_spirv`], which supplies no capabilities.
+    fn compile_source_to_spirv_impl(
+        &self,
+        module_name: &str,
+        source: &str,
+        entry_point: &str,
+        capabilities: &[&str],
+    ) -> RenderResult<Vec<u8>> {
+        let session = self.create_session(capabilities)?;
+        let module = session
+            .load_module_from_source_string(module_name, &format!("{module_name}.slang"), source)
+            .map_err(map_slang_error)?;
+        self.finish_compile(&session, module, entry_point)
+    }
+
+    /// Create a Slang session targeting SPIR-V with the given capabilities.
+    fn create_session(&self, capabilities: &[&str]) -> RenderResult<shader_slang::Session> {
         let mut options = shader_slang::CompilerOptions::default()
             .optimization(shader_slang::OptimizationLevel::High)
             .matrix_layout_row(true);
@@ -123,13 +114,19 @@ impl Compiler {
             .targets(&targets)
             .options(&options);
 
-        let session = self
-            .global_session
+        self.global_session
             .create_session(&session_desc)
-            .ok_or_else(|| RenderError::Backend("failed to create Slang session".to_string()))?;
+            .ok_or_else(|| RenderError::Backend("failed to create Slang session".to_string()))
+    }
 
-        let module = session.load_module(path).map_err(map_slang_error)?;
-
+    /// Turn a loaded module into SPIR-V bytecode: pick the entry point, link
+    /// the program, and extract the target code.
+    fn finish_compile(
+        &self,
+        session: &shader_slang::Session,
+        module: shader_slang::Module,
+        entry_point: &str,
+    ) -> RenderResult<Vec<u8>> {
         let entry = module
             .find_entry_point_by_name(entry_point)
             .ok_or_else(|| {
