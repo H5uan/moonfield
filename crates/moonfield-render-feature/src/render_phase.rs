@@ -6,12 +6,14 @@
 //! pass only dispatches items to their registered draw functions; it never
 //! names mesh types.
 
+use std::sync::Mutex;
+
 use moonfield_app::prelude::World;
 use moonfield_asset::AssetId;
 use moonfield_camera::view_matrix;
 use moonfield_math::{GlobalTransform, Mat4, Vec3A};
 use moonfield_render_core::{DrawFunction, DrawFunctionId, MainEntity, OrderedFloat, PhaseItem};
-use moonfield_rhi::{CommandBuffer, IndexFormat, ShaderStages};
+use moonfield_rhi::{BumpAlloc, CommandBuffer, GpuBumpAllocator, IndexFormat, ShaderStages};
 
 use crate::core_3d::pass::{Core3dPipeline, RenderTargetSizes, INITIAL_HEIGHT, INITIAL_WIDTH};
 use crate::core_3d::Core3dFrame;
@@ -49,14 +51,49 @@ impl PhaseItem for Opaque3d {
 /// Per-draw push constants: model-view-projection matrix + flat color.
 #[repr(C)]
 #[derive(Clone, Copy, bytemuck::Pod, bytemuck::Zeroable)]
-struct ScenePushConstants {
+struct DrawData {
     mvp: [f32; 16],
     color: [f32; 4],
 }
 
-/// The mesh pipeline's push-constant range size; the pipeline layout and the
-/// per-draw upload must agree.
-pub(crate) const PUSH_CONSTANT_SIZE: u32 = std::mem::size_of::<ScenePushConstants>() as u32;
+/// The mesh pipeline's root pointer size: one `GpuPtr` per draw, pushed as a
+/// single 8-byte value. The pipeline layout range and the per-draw push must
+/// agree; the `DrawData` payload itself lives in the frame draw arena.
+pub(crate) const ROOT_POINTER_SIZE: u32 = std::mem::size_of::<u64>() as u32;
+pub(crate) const DRAW_ARENA_BLOCK: u64 = 1024 * 1024;
+
+pub struct FrameDrawArena {
+    inner: std::sync::Mutex<ArenaInner>,
+}
+
+struct ArenaInner {
+    arenas: Vec<GpuBumpAllocator>, // RING = MAX_FRAMES_IN_FLIGHT(2)
+    current: usize,
+}
+
+impl FrameDrawArena {
+    pub fn new(device: &moonfield_rhi::Device) -> moonfield_rhi::Result<Self> {
+        let mut arenas = Vec::with_capacity(moonfield_render_core::MAX_FRAMES_IN_FLIGHT);
+        for _ in 0..moonfield_render_core::MAX_FRAMES_IN_FLIGHT {
+            arenas.push(GpuBumpAllocator::new(device, DRAW_ARENA_BLOCK)?);
+        }
+        Ok(Self {
+            inner: Mutex::new(ArenaInner { arenas, current: 0 }),
+        })
+    }
+
+    pub fn begin_frame(&self, slot: usize) {
+        let mut g = self.inner.lock().unwrap_or_else(|e| e.into_inner());
+        g.arenas[slot].free_all();
+        g.current = slot;
+    }
+
+    pub fn alloc_draw_data(&self) -> moonfield_rhi::Result<BumpAlloc> {
+        let mut g = self.inner.lock().unwrap_or_else(|e| e.into_inner());
+        let slot = g.current;
+        g.arenas[slot].alloc_typed::<DrawData>(1)
+    }
+}
 
 /// The opaque phase's registered draw function. A marker type with no state.
 pub struct DrawMesh;
@@ -78,20 +115,33 @@ impl DrawFunction<Opaque3d> for DrawMesh {
         let Some(gpu) = prepared_meshes.get_for_revision(item.mesh, revision) else {
             return;
         };
+        let Some(draw_arena) = world.get_resource::<FrameDrawArena>() else {
+            return;
+        };
+        let root = match draw_arena.alloc_draw_data() {
+            Ok(allocation) => allocation,
+            Err(e) => {
+                moonfield_log::error!("draw arena allocation failed: {e}");
+                return;
+            }
+        };
+        unsafe {
+            *root.cpu.typed::<DrawData>() = DrawData {
+                mvp: item.mvp.to_cols_array(),
+                color: item.color,
+            };
+        }
 
         let pipeline = pipeline.pipeline();
         command_buffer.bind_graphics_pipeline(pipeline);
         command_buffer.bind_vertex_buffers(0, &[gpu.vertex()], &[0]);
         command_buffer.bind_index_buffer(gpu.index(), 0, IndexFormat::Uint32);
-        let push = ScenePushConstants {
-            mvp: item.mvp.to_cols_array(),
-            color: item.color,
-        };
+
         command_buffer.push_constants(
             pipeline.layout(),
             ShaderStages::VERTEX | ShaderStages::FRAGMENT,
             0,
-            bytemuck::bytes_of(&push),
+            bytemuck::bytes_of(&[root.gpu.as_raw()]),
         );
         command_buffer.draw_indexed(gpu.index_count(), 1, 0, 0, 0);
     }

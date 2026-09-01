@@ -29,7 +29,7 @@ use std::path::PathBuf;
 use moonfield_render_core::{DrawFunctions, PhaseItem};
 
 use super::{Core3dFrame, Core3dView};
-use crate::render_phase::{Opaque3d, PUSH_CONSTANT_SIZE};
+use crate::render_phase::{FrameDrawArena, Opaque3d, ROOT_POINTER_SIZE};
 
 /// Initial offscreen target size; consumers (e.g. the editor's viewport
 /// panel) report real sizes through [`RenderTargetSizes`]. Queue systems use
@@ -81,7 +81,7 @@ impl Core3dPipeline {
         let push_constants = [PushConstantRange {
             stages: ShaderStages::VERTEX | ShaderStages::FRAGMENT,
             offset: 0,
-            size: PUSH_CONSTANT_SIZE,
+            size: ROOT_POINTER_SIZE,
         }];
         let pipeline = GraphicsPipeline::new_with_options(
             device,
@@ -248,6 +248,14 @@ pub fn record_view_pass(
 /// Ordering: registered `.after(acquire_window_frames)` and
 /// `.before(submit_window_frames)` by [`RenderFeaturePlugin`].
 pub fn main_opaque_pass_3d(world: &mut World) {
+    if !world.contains_resource::<FrameDrawArena>() {
+        if let Some(render_device) = world.get_resource::<RenderDevice>().map(|d| (*d).clone()) {
+            match FrameDrawArena::new(render_device.device()) {
+                Ok(arena) => world.insert_resource(arena),
+                Err(e) => error!("failed to create frame draw arena: {e}"),
+            }
+        }
+    }
     if !world.contains_resource::<Core3dPipeline>() {
         let Some(render_device) = world.get_resource::<RenderDevice>().map(|d| (*d).clone()) else {
             return;
@@ -264,6 +272,9 @@ pub fn main_opaque_pass_3d(world: &mut World) {
     let Some(mut surfaces) = world.get_resource_mut::<WindowSurfaces>() else {
         return;
     };
+    // The frame slot must be captured before the command-buffer borrow below:
+    // `CommandBuffer` keeps `surfaces` mutably borrowed until recording ends.
+    let frame_slot = surfaces.values_mut().next().map(|data| data.frame_index());
     let Some(command_buffer) = surfaces
         .values_mut()
         .find_map(|data| data.current_command_buffer())
@@ -282,6 +293,12 @@ pub fn main_opaque_pass_3d(world: &mut World) {
     let Some(targets) = targets.as_deref() else {
         return;
     };
+
+    if let Some(slot) = frame_slot {
+        if let Some(arena) = world.get_resource::<FrameDrawArena>() {
+            arena.begin_frame(slot);
+        }
+    }
 
     // Record every offscreen target: views draw into their target; targets
     // with no view this frame are still cleared (background color).
@@ -336,6 +353,10 @@ mod tests {
         // after `RenderDevice` so LIFO teardown destroys it first.
         app.render_world_mut()
             .insert_resource(Core3dPipeline::new(render_device).expect("pipeline"));
+        // The draw function allocates per-draw root data from this arena; the
+        // test drives slot 0 manually (no window frame loop in headless mode).
+        app.render_world_mut()
+            .insert_resource(FrameDrawArena::new(render_device.device()).expect("arena"));
         app.add_extract_system(moonfield_render_core::extract_cameras);
         app.world_mut().spawn((
             Camera::default(),
@@ -380,6 +401,14 @@ mod tests {
         let draw_functions = world
             .get_resource::<DrawFunctions<Opaque3d>>()
             .expect("DrawFunctions<Opaque3d>");
+
+        // Headless tests drive the arena's slot 0 directly (the window frame
+        // loop that would reset/advance it does not run here); single slot,
+        // submitted and waited below, needs no ring.
+        world
+            .get_resource::<FrameDrawArena>()
+            .expect("FrameDrawArena inserted by mesh_world")
+            .begin_frame(0);
 
         let command_pool =
             CommandPool::new(device, device.queue_family_indices().graphics).expect("pool");

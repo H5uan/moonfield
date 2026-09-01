@@ -312,6 +312,10 @@ pub enum QueueType {
 pub struct Stage(pub(crate) vk::PipelineStageFlags2);
 
 impl Stage {
+    /// Vertex shader stage
+    pub const VERTEX: Self = Self(vk::PipelineStageFlags2::VERTEX_SHADER);
+    /// Fragment shader stage
+    pub const FRAGMENT: Self = Self(vk::PipelineStageFlags2::FRAGMENT_SHADER);
     /// Compute shader stage (dispatch).
     pub const COMPUTE: Self = Self(vk::PipelineStageFlags2::COMPUTE_SHADER);
     /// Transfer stage (buffer/image copy).

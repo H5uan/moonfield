@@ -1,14 +1,8 @@
-
-struct PushConstants
+struct DrawData
 {
-    // Slang packs matrices row-major by default; glam's `to_cols_array` is
-    // column-major, so the layout must be declared explicitly.
     column_major float4x4 mvp;
     float4 color;
 };
-
-[[vk::push_constant]]
-PushConstants push;
 
 struct VsInput
 {
@@ -22,10 +16,10 @@ struct VsOutput
 };
 
 [shader("vertex")]
-VsOutput main(VsInput input)
+VsOutput main(VsInput input, Ptr<DrawData> root)
 {
     VsOutput output;
-    output.position = mul(push.mvp, float4(input.position, 1.0));
+    output.position = mul(root[0].mvp, float4(input.position, 1.0));
     output.local_pos = input.position;
     return output;
 }
