@@ -19,6 +19,10 @@ use std::sync::{Arc, Mutex, OnceLock};
 const REQUIRED_DEVICE_EXTENSIONS: &[&CStr] = &[
     ash::khr::swapchain::NAME,
     ash::ext::descriptor_heap::NAME,
+    // Shader-side descriptor-heap access (`ResourceDescriptorHeap[]` +
+    // `spvDescriptorHeapEXT` lowers to untyped pointer chains that read the
+    // bound heap directly). The RHI's bindless sampling path requires it.
+    ash::khr::shader_untyped_pointers::NAME,
     ash::ext::extended_dynamic_state3::NAME,
     ash::ext::mesh_shader::NAME,
     // GPU-driven + bindless helpers. `mutable_descriptor_type` lets one
@@ -327,6 +331,9 @@ impl Device {
             vk::PhysicalDeviceVulkan14Features::default().dynamic_rendering_local_read(true);
         let mut descriptor_heap_features =
             vk::PhysicalDeviceDescriptorHeapFeaturesEXT::default().descriptor_heap(true);
+        let mut shader_untyped_pointers_features =
+            vk::PhysicalDeviceShaderUntypedPointersFeaturesKHR::default()
+                .shader_untyped_pointers(true);
         let mut extended_dynamic_state3_features =
             vk::PhysicalDeviceExtendedDynamicState3FeaturesEXT::default()
                 .extended_dynamic_state3_color_blend_enable(true)
@@ -393,21 +400,32 @@ impl Device {
         if optional_enabled.contains(&ash::ext::ray_tracing_invocation_reorder::NAME) {
             features2 = features2.push(&mut invocation_reorder_features);
         }
-        let _ = features2
+        // `TaggedStructure::push` consumes `self` and returns the chained struct —
+        // the return value is the one that carries the pNext link, so the
+        // whole core chain must be rebound, not discarded (the optional RT
+        // structs above already reassign).
+        features2 = features2
             .push(&mut vulkan_12_features)
             .push(&mut vulkan_13_features)
             .push(&mut vulkan_14_features)
             .push(&mut descriptor_heap_features)
+            .push(&mut shader_untyped_pointers_features)
             .push(&mut extended_dynamic_state3_features)
             .push(&mut mesh_shader_features)
             .push(&mut mutable_descriptor_type_features)
             .push(&mut vertex_input_dynamic_state_features)
             .push(&mut device_generate_commands_features);
 
-        let create_info = vk::DeviceCreateInfo::default()
+        // `push` requires a chainless `next`, but `features2` heads the whole
+        // feature chain built above — merge that chain with `extend` instead.
+        let mut create_info = vk::DeviceCreateInfo::default()
             .queue_create_infos(&queue_create_infos)
-            .enabled_extension_names(&device_extension_names)
-            .push(&mut features2);
+            .enabled_extension_names(&device_extension_names);
+        // SAFETY: `features2` and the structs behind it are valid, writable
+        // Vulkan feature structures for the lifetime of the create call.
+        unsafe {
+            create_info = create_info.extend(&mut features2);
+        }
 
         let device = unsafe {
             instance

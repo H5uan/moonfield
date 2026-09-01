@@ -303,10 +303,12 @@ impl DescriptorHeap {
     }
 
     /// Bind both heaps to the command buffer: call once per frame while
-    /// recording, before the draws that sample texture slots. Heap binding is
-    /// bind-point agnostic — one call serves graphics and compute work.
-    /// `reserved_range_size` satisfies the driver's minimum reserved range.
-    pub fn cmd_bind_graphics(&self, cb: &CommandBuffer) -> Result<()> {
+    /// recording, before the draw/dispatch that samples texture slots. Heap
+    /// binding is command-buffer scoped and bind-point agnostic — one call
+    /// serves graphics and compute work (the extension spec makes the bound
+    /// heap available to all subsequent shaders). `reserved_range_size`
+    /// satisfies the driver's minimum reserved range.
+    pub fn cmd_bind(&self, cb: &CommandBuffer) -> Result<()> {
         let resource_bind = vk::BindHeapInfoEXT::default()
             .heap_range(vk::DeviceAddressRangeEXT {
                 address: self.resource_heap.gpu().as_raw(),

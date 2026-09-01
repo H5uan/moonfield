@@ -198,9 +198,11 @@ impl FrameUploader {
             .dst_queue_family_index(vk::QUEUE_FAMILY_IGNORED)
             .image(image)
             .subresource_range(subresource);
+        // The image is shader-readable for every stage, not just fragment:
+        // bindless sampling happens from compute (and future mesh) stages too.
         self.cb[slot].pipeline_barrier(
             vk::PipelineStageFlags::TRANSFER,
-            vk::PipelineStageFlags::FRAGMENT_SHADER,
+            vk::PipelineStageFlags::ALL_COMMANDS,
             vk::DependencyFlags::empty(),
             &[],
             &[],

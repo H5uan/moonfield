@@ -49,9 +49,68 @@ impl Compiler {
 
     /// Compile a Slang file to SPIR-V for the given entry point.
     pub fn compile_file_to_spirv(&self, path: &str, entry_point: &str) -> RenderResult<Vec<u8>> {
-        let options = shader_slang::CompilerOptions::default()
+        self.compile_file_to_spirv_impl(path, entry_point, &[])
+    }
+
+    /// Compile a Slang file to SPIR-V with extra SPIR-V capabilities enabled.
+    ///
+    /// Capability names are Slang capability atoms (e.g. `spvDescriptorHeapEXT`
+    /// for the `VK_EXT_descriptor_heap` shader path — `ResourceDescriptorHeap[]`
+    /// then lowers to untyped pointer heap access without descriptor bindings).
+    /// Unknown names are ignored so callers can pass driver-dependent lists.
+    pub fn compile_file_to_spirv_with_capabilities(
+        &self,
+        path: &str,
+        entry_point: &str,
+        capabilities: &[&str],
+    ) -> RenderResult<Vec<u8>> {
+        self.compile_file_to_spirv_impl(path, entry_point, capabilities)
+    }
+
+    /// Compile Slang source to SPIR-V with extra capabilities (see
+    /// [`compile_file_to_spirv_with_capabilities`]).
+    pub fn compile_source_to_spirv_with_capabilities(
+        &self,
+        module_name: &str,
+        source: &str,
+        entry_point: &str,
+        capabilities: &[&str],
+    ) -> RenderResult<Vec<u8>> {
+        let temp_dir = std::env::temp_dir();
+        let file_name = format!("{}.slang", module_name);
+        let temp_path = temp_dir.join(&file_name);
+
+        std::fs::write(&temp_path, source).map_err(|e| {
+            RenderError::Backend(format!("failed to write temp shader file: {}", e))
+        })?;
+
+        let result = self.compile_file_to_spirv_impl(
+            temp_path.to_string_lossy().as_ref(),
+            entry_point,
+            capabilities,
+        );
+
+        // Best-effort cleanup; ignore errors.
+        let _ = std::fs::remove_file(&temp_path);
+
+        result
+    }
+
+    fn compile_file_to_spirv_impl(
+        &self,
+        path: &str,
+        entry_point: &str,
+        capabilities: &[&str],
+    ) -> RenderResult<Vec<u8>> {
+        let mut options = shader_slang::CompilerOptions::default()
             .optimization(shader_slang::OptimizationLevel::High)
             .matrix_layout_row(true);
+        for name in capabilities {
+            let capability = self.global_session.find_capability(name);
+            if !capability.is_unknown() {
+                options = options.capability(capability);
+            }
+        }
 
         let profile = self.global_session.find_profile("glsl_450");
         let target_desc = shader_slang::TargetDesc::default()
