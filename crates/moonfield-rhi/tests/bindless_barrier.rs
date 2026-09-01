@@ -1,12 +1,15 @@
-//! Headless smoke test for the bindless stage barrier.
+//! Headless smoke tests for the bindless stage barrier.
 //!
 //! Dispatch A writes a fixed value through its output root pointer, a
-//! `barrier(COMPUTE, COMPUTE)` orders the writes, and dispatch B reads that
-//! buffer and writes 1 to a second buffer only if it observes the expected
-//! value. If the barrier were missing, B could read stale memory; with it,
-//! the payload propagates.
+//! `barrier(COMPUTE, COMPUTE, hazard)` orders the writes, and dispatch B
+//! reads that buffer and writes 1 to a second buffer only if it observes the
+//! expected value. If the barrier were missing, B could read stale memory;
+//! with it, the payload propagates. Both the plain memory hazard and the
+//! descriptor-heap hazard (the blog's barrier flags) are exercised.
 
-use moonfield_rhi::vulkan::bindless::{ComputePipeline, GpuAllocation, Memory, Stage};
+use moonfield_rhi::vulkan::bindless::{
+    BarrierHazard, ComputePipeline, GpuAllocation, Memory, Stage,
+};
 use moonfield_rhi::{CommandBufferUsage, CommandPool, Compiler, Device, Instance, ShaderModule};
 mod common;
 
@@ -38,29 +41,33 @@ void main(uint3 tid : SV_DispatchThreadID,
 }
 "#;
 
-#[test]
-fn bindless_barrier_orders_dispatch() {
-    // CI runners without the engine's required `VK_EXT_descriptor_heap`
-    // (lavapipe, most drivers) skip this test.
+/// Create a headless instance + device, skipping on machines without one
+/// (CI runners without the engine's required `VK_EXT_descriptor_heap`, e.g.
+/// lavapipe, skip these tests).
+fn setup() -> Option<(Instance, Device)> {
     let instance = match Instance::new_headless() {
         Ok(instance) => instance,
         Err(err) => {
             eprintln!("skipping: no Vulkan instance available ({err})");
-            return;
+            return None;
         }
     };
     if common::skip_if_descriptor_heap_missing(&instance) {
-        return;
+        return None;
     }
-
     let device = match Device::new(&instance, None) {
         Ok(device) => device,
         Err(err) => {
             eprintln!("skipping: no Vulkan device available ({err})");
-            return;
+            return None;
         }
     };
+    Some((instance, device))
+}
 
+/// Run the write A → barrier → check B sequence and return what dispatch B
+/// observed: 1 when every payload element propagated through the barrier.
+fn run_pair(device: &Device, hazard: BarrierHazard) -> u32 {
     let compiler = Compiler::new().expect("compiler creation");
     let write_spirv = compiler
         .compile_source_to_spirv("write", WRITE_KERNEL, "main")
@@ -68,13 +75,13 @@ fn bindless_barrier_orders_dispatch() {
     let check_spirv = compiler
         .compile_source_to_spirv("check", CHECK_KERNEL, "main")
         .expect("check kernel compilation");
-    let write_module = ShaderModule::from_spirv(&device, &write_spirv).expect("write module");
-    let check_module = ShaderModule::from_spirv(&device, &check_spirv).expect("check module");
-    let write_pipeline = ComputePipeline::new(&device, &write_module).expect("write pipeline");
-    let check_pipeline = ComputePipeline::new(&device, &check_module).expect("check pipeline");
+    let write_module = ShaderModule::from_spirv(device, &write_spirv).expect("write module");
+    let check_module = ShaderModule::from_spirv(device, &check_spirv).expect("check module");
+    let write_pipeline = ComputePipeline::new(device, &write_module).expect("write pipeline");
+    let check_pipeline = ComputePipeline::new(device, &check_module).expect("check pipeline");
 
-    let payload = GpuAllocation::new(&device, 64, Memory::Default).expect("payload allocation");
-    let result = GpuAllocation::new(&device, 64, Memory::Default).expect("result allocation");
+    let payload = GpuAllocation::new(device, 64, Memory::Default).expect("payload allocation");
+    let result = GpuAllocation::new(device, 64, Memory::Default).expect("result allocation");
 
     // CPU pre-fills the pass marker; any thread seeing a stale payload
     // clears it atomically.
@@ -83,8 +90,7 @@ fn bindless_barrier_orders_dispatch() {
         *result_host.typed::<u32>() = 1;
     }
 
-    let pool =
-        CommandPool::new(&device, device.queue_family_indices().graphics).expect("command pool");
+    let pool = CommandPool::new(device, device.queue_family_indices().graphics).expect("pool");
     let mut cmd = pool.allocate_command_buffer().expect("command buffer");
     cmd.begin(CommandBufferUsage::ONE_TIME_SUBMIT)
         .expect("begin");
@@ -96,7 +102,7 @@ fn bindless_barrier_orders_dispatch() {
 
     // The barrier is the point under test: it must make A's writes visible
     // to B without any resource list.
-    cmd.barrier(Stage::COMPUTE, Stage::COMPUTE);
+    cmd.barrier(Stage::COMPUTE, Stage::COMPUTE, hazard);
 
     // Dispatch B: read payload, pass an all-42 check.
     cmd.bind_compute_pipeline(check_pipeline.raw());
@@ -124,9 +130,29 @@ fn bindless_barrier_orders_dispatch() {
 
     // result[0] == 1 only if every payload element was 42 after the barrier.
     let result_host = result.host().expect("result must have a host view");
-    let all_observed = unsafe { *result_host.typed::<u32>() };
+    unsafe { *result_host.typed::<u32>() }
+}
+
+#[test]
+fn memory_hazard_barrier_orders_dispatch() {
+    let Some((_instance, device)) = setup() else {
+        return;
+    };
     assert_eq!(
-        all_observed, 1,
-        "barrier did not make dispatch A visible to B"
+        run_pair(&device, BarrierHazard::Memory),
+        1,
+        "memory barrier did not make dispatch A visible to B"
+    );
+}
+
+#[test]
+fn descriptor_hazard_barrier_orders_dispatch() {
+    let Some((_instance, device)) = setup() else {
+        return;
+    };
+    assert_eq!(
+        run_pair(&device, BarrierHazard::Descriptors),
+        1,
+        "descriptor barrier did not make dispatch A visible to B"
     );
 }

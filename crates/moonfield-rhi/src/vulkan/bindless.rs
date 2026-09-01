@@ -331,6 +331,20 @@ impl std::ops::BitOr for Stage {
     }
 }
 
+/// What kind of hazard a barrier orders — the blog's barrier flags. A plain
+/// memory hazard covers pointer-accessed data; a descriptor hazard additionally
+/// exposes the descriptor read the next stage performs through non-uniform
+/// heap indices (a sampled image read).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum BarrierHazard {
+    /// Plain memory read/write hazard (current behavior).
+    #[default]
+    Memory,
+    /// Descriptor-heap hazard: a stage (or the CPU, through the host mapping)
+    /// just wrote heap descriptors that the next stage samples.
+    Descriptors,
+}
+
 /// A Vulkan compute pipeline for the bindless model.
 ///
 /// Root data is a single push-constant range holding the entry point's GPU

@@ -7,7 +7,9 @@
 //!    are read from a GPU-memory `DispatchIndirectArgs` struct.
 
 use moonfield_rhi::indirect::DispatchIndirectArgs;
-use moonfield_rhi::vulkan::bindless::{ComputePipeline, GpuAllocation, Memory, Stage};
+use moonfield_rhi::vulkan::bindless::{
+    BarrierHazard, ComputePipeline, GpuAllocation, Memory, Stage,
+};
 use moonfield_rhi::{CommandBufferUsage, CommandPool, Compiler, Device, Instance, ShaderModule};
 use std::sync::Mutex;
 mod common;
@@ -70,7 +72,7 @@ fn bindless_memcpy_roundtrip() {
         .expect("begin");
     cmd.cmd_memcpy(&dst, &src, SIZE);
     // Make the copied data visible after the copy (transfer -> all stages).
-    cmd.barrier(Stage::TRANSFER, Stage::ALL);
+    cmd.barrier(Stage::TRANSFER, Stage::ALL, BarrierHazard::Memory);
     cmd.end().expect("end");
 
     let commands = [cmd.raw()];

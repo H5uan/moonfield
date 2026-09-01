@@ -1,7 +1,7 @@
 //! Vulkan command pool and command buffer abstractions.
 
 use crate::bind::{BindGroup, TextureView};
-use crate::bindless::{GpuAllocation, GpuPtr, Stage};
+use crate::bindless::{BarrierHazard, GpuAllocation, GpuPtr, Stage};
 use crate::error::{Error, Result};
 use crate::types::{
     AttachmentLayout, ClearValue, CommandBufferUsage, CompareOp, CullMode, FrontFace, LoadOp,
@@ -374,6 +374,27 @@ impl CommandBuffer {
         }
     }
 
+    /// Update push data — the extension's push-constant storage class,
+    /// available to all shader stages. This is the fast path for root data
+    /// that does not fit inline: store device addresses of per-draw structs,
+    /// like a larger push constant block. Recording push data invalidates
+    /// non-heap descriptor state and vice versa, so it pairs with pure-heap
+    /// pipelines. The total written is bounded by `max_push_data_size` at
+    /// record time (validation flags overruns).
+    pub fn push_data(&self, offset: u32, data: &[u8]) {
+        let range = vk::HostAddressRangeConstEXT {
+            address: data.as_ptr().cast(),
+            size: data.len(),
+            _marker: std::marker::PhantomData,
+        };
+        let info = vk::PushDataInfoEXT::default().offset(offset).data(range);
+        // SAFETY: the byte range is valid for the call and the command buffer is
+        // recording.
+        unsafe {
+            self.ext.descriptor_heap.cmd_push_data(self.buffer, &info);
+        }
+    }
+
     /// Bind a graphics pipeline.
     pub fn bind_graphics_pipeline(&self, pipeline: &GraphicsPipeline) {
         unsafe {
@@ -451,12 +472,22 @@ impl CommandBuffer {
     /// `before` become visible to all memory accesses in `after`. This is the
     /// bindless form of synchronization — shaders touch memory through
     /// pointers, so a resource list would be both impossible and meaningless.
-    pub fn barrier(&self, before: Stage, after: Stage) {
+    pub fn barrier(&self, before: Stage, after: Stage, hazard: BarrierHazard) {
+        let (src_access, dst_access) = match hazard {
+            BarrierHazard::Memory => (
+                vk::AccessFlags2::MEMORY_READ | vk::AccessFlags2::MEMORY_WRITE,
+                vk::AccessFlags2::MEMORY_READ | vk::AccessFlags2::MEMORY_WRITE,
+            ),
+            BarrierHazard::Descriptors => (
+                vk::AccessFlags2::MEMORY_WRITE | vk::AccessFlags2::MEMORY_READ,
+                vk::AccessFlags2::MEMORY_READ | vk::AccessFlags2::SHADER_SAMPLED_READ,
+            ),
+        };
         let memory_barrier = vk::MemoryBarrier2::default()
             .src_stage_mask(before.to_vk())
-            .src_access_mask(vk::AccessFlags2::MEMORY_READ | vk::AccessFlags2::MEMORY_WRITE)
+            .src_access_mask(src_access)
             .dst_stage_mask(after.to_vk())
-            .dst_access_mask(vk::AccessFlags2::MEMORY_READ | vk::AccessFlags2::MEMORY_WRITE);
+            .dst_access_mask(dst_access);
         let dependency_info =
             vk::DependencyInfo::default().memory_barriers(std::slice::from_ref(&memory_barrier));
         unsafe {
