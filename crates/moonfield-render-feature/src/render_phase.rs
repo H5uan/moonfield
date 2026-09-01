@@ -13,7 +13,7 @@ use moonfield_asset::AssetId;
 use moonfield_camera::view_matrix;
 use moonfield_math::{GlobalTransform, Mat4, Vec3A};
 use moonfield_render_core::{DrawFunction, DrawFunctionId, MainEntity, OrderedFloat, PhaseItem};
-use moonfield_rhi::{BumpAlloc, CommandBuffer, GpuBumpAllocator, IndexFormat, ShaderStages};
+use moonfield_rhi::{BumpAlloc, CommandBuffer, GpuBumpAllocator, IndexFormat};
 
 use crate::core_3d::pass::{Core3dPipeline, RenderTargetSizes, INITIAL_HEIGHT, INITIAL_WIDTH};
 use crate::core_3d::Core3dFrame;
@@ -56,10 +56,9 @@ struct DrawData {
     color: [f32; 4],
 }
 
-/// The mesh pipeline's root pointer size: one `GpuPtr` per draw, pushed as a
-/// single 8-byte value. The pipeline layout range and the per-draw push must
-/// agree; the `DrawData` payload itself lives in the frame draw arena.
-pub(crate) const ROOT_POINTER_SIZE: u32 = std::mem::size_of::<u64>() as u32;
+/// The mesh pipeline's root pointer: one `GpuPtr` per draw, pushed as a
+/// single 8-byte value via `push_data`. The `DrawData` payload itself lives
+/// in the frame draw arena.
 pub(crate) const DRAW_ARENA_BLOCK: u64 = 1024 * 1024;
 
 pub struct FrameDrawArena {
@@ -137,12 +136,7 @@ impl DrawFunction<Opaque3d> for DrawMesh {
         command_buffer.bind_vertex_buffers(0, &[gpu.vertex()], &[0]);
         command_buffer.bind_index_buffer(gpu.index(), 0, IndexFormat::Uint32);
 
-        command_buffer.push_constants(
-            pipeline.layout(),
-            ShaderStages::VERTEX | ShaderStages::FRAGMENT,
-            0,
-            bytemuck::bytes_of(&[root.gpu.as_raw()]),
-        );
+        command_buffer.push_data(0, bytemuck::bytes_of(&[root.gpu.as_raw()]));
         command_buffer.draw_indexed(gpu.index_count(), 1, 0, 0, 0);
     }
 }

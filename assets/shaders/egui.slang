@@ -1,15 +1,20 @@
-
-struct Locals
+// egui's per-draw root data, pushed via vkCmdPushDataEXT (`push_data`) and
+// read through the PushConstant storage class. The texture/sampler slot
+// indices are consumed by the pipeline's binding→heap mappings
+// (HEAP_WITH_PUSH_INDEX), not by the shader; the shader reads only the
+// scalars. Layout must match `EguiRoot` in egui_vk.rs.
+struct EguiRoot
 {
     float2 screen_size_in_points;
+    uint texture;
+    uint sampler;
     uint dithering;
     uint predictable_filtering;
 };
 
+// Classic binding declaration, resolved through the pipeline's
+// binding→heap mapping at draw time — no descriptor set is ever allocated.
 [[vk::binding(0, 0)]]
-ConstantBuffer<Locals> locals;
-
-[[vk::binding(0, 1)]]
 Sampler2D tex;
 
 struct VsInput
@@ -36,7 +41,7 @@ float4 unpack_color(uint color)
 }
 
 [shader("vertex")]
-VsOutput vs_main(VsInput input)
+VsOutput vs_main(VsInput input, uniform EguiRoot root)
 {
     VsOutput output;
     output.uv = input.uv;
@@ -44,8 +49,8 @@ VsOutput vs_main(VsInput input)
     // Vulkan with a positive-height viewport: +y in points maps to +y in NDC
     // (down the framebuffer), so the y axis needs no flip.
     output.position = float4(
-        2.0 * input.pos.x / locals.screen_size_in_points.x - 1.0,
-        2.0 * input.pos.y / locals.screen_size_in_points.y - 1.0,
+        2.0 * input.pos.x / root.screen_size_in_points.x - 1.0,
+        2.0 * input.pos.y / root.screen_size_in_points.y - 1.0,
         0.0,
         1.0);
     return output;
@@ -71,9 +76,9 @@ float linear_from_gamma(float srgb)
     return srgb < 0.04045 ? srgb / 12.92 : pow((srgb + 0.055) / 1.055, 2.4);
 }
 
-float4 sample_texture(float2 uv)
+float4 sample_texture(EguiRoot root, float2 uv)
 {
-    if (locals.predictable_filtering == 0)
+    if (root.predictable_filtering == 0)
     {
         // Hardware filtering: fast, but varies across GPUs and drivers.
         return tex.Sample(uv);
@@ -100,11 +105,11 @@ float4 sample_texture(float2 uv)
     return lerp(top, bottom, pixel_fract.y);
 }
 
-float4 shade(VsOutput input)
+float4 shade(EguiRoot root, VsOutput input)
 {
-    float4 tex_gamma = sample_texture(input.uv);
+    float4 tex_gamma = sample_texture(root, input.uv);
     float4 out_color_gamma = input.color * tex_gamma;
-    if (locals.dithering == 1)
+    if (root.dithering == 1)
     {
         float3 rgb = dither_interleaved(out_color_gamma.rgb, 256.0, input.position.xy);
         out_color_gamma = float4(rgb, out_color_gamma.a);
@@ -113,15 +118,15 @@ float4 shade(VsOutput input)
 }
 
 [shader("fragment")]
-float4 fs_gamma(VsOutput input) : SV_TARGET
+float4 fs_gamma(VsOutput input, uniform EguiRoot root) : SV_TARGET
 {
-    return shade(input);
+    return shade(root, input);
 }
 
 [shader("fragment")]
-float4 fs_linear(VsOutput input) : SV_TARGET
+float4 fs_linear(VsOutput input, uniform EguiRoot root) : SV_TARGET
 {
-    float4 color_gamma = shade(input);
+    float4 color_gamma = shade(root, input);
     return float4(
         linear_from_gamma(color_gamma.r),
         linear_from_gamma(color_gamma.g),

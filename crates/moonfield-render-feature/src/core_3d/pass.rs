@@ -19,9 +19,8 @@ use moonfield_render_core::{ViewTargets, WindowSurfaces};
 use moonfield_rhi::{
     AttachmentLayout, ClearValue, CommandBuffer, CompareOp, Compiler, CullMode, CullState,
     DepthState, Format, FrontFace, GraphicsPipeline, LoadOp, OffscreenTarget, PipelineOptions,
-    PushConstantRange, Rect2d, RenderAttachment, RenderDevice, RenderPassDesc, Result,
-    ShaderModule, ShaderStages, StoreOp, VertexAttribute, VertexBufferLayout, VertexFormat,
-    Viewport,
+    Rect2d, RenderAttachment, RenderDevice, RenderPassDesc, Result, ShaderModule, StoreOp,
+    VertexAttribute, VertexBufferLayout, VertexFormat, Viewport,
 };
 use std::collections::HashMap;
 use std::path::PathBuf;
@@ -29,7 +28,7 @@ use std::path::PathBuf;
 use moonfield_render_core::{DrawFunctions, PhaseItem};
 
 use super::{Core3dFrame, Core3dView};
-use crate::render_phase::{FrameDrawArena, Opaque3d, ROOT_POINTER_SIZE};
+use crate::render_phase::{FrameDrawArena, Opaque3d};
 
 /// Initial offscreen target size; consumers (e.g. the editor's viewport
 /// panel) report real sizes through [`RenderTargetSizes`]. Queue systems use
@@ -78,11 +77,8 @@ impl Core3dPipeline {
                 offset: 0,
             }],
         };
-        let push_constants = [PushConstantRange {
-            stages: ShaderStages::VERTEX | ShaderStages::FRAGMENT,
-            offset: 0,
-            size: ROOT_POINTER_SIZE,
-        }];
+        // Descriptor-heap pipeline: no set layouts, no push constant ranges —
+        // per-draw root pointers go through `push_data` instead.
         let pipeline = GraphicsPipeline::new_with_options(
             device,
             &[VIEW_TARGET_FORMAT],
@@ -90,8 +86,11 @@ impl Core3dPipeline {
             &vertex_shader,
             &fragment_shader,
             &vertex_layout,
-            &push_constants,
-            &PipelineOptions::default(),
+            &[],
+            &PipelineOptions {
+                descriptor_heap: true,
+                ..PipelineOptions::default()
+            },
         )?;
         Ok(Self { pipeline })
     }

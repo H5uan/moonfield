@@ -55,15 +55,16 @@ fn descriptor_heap_properties_are_reported() {
         props.resource_heap_alignment
     );
 
-    // The heap capacity and the reserved range the binding needs must be
-    // positive, or a DescriptorHeap cannot be sized at all.
+    // The heap capacity must be positive, or a DescriptorHeap cannot be
+    // sized at all. The reserved range may legitimately be zero (the driver
+    // needs no implementation reservation — AMD 26.8.1 reports 0).
     assert!(
         props.max_resource_heap_size > 0,
         "max resource heap size unset"
     );
     assert!(
-        props.min_resource_heap_reserved_range > 0,
-        "min resource heap reserved range unset"
+        props.min_resource_heap_reserved_range <= props.max_resource_heap_size,
+        "reserved range exceeds the heap cap"
     );
 
     // Sampler heaps follow the same contract; they only carry samplers.

@@ -33,6 +33,44 @@ pub enum BlendMode {
     PremultipliedAlpha,
 }
 
+/// The kind of shader resource a [`HeapMapping`] maps.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum HeapMappingResource {
+    /// A sampled image (`OpTypeImage` with Sampled=1), indexed into the
+    /// resource heap.
+    SampledImage,
+    /// A standalone sampler (`OpTypeSampler`), indexed into the sampler heap.
+    Sampler,
+    /// A combined image sampler (`OpTypeSampledImage`): the image index comes
+    /// from `push_offset` (resource heap) and the sampler index from
+    /// `sampler_push_offset` (sampler heap).
+    CombinedImageSampler,
+}
+
+/// A binding→heap mapping for descriptor-heap pipelines
+/// (`VkDescriptorSetAndBindingMappingEXT` with
+/// `HEAP_WITH_PUSH_INDEX`): the shader's `DescriptorSet`/`Binding`-decorated
+/// variable at (set, binding) reads its descriptor from the bound heap at
+/// `slot_index * slot_stride`, where the slot index is the `u32` in push data
+/// at `push_offset`. Lets shaders keep classic binding declarations while all
+/// descriptors live in the descriptor heap and indices flow through push
+/// data — no descriptor sets are ever allocated.
+#[derive(Debug, Clone, Copy)]
+pub struct HeapMapping {
+    /// The `DescriptorSet` decoration value the mapping applies to.
+    pub set: u32,
+    /// The `Binding` decoration value the mapping applies to.
+    pub binding: u32,
+    /// The resource kind at that binding.
+    pub resource: HeapMappingResource,
+    /// Byte offset into push data holding the resource-heap slot index (the
+    /// sampler-heap index for [`HeapMappingResource::Sampler`]).
+    pub push_offset: u32,
+    /// Combined image samplers only: byte offset into push data holding the
+    /// sampler-heap slot index. Unused otherwise.
+    pub sampler_push_offset: u32,
+}
+
 /// Optional pipeline configuration beyond the [`GraphicsPipeline::new`]
 /// defaults: descriptor set layouts. Rasterizer state (blend, cull, depth)
 /// is dynamic and applied per draw through the command buffer.
@@ -40,7 +78,21 @@ pub enum BlendMode {
 pub struct PipelineOptions<'a> {
     /// Descriptor set layouts baked into the pipeline layout (set 0, 1, …).
     /// Borrowed; the caller keeps them alive as long as sets are bound.
+    /// Must be empty when [`descriptor_heap`](Self::descriptor_heap) is set.
     pub set_layouts: &'a [&'a BindGroupLayout],
+    /// Source all shader resources from the descriptor heap
+    /// (`VK_PIPELINE_CREATE_2_DESCRIPTOR_HEAP_BIT_EXT`): the pipeline is
+    /// created with a null layout, so descriptor-set bindings and push
+    /// constants are unavailable — shaders read the bound heaps and push
+    /// data ([`CommandBuffer::push_data`](crate::CommandBuffer::push_data))
+    /// instead.
+    pub descriptor_heap: bool,
+    /// Binding→heap mappings for heap pipelines whose shaders declare
+    /// `DescriptorSet`/`Binding` resources (the driver resolves them against
+    /// the bound heaps; each shader stage gets the same list, which the spec
+    /// explicitly allows to overspecify). Requires
+    /// [`descriptor_heap`](Self::descriptor_heap).
+    pub heap_mappings: &'a [HeapMapping],
 }
 
 /// A Vulkan graphics pipeline and its layout.
@@ -102,16 +154,71 @@ impl GraphicsPipeline {
         let vertex_entry = std::ffi::CString::new("main").unwrap();
         let fragment_entry = std::ffi::CString::new("main").unwrap();
 
-        let shader_stages = [
-            vk::PipelineShaderStageCreateInfo::default()
-                .stage(vk::ShaderStageFlags::VERTEX)
-                .module(vertex_shader.raw())
-                .name(&vertex_entry),
-            vk::PipelineShaderStageCreateInfo::default()
-                .stage(vk::ShaderStageFlags::FRAGMENT)
-                .module(fragment_shader.raw())
-                .name(&fragment_entry),
-        ];
+        // Binding→heap mappings for descriptor-heap pipelines whose shaders
+        // keep DescriptorSet/Binding decorations: chained into each shader
+        // stage (the spec explicitly allows mappings a stage does not
+        // declare). Slot strides mirror DescriptorHeap's slot sizing
+        // (descriptor size rounded up to its alignment).
+        let heap_props = device.descriptor_heap_properties();
+        let image_stride = heap_props
+            .image_descriptor_size
+            .max(heap_props.image_descriptor_alignment) as u32;
+        let sampler_stride = heap_props
+            .sampler_descriptor_size
+            .max(heap_props.sampler_descriptor_alignment) as u32;
+        let mappings_vk: Vec<vk::DescriptorSetAndBindingMappingEXT> = options
+            .heap_mappings
+            .iter()
+            .map(|mapping| {
+                let (resource_mask, index_stride) = match mapping.resource {
+                    HeapMappingResource::SampledImage => {
+                        (vk::SpirvResourceTypeFlagsEXT::SAMPLED_IMAGE, image_stride)
+                    }
+                    HeapMappingResource::Sampler => {
+                        (vk::SpirvResourceTypeFlagsEXT::SAMPLER, sampler_stride)
+                    }
+                    HeapMappingResource::CombinedImageSampler => (
+                        vk::SpirvResourceTypeFlagsEXT::COMBINED_SAMPLED_IMAGE,
+                        image_stride,
+                    ),
+                };
+                let push_index = vk::DescriptorMappingSourcePushIndexEXT::default()
+                    .heap_offset(0)
+                    .push_offset(mapping.push_offset)
+                    .heap_index_stride(index_stride)
+                    .heap_array_stride(0)
+                    .use_combined_image_sampler_index(false)
+                    .sampler_heap_offset(0)
+                    .sampler_push_offset(mapping.sampler_push_offset)
+                    .sampler_heap_index_stride(sampler_stride)
+                    .sampler_heap_array_stride(0);
+                vk::DescriptorSetAndBindingMappingEXT::default()
+                    .descriptor_set(mapping.set)
+                    .first_binding(mapping.binding)
+                    .binding_count(1)
+                    .resource_mask(resource_mask)
+                    .source(vk::DescriptorMappingSourceEXT::HEAP_WITH_PUSH_INDEX)
+                    .source_data(vk::DescriptorMappingSourceDataEXT { push_index })
+            })
+            .collect();
+        let mut mapping_info_vs =
+            vk::ShaderDescriptorSetAndBindingMappingInfoEXT::default().mappings(&mappings_vk);
+        let mut mapping_info_fs =
+            vk::ShaderDescriptorSetAndBindingMappingInfoEXT::default().mappings(&mappings_vk);
+
+        let mut vertex_stage = vk::PipelineShaderStageCreateInfo::default()
+            .stage(vk::ShaderStageFlags::VERTEX)
+            .module(vertex_shader.raw())
+            .name(&vertex_entry);
+        let mut fragment_stage = vk::PipelineShaderStageCreateInfo::default()
+            .stage(vk::ShaderStageFlags::FRAGMENT)
+            .module(fragment_shader.raw())
+            .name(&fragment_entry);
+        if !mappings_vk.is_empty() {
+            vertex_stage = vertex_stage.push(&mut mapping_info_vs);
+            fragment_stage = fragment_stage.push(&mut mapping_info_fs);
+        }
+        let shader_stages = [vertex_stage, fragment_stage];
 
         let binding = vk::VertexInputBindingDescription::default()
             .binding(0)
@@ -196,23 +303,31 @@ impl GraphicsPipeline {
             .logic_op_enable(false)
             .attachments(&color_blend_attachments);
 
-        let set_layouts: Vec<vk::DescriptorSetLayout> = options
-            .set_layouts
-            .iter()
-            .map(|layout| layout.raw_vk())
-            .collect();
-        let push_constant_ranges_vk: Vec<vk::PushConstantRange> = push_constant_ranges
-            .iter()
-            .map(|range| range.to_vk())
-            .collect();
-        let pipeline_layout_info = vk::PipelineLayoutCreateInfo::default()
-            .push_constant_ranges(&push_constant_ranges_vk)
-            .set_layouts(&set_layouts);
-        let layout = unsafe {
-            device
-                .raw()
-                .create_pipeline_layout(&pipeline_layout_info, None)
-                .map_err(|e| Error::Backend(format!("failed to create pipeline layout: {:?}", e)))?
+        let layout = if options.descriptor_heap {
+            // Heap-backed pipelines have no pipeline layout at all (per the
+            // extension: the layout must be NULL when the flag is set).
+            vk::PipelineLayout::null()
+        } else {
+            let set_layouts: Vec<vk::DescriptorSetLayout> = options
+                .set_layouts
+                .iter()
+                .map(|layout| layout.raw_vk())
+                .collect();
+            let push_constant_ranges_vk: Vec<vk::PushConstantRange> = push_constant_ranges
+                .iter()
+                .map(|range| range.to_vk())
+                .collect();
+            let pipeline_layout_info = vk::PipelineLayoutCreateInfo::default()
+                .push_constant_ranges(&push_constant_ranges_vk)
+                .set_layouts(&set_layouts);
+            unsafe {
+                device
+                    .raw()
+                    .create_pipeline_layout(&pipeline_layout_info, None)
+                    .map_err(|e| {
+                        Error::Backend(format!("failed to create pipeline layout: {:?}", e))
+                    })?
+            }
         };
 
         // Dynamic rendering replaces the compatible render pass: formats are
@@ -223,7 +338,12 @@ impl GraphicsPipeline {
             .color_attachment_formats(&color_formats_vk)
             .depth_attachment_format(depth_format.map_or(vk::Format::UNDEFINED, |f| f.to_vk()));
 
-        let pipeline_info = vk::GraphicsPipelineCreateInfo::default()
+        // Descriptor-heap pipelines are flagged through the flags2 struct
+        // (VK_KHR_maintenance5), chained next to the rendering info.
+        let mut flags2_info = vk::PipelineCreateFlags2CreateInfo::default()
+            .flags(vk::PipelineCreateFlags2::DESCRIPTOR_HEAP_EXT);
+
+        let mut pipeline_info = vk::GraphicsPipelineCreateInfo::default()
             .stages(&shader_stages)
             .vertex_input_state(&vertex_input_info)
             .input_assembly_state(&input_assembly)
@@ -237,6 +357,9 @@ impl GraphicsPipeline {
             .subpass(0)
             .render_pass(vk::RenderPass::null())
             .push(&mut rendering_info);
+        if options.descriptor_heap {
+            pipeline_info = pipeline_info.push(&mut flags2_info);
+        }
 
         let pipelines = unsafe {
             device

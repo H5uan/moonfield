@@ -15,7 +15,7 @@
 //! the next frame's write, not slot zeroing, is what makes the new contents
 //! visible.
 
-use crate::bindless::{GpuAllocation, Memory};
+use crate::bindless::GpuAllocation;
 use crate::error::{Error, Result};
 use crate::types::{Filter, SamplerDesc};
 use crate::vulkan::device::{DescriptorHeapProperties, Device};
@@ -145,9 +145,11 @@ impl DescriptorHeap {
     }
 
     /// Size one heap buffer from the driver properties: slot stride is the
-    /// descriptor size rounded up to its alignment, the heap total is clamped
-    /// to the driver's cap, and the effective capacity reports how many slots
-    /// actually fit (the driver may cap below the request).
+    /// descriptor size rounded up to its alignment (the resource heap takes
+    /// the max of the image and buffer sizes — both live in it), the heap
+    /// total is clamped to the driver's cap, and the effective capacity
+    /// reports how many slots actually fit (the driver may cap below the
+    /// request).
     fn heap_buffer(
         device: &Device,
         capacity: u32,
@@ -156,8 +158,12 @@ impl DescriptorHeap {
     ) -> Result<(GpuAllocation, usize, u64, u32)> {
         let (size, alignment, heap_size, heap_align) = match kind {
             HeapKind::Resource => (
-                props.image_descriptor_size,
-                props.image_descriptor_alignment,
+                props
+                    .image_descriptor_size
+                    .max(props.buffer_descriptor_size),
+                props
+                    .image_descriptor_alignment
+                    .max(props.buffer_descriptor_alignment),
                 props.max_resource_heap_size,
                 props.resource_heap_alignment,
             ),
@@ -172,8 +178,9 @@ impl DescriptorHeap {
         let total =
             align_up(capacity as usize * stride, heap_align as usize).min(heap_size as usize);
         let effective = (total / stride) as u32;
-        let allocation =
-            GpuAllocation::new_aligned(device, total as u64, Memory::Default, heap_align)?;
+        // Heap backing memory must carry the DESCRIPTOR_HEAP usage flag —
+        // the extension requires it of buffers bound as heaps.
+        let allocation = GpuAllocation::new_heap(device, total as u64, heap_align)?;
         Ok((allocation, stride, total as u64, effective))
     }
 
@@ -263,6 +270,51 @@ impl DescriptorHeap {
         }
         // SAFETY: every range points into the heap's host mapping and stays
         // alive for the call; the descriptor data encodes valid views.
+        unsafe {
+            self.ext.write_resource_descriptors(&resources, &ranges)?;
+        }
+        Ok(())
+    }
+
+    /// Write storage-buffer descriptors into resource-heap slots.
+    ///
+    /// Buffer descriptors encode a device address range directly (no buffer
+    /// view object); `address`/`size` describe the range shaders may access.
+    /// Slots are allocated with [`alloc_image_slot`](Self::alloc_image_slot)
+    /// (the resource heap is shared between image and buffer descriptors).
+    pub fn write_buffer_descriptors(
+        &self,
+        writes: &[(TextureHandle, vk::DeviceAddressRangeEXT)],
+    ) -> Result<()> {
+        let mut resources: Vec<vk::ResourceDescriptorInfoEXT<'_>> =
+            Vec::with_capacity(writes.len());
+        for (_, range) in writes {
+            resources.push(
+                vk::ResourceDescriptorInfoEXT::default()
+                    .ty(vk::DescriptorType::STORAGE_BUFFER)
+                    .data(vk::ResourceDescriptorDataEXT {
+                        p_address_range: range,
+                    }),
+            );
+        }
+        let host = self
+            .resource_heap
+            .host()
+            .ok_or_else(|| Error::Validation("resource heap is not host-visible".into()))?;
+        let mut ranges: Vec<vk::HostAddressRangeEXT<'_>> = Vec::with_capacity(writes.len());
+        for (handle, _) in writes {
+            let address = host
+                .offset(handle.0 as usize * self.image_stride)
+                .as_ptr()
+                .cast();
+            ranges.push(vk::HostAddressRangeEXT {
+                address,
+                size: self.image_stride,
+                _marker: std::marker::PhantomData,
+            });
+        }
+        // SAFETY: every range points into the heap's host mapping and stays
+        // alive for the call; the address ranges reference live buffers.
         unsafe {
             self.ext.write_resource_descriptors(&resources, &ranges)?;
         }
