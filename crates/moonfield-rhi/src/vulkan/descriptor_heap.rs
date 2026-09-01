@@ -24,6 +24,10 @@ use ash::vk;
 use moonfield_math::gpu::align_up;
 use std::sync::Mutex;
 
+/// Default descriptor heap capacities, matching the bindless texture budget.
+pub const DESCRIPTOR_HEAP_IMAGE_CAPACITY: u32 = 4096;
+pub const DESCRIPTOR_HEAP_SAMPLER_CAPACITY: u32 = 1024;
+
 /// A slot index in the image descriptor array (`binding 0`), the handle
 /// shaders store in root data and index with `NonUniformResourceIndex`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]

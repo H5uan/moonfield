@@ -41,7 +41,10 @@ pub use bump::{BumpAlloc, GpuBumpAllocator};
 pub use command::{
     CommandBuffer, CommandPool, CullState, DepthState, RenderAttachment, RenderPassDesc,
 };
-pub use descriptor_heap::{DescriptorHeap, SamplerHandle, TextureHandle, TextureSlotDesc};
+pub use descriptor_heap::{
+    DescriptorHeap, SamplerHandle, TextureHandle, TextureSlotDesc, DESCRIPTOR_HEAP_IMAGE_CAPACITY,
+    DESCRIPTOR_HEAP_SAMPLER_CAPACITY,
+};
 pub use device::{DescriptorHeapProperties, Device, QueueFamilyIndices};
 pub use instance::Instance;
 pub use offscreen::OffscreenTarget;

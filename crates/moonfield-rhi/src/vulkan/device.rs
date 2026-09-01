@@ -1,9 +1,11 @@
 //! Vulkan logical device abstraction.
 
-use crate::bindless;
 use crate::error::{Error, Result};
 use crate::vulkan::instance::Instance;
 use crate::vulkan::sync::Semaphore;
+use crate::{
+    bindless, DescriptorHeap, DESCRIPTOR_HEAP_IMAGE_CAPACITY, DESCRIPTOR_HEAP_SAMPLER_CAPACITY,
+};
 use crate::{FrameUploader, UPLOAD_ARENA_SIZE};
 use ash::vk::{self, TaggedStructure as _};
 use gpu_allocator::vulkan::{Allocator, AllocatorCreateDesc};
@@ -158,6 +160,9 @@ pub struct Device {
     /// arenas free chunks through the allocator's `Arc` while the device is
     /// still alive, then the allocator itself is torn down (see `Drop`).
     uploader: OnceLock<Arc<Mutex<FrameUploader>>>,
+    /// Lazily-built shared descriptor heap serving bindless resources. Same shape
+    /// as `uploader`: built once, shared by `Arc`, outlives `&Device`.
+    descriptor_heap: OnceLock<Arc<DescriptorHeap>>,
     /// Shared GPU memory allocator for buffers and images. Wrapped in
     /// `Arc<Mutex>` so resources can hold clones and free their allocations
     /// on drop without a borrow on the device. `Option` so `Drop` can take it
@@ -447,6 +452,7 @@ impl Device {
             extension_fns,
             optional_extensions: optional_enabled,
             uploader: OnceLock::new(),
+            descriptor_heap: OnceLock::new(),
             allocator: Some(Arc::new(Mutex::new(allocator))),
         })
     }
@@ -594,6 +600,21 @@ impl Device {
                     FrameUploader::new(self, UPLOAD_ARENA_SIZE)
                         .expect("failed to create the shared frame uploader"),
                 ))
+            })
+            .clone()
+    }
+
+    pub fn descriptor_heap(&self) -> Arc<DescriptorHeap> {
+        self.descriptor_heap
+            .get_or_init(|| {
+                Arc::new(
+                    DescriptorHeap::new(
+                        self,
+                        DESCRIPTOR_HEAP_IMAGE_CAPACITY,
+                        DESCRIPTOR_HEAP_SAMPLER_CAPACITY,
+                    )
+                    .expect("failed to create the shared descriptor heap"),
+                )
             })
             .clone()
     }

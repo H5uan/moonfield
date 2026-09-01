@@ -6,13 +6,25 @@
 //! frame, transitioning the image to a shader-readable layout; the caller
 //! submits with [`FrameUploader::end_frame`].
 
+use std::sync::Arc;
+
 use crate::error::{Error, Result};
 use crate::types::Format;
 use crate::vulkan::device::Device;
-use crate::FrameUploader;
+use crate::{DescriptorHeap, FrameUploader, TextureHandle};
 use ash::vk;
 use gpu_allocator::vulkan::{Allocation, AllocationCreateDesc, AllocationScheme};
 use gpu_allocator::MemoryLocation;
+
+struct TextureSlot {
+    handle: TextureHandle,
+    heap: Arc<DescriptorHeap>,
+    /// The view's create info, owned here for its *lifetime*: the heap's
+    /// descriptor write encoded a pointer to it (`ImageDescriptorInfoEXT.
+    /// p_view`), so it must outlive the slot. Not read on the Rust side.
+    #[allow(dead_code)]
+    view_create_info: vk::ImageViewCreateInfo<'static>,
+}
 
 /// A sampled 2D texture with owned memory.
 ///
@@ -26,18 +38,21 @@ pub struct Texture {
     allocator: std::sync::Arc<std::sync::Mutex<gpu_allocator::vulkan::Allocator>>,
     width: u32,
     height: u32,
+    slot: Option<TextureSlot>,
 }
 
 impl Texture {
-    /// Create a `width`×`height` sampled texture (single mip, `TRANSFER_DST`
-    /// for uploads). The image starts in `UNDEFINED`; the first
-    /// [`upload`](Self::upload) transitions it to shader-readable.
-    pub fn new(device: &Device, width: u32, height: u32, format: Format) -> Result<Self> {
-        if width == 0 || height == 0 {
-            return Err(Error::Validation(format!(
-                "texture dimensions must be non-zero, got {width}x{height}"
-            )));
-        }
+    fn create_image(
+        device: &Device,
+        width: u32,
+        height: u32,
+        format: Format,
+    ) -> Result<(
+        vk::Image,
+        vk::ImageView,
+        vk::ImageViewCreateInfo<'static>,
+        Allocation,
+    )> {
         let image_info = vk::ImageCreateInfo::default()
             .image_type(vk::ImageType::TYPE_2D)
             .format(format.to_vk())
@@ -101,7 +116,19 @@ impl Texture {
                 .create_image_view(&view_info, None)
                 .map_err(|e| Error::Backend(format!("failed to create texture view: {e:?}")))?
         };
-
+        Ok((image, image_view, view_info, allocation))
+    }
+    /// Create a `width`×`height` sampled texture (single mip, `TRANSFER_DST`
+    /// for uploads). The image starts in `UNDEFINED`; the first
+    /// [`upload`](Self::upload) transitions it to shader-readable.
+    pub fn new(device: &Device, width: u32, height: u32, format: Format) -> Result<Self> {
+        if width == 0 || height == 0 {
+            return Err(Error::Validation(format!(
+                "texture dimensions must be non-zero, got {width}x{height}"
+            )));
+        }
+        let (image, image_view, _view_create_info, allocation) =
+            Self::create_image(device, width, height, format)?;
         Ok(Self {
             image_view,
             image,
@@ -110,6 +137,50 @@ impl Texture {
             allocator: device.allocator().clone(),
             width,
             height,
+            slot: None,
+        })
+    }
+
+    pub fn bindless(
+        device: &Device,
+        uploader: &mut FrameUploader,
+        width: u32,
+        height: u32,
+        format: Format,
+        bytes: &[u8],
+    ) -> Result<Self> {
+        if bytes.len() != width as usize * height as usize * 4 {
+            return Err(Error::Validation(format!(
+                "texture upload needs {} bytes, got {}",
+                width as usize * height as usize * 4,
+                bytes.len()
+            )));
+        }
+        let (image, image_view, view_create_info, allocation) =
+            Self::create_image(device, width, height, format)?;
+        uploader.upload_image(image, bytes, None, (width, height))?;
+        let heap = device.descriptor_heap();
+        let handle = heap.alloc_image_slot()?;
+        heap.write_resource_descriptors(&[(
+            handle,
+            crate::TextureSlotDesc {
+                view_create_info: &view_create_info,
+                layout: vk::ImageLayout::GENERAL,
+            },
+        )])?;
+        Ok(Self {
+            image_view,
+            image,
+            allocation: Some(allocation),
+            device: device.raw().clone(),
+            allocator: device.allocator().clone(),
+            width,
+            height,
+            slot: Some(TextureSlot {
+                handle,
+                heap,
+                view_create_info,
+            }),
         })
     }
 
@@ -141,10 +212,24 @@ impl Texture {
     pub fn extent(&self) -> (u32, u32) {
         (self.width, self.height)
     }
+
+    /// The bindless heap slot, `None` for escape-hatch textures (e.g. the
+    /// egui interop path) that do not participate in the descriptor heap.
+    pub fn handle(&self) -> Option<TextureHandle> {
+        self.slot.as_ref().map(|slot| slot.handle)
+    }
 }
 
 impl Drop for Texture {
     fn drop(&mut self) {
+        // Return the bindless slot before tearing down the image: the heap
+        // keeps the slot's view create info alive until then (bump contract:
+        // a freed slot is never referenced again).
+        if let Some(slot) = self.slot.take() {
+            if let Err(e) = slot.heap.free_image_slot(slot.handle) {
+                moonfield_log::error!("failed to free texture slot: {e}");
+            }
+        }
         // SAFETY: the caller defers destruction past the in-flight frames
         // that sampled this texture.
         unsafe {
