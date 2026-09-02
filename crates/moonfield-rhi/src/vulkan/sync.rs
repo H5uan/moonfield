@@ -136,3 +136,51 @@ impl Drop for Fence {
         }
     }
 }
+
+/// A GPU pipeline stage mask for bindless barriers.
+///
+/// Bindless synchronization is stage-to-stage: the barrier orders the end of
+/// a producer stage against the start of a consumer stage, without naming any
+/// resource — shaders address memory indirectly through pointers, so a
+/// resource list would be both impossible and meaningless. The access mask is
+/// the widest possible read/write, matching the pointer model.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Stage(pub(crate) vk::PipelineStageFlags2);
+
+impl Stage {
+    /// Vertex shader stage
+    pub const VERTEX: Self = Self(vk::PipelineStageFlags2::VERTEX_SHADER);
+    /// Fragment shader stage
+    pub const FRAGMENT: Self = Self(vk::PipelineStageFlags2::FRAGMENT_SHADER);
+    /// Compute shader stage (dispatch).
+    pub const COMPUTE: Self = Self(vk::PipelineStageFlags2::COMPUTE_SHADER);
+    /// Transfer stage (buffer/image copy).
+    pub const TRANSFER: Self = Self(vk::PipelineStageFlags2::TRANSFER);
+    /// All stages; implies the widest dependency and ignores access masks.
+    pub const ALL: Self = Self(vk::PipelineStageFlags2::ALL_COMMANDS);
+
+    pub(crate) fn to_vk(self) -> vk::PipelineStageFlags2 {
+        self.0
+    }
+}
+
+impl std::ops::BitOr for Stage {
+    type Output = Self;
+    fn bitor(self, rhs: Self) -> Self {
+        Self(self.0 | rhs.0)
+    }
+}
+
+/// What kind of hazard a barrier orders — the blog's barrier flags. A plain
+/// memory hazard covers pointer-accessed data; a descriptor hazard additionally
+/// exposes the descriptor read the next stage performs through non-uniform
+/// heap indices (a sampled image read).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum BarrierHazard {
+    /// Plain memory read/write hazard (current behavior).
+    #[default]
+    Memory,
+    /// Descriptor-heap hazard: a stage (or the CPU, through the host mapping)
+    /// just wrote heap descriptors that the next stage samples.
+    Descriptors,
+}

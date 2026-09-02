@@ -10,7 +10,7 @@
 //!
 //! Compute indirect dispatch is wired through the bindless path:
 //! [`CommandBuffer::dispatch_indirect`](crate::CommandBuffer::dispatch_indirect)
-//! takes a [`GpuAllocation`](crate::vulkan::bindless::GpuAllocation) holding
+//! takes a [`GpuAllocation`](crate::vulkan::memory::GpuAllocation) holding
 //! these arguments.
 
 use crate::types::BufferUsage;

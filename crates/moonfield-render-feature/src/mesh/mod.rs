@@ -10,10 +10,9 @@ pub mod gltf;
 use std::path::Path;
 use std::{collections::HashMap, collections::HashSet};
 
-use gpu_allocator::MemoryLocation;
 use moonfield_app::prelude::World;
 use moonfield_asset::{AssetId, AssetRevision, Assets, Handle};
-use moonfield_rhi::{Buffer, BufferUsage, RenderDevice};
+use moonfield_rhi::{Buffer, BufferUsage, Memory, RenderDevice};
 
 use crate::mesh::gltf::{MeshGltfError, import_gltf_mesh, parse_gltf_mesh};
 
@@ -117,14 +116,14 @@ impl GpuMesh {
             device,
             std::mem::size_of_val(positions) as u64,
             BufferUsage::VERTEX,
-            MemoryLocation::CpuToGpu,
+            Memory::Default,
         )?;
         vertex.upload(device, positions)?;
         let index = Buffer::new(
             device,
             std::mem::size_of_val(indices) as u64,
             BufferUsage::INDEX,
-            MemoryLocation::CpuToGpu,
+            Memory::Default,
         )?;
         index.upload(device, indices)?;
         Ok(Self {

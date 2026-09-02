@@ -13,6 +13,10 @@ lives in `moonfield-render-core` (Selene), never here.
   at this boundary, never in scene code.
 - Public resource descriptions (`Format`, `BufferUsage`, `VertexBufferLayout`)
   live in `src/types.rs` as the crate's own vocabulary, not raw `ash` types.
+- Module map inside `src/vulkan/`: `memory.rs` owns the allocation/pointer
+  model (`GpuAllocation`/`GpuPtr`/`HostPtr`/`Memory`), `sync.rs` the barrier
+  vocabulary (`Stage`/`BarrierHazard`) plus fences/semaphores, `pipeline.rs`
+  both pipeline types, `view.rs` the `TextureView` wrapper.
 
 ## Object ownership and lifecycle
 

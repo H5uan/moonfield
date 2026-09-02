@@ -1,15 +1,15 @@
 //! Vulkan buffer abstraction backed by `gpu_allocator`.
 //!
-//! Buffers allocate through the device's shared [`Allocator`] and may live in
-//! host-visible (`CpuToGpu`) or device-local (`GpuOnly`) memory. `GpuOnly`
-//! buffers are uploaded via a one-shot staging copy so the RHI can hold
-//! GPU-resident resources (indirect args, workgraph backing, vertex data).
+//! Buffers allocate through the device's shared [`Allocator`] in the crate's
+//! [`Memory`] classes; [`Memory::Gpu`] buffers are uploaded via a one-shot
+//! staging copy so the RHI can hold GPU-resident resources (indirect args,
+//! workgraph backing, vertex data).
 
 use crate::error::{Error, Result};
 use crate::types::BufferUsage;
 use crate::vulkan::device::Device;
+use crate::vulkan::memory::Memory;
 use ash::vk;
-use gpu_allocator::MemoryLocation;
 use gpu_allocator::vulkan::{Allocation, AllocationCreateDesc, AllocationScheme, Allocator};
 use std::sync::{Arc, Mutex};
 
@@ -17,24 +17,19 @@ use std::sync::{Arc, Mutex};
 pub struct Buffer {
     buffer: vk::Buffer,
     allocation: Option<Allocation>,
-    size: vk::DeviceSize,
-    location: MemoryLocation,
+    size: u64,
+    memory: Memory,
     device: ash::Device,
     allocator: Arc<Mutex<Allocator>>,
 }
 
 impl Buffer {
-    /// Create a buffer of the given size, usage, and memory location.
+    /// Create a buffer of the given size, usage, and memory class.
     ///
     /// `COPY_DST` is OR-ed into the usage so uploads always go through a
-    /// staging copy on `GpuOnly` buffers (and are a no-op for host-visible
-    /// ones), matching Vulkan's buffer upload convention.
-    pub fn new(
-        device: &Device,
-        size: u64,
-        usage: BufferUsage,
-        location: MemoryLocation,
-    ) -> Result<Self> {
+    /// staging copy on [`Memory::Gpu`] buffers (and are a no-op for
+    /// host-visible ones), matching Vulkan's buffer upload convention.
+    pub fn new(device: &Device, size: u64, usage: BufferUsage, memory: Memory) -> Result<Self> {
         let usage = usage | BufferUsage::COPY_DST;
 
         let buffer_info = vk::BufferCreateInfo::default()
@@ -58,7 +53,7 @@ impl Buffer {
             .allocate(&AllocationCreateDesc {
                 name: "buffer",
                 requirements,
-                location,
+                location: memory.to_location(),
                 linear: true,
                 allocation_scheme: AllocationScheme::GpuAllocatorManaged,
             })
@@ -75,7 +70,7 @@ impl Buffer {
             buffer,
             allocation: Some(allocation),
             size,
-            location,
+            memory,
             device: device.raw().clone(),
             allocator,
         })
@@ -87,13 +82,13 @@ impl Buffer {
     }
 
     /// Size of the buffer in bytes.
-    pub fn size(&self) -> vk::DeviceSize {
+    pub fn size(&self) -> u64 {
         self.size
     }
 
-    /// The memory location this buffer was allocated in.
-    pub fn location(&self) -> MemoryLocation {
-        self.location
+    /// The memory class this buffer was allocated in.
+    pub fn memory(&self) -> Memory {
+        self.memory
     }
 
     /// Upload data to the buffer.
@@ -103,15 +98,15 @@ impl Buffer {
     /// and a one-shot copy command, blocking on the graphics queue until the
     /// copy completes.
     pub fn upload<T: Copy>(&self, device: &Device, data: &[T]) -> Result<()> {
-        let bytes = std::mem::size_of_val(data) as vk::DeviceSize;
+        let bytes = std::mem::size_of_val(data) as u64;
         if bytes > self.size {
             return Err(Error::Validation(
                 "upload data exceeds buffer size".to_string(),
             ));
         }
 
-        match self.location {
-            MemoryLocation::GpuOnly => {
+        match self.memory {
+            Memory::Gpu => {
                 // Stage through the device's shared frame uploader: the
                 // staging region is carved from its bump arena and the copy
                 // goes out as one submit+wait, with no per-call staging
@@ -120,8 +115,8 @@ impl Buffer {
                 let mut uploader = uploader.lock().unwrap_or_else(|e| e.into_inner());
                 uploader.upload_and_wait(self, data)
             }
-            // CpuToGpu / Unknown / GpuToCpu all back host-visible memory; map
-            // and copy directly. GpuToCpu is unusual for uploads but still
+            // Default and Readback both back host-visible memory; map and
+            // copy directly. Readback is unusual for uploads but still
             // host-visible, so the same path applies.
             _ => self.upload_host_visible(bytes, data),
         }
@@ -129,16 +124,16 @@ impl Buffer {
 
     /// Read data out of a host-visible buffer (test readback, debug dumps).
     ///
-    /// Device-local (`GpuOnly`) buffers cannot be mapped; this returns an
-    /// error for them.
+    /// Device-local ([`Memory::Gpu`]) buffers cannot be mapped; this returns
+    /// an error for them.
     pub fn read<T: Copy>(&self, data: &mut [T]) -> Result<()> {
-        let bytes = std::mem::size_of_val(data) as vk::DeviceSize;
+        let bytes = std::mem::size_of_val(data) as u64;
         if bytes > self.size {
             return Err(Error::Validation(
                 "read range exceeds buffer size".to_string(),
             ));
         }
-        if self.location == MemoryLocation::GpuOnly {
+        if self.memory == Memory::Gpu {
             return Err(Error::Validation(
                 "cannot read a device-local buffer".to_string(),
             ));
@@ -184,7 +179,7 @@ impl Buffer {
         Ok(())
     }
 
-    fn upload_host_visible<T: Copy>(&self, bytes: vk::DeviceSize, data: &[T]) -> Result<()> {
+    fn upload_host_visible<T: Copy>(&self, bytes: u64, data: &[T]) -> Result<()> {
         let allocation = self.allocation.as_ref().ok_or(Error::InvalidHandle)?;
         // SAFETY: same persistent-mapping rule as `read` above — reuse the
         // allocation's mapped pointer, only manual map/unmap when absent.

@@ -42,10 +42,10 @@ impl HeapSlots {
         let texture = heap.alloc_image_slot()?;
         heap.write_resource_descriptors(&[(
             texture,
-            crate::TextureSlotDesc {
-                view_create_info: &view_create_info,
-                layout: vk::ImageLayout::GENERAL,
-            },
+            crate::vulkan::descriptor_heap::TextureSlotDesc::new(
+                &view_create_info,
+                vk::ImageLayout::GENERAL,
+            ),
         )])?;
         let sampler = heap.alloc_sampler_slot()?;
         heap.write_samplers(&[(sampler, target_sampler_desc())])?;
@@ -63,10 +63,10 @@ impl HeapSlots {
     fn rewrite(&mut self, view_create_info: vk::ImageViewCreateInfo<'static>) -> Result<()> {
         self.heap.write_resource_descriptors(&[(
             self.texture,
-            crate::TextureSlotDesc {
-                view_create_info: &view_create_info,
-                layout: vk::ImageLayout::GENERAL,
-            },
+            crate::vulkan::descriptor_heap::TextureSlotDesc::new(
+                &view_create_info,
+                vk::ImageLayout::GENERAL,
+            ),
         )])?;
         self.view_create_info = view_create_info;
         Ok(())
@@ -252,15 +252,15 @@ impl OffscreenTarget {
     ///
     /// The returned view borrows this target's underlying `vk::ImageView`; it
     /// does not own it and must not outlive the target.
-    pub fn view(&self) -> crate::view::TextureView {
-        crate::view::TextureView::borrow_raw(self.image_view, self.device.clone())
+    pub fn view(&self) -> crate::vulkan::view::TextureView {
+        crate::vulkan::view::TextureView::borrow_raw(self.image_view, self.device.clone())
     }
 
     /// Borrow the depth image view, if present (for the depth attachment of a
     /// [`RenderPassDesc`](crate::RenderPassDesc)).
-    pub fn depth_view(&self) -> Option<crate::view::TextureView> {
+    pub fn depth_view(&self) -> Option<crate::vulkan::view::TextureView> {
         self.depth_image_view
-            .map(|view| crate::view::TextureView::borrow_raw(view, self.device.clone()))
+            .map(|view| crate::vulkan::view::TextureView::borrow_raw(view, self.device.clone()))
     }
 
     /// The color attachment format of this target.
@@ -293,7 +293,7 @@ impl OffscreenTarget {
             device,
             (width * height * 4) as u64,
             crate::BufferUsage::COPY_DST,
-            MemoryLocation::GpuToCpu,
+            crate::Memory::Readback,
         )?;
 
         let command_pool = CommandPool::new(device, device.queue_family_indices().graphics)?;

@@ -8,7 +8,6 @@
 pub mod error;
 pub mod indirect;
 pub mod types;
-pub mod view;
 
 pub mod vulkan;
 
@@ -19,5 +18,4 @@ pub use types::{
     Filter, Format, FrontFace, LoadOp, Offset2d, Rect2d, SamplerDesc, StoreOp, VertexAttribute,
     VertexBufferLayout, VertexFormat, Viewport, WrapMode,
 };
-pub use view::TextureView;
 pub use vulkan::*;

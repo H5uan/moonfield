@@ -1,4 +1,4 @@
-//! Vulkan graphics pipeline abstraction.
+//! Vulkan pipeline abstractions (graphics and compute).
 
 use crate::error::{Error, Result};
 use crate::types::{Format, VertexBufferLayout};
@@ -285,13 +285,94 @@ impl GraphicsPipeline {
         })
     }
 
-    /// Access the raw `vk::Pipeline` handle.
-    pub fn raw(&self) -> vk::Pipeline {
+    /// Access the raw `vk::Pipeline` handle. Crate-internal: command recording
+    /// binds through it; callers bind via
+    /// [`CommandBuffer::bind_graphics_pipeline`](crate::CommandBuffer::bind_graphics_pipeline).
+    pub(crate) fn raw(&self) -> vk::Pipeline {
         self.pipeline
     }
 }
 
 impl Drop for GraphicsPipeline {
+    fn drop(&mut self) {
+        unsafe {
+            self.device.destroy_pipeline(self.pipeline, None);
+        }
+    }
+}
+
+/// A Vulkan compute pipeline.
+///
+/// Like its graphics counterpart, the pipeline is a descriptor-heap pipeline
+/// with a null layout: root data is delivered through push data
+/// ([`CommandBuffer::push_data`](crate::CommandBuffer::push_data)) as the
+/// entry point's GPU pointers (two 64-bit addresses: input @ offset 0,
+/// output @ offset 8), matching the Slang `EntryPointParams_std430` layout of
+/// a kernel with two pointer parameters.
+pub struct ComputePipeline {
+    pipeline: vk::Pipeline,
+    device: ash::Device,
+}
+
+impl ComputePipeline {
+    /// Create a compute pipeline from a compiled compute shader module.
+    pub fn new(device: &Device, shader: &ShaderModule) -> Result<Self> {
+        let stage = shader.stage().ok_or_else(|| {
+            Error::Validation(
+                "compute shader module has no stage information; compile through \
+                 `Compiler` + `ShaderModule::from_compiled`"
+                    .to_string(),
+            )
+        })?;
+        if stage != vk::ShaderStageFlags::COMPUTE {
+            return Err(Error::Validation(format!(
+                "compute pipeline received a {stage:?} shader module"
+            )));
+        }
+        let entry = std::ffi::CString::new(shader.entry().ok_or_else(|| {
+            Error::Validation(
+                "compute shader module has no entry-point name; compile through \
+                 `Compiler` + `ShaderModule::from_compiled`"
+                    .to_string(),
+            )
+        })?)
+        .map_err(|e| Error::Validation(format!("entry point name is not valid C: {e}")))?;
+        let stage = vk::PipelineShaderStageCreateInfo::default()
+            .stage(vk::ShaderStageFlags::COMPUTE)
+            .module(shader.raw())
+            .name(&entry);
+        // Descriptor-heap pipelines have no pipeline layout at all (per the
+        // extension: the layout must be NULL when the flag is set).
+        let layout = vk::PipelineLayout::null();
+        let mut flags2_info = vk::PipelineCreateFlags2CreateInfo::default()
+            .flags(vk::PipelineCreateFlags2::DESCRIPTOR_HEAP_EXT);
+        let pipeline_info = vk::ComputePipelineCreateInfo::default()
+            .stage(stage)
+            .layout(layout)
+            .push(&mut flags2_info);
+        let pipelines = unsafe {
+            device.raw().create_compute_pipelines(
+                vk::PipelineCache::null(),
+                std::slice::from_ref(&pipeline_info),
+                None,
+            )
+        }
+        .map_err(|e| Error::Backend(format!("failed to create compute pipeline: {:?}", e)))?;
+        Ok(Self {
+            pipeline: pipelines[0],
+            device: device.raw().clone(),
+        })
+    }
+
+    /// Access the raw `vk::Pipeline` handle. Crate-internal: command recording
+    /// binds through it; callers bind via
+    /// [`CommandBuffer::bind_compute_pipeline`](crate::CommandBuffer::bind_compute_pipeline).
+    pub(crate) fn raw(&self) -> vk::Pipeline {
+        self.pipeline
+    }
+}
+
+impl Drop for ComputePipeline {
     fn drop(&mut self) {
         unsafe {
             self.device.destroy_pipeline(self.pipeline, None);

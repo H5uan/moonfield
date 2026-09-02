@@ -144,7 +144,7 @@ PsOutput main(PsInput input)
         &device,
         std::mem::size_of_val(&vertices) as u64,
         BufferUsage::VERTEX,
-        gpu_allocator::MemoryLocation::CpuToGpu,
+        moonfield_rhi::Memory::Default,
     )
     .expect("vertex buffer");
     vertex_buffer
@@ -162,7 +162,7 @@ PsOutput main(PsInput input)
         &device,
         std::mem::size_of_val(&args) as u64,
         BufferUsage::INDIRECT,
-        gpu_allocator::MemoryLocation::CpuToGpu,
+        moonfield_rhi::Memory::Default,
     )
     .expect("indirect args buffer");
     args_buffer
@@ -188,7 +188,7 @@ PsOutput main(PsInput input)
     command_buffer.bind_graphics_pipeline(&pipeline);
     command_buffer.bind_vertex_buffers(0, &[&vertex_buffer], &[0]);
     command_buffer.draw_indirect(
-        args_buffer.raw(),
+        &args_buffer,
         0,
         1,
         std::mem::size_of::<DrawIndirectArgs>() as u32,
@@ -203,7 +203,7 @@ PsOutput main(PsInput input)
         &device,
         std::mem::size_of_val(&indices) as u64,
         BufferUsage::INDEX,
-        gpu_allocator::MemoryLocation::CpuToGpu,
+        moonfield_rhi::Memory::Default,
     )
     .expect("index buffer");
     index_buffer
@@ -221,7 +221,7 @@ PsOutput main(PsInput input)
         &device,
         std::mem::size_of_val(&indexed_args) as u64,
         BufferUsage::INDIRECT,
-        gpu_allocator::MemoryLocation::CpuToGpu,
+        moonfield_rhi::Memory::Default,
     )
     .expect("indexed indirect args buffer");
     indexed_args_buffer
@@ -238,7 +238,7 @@ PsOutput main(PsInput input)
     second.bind_vertex_buffers(0, &[&vertex_buffer], &[0]);
     second.bind_index_buffer(&index_buffer, 0, IndexFormat::Uint32);
     second.draw_indexed_indirect(
-        indexed_args_buffer.raw(),
+        &indexed_args_buffer,
         0,
         1,
         std::mem::size_of::<moonfield_rhi::DrawIndexedIndirectArgs>() as u32,

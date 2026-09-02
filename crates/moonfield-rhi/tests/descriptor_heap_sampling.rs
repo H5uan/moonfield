@@ -8,11 +8,9 @@
 
 mod common;
 
-use moonfield_rhi::bindless::GpuAllocation;
-use moonfield_rhi::vulkan::bindless::{ComputePipeline, Memory};
 use moonfield_rhi::{
-    CommandBufferUsage, CommandPool, Compiler, Device, Format, Instance, SamplerDesc, ShaderModule,
-    Texture,
+    CommandBufferUsage, CommandPool, Compiler, ComputePipeline, Device, Format, GpuAllocation,
+    Instance, Memory, SamplerDesc, ShaderModule, Texture,
 };
 
 /// Sample one pixel per thread from the heap texture (thread i samples column
@@ -100,7 +98,7 @@ fn heap_texture_sampling_roundtrip() {
         .expect("begin");
     heap.cmd_bind(&cmd).expect("bind heaps");
     eprintln!("MARK: heaps bound");
-    cmd.bind_compute_pipeline(pipeline.raw());
+    cmd.bind_compute_pipeline(&pipeline);
     cmd.set_bindless_root(out.gpu(), out.gpu());
     cmd.dispatch(4, 1, 1);
     cmd.end().expect("end");

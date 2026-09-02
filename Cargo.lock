@@ -1162,7 +1162,6 @@ dependencies = [
  "egui",
  "egui-winit",
  "egui_dock",
- "gpu-allocator",
  "moonfield-app",
  "moonfield-asset",
  "moonfield-camera",
@@ -1237,7 +1236,6 @@ version = "0.1.0"
 dependencies = [
  "bytemuck",
  "gltf",
- "gpu-allocator",
  "moonfield-app",
  "moonfield-asset",
  "moonfield-camera",

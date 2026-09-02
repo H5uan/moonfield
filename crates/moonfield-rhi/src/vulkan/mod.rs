@@ -4,13 +4,13 @@
 //! surface over instance, physical device, logical device, and swapchain
 //! creation.
 
-pub mod bindless;
 pub mod buffer;
 pub mod bump;
 pub mod command;
 pub mod descriptor_heap;
 pub mod device;
 pub mod instance;
+pub mod memory;
 pub mod offscreen;
 pub mod pipeline;
 pub mod plugin;
@@ -20,6 +20,7 @@ pub mod swapchain;
 pub mod sync;
 pub mod texture;
 pub mod upload;
+pub mod view;
 
 /// Aggregated device-extension loaders, built once at device creation and
 /// shared with command buffers through an `Arc` — the same shape
@@ -42,13 +43,14 @@ pub use command::{
     CommandBuffer, CommandPool, CullState, DepthState, RenderAttachment, RenderPassDesc,
 };
 pub use descriptor_heap::{
-    DESCRIPTOR_HEAP_IMAGE_CAPACITY, DESCRIPTOR_HEAP_SAMPLER_CAPACITY, DescriptorHeap,
-    SamplerHandle, TextureHandle, TextureSlotDesc,
+    BufferRange, DESCRIPTOR_HEAP_IMAGE_CAPACITY, DESCRIPTOR_HEAP_SAMPLER_CAPACITY, DescriptorHeap,
+    SamplerHandle, TextureHandle,
 };
 pub use device::{DescriptorHeapProperties, Device, QueueFamilyIndices};
 pub use instance::Instance;
+pub use memory::{GpuAllocation, GpuPtr, HostPtr, Memory};
 pub use offscreen::OffscreenTarget;
-pub use pipeline::{BlendMode, GraphicsPipeline, ShaderStageDesc};
+pub use pipeline::{BlendMode, ComputePipeline, GraphicsPipeline, ShaderStageDesc};
 pub use plugin::RenderDevice;
 pub use shader::{
     CompiledShader, Compiler, RootBinder, RootParam, RootParamKind, ShaderCache, UserAttributeArg,
@@ -56,6 +58,7 @@ pub use shader::{
 };
 pub use shader_module::ShaderModule;
 pub use swapchain::{Surface, Swapchain};
-pub use sync::{Fence, Semaphore};
+pub use sync::{BarrierHazard, Fence, Semaphore, Stage};
 pub use texture::Texture;
 pub use upload::{FrameUploader, UPLOAD_ARENA_SIZE, UPLOAD_FRAME_RING};
+pub use view::TextureView;

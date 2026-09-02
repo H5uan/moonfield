@@ -115,7 +115,7 @@ PsOutput main(PsInput input)
         &device,
         std::mem::size_of_val(&vertices) as u64,
         BufferUsage::VERTEX,
-        gpu_allocator::MemoryLocation::CpuToGpu,
+        moonfield_rhi::Memory::Default,
     )?;
     vertex_buffer.upload(&device, &vertices)?;
 

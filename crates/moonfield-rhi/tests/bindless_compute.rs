@@ -5,8 +5,10 @@
 //! through a buffer device address root pointer, writes output through a
 //! second root pointer, and the CPU reads the result back.
 
-use moonfield_rhi::vulkan::bindless::{ComputePipeline, GpuAllocation, Memory};
-use moonfield_rhi::{CommandBufferUsage, CommandPool, Compiler, Device, Instance, ShaderModule};
+use moonfield_rhi::{
+    CommandBufferUsage, CommandPool, Compiler, ComputePipeline, Device, GpuAllocation, Instance,
+    Memory, ShaderModule,
+};
 mod common;
 
 /// `+1` kernel: out[tid] = in[tid] + 1. Root data is two 64-bit addresses
@@ -70,7 +72,7 @@ fn bindless_compute_roundtrip() {
     let mut cmd = pool.allocate_command_buffer().expect("command buffer");
     cmd.begin(CommandBufferUsage::ONE_TIME_SUBMIT)
         .expect("begin");
-    cmd.bind_compute_pipeline(pipeline.raw());
+    cmd.bind_compute_pipeline(&pipeline);
     cmd.set_bindless_root(input.gpu(), output.gpu());
     cmd.dispatch(1, 1, 1);
     cmd.end().expect("end");

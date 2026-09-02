@@ -8,8 +8,10 @@
 
 mod common;
 
-use moonfield_rhi::vulkan::bindless::{ComputePipeline, GpuAllocation, Memory};
-use moonfield_rhi::{CommandBufferUsage, CommandPool, Compiler, Device, Instance, ShaderModule};
+use moonfield_rhi::{
+    CommandBufferUsage, CommandPool, Compiler, ComputePipeline, Device, GpuAllocation, Instance,
+    Memory, ShaderModule,
+};
 
 #[test]
 fn push_data_records_cleanly() {
@@ -101,7 +103,7 @@ fn push_data_feeds_root_pointers() {
     let mut cmd = pool.allocate_command_buffer().expect("command buffer");
     cmd.begin(CommandBufferUsage::ONE_TIME_SUBMIT)
         .expect("begin");
-    cmd.bind_compute_pipeline(pipeline.raw());
+    cmd.bind_compute_pipeline(&pipeline);
     // Push data and push constants alias the same bank, last setter wins —
     // the kernel must see exactly these two addresses, so nothing but
     // push_data may touch root state after this call.

@@ -163,10 +163,10 @@ impl Texture {
         let handle = heap.alloc_image_slot()?;
         heap.write_resource_descriptors(&[(
             handle,
-            crate::TextureSlotDesc {
-                view_create_info: &view_create_info,
-                layout: vk::ImageLayout::GENERAL,
-            },
+            crate::vulkan::descriptor_heap::TextureSlotDesc::new(
+                &view_create_info,
+                vk::ImageLayout::GENERAL,
+            ),
         )])?;
         Ok(Self {
             image_view,
@@ -202,10 +202,10 @@ impl Texture {
         uploader.upload_image(self.image, bytes, offset, region)
     }
 
-    /// Borrow the image view as a backend-neutral
-    /// [`TextureView`](crate::TextureView); it must not outlive the texture.
-    pub fn view(&self) -> crate::view::TextureView {
-        crate::view::TextureView::borrow_raw(self.image_view, self.device.clone())
+    /// Borrow the image view as a backend-neutral [`TextureView`]; it must not
+    /// outlive the texture.
+    pub fn view(&self) -> crate::vulkan::view::TextureView {
+        crate::vulkan::view::TextureView::borrow_raw(self.image_view, self.device.clone())
     }
 
     /// The `(width, height)` of the texture.

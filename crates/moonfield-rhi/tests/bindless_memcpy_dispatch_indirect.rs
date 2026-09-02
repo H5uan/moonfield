@@ -7,10 +7,10 @@
 //!    are read from a GPU-memory `DispatchIndirectArgs` struct.
 
 use moonfield_rhi::indirect::DispatchIndirectArgs;
-use moonfield_rhi::vulkan::bindless::{
-    BarrierHazard, ComputePipeline, GpuAllocation, Memory, Stage,
+use moonfield_rhi::{
+    BarrierHazard, CommandBufferUsage, CommandPool, Compiler, ComputePipeline, Device,
+    GpuAllocation, Instance, Memory, ShaderModule, Stage,
 };
-use moonfield_rhi::{CommandBufferUsage, CommandPool, Compiler, Device, Instance, ShaderModule};
 use std::sync::Mutex;
 mod common;
 
@@ -149,7 +149,7 @@ fn bindless_dispatch_indirect_roundtrip() {
     let mut cmd = pool.allocate_command_buffer().expect("cmd");
     cmd.begin(CommandBufferUsage::ONE_TIME_SUBMIT)
         .expect("begin");
-    cmd.bind_compute_pipeline(pipeline.raw());
+    cmd.bind_compute_pipeline(&pipeline);
     cmd.set_bindless_root(input.gpu(), output.gpu());
     cmd.dispatch_indirect(&args);
     cmd.end().expect("end");

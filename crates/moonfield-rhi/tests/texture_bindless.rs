@@ -8,6 +8,14 @@
 mod common;
 
 use moonfield_rhi::{Device, Format, FrameUploader, Instance, Texture, UPLOAD_ARENA_SIZE};
+use std::sync::Mutex;
+
+/// Serializes the tests in this binary. Each test creates its own Vulkan
+/// instance, device, and uploader; doing so concurrently on one GPU
+/// access-violates on some Windows drivers, and the crate confines Vulkan
+/// objects to a single thread by rule — tests must not create devices in
+/// parallel (mirrors `bindless_allocation.rs`).
+static DEVICE_LOCK: Mutex<()> = Mutex::new(());
 
 /// Create a headless instance + device with a private frame uploader,
 /// skipping on machines without one (mirrors the other RHI test setups).
@@ -53,6 +61,7 @@ fn checkerboard() -> Vec<u8> {
 
 #[test]
 fn bindless_allocates_slots_in_order() {
+    let _guard = DEVICE_LOCK.lock().unwrap();
     let Some((_instance, device, mut uploader)) = setup() else {
         return;
     };
@@ -80,6 +89,7 @@ fn bindless_allocates_slots_in_order() {
 
 #[test]
 fn drop_releases_slot_for_reuse() {
+    let _guard = DEVICE_LOCK.lock().unwrap();
     let Some((_instance, device, mut uploader)) = setup() else {
         return;
     };
@@ -105,6 +115,7 @@ fn drop_releases_slot_for_reuse() {
 
 #[test]
 fn escape_hatch_has_no_slot() {
+    let _guard = DEVICE_LOCK.lock().unwrap();
     let Some((_instance, device, mut _uploader)) = setup() else {
         return;
     };

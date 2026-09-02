@@ -225,12 +225,15 @@ viewport and records it into the persistent `OffscreenTarget` held by the
 egui. Referenced mesh assets are copied
 into `ExtractedMeshes`; GPU buffers in the render-world `PreparedGpuMeshes`
 resource are reused only when their `AssetRevision` matches. The pass
-only consumes prepared buffers while recording. The per-draw model matrix and flat color go
-through push constants. The offscreen target carries a depth attachment
+only consumes prepared buffers while recording. Per-draw data (mvp + flat
+color) is a `DrawData` record carved from the render-world `FrameDrawArena`;
+the draw pushes a single `GpuPtr` to it through `push_data`. The offscreen
+target carries a depth attachment
 (`OffscreenTarget::new_with_depth`; reverse-Z — depth clears to 0.0 and the
 compare op is `GREATER_OR_EQUAL`), so overlapping meshes occlude.
-Slang packs push-constant matrices row-major while glam's `to_cols_array()` is
-column-major, so the shader declares `column_major float4x4 mvp;`.
+Slang packs matrices row-major by default while glam's `to_cols_array()` is
+column-major, so the matrix ships column-major inside `DrawData` and the
+shader declares `column_major float4x4 mvp;`.
 The Hierarchy dock panel lists the entity tree (from `ChildOf`/`Children`,
 labeled by `Name`) and selects an entity; the Inspector panel renders
 auto-generated editing UI for the selected entity's registered components.

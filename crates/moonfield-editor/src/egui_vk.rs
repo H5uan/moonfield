@@ -25,8 +25,8 @@
 
 use egui::epaint::{ClippedPrimitive, ImageDelta, Primitive, TextureId};
 use egui::{TextureFilter, TextureOptions, TextureWrapMode};
-use gpu_allocator::MemoryLocation;
 use moonfield_render_core::MAX_FRAMES_IN_FLIGHT;
+use moonfield_rhi::Memory;
 use moonfield_rhi::types::WrapMode;
 use moonfield_rhi::{
     BlendMode, Buffer, BufferUsage, CommandBuffer, CompareOp, Compiler, CullMode, CullState,
@@ -515,14 +515,14 @@ impl FrameResources {
             device,
             (INITIAL_VERTEX_CAPACITY * std::mem::size_of::<PodVertex>()) as u64,
             BufferUsage::VERTEX,
-            MemoryLocation::CpuToGpu,
+            Memory::Default,
         )
         .map_err(|e| e.to_string())?;
         let index_buffer = Buffer::new(
             device,
             (INITIAL_INDEX_CAPACITY * std::mem::size_of::<u32>()) as u64,
             BufferUsage::INDEX,
-            MemoryLocation::CpuToGpu,
+            Memory::Default,
         )
         .map_err(|e| e.to_string())?;
         Ok(Self {
@@ -595,7 +595,7 @@ impl EguiFrameResources {
                 device,
                 (frame.vertex_capacity * std::mem::size_of::<PodVertex>()) as u64,
                 BufferUsage::VERTEX,
-                MemoryLocation::CpuToGpu,
+                Memory::Default,
             )
             .map_err(|e| e.to_string())?;
         }
@@ -605,7 +605,7 @@ impl EguiFrameResources {
                 device,
                 (frame.index_capacity * std::mem::size_of::<u32>()) as u64,
                 BufferUsage::INDEX,
-                MemoryLocation::CpuToGpu,
+                Memory::Default,
             )
             .map_err(|e| e.to_string())?;
         }

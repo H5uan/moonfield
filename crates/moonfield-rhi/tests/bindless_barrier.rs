@@ -7,10 +7,10 @@
 //! with it, the payload propagates. Both the plain memory hazard and the
 //! descriptor-heap hazard (the blog's barrier flags) are exercised.
 
-use moonfield_rhi::vulkan::bindless::{
-    BarrierHazard, ComputePipeline, GpuAllocation, Memory, Stage,
+use moonfield_rhi::{
+    BarrierHazard, CommandBufferUsage, CommandPool, Compiler, ComputePipeline, Device,
+    GpuAllocation, Instance, Memory, ShaderModule, Stage,
 };
-use moonfield_rhi::{CommandBufferUsage, CommandPool, Compiler, Device, Instance, ShaderModule};
 mod common;
 
 /// Dispatch A: write all ones into `payload`.
@@ -96,7 +96,7 @@ fn run_pair(device: &Device, hazard: BarrierHazard) -> u32 {
         .expect("begin");
 
     // Dispatch A: write 42 into every payload slot.
-    cmd.bind_compute_pipeline(write_pipeline.raw());
+    cmd.bind_compute_pipeline(&write_pipeline);
     cmd.set_bindless_root(payload.gpu(), payload.gpu());
     cmd.dispatch(1, 1, 1);
 
@@ -105,7 +105,7 @@ fn run_pair(device: &Device, hazard: BarrierHazard) -> u32 {
     cmd.barrier(Stage::COMPUTE, Stage::COMPUTE, hazard);
 
     // Dispatch B: read payload, pass an all-42 check.
-    cmd.bind_compute_pipeline(check_pipeline.raw());
+    cmd.bind_compute_pipeline(&check_pipeline);
     cmd.set_bindless_root(payload.gpu(), result.gpu());
     cmd.dispatch(1, 1, 1);
 

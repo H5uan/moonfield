@@ -3,9 +3,7 @@
 use crate::error::{Error, Result};
 use crate::vulkan::instance::Instance;
 use crate::vulkan::sync::Semaphore;
-use crate::{
-    DESCRIPTOR_HEAP_IMAGE_CAPACITY, DESCRIPTOR_HEAP_SAMPLER_CAPACITY, DescriptorHeap, bindless,
-};
+use crate::{DESCRIPTOR_HEAP_IMAGE_CAPACITY, DESCRIPTOR_HEAP_SAMPLER_CAPACITY, DescriptorHeap};
 use crate::{FrameUploader, UPLOAD_ARENA_SIZE};
 use ash::vk::{self, TaggedStructure as _};
 use gpu_allocator::vulkan::{Allocator, AllocatorCreateDesc};
@@ -595,13 +593,6 @@ impl Device {
     /// Access the presentation queue.
     pub fn present_queue(&self) -> vk::Queue {
         self.present_queue
-    }
-
-    pub fn queue(&self, ty: bindless::QueueType) -> vk::Queue {
-        match ty {
-            bindless::QueueType::Graphics => self.graphics_queue,
-            bindless::QueueType::Compute => self.compute_queue,
-        }
     }
 
     /// Access the selected queue family indices.

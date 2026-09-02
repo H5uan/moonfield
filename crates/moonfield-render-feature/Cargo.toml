@@ -10,7 +10,6 @@ splat = ["mesh"]
 
 [dependencies]
 bytemuck = { version = "1.23", features = ["derive"] }
-gpu-allocator = "0.28.0"
 gltf = { workspace = true }
 moonfield-app = { workspace = true }
 moonfield-asset = { workspace = true }

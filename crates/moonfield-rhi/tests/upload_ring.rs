@@ -7,7 +7,7 @@
 mod common;
 
 use ash::vk;
-use gpu_allocator::MemoryLocation;
+use moonfield_rhi::Memory;
 use moonfield_rhi::{
     Buffer, BufferUsage, CommandBufferUsage, CommandPool, Device, Error, FrameUploader, Instance,
 };
@@ -47,13 +47,8 @@ fn pattern(n: usize, seed: u8) -> Vec<u8> {
 /// A second, independent submit: the upload path is exercised, then the
 /// result is drained through a separate copy + `submit_and_wait`.
 fn readback(device: &Device, src: &Buffer, n: usize) -> Vec<u8> {
-    let dst = Buffer::new(
-        device,
-        n as u64,
-        BufferUsage::STORAGE,
-        MemoryLocation::GpuToCpu,
-    )
-    .expect("readback buffer");
+    let dst = Buffer::new(device, n as u64, BufferUsage::STORAGE, Memory::Readback)
+        .expect("readback buffer");
     let pool = CommandPool::new(device, device.queue_family_indices().graphics).expect("pool");
     let mut cb = pool.allocate_command_buffer().expect("command buffer");
     cb.begin(CommandBufferUsage::ONE_TIME_SUBMIT)
@@ -94,7 +89,7 @@ fn one_frame_carries_many_uploads() {
                 &device,
                 n as u64,
                 BufferUsage::STORAGE | BufferUsage::COPY_SRC,
-                MemoryLocation::GpuOnly,
+                Memory::Gpu,
             )
             .expect("destination buffer")
         })
@@ -133,7 +128,7 @@ fn cross_frame_reuse_does_not_clobber() {
                 &device,
                 n as u64,
                 BufferUsage::STORAGE | BufferUsage::COPY_SRC,
-                MemoryLocation::GpuOnly,
+                Memory::Gpu,
             )
             .expect("destination buffer")
         })
@@ -162,8 +157,8 @@ fn host_visible_target_is_rejected() {
 
     // Host-visible buffers are written directly by the caller; the uploader
     // refuses to stage into them so no one accidentally double-paths.
-    let host = Buffer::new(&device, 64, BufferUsage::STORAGE, MemoryLocation::CpuToGpu)
-        .expect("host buffer");
+    let host =
+        Buffer::new(&device, 64, BufferUsage::STORAGE, Memory::Default).expect("host buffer");
     assert!(matches!(
         uploader.upload(&host, &[1u8, 2, 3]),
         Err(Error::Validation(_))
@@ -184,7 +179,7 @@ fn upload_and_wait_sync_path() {
         &device,
         n as u64,
         BufferUsage::STORAGE | BufferUsage::COPY_SRC,
-        MemoryLocation::GpuOnly,
+        Memory::Gpu,
     )
     .expect("destination buffer");
 

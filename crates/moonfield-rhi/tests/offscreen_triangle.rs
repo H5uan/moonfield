@@ -135,7 +135,7 @@ float4 main(PsInput input) : SV_TARGET
         &device,
         std::mem::size_of_val(&vertices) as u64,
         BufferUsage::VERTEX,
-        gpu_allocator::MemoryLocation::CpuToGpu,
+        moonfield_rhi::Memory::Default,
     )
     .expect("vertex buffer");
     vertex_buffer.upload(&device, &vertices).expect("upload");

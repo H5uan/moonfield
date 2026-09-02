@@ -9,11 +9,11 @@
 
 mod common;
 
-use moonfield_rhi::bindless::{GpuAllocation, Memory};
 use moonfield_rhi::{
-    AttachmentLayout, ClearValue, CommandBufferUsage, CommandPool, Compiler, Device, Format,
-    FrameUploader, GraphicsPipeline, Instance, LoadOp, OffscreenTarget, Rect2d, RenderAttachment,
-    RenderPassDesc, ShaderModule, StoreOp, Texture, UPLOAD_ARENA_SIZE, VertexBufferLayout,
+    AttachmentLayout, BufferRange, ClearValue, CommandBufferUsage, CommandPool, Compiler, Device,
+    Format, FrameUploader, GpuAllocation, GraphicsPipeline, Instance, LoadOp, Memory,
+    OffscreenTarget, Rect2d, RenderAttachment, RenderPassDesc, ShaderModule, StoreOp, Texture,
+    UPLOAD_ARENA_SIZE, VertexBufferLayout,
 };
 
 const VERTEX: &str = r#"
@@ -173,8 +173,8 @@ fn graphics_heap_buffer_descriptor_read() {
     }
     heap.write_buffer_descriptors(&[(
         slot,
-        ash::vk::DeviceAddressRangeEXT {
-            address: buffer.gpu().as_raw(),
+        BufferRange {
+            address: buffer.gpu(),
             size: 16,
         },
     )])

@@ -1,7 +1,7 @@
 use ash::vk;
-use gpu_allocator::MemoryLocation;
 
 use crate::error::{Error, Result};
+use crate::vulkan::memory::Memory;
 use crate::{Buffer, CommandBufferUsage};
 use crate::{CommandBuffer, CommandPool, GpuBumpAllocator, Semaphore, vulkan::Device};
 pub const UPLOAD_FRAME_RING: usize = 2;
@@ -78,9 +78,9 @@ impl FrameUploader {
     }
 
     pub fn upload<T: Copy>(&mut self, dst: &Buffer, data: &[T]) -> Result<()> {
-        if dst.location() != MemoryLocation::GpuOnly {
+        if dst.memory() != Memory::Gpu {
             return Err(Error::Validation(
-              "FrameUploader stages into GpuOnly buffers; host-visible targets are written directly".into(),
+              "FrameUploader stages into Memory::Gpu buffers; host-visible targets are written directly".into(),
           ));
         }
         let bytes = std::mem::size_of_val(data) as u64;

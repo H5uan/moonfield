@@ -4,8 +4,7 @@
 //! non-zero buffer device address, that the memory classes map to the
 //! expected CPU visibility, and that dropping restores the pool.
 
-use moonfield_rhi::vulkan::bindless::{GpuAllocation, Memory};
-use moonfield_rhi::{Device, Instance};
+use moonfield_rhi::{Device, GpuAllocation, Instance, Memory};
 use std::sync::Mutex;
 mod common;
 

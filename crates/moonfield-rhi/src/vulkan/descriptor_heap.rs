@@ -17,10 +17,10 @@
 //! visible.
 
 use crate::CommandBuffer;
-use crate::bindless::GpuAllocation;
 use crate::error::{Error, Result};
 use crate::types::{Filter, SamplerDesc};
 use crate::vulkan::device::{DescriptorHeapProperties, Device};
+use crate::vulkan::memory::{GpuAllocation, GpuPtr};
 use ash::vk;
 use moonfield_math::gpu::align_up;
 use std::sync::Mutex;
@@ -45,9 +45,35 @@ pub struct SamplerHandle(pub u32);
 /// (`ImageDescriptorInfoEXT.p_view` is a create info pointer, so it must
 /// outlive the slot — the owning `Texture` guarantees that). `layout` is the
 /// image layout the sample sees; the upload path leaves images in `GENERAL`.
+///
+/// Crate-internal: the only writers are `Texture::bindless` and
+/// `OffscreenTarget`, which own the create info's lifetime.
 pub struct TextureSlotDesc<'a> {
-    pub view_create_info: &'a vk::ImageViewCreateInfo<'a>,
-    pub layout: vk::ImageLayout,
+    pub(crate) view_create_info: &'a vk::ImageViewCreateInfo<'a>,
+    pub(crate) layout: vk::ImageLayout,
+}
+
+impl<'a> TextureSlotDesc<'a> {
+    /// Describe one slot from the view's create info and the layout samples
+    /// see. The create info must outlive the slot (the heap encodes it by
+    /// pointer).
+    pub(crate) fn new(
+        view_create_info: &'a vk::ImageViewCreateInfo<'a>,
+        layout: vk::ImageLayout,
+    ) -> Self {
+        Self {
+            view_create_info,
+            layout,
+        }
+    }
+}
+
+/// A device-address range a resource-heap buffer descriptor covers.
+pub struct BufferRange {
+    /// Base device address of the range.
+    pub address: GpuPtr,
+    /// Size in bytes.
+    pub size: u64,
 }
 
 /// Bump-counter + freelist slot allocator for one descriptor array.
@@ -231,7 +257,10 @@ impl DescriptorHeap {
     /// `view_create_info` in each description must outlive the slot — the heap
     /// keeps it in heap memory by pointer. This is a direct host write into
     /// the resource heap's mapping, not an `vkUpdateDescriptorSets`.
-    pub fn write_resource_descriptors(
+    ///
+    /// Crate-internal: the only writers are `Texture::bindless` and
+    /// `OffscreenTarget`; tests exercise image-descriptor writes through them.
+    pub(crate) fn write_resource_descriptors(
         &self,
         writes: &[(TextureHandle, TextureSlotDesc<'_>)],
     ) -> Result<()> {
@@ -281,16 +310,21 @@ impl DescriptorHeap {
     /// Write storage-buffer descriptors into resource-heap slots.
     ///
     /// Buffer descriptors encode a device address range directly (no buffer
-    /// view object); `address`/`size` describe the range shaders may access.
-    /// Slots are allocated with [`alloc_image_slot`](Self::alloc_image_slot)
-    /// (the resource heap is shared between image and buffer descriptors).
-    pub fn write_buffer_descriptors(
-        &self,
-        writes: &[(TextureHandle, vk::DeviceAddressRangeEXT)],
-    ) -> Result<()> {
+    /// view object); each [`BufferRange`] describes the range shaders may
+    /// access. Slots are allocated with
+    /// [`alloc_image_slot`](Self::alloc_image_slot) (the resource heap is
+    /// shared between image and buffer descriptors).
+    pub fn write_buffer_descriptors(&self, writes: &[(TextureHandle, BufferRange)]) -> Result<()> {
+        let address_ranges: Vec<vk::DeviceAddressRangeEXT> = writes
+            .iter()
+            .map(|(_, range)| vk::DeviceAddressRangeEXT {
+                address: range.address.as_raw(),
+                size: range.size,
+            })
+            .collect();
         let mut resources: Vec<vk::ResourceDescriptorInfoEXT<'_>> =
             Vec::with_capacity(writes.len());
-        for (_, range) in writes {
+        for range in &address_ranges {
             resources.push(
                 vk::ResourceDescriptorInfoEXT::default()
                     .ty(vk::DescriptorType::STORAGE_BUFFER)

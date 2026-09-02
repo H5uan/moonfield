@@ -7,12 +7,11 @@
 
 mod common;
 
-use moonfield_rhi::vulkan::bindless::{GpuAllocation, Memory};
 use moonfield_rhi::{
     AttachmentLayout, Buffer, BufferUsage, ClearValue, CommandBufferUsage, CommandPool, Compiler,
-    Device, Format, GraphicsPipeline, Instance, LoadOp, OffscreenTarget, Rect2d, RenderAttachment,
-    RenderPassDesc, SamplerDesc, ShaderModule, StoreOp, Texture, VertexAttribute,
-    VertexBufferLayout, VertexFormat,
+    Device, Format, GpuAllocation, GraphicsPipeline, Instance, LoadOp, Memory, OffscreenTarget,
+    Rect2d, RenderAttachment, RenderPassDesc, SamplerDesc, ShaderModule, StoreOp, Texture,
+    VertexAttribute, VertexBufferLayout, VertexFormat,
 };
 
 const SIZE: u32 = 64;
@@ -147,7 +146,7 @@ fn fragment_heap_sampling_roundtrip() {
         &device,
         std::mem::size_of_val(&vertices) as u64,
         BufferUsage::VERTEX,
-        gpu_allocator::MemoryLocation::CpuToGpu,
+        moonfield_rhi::Memory::Default,
     )
     .expect("vertex buffer");
     vertex_buffer.upload(&device, &vertices).expect("upload");

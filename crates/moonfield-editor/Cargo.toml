@@ -23,7 +23,6 @@ moonfield-scene = { workspace = true }
 moonfield-window = { workspace = true }
 moonfield-winit = { workspace = true }
 bytemuck = { workspace = true }
-gpu-allocator = "0.28.0"
 winit = "0.30"
 egui = "0.36.1"
 egui-winit = { version = "0.36.1", default-features = false }

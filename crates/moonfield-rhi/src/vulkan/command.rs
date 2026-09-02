@@ -1,14 +1,15 @@
 //! Vulkan command pool and command buffer abstractions.
 
-use crate::bindless::{BarrierHazard, GpuAllocation, GpuPtr, Stage};
 use crate::error::{Error, Result};
 use crate::types::{
     AttachmentLayout, ClearValue, CommandBufferUsage, CompareOp, CullMode, FrontFace, LoadOp,
     Rect2d, StoreOp, Viewport,
 };
-use crate::view::TextureView;
 use crate::vulkan::device::Device;
-use crate::{BlendMode, Buffer, GraphicsPipeline, IndexFormat};
+use crate::vulkan::memory::{GpuAllocation, GpuPtr};
+use crate::vulkan::sync::{BarrierHazard, Stage};
+use crate::vulkan::view::TextureView;
+use crate::{BlendMode, Buffer, ComputePipeline, GraphicsPipeline, IndexFormat};
 use ash::vk;
 use std::sync::Arc;
 
@@ -368,10 +369,13 @@ impl CommandBuffer {
     }
 
     /// Bind a compute pipeline.
-    pub fn bind_compute_pipeline(&self, pipeline: vk::Pipeline) {
+    pub fn bind_compute_pipeline(&self, pipeline: &ComputePipeline) {
         unsafe {
-            self.device
-                .cmd_bind_pipeline(self.buffer, vk::PipelineBindPoint::COMPUTE, pipeline);
+            self.device.cmd_bind_pipeline(
+                self.buffer,
+                vk::PipelineBindPoint::COMPUTE,
+                pipeline.raw(),
+            );
         }
     }
 
@@ -492,16 +496,10 @@ impl CommandBuffer {
     ///
     /// `stride` is the byte stride between consecutive `DrawIndirectArgs`
     /// records and must be a multiple of 4.
-    pub fn draw_indirect(
-        &self,
-        buffer: vk::Buffer,
-        offset: vk::DeviceSize,
-        draw_count: u32,
-        stride: u32,
-    ) {
+    pub fn draw_indirect(&self, buffer: &Buffer, offset: u64, draw_count: u32, stride: u32) {
         unsafe {
             self.device
-                .cmd_draw_indirect(self.buffer, buffer, offset, draw_count, stride);
+                .cmd_draw_indirect(self.buffer, buffer.raw(), offset, draw_count, stride);
         }
     }
 
@@ -511,14 +509,19 @@ impl CommandBuffer {
     /// records and must be a multiple of 4.
     pub fn draw_indexed_indirect(
         &self,
-        buffer: vk::Buffer,
-        offset: vk::DeviceSize,
+        buffer: &Buffer,
+        offset: u64,
         draw_count: u32,
         stride: u32,
     ) {
         unsafe {
-            self.device
-                .cmd_draw_indexed_indirect(self.buffer, buffer, offset, draw_count, stride);
+            self.device.cmd_draw_indexed_indirect(
+                self.buffer,
+                buffer.raw(),
+                offset,
+                draw_count,
+                stride,
+            );
         }
     }
 
@@ -529,19 +532,19 @@ impl CommandBuffer {
     /// instance requests `API_VERSION_1_3` so this is always available.
     pub fn draw_indirect_count(
         &self,
-        buffer: vk::Buffer,
-        offset: vk::DeviceSize,
-        count_buffer: vk::Buffer,
-        count_buffer_offset: vk::DeviceSize,
+        buffer: &Buffer,
+        offset: u64,
+        count_buffer: &Buffer,
+        count_buffer_offset: u64,
         max_draw_count: u32,
         stride: u32,
     ) {
         unsafe {
             self.device.cmd_draw_indirect_count(
                 self.buffer,
-                buffer,
+                buffer.raw(),
                 offset,
-                count_buffer,
+                count_buffer.raw(),
                 count_buffer_offset,
                 max_draw_count,
                 stride,
@@ -556,19 +559,19 @@ impl CommandBuffer {
     /// instance requests `API_VERSION_1_3` so this is always available.
     pub fn draw_indexed_indirect_count(
         &self,
-        buffer: vk::Buffer,
-        offset: vk::DeviceSize,
-        count_buffer: vk::Buffer,
-        count_buffer_offset: vk::DeviceSize,
+        buffer: &Buffer,
+        offset: u64,
+        count_buffer: &Buffer,
+        count_buffer_offset: u64,
         max_draw_count: u32,
         stride: u32,
     ) {
         unsafe {
             self.device.cmd_draw_indexed_indirect_count(
                 self.buffer,
-                buffer,
+                buffer.raw(),
                 offset,
-                count_buffer,
+                count_buffer.raw(),
                 count_buffer_offset,
                 max_draw_count,
                 stride,
@@ -596,7 +599,10 @@ impl CommandBuffer {
     }
 
     /// Insert a pipeline barrier.
-    pub fn pipeline_barrier(
+    ///
+    /// Crate-internal: the upload and offscreen paths' legacy image-layout
+    /// transitions use it; everything else uses [`barrier`](Self::barrier).
+    pub(crate) fn pipeline_barrier(
         &self,
         src_stage: vk::PipelineStageFlags,
         dst_stage: vk::PipelineStageFlags,

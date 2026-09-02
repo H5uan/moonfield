@@ -1,23 +1,22 @@
-//! Bindless GPU pointer primitives for the Lunar Mare render foundation.
+//! GPU memory and pointer primitives — the RHI's memory model.
 //!
-//! The bindless model replaces retained-mode descriptor binding: shader root
-//! data is a single GPU pointer per stage. [`GpuPtr`] values are device
-//! addresses storable in GPU-side structs; [`HostPtr`] is the CPU view of the
-//! same allocation for direct writes. [`Memory`] splits allocations into
+//! [`GpuPtr`] values are device addresses storable in GPU-side structs;
+//! [`HostPtr`] is the CPU view of the same allocation for direct writes.
+//! [`GpuAllocation`] carries both views over the same bytes — CPU view +
+//! device address in one object. [`Memory`] splits allocations into
 //! CPU-writable default memory, GPU-private memory, and CPU read-back.
 
 use std::sync::{Arc, Mutex};
 
 use ash::vk;
-use ash::vk::TaggedStructure as _;
 use gpu_allocator::{
     MemoryLocation,
     vulkan::{Allocation, AllocationCreateDesc, AllocationScheme, Allocator},
 };
 
-use crate::{Error, Result, device::Device, shader_module::ShaderModule};
+use crate::{Error, Result};
 
-/// GPU memory classes for bindless allocations.
+/// GPU memory classes for allocations.
 #[derive(Copy, Clone, Debug, PartialEq, Eq, Default)]
 pub enum Memory {
     /// GPU-visible memory with a CPU-mapped pointer, optimized for CPU
@@ -93,7 +92,6 @@ impl HostPtr {
     ///
     /// Crate-internal: allocator code writes through this; consumers use
     /// [`HostPtr::typed`].
-    #[allow(dead_code)] // internal accessor for the allocator layer
     pub(crate) fn as_ptr(&self) -> *mut u8 {
         self.0
     }
@@ -291,7 +289,10 @@ impl GpuAllocation {
         self.size
     }
 
-    pub fn buffer(&self) -> vk::Buffer {
+    /// The raw `vk::Buffer` address carrier. Crate-internal: command recording
+    /// (`cmd_memcpy`, `dispatch_indirect`) and the bump arena's copy-source
+    /// handle use it; consumers work with the paired CPU/GPU pointers.
+    pub(crate) fn buffer(&self) -> vk::Buffer {
         self.buffer
     }
 }
@@ -310,141 +311,6 @@ impl Drop for GpuAllocation {
                 .free(allocation)
         {
             moonfield_log::error!("failed to free bindless allocation: {e}");
-        }
-    }
-}
-
-/// Which class of GPU work a queue serves.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum QueueType {
-    /// Graphics-capable queue (also accepts compute and transfer work).
-    Graphics,
-    /// Dedicated async-compute queue when the device has one, otherwise the
-    /// graphics queue is used for compute work too.
-    Compute,
-}
-
-/// A GPU pipeline stage mask for bindless barriers.
-///
-/// Bindless synchronization is stage-to-stage: the barrier orders the end of
-/// a producer stage against the start of a consumer stage, without naming any
-/// resource — shaders address memory indirectly through pointers, so a
-/// resource list would be both impossible and meaningless. The access mask is
-/// the widest possible read/write, matching the pointer model.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub struct Stage(pub(crate) vk::PipelineStageFlags2);
-
-impl Stage {
-    /// Vertex shader stage
-    pub const VERTEX: Self = Self(vk::PipelineStageFlags2::VERTEX_SHADER);
-    /// Fragment shader stage
-    pub const FRAGMENT: Self = Self(vk::PipelineStageFlags2::FRAGMENT_SHADER);
-    /// Compute shader stage (dispatch).
-    pub const COMPUTE: Self = Self(vk::PipelineStageFlags2::COMPUTE_SHADER);
-    /// Transfer stage (buffer/image copy).
-    pub const TRANSFER: Self = Self(vk::PipelineStageFlags2::TRANSFER);
-    /// All stages; implies the widest dependency and ignores access masks.
-    pub const ALL: Self = Self(vk::PipelineStageFlags2::ALL_COMMANDS);
-
-    pub(crate) fn to_vk(self) -> vk::PipelineStageFlags2 {
-        self.0
-    }
-}
-
-impl std::ops::BitOr for Stage {
-    type Output = Self;
-    fn bitor(self, rhs: Self) -> Self {
-        Self(self.0 | rhs.0)
-    }
-}
-
-/// What kind of hazard a barrier orders — the blog's barrier flags. A plain
-/// memory hazard covers pointer-accessed data; a descriptor hazard additionally
-/// exposes the descriptor read the next stage performs through non-uniform
-/// heap indices (a sampled image read).
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
-pub enum BarrierHazard {
-    /// Plain memory read/write hazard (current behavior).
-    #[default]
-    Memory,
-    /// Descriptor-heap hazard: a stage (or the CPU, through the host mapping)
-    /// just wrote heap descriptors that the next stage samples.
-    Descriptors,
-}
-
-/// A Vulkan compute pipeline for the bindless model.
-///
-/// Like its graphics counterpart, the pipeline is a descriptor-heap pipeline
-/// with a null layout: root data is delivered through push data
-/// ([`CommandBuffer::push_data`](crate::CommandBuffer::push_data)) as the
-/// entry point's GPU pointers (two 64-bit addresses: input @ offset 0,
-/// output @ offset 8), matching the Slang `EntryPointParams_std430` layout of
-/// a kernel with two pointer parameters.
-pub struct ComputePipeline {
-    pipeline: vk::Pipeline,
-    device: ash::Device,
-}
-
-impl ComputePipeline {
-    /// Create a compute pipeline from a compiled compute shader module.
-    pub fn new(device: &Device, shader: &ShaderModule) -> Result<Self> {
-        let stage = shader.stage().ok_or_else(|| {
-            Error::Validation(
-                "compute shader module has no stage information; compile through \
-                 `Compiler` + `ShaderModule::from_compiled`"
-                    .to_string(),
-            )
-        })?;
-        if stage != vk::ShaderStageFlags::COMPUTE {
-            return Err(Error::Validation(format!(
-                "compute pipeline received a {stage:?} shader module"
-            )));
-        }
-        let entry = std::ffi::CString::new(shader.entry().ok_or_else(|| {
-            Error::Validation(
-                "compute shader module has no entry-point name; compile through \
-                 `Compiler` + `ShaderModule::from_compiled`"
-                    .to_string(),
-            )
-        })?)
-        .map_err(|e| Error::Validation(format!("entry point name is not valid C: {e}")))?;
-        let stage = vk::PipelineShaderStageCreateInfo::default()
-            .stage(vk::ShaderStageFlags::COMPUTE)
-            .module(shader.raw())
-            .name(&entry);
-        // Descriptor-heap pipelines have no pipeline layout at all (per the
-        // extension: the layout must be NULL when the flag is set).
-        let layout = vk::PipelineLayout::null();
-        let mut flags2_info = vk::PipelineCreateFlags2CreateInfo::default()
-            .flags(vk::PipelineCreateFlags2::DESCRIPTOR_HEAP_EXT);
-        let pipeline_info = vk::ComputePipelineCreateInfo::default()
-            .stage(stage)
-            .layout(layout)
-            .push(&mut flags2_info);
-        let pipelines = unsafe {
-            device.raw().create_compute_pipelines(
-                vk::PipelineCache::null(),
-                std::slice::from_ref(&pipeline_info),
-                None,
-            )
-        }
-        .map_err(|e| Error::Backend(format!("failed to create compute pipeline: {:?}", e)))?;
-        Ok(Self {
-            pipeline: pipelines[0],
-            device: device.raw().clone(),
-        })
-    }
-
-    /// Access the raw `vk::Pipeline` handle.
-    pub fn raw(&self) -> vk::Pipeline {
-        self.pipeline
-    }
-}
-
-impl Drop for ComputePipeline {
-    fn drop(&mut self) {
-        unsafe {
-            self.device.destroy_pipeline(self.pipeline, None);
         }
     }
 }

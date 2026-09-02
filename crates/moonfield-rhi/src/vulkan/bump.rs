@@ -8,9 +8,9 @@
 //! (memcpy source) and the buffer device address (copy source) — with the
 //! owning buffer handle, so the translation from allocation to (cpu, gpu,
 //! vk::Buffer) happens exactly once per block.
-use crate::bindless::{GpuAllocation, GpuPtr, HostPtr, Memory};
 use crate::error::{Error, Result};
 use crate::vulkan::device::Device;
+use crate::vulkan::memory::{GpuAllocation, GpuPtr, HostPtr, Memory};
 use ash::vk;
 use gpu_allocator::vulkan::Allocator;
 use moonfield_math::gpu::align_up;
@@ -24,10 +24,8 @@ pub struct BumpAlloc {
     /// GPU view — the buffer device address of the same bytes.
     pub gpu: GpuPtr,
     /// The block buffer backing this region (copy source).
-    #[allow(dead_code)] // consumed by the FrameUploader's cmd_copy_buffer (next step)
     pub(crate) src: vk::Buffer,
     /// Offset into `src` (copy source offset).
-    #[allow(dead_code)] // consumed by the FrameUploader's cmd_copy_buffer (next step)
     pub(crate) src_offset: u64,
 }
 
