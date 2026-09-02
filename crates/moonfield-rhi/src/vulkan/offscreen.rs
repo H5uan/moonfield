@@ -4,31 +4,98 @@
 //! the scene is rendered into the image and a UI toolkit (e.g. egui) samples
 //! it afterwards. The caller picks the attachment layout when beginning a
 //! rendering pass; `SHADER_READ_ONLY_OPTIMAL` outside a pass keeps the image
-//! sampleable with no explicit transitions.
+//! sampleable with no explicit transitions. Sampling goes through the
+//! descriptor heap: the target owns one image slot and one sampler slot
+//! ([`texture_handle`](OffscreenTarget::texture_handle) /
+//! [`sampler_handle`](OffscreenTarget::sampler_handle)), stable across
+//! resizes — the image slot's descriptor is rewritten in place.
 //!
 //! [`OffscreenTarget::new_with_depth`] adds a `D32Sfloat` depth attachment for
 //! depth-tested scene rendering (reverse-Z: the depth clear value is 0.0).
 
 use crate::error::{Error, Result};
-use crate::types::Format;
+use crate::types::{Filter, Format, SamplerDesc, WrapMode};
 use crate::vulkan::device::Device;
-use crate::{CommandBuffer, CommandPool};
+use crate::{CommandBuffer, CommandPool, DescriptorHeap, SamplerHandle, TextureHandle};
 use ash::vk;
 use gpu_allocator::vulkan::{Allocation, AllocationCreateDesc, AllocationScheme};
 use gpu_allocator::MemoryLocation;
+use std::sync::Arc;
+
+/// The target's descriptor-heap slots: the color view's image slot and the
+/// fixed linear/clamp sampler slot. The image slot is rewritten in place on
+/// resize, so both handles are stable for the target's lifetime.
+struct HeapSlots {
+    texture: TextureHandle,
+    sampler: SamplerHandle,
+    heap: Arc<DescriptorHeap>,
+    /// The color view's create info, owned for its *lifetime*: the heap's
+    /// descriptor write encoded a pointer to it (`ImageDescriptorInfoEXT.
+    /// p_view`), so it must outlive the slot. Rebuilt on resize.
+    view_create_info: vk::ImageViewCreateInfo<'static>,
+}
+
+impl HeapSlots {
+    /// Allocate the image and sampler slots and write both descriptors.
+    fn new(device: &Device, view_create_info: vk::ImageViewCreateInfo<'static>) -> Result<Self> {
+        let heap = device.descriptor_heap();
+        let texture = heap.alloc_image_slot()?;
+        heap.write_resource_descriptors(&[(
+            texture,
+            crate::TextureSlotDesc {
+                view_create_info: &view_create_info,
+                layout: vk::ImageLayout::GENERAL,
+            },
+        )])?;
+        let sampler = heap.alloc_sampler_slot()?;
+        heap.write_samplers(&[(sampler, target_sampler_desc())])?;
+        Ok(Self {
+            texture,
+            sampler,
+            heap,
+            view_create_info,
+        })
+    }
+
+    /// Rewrite the image slot against a recreated view (resize). The device
+    /// is idle when the caller resizes, so the in-place write cannot race an
+    /// in-flight frame; the slot index itself is unchanged.
+    fn rewrite(&mut self, view_create_info: vk::ImageViewCreateInfo<'static>) -> Result<()> {
+        self.heap.write_resource_descriptors(&[(
+            self.texture,
+            crate::TextureSlotDesc {
+                view_create_info: &view_create_info,
+                layout: vk::ImageLayout::GENERAL,
+            },
+        )])?;
+        self.view_create_info = view_create_info;
+        Ok(())
+    }
+}
+
+impl Drop for HeapSlots {
+    fn drop(&mut self) {
+        if let Err(e) = self.heap.free_image_slot(self.texture) {
+            moonfield_log::error!("failed to free offscreen texture slot: {e}");
+        }
+        if let Err(e) = self.heap.free_sampler_slot(self.sampler) {
+            moonfield_log::error!("failed to free offscreen sampler slot: {e}");
+        }
+    }
+}
 
 /// A renderable and sampleable offscreen color target.
 ///
 /// Fields are ordered so that Rust drops them in the correct Vulkan
-/// dependency order: view, sampler, image and its allocation, then the
-/// device-owning handles. The optional depth image/view/allocation are
-/// destroyed explicitly in [`OffscreenTarget::destroy_image_resources`]
-/// alongside the color ones. There is no render pass or framebuffer — with
-/// dynamic rendering the caller builds attachments inline via
-/// [`RenderPassDesc`](crate::RenderPassDesc).
+/// dependency order: the heap slots first (a freed slot is never referenced
+/// again), then view, image and its allocation, then the device-owning
+/// handles. The optional depth image/view/allocation are destroyed explicitly
+/// in [`OffscreenTarget::destroy_image_resources`] alongside the color ones.
+/// There is no render pass or framebuffer — with dynamic rendering the caller
+/// builds attachments inline via [`RenderPassDesc`](crate::RenderPassDesc).
 pub struct OffscreenTarget {
+    heap_slots: HeapSlots,
     image_view: vk::ImageView,
-    sampler: vk::Sampler,
     image: vk::Image,
     allocation: Option<Allocation>,
     depth_image_view: Option<vk::ImageView>,
@@ -83,8 +150,8 @@ impl OffscreenTarget {
         let extent = vk::Extent2D { width, height };
         let allocator = device.allocator().clone();
         let (image, allocation) = create_color_image(device, &allocator, extent, format_vk)?;
-        let image_view = create_image_view(device, image, format_vk, vk::ImageAspectFlags::COLOR)?;
-        let sampler = create_sampler(device)?;
+        let (image_view, view_create_info) =
+            create_image_view(device, image, format_vk, vk::ImageAspectFlags::COLOR)?;
         let (depth_image, depth_allocation, depth_image_view) = if with_depth {
             let (image, allocation) = create_depth_image(device, &allocator, extent)?;
             let view = create_image_view(
@@ -92,7 +159,8 @@ impl OffscreenTarget {
                 image,
                 vk::Format::D32_SFLOAT,
                 vk::ImageAspectFlags::DEPTH,
-            )?;
+            )?
+            .0;
             (Some(image), Some(allocation), Some(view))
         } else {
             (None, None, None)
@@ -100,9 +168,13 @@ impl OffscreenTarget {
 
         transition_to_shader_read(device, image)?;
 
+        // Publish the color view and the fixed sampler to the descriptor
+        // heap; the slots stay stable for the target's lifetime.
+        let heap_slots = HeapSlots::new(device, view_create_info)?;
+
         Ok(Self {
+            heap_slots,
             image_view,
-            sampler,
             image,
             allocation: Some(allocation),
             depth_image_view,
@@ -140,19 +212,27 @@ impl OffscreenTarget {
         let extent = vk::Extent2D { width, height };
         let format_vk = self.format.to_vk();
         let (image, allocation) = create_color_image(device, &self.allocator, extent, format_vk)?;
-        self.image_view = create_image_view(device, image, format_vk, vk::ImageAspectFlags::COLOR)?;
+        let (image_view, view_create_info) =
+            create_image_view(device, image, format_vk, vk::ImageAspectFlags::COLOR)?;
+        self.image_view = image_view;
         self.image = image;
         self.allocation = Some(allocation);
         self.extent = extent;
+        // The device is idle and the slot index is stable: rewrite the
+        // descriptor in place so existing handles keep working.
+        self.heap_slots.rewrite(view_create_info)?;
         if self.has_depth {
             let (depth_image, depth_allocation) =
                 create_depth_image(device, &self.allocator, extent)?;
-            self.depth_image_view = Some(create_image_view(
-                device,
-                depth_image,
-                vk::Format::D32_SFLOAT,
-                vk::ImageAspectFlags::DEPTH,
-            )?);
+            self.depth_image_view = Some(
+                create_image_view(
+                    device,
+                    depth_image,
+                    vk::Format::D32_SFLOAT,
+                    vk::ImageAspectFlags::DEPTH,
+                )?
+                .0,
+            );
             self.depth_image = Some(depth_image);
             self.depth_allocation = Some(depth_allocation);
         }
@@ -188,12 +268,16 @@ impl OffscreenTarget {
         self.format
     }
 
-    /// Borrow the sampler as a backend-neutral [`Sampler`].
-    ///
-    /// The returned sampler borrows this target's underlying `vk::Sampler`;
-    /// it does not own it and must not outlive the target.
-    pub fn sampler_view(&self) -> crate::bind::Sampler {
-        crate::bind::Sampler::borrow_raw(self.sampler, self.device.clone())
+    /// The color view's descriptor-heap slot, for bindless sampling (e.g.
+    /// the editor's egui pass). Stable across resizes.
+    pub fn texture_handle(&self) -> TextureHandle {
+        self.heap_slots.texture
+    }
+
+    /// The target's fixed sampler's descriptor-heap slot (linear filtering,
+    /// clamp-to-edge). Stable across resizes.
+    pub fn sampler_handle(&self) -> SamplerHandle {
+        self.heap_slots.sampler
     }
 
     /// The `(width, height)` of the target.
@@ -338,15 +422,12 @@ impl OffscreenTarget {
 
 impl Drop for OffscreenTarget {
     fn drop(&mut self) {
-        // SAFETY: best-effort wait so the image is not destroyed while in use.
+        // SAFETY: best-effort wait so the image is not destroyed while in use
+        // (heap slot frees in `HeapSlots::drop` are plain bookkeeping).
         unsafe {
             let _ = self.device.device_wait_idle();
         }
         self.destroy_image_resources();
-        // SAFETY: the sampler is no longer referenced once the image is gone.
-        unsafe {
-            self.device.destroy_sampler(self.sampler, None);
-        }
     }
 }
 
@@ -416,7 +497,7 @@ fn create_image_view(
     image: vk::Image,
     format: vk::Format,
     aspect: vk::ImageAspectFlags,
-) -> Result<vk::ImageView> {
+) -> Result<(vk::ImageView, vk::ImageViewCreateInfo<'static>)> {
     let create_info = vk::ImageViewCreateInfo::default()
         .image(image)
         .view_type(vk::ImageViewType::TYPE_2D)
@@ -430,12 +511,15 @@ fn create_image_view(
                 .layer_count(1),
         );
     // SAFETY: the image is valid and lives longer than the view.
-    unsafe {
+    let view = unsafe {
         device
             .raw()
             .create_image_view(&create_info, None)
-            .map_err(|e| Error::Backend(format!("failed to create offscreen image view: {:?}", e)))
-    }
+            .map_err(|e| {
+                Error::Backend(format!("failed to create offscreen image view: {:?}", e))
+            })?
+    };
+    Ok((view, create_info))
 }
 
 /// Create a `D32Sfloat` depth attachment image. No explicit transition is
@@ -495,21 +579,14 @@ fn create_depth_image(
     Ok((image, allocation))
 }
 
-fn create_sampler(device: &Device) -> Result<vk::Sampler> {
-    let create_info = vk::SamplerCreateInfo::default()
-        .mag_filter(vk::Filter::LINEAR)
-        .min_filter(vk::Filter::LINEAR)
-        .mipmap_mode(vk::SamplerMipmapMode::LINEAR)
-        .address_mode_u(vk::SamplerAddressMode::CLAMP_TO_EDGE)
-        .address_mode_v(vk::SamplerAddressMode::CLAMP_TO_EDGE)
-        .address_mode_w(vk::SamplerAddressMode::CLAMP_TO_EDGE)
-        .max_lod(0.0);
-    // SAFETY: the device is valid.
-    unsafe {
-        device
-            .raw()
-            .create_sampler(&create_info, None)
-            .map_err(|e| Error::Backend(format!("failed to create sampler: {:?}", e)))
+/// The target's fixed sampler settings (linear filtering, clamp to edge),
+/// written into the sampler heap slot at creation.
+fn target_sampler_desc() -> SamplerDesc {
+    SamplerDesc {
+        min_filter: Filter::Linear,
+        mag_filter: Filter::Linear,
+        mipmap_filter: Some(Filter::Linear),
+        wrap: WrapMode::ClampToEdge,
     }
 }
 

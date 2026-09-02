@@ -168,11 +168,11 @@ impl EditorFeedbackChannel {
 }
 
 /// Render-world binding of the viewport's offscreen target as an egui
-/// texture, rebound whenever the target is (re)created at a new size.
+/// texture, registered once — the target's heap slots are stable across
+/// resizes, so the registration never needs rebinding.
 #[derive(Default)]
 struct ViewportTexture {
     id: Option<egui::TextureId>,
-    extent: (u32, u32),
 }
 
 /// Render-world resource: a tessellated, GPU-uploaded egui frame, produced by
@@ -452,7 +452,7 @@ fn prepare_egui_frame(world: &mut World) {
         });
         info
     };
-    let Some((color_format, srgb_framebuffer, frame_slot, extent)) = surface_info else {
+    let Some((color_format, srgb_framebuffer, frame_slot, _extent)) = surface_info else {
         return;
     };
 
@@ -480,13 +480,7 @@ fn prepare_egui_frame(world: &mut World) {
         }
     }
     if !world.contains_resource::<egui_vk::EguiFrameResources>() {
-        let created = {
-            let pipeline = world
-                .get_resource::<egui_vk::EguiPipeline>()
-                .expect("EguiPipeline was just ensured");
-            egui_vk::EguiFrameResources::new(&device, &pipeline, MAX_FRAMES_IN_FLIGHT)
-        };
-        match created {
+        match egui_vk::EguiFrameResources::new(&device, MAX_FRAMES_IN_FLIGHT) {
             Ok(frames) => world.insert_resource(frames),
             Err(e) => {
                 error!("failed to create egui frame resources: {e}");
@@ -514,7 +508,9 @@ fn prepare_egui_frame(world: &mut World) {
         // one frame.
         for (id, deltas) in frame.textures_delta.set.drain() {
             for delta in deltas {
-                if let Err(e) = textures.update_texture(&device, &mut pipeline, id, &delta) {
+                if let Err(e) =
+                    textures.update_texture(&device, &mut pipeline, id, &delta, frame_slot)
+                {
                     error!("failed to update egui texture {id:?}: {e}");
                 }
             }
@@ -527,51 +523,29 @@ fn prepare_egui_frame(world: &mut World) {
         }
     }
 
-    // (Re)bind the viewport's offscreen target when `prepare_view_targets`
-    // (earlier in this schedule) created or resized it.
-    let viewport_extent = world.get_resource::<ViewTargets>().and_then(|targets| {
+    // Bind the viewport's offscreen target once. Its heap slots are stable
+    // across resizes (`OffscreenTarget` rewrites the descriptor in place),
+    // so no rebind is ever needed after registration.
+    let viewport_handles = world.get_resource::<ViewTargets>().and_then(|targets| {
         targets
             .get(RenderTarget::Viewport)
-            .map(|target| target.extent())
+            .map(|target| (target.texture_handle(), target.sampler_handle()))
     });
-    if let Some(target_extent) = viewport_extent {
-        let needs_rebind = {
-            let viewport_texture = world
-                .get_resource::<ViewportTexture>()
-                .expect("ViewportTexture registered in render world");
-            viewport_texture.id.is_none() || viewport_texture.extent != target_extent
-        };
-        if needs_rebind {
-            let mut pipeline = world
-                .get_resource_mut::<egui_vk::EguiPipeline>()
-                .expect("EguiPipeline was just ensured");
+    if let Some((texture, sampler)) = viewport_handles {
+        let needs_register = world
+            .get_resource::<ViewportTexture>()
+            .expect("ViewportTexture registered in render world")
+            .id
+            .is_none();
+        if needs_register {
             let mut textures = world
                 .get_resource_mut::<egui_vk::EguiTextures>()
                 .expect("EguiTextures was just ensured");
-            let targets = world
-                .get_resource::<ViewTargets>()
-                .expect("ViewTargets was just read");
-            let target = targets
-                .get(RenderTarget::Viewport)
-                .expect("extent was just read");
-            let view = target.view();
-            let sampler = target.sampler_view();
-            let mut viewport_texture = world
+            let id = textures.register_native_texture(texture, sampler);
+            world
                 .get_resource_mut::<ViewportTexture>()
-                .expect("ViewportTexture registered in render world");
-            let result = match viewport_texture.id {
-                Some(id) => textures
-                    .update_native_texture(&device, &mut pipeline, id, &view, &sampler)
-                    .map(|_| id),
-                None => textures.register_native_texture(&device, &mut pipeline, &view, &sampler),
-            };
-            match result {
-                Ok(id) => {
-                    viewport_texture.id = Some(id);
-                    viewport_texture.extent = target_extent;
-                }
-                Err(e) => error!("failed to register viewport texture: {e}"),
-            }
+                .expect("ViewportTexture registered in render world")
+                .id = Some(id);
         }
     }
 
@@ -579,24 +553,11 @@ fn prepare_egui_frame(world: &mut World) {
     let primitives = frame
         .egui_ctx
         .tessellate(std::mem::take(&mut frame.shapes), pixels_per_point);
-    let screen_size_points = [
-        extent.width as f32 / pixels_per_point,
-        extent.height as f32 / pixels_per_point,
-    ];
     {
-        let pipeline = world
-            .get_resource::<egui_vk::EguiPipeline>()
-            .expect("EguiPipeline was just ensured");
         let mut frames = world
             .get_resource_mut::<egui_vk::EguiFrameResources>()
             .expect("EguiFrameResources was just ensured");
-        if let Err(e) = frames.update(
-            &device,
-            frame_slot,
-            &primitives,
-            screen_size_points,
-            pipeline.options(),
-        ) {
+        if let Err(e) = frames.update(&device, frame_slot, &primitives) {
             error!("failed to upload egui frame data: {e}");
             return;
         }

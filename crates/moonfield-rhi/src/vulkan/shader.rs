@@ -103,7 +103,7 @@ impl Compiler {
             }
         }
 
-        let profile = self.global_session.find_profile("glsl_450");
+        let profile = self.global_session.find_profile("spirv_1_5");
         let target_desc = shader_slang::TargetDesc::default()
             .format(shader_slang::CompileTarget::Spirv)
             .profile(profile)
@@ -156,7 +156,7 @@ impl Compiler {
             .optimization(shader_slang::OptimizationLevel::High)
             .matrix_layout_row(true);
 
-        let profile = self.global_session.find_profile("glsl_450");
+        let profile = self.global_session.find_profile("spirv_1_4");
         let target_desc = shader_slang::TargetDesc::default()
             .format(shader_slang::CompileTarget::Spirv)
             .profile(profile)

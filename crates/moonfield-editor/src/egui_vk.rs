@@ -2,18 +2,20 @@
 //!
 //! There is no "renderer" object. Persistent GPU state lives in three
 //! resources the render world owns — [`EguiPipeline`] (shader modules,
-//! graphics pipeline, descriptor layouts, cached samplers), [`EguiTextures`]
-//! (egui-managed textures, user-texture registrations, the deferred-free
-//! ring), and [`EguiFrameResources`] (per-frame-in-flight vertex/index/
-//! uniform buffers) — while [`record_egui`] records the draw commands into a
-//! render pass the caller has open. The editor's `prepare_egui_frame` /
-//! `egui_pass` systems drive them; tests drive them directly.
+//! graphics pipeline, the descriptor heap, cached sampler slots),
+//! [`EguiTextures`] (egui-managed textures, user-texture registrations, the
+//! deferred-free ring), and [`EguiFrameResources`] (per-frame-in-flight
+//! vertex/index buffers) — while [`record_egui`] records the draw commands
+//! into a render pass the caller has open. The editor's `prepare_egui_frame`
+//! / `egui_pass` systems drive them; tests drive them directly.
 //!
 //! The feature spec is egui-wgpu 0.36 (reference source cloned at
-//! `target/egui-src/crates/egui-wgpu/`), ported to Vulkan idioms: a combined
-//! image sampler replaces the separate texture/sampler binding pair, and
-//! texture uploads go through a blocking staging copy instead of
-//! `queue.write_texture`.
+//! `target/egui-src/crates/egui-wgpu/`), ported to the RHI's bindless model:
+//! all shader resources come from the `VK_EXT_descriptor_heap` heaps (texture
+//! and sampler slots indexed in the shader), and per-draw root data (screen
+//! size, option flags, texture/sampler handles) is pushed with
+//! [`CommandBuffer::push_data`]. There are no descriptor set layouts, no
+//! descriptor sets, and no push constant ranges anywhere in the pipeline.
 //!
 //! Explicitly not supported (recorded in the Agent Note): MSAA, depth-stencil
 //! attachments, `CallbackTrait` paint callbacks, multiple viewports. The
@@ -27,15 +29,15 @@ use gpu_allocator::MemoryLocation;
 use moonfield_render_core::MAX_FRAMES_IN_FLIGHT;
 use moonfield_rhi::types::WrapMode;
 use moonfield_rhi::{
-    BindGroup, BindGroupEntry, BindGroupLayout, BindGroupLayoutEntry, BindingResource, BindingType,
     BlendMode, Buffer, BufferUsage, CommandBuffer, CompareOp, Compiler, CullMode, CullState,
-    DepthState, Device, Extent2d, Filter, Format, FrameUploader, FrontFace, GraphicsPipeline,
-    IndexFormat, Offset2d, PipelineOptions, Rect2d, RenderDevice, Sampler, SamplerDesc,
-    ShaderModule, ShaderStage, Texture, TextureView, VertexAttribute, VertexBufferLayout,
-    VertexFormat, UPLOAD_ARENA_SIZE,
+    DepthState, DescriptorHeap, Device, Extent2d, Filter, Format, FrameUploader, FrontFace,
+    GraphicsPipeline, HeapMapping, HeapMappingResource, IndexFormat, Offset2d, PipelineOptions,
+    Rect2d, RenderDevice, SamplerDesc, SamplerHandle, ShaderModule, Texture, TextureHandle,
+    VertexAttribute, VertexBufferLayout, VertexFormat, UPLOAD_ARENA_SIZE,
 };
 use std::collections::HashMap;
 use std::path::PathBuf;
+use std::sync::Arc;
 
 /// Initial vertex buffer capacity, in vertices (egui-wgpu parity).
 const INITIAL_VERTEX_CAPACITY: usize = 1024;
@@ -72,11 +74,15 @@ pub struct CallbackResources {
     _private: (),
 }
 
-/// Per-frame uniform block: screen size in points + shader option flags.
+/// Per-draw root data, pushed via [`CommandBuffer::push_data`] and read by
+/// the shader through the PushConstant storage class. Layout must match
+/// `EguiRoot` in `egui.slang`.
 #[repr(C)]
 #[derive(Clone, Copy, bytemuck::Pod, bytemuck::Zeroable)]
-struct Uniform {
+struct EguiRoot {
     screen_size_in_points: [f32; 2],
+    texture: u32,
+    sampler: u32,
     dithering: u32,
     predictable_filtering: u32,
 }
@@ -99,23 +105,20 @@ struct MeshDraw {
     vertex_offset: i32,
 }
 
-/// The egui graphics pipeline and the descriptor set layouts its bind groups
-/// are allocated from. `color_format` is the format of the target the
-/// pipeline draws into (the swapchain format in the editor); it is baked in
-/// via dynamic rendering. `srgb_framebuffer` selects the fragment entry
-/// point: an sRGB target needs the shader to convert gamma values to linear
-/// and let the hardware re-encode on write; an unorm target takes the
+/// The egui graphics pipeline: a descriptor-heap pipeline (null layout, no
+/// set layouts, no push constant ranges) plus the shared heap and the sampler
+/// slot cache its textures draw from. `color_format` is the format of the
+/// target the pipeline draws into (the swapchain format in the editor); it is
+/// baked in via dynamic rendering. `srgb_framebuffer` selects the fragment
+/// entry point: an sRGB target needs the shader to convert gamma values to
+/// linear and let the hardware re-encode on write; an unorm target takes the
 /// shader's gamma values verbatim.
 pub struct EguiPipeline {
     pipeline: GraphicsPipeline,
-    /// Held to keep the layout alive for the lifetime of the per-slot uniform
-    /// bind groups in [`EguiFrameResources`]; read at their construction.
-    uniform_layout: BindGroupLayout,
-    /// The layout every texture descriptor set in [`EguiTextures`] is
-    /// allocated from.
-    texture_layout: BindGroupLayout,
-    /// Samplers cached by egui sampler options; owned, destroyed on drop.
-    samplers: HashMap<TextureOptions, Sampler>,
+    /// The shared descriptor heap every egui texture/sampler slot lives in.
+    heap: Arc<DescriptorHeap>,
+    /// Sampler heap slots cached by egui sampler options; freed on drop.
+    samplers: HashMap<TextureOptions, SamplerHandle>,
     options: EguiOptions,
     /// Reserved for future paint callbacks; see [`CallbackResources`].
     pub callback_resources: CallbackResources,
@@ -146,25 +149,6 @@ impl EguiPipeline {
         let fragment_shader =
             ShaderModule::from_spirv(device, &fragment_spirv).map_err(|e| e.to_string())?;
 
-        let uniform_layout = BindGroupLayout::new(
-            device,
-            &[BindGroupLayoutEntry {
-                binding: 0,
-                ty: BindingType::UniformBuffer,
-                visibility: ShaderStage::All,
-            }],
-        )
-        .map_err(|e| e.to_string())?;
-        let texture_layout = BindGroupLayout::new(
-            device,
-            &[BindGroupLayoutEntry {
-                binding: 0,
-                ty: BindingType::SampledTexture,
-                visibility: ShaderStage::Fragment,
-            }],
-        )
-        .map_err(|e| e.to_string())?;
-
         let vertex_layout = VertexBufferLayout {
             stride: std::mem::size_of::<PodVertex>() as u32,
             attributes: vec![
@@ -185,6 +169,17 @@ impl EguiPipeline {
                 },
             ],
         };
+        // Descriptor-heap pipeline: null layout, no set layouts, no push
+        // constant ranges. The shader's one combined-image-sampler binding is
+        // resolved against the bound heaps through a push-index mapping: the
+        // texture and sampler slot indices live in the draw's push data.
+        let heap_mappings = [HeapMapping {
+            set: 0,
+            binding: 0,
+            resource: HeapMappingResource::CombinedImageSampler,
+            push_offset: std::mem::offset_of!(EguiRoot, texture) as u32,
+            sampler_push_offset: std::mem::offset_of!(EguiRoot, sampler) as u32,
+        }];
         let pipeline = GraphicsPipeline::new_with_options(
             device,
             &[color_format],
@@ -194,61 +189,52 @@ impl EguiPipeline {
             &vertex_layout,
             &[],
             &PipelineOptions {
-                set_layouts: &[&uniform_layout, &texture_layout],
+                descriptor_heap: true,
+                heap_mappings: &heap_mappings,
+                ..PipelineOptions::default()
             },
         )
         .map_err(|e| e.to_string())?;
 
         Ok(Self {
             pipeline,
-            uniform_layout,
-            texture_layout,
+            heap: device.descriptor_heap(),
             samplers: HashMap::new(),
             options,
             callback_resources: CallbackResources { _private: () },
         })
     }
 
-    /// The options the pipeline was built with (the uniform block mirrors
-    /// them every frame).
+    /// The options the pipeline was built with (the per-draw root data
+    /// mirrors them every draw).
     pub fn options(&self) -> &EguiOptions {
         &self.options
     }
 
-    /// Create or fetch the cached sampler for the given egui options (egui
-    /// mip levels are always 1, so the mipmap mode only selects the enum).
-    fn sampler(&mut self, device: &Device, options: TextureOptions) -> Result<&Sampler, String> {
+    /// Create-or-fetch the descriptor-heap slot of the sampler for the given
+    /// egui options (egui mip levels are always 1, so the mipmap mode only
+    /// selects the enum).
+    fn sampler_slot(&mut self, options: TextureOptions) -> Result<SamplerHandle, String> {
         Ok(match self.samplers.entry(options) {
-            std::collections::hash_map::Entry::Occupied(entry) => entry.into_mut(),
-            std::collections::hash_map::Entry::Vacant(entry) => entry
-                .insert(Sampler::new(device, &sampler_desc(options)).map_err(|e| e.to_string())?),
+            std::collections::hash_map::Entry::Occupied(entry) => *entry.get(),
+            std::collections::hash_map::Entry::Vacant(entry) => {
+                let handle = self.heap.alloc_sampler_slot().map_err(|e| e.to_string())?;
+                self.heap
+                    .write_samplers(&[(handle, sampler_desc(options))])
+                    .map_err(|e| e.to_string())?;
+                *entry.insert(handle)
+            }
         })
     }
+}
 
-    /// Create-or-fetch the sampler for `options` and bind `view` with it in
-    /// the texture layout. The borrow checker cannot mix the mutable sampler
-    /// cache access with reads of `texture_layout` at call sites, so both
-    /// happen here in one scope.
-    fn texture_bind_group(
-        &mut self,
-        device: &Device,
-        view: &TextureView,
-        options: TextureOptions,
-    ) -> Result<BindGroup, String> {
-        self.sampler(device, options)?;
-        let sampler = self
-            .samplers
-            .get(&options)
-            .expect("sampler was just ensured");
-        BindGroup::new(
-            device,
-            &self.texture_layout,
-            &[BindGroupEntry {
-                binding: 0,
-                resource: BindingResource::Texture { view, sampler },
-            }],
-        )
-        .map_err(|e| e.to_string())
+impl Drop for EguiPipeline {
+    fn drop(&mut self) {
+        for (_, handle) in self.samplers.drain() {
+            if let Err(e) = self.heap.free_sampler_slot(handle) {
+                moonfield_log::error!("failed to free egui sampler slot: {e}");
+            }
+        }
     }
 }
 
@@ -270,42 +256,59 @@ fn sampler_desc(options: TextureOptions) -> SamplerDesc {
     }
 }
 
-/// An egui-managed RGBA texture: one [`Texture`] per `TextureId::Managed`, no
-/// mipmaps, no atlas packing (egui-wgpu parity).
+/// An egui-managed RGBA texture: one bindless [`Texture`] per
+/// `TextureId::Managed`, no mipmaps, no atlas packing (egui-wgpu parity).
 struct ManagedTexture {
     texture: Texture,
-    set: BindGroup,
+    texture_handle: TextureHandle,
+    sampler: SamplerHandle,
     options: TextureOptions,
+}
+
+/// An external image (e.g. the viewport's offscreen target): just the heap
+/// handles; the image and its slots belong to the caller.
+#[derive(Clone, Copy)]
+struct UserTexture {
+    texture: TextureHandle,
+    sampler: SamplerHandle,
 }
 
 enum TextureEntry {
     Managed(Box<ManagedTexture>),
-    /// An external image (e.g. the viewport's offscreen target). Only the
-    /// descriptor set is owned; the image belongs to the caller.
-    User(Box<BindGroup>),
+    User(UserTexture),
 }
 
 impl TextureEntry {
-    fn set(&self) -> &BindGroup {
+    /// The handles the per-draw root data carries for this entry.
+    fn handles(&self) -> (TextureHandle, SamplerHandle) {
         match self {
-            Self::Managed(texture) => &texture.set,
-            Self::User(set) => set,
+            Self::Managed(texture) => (texture.texture_handle, texture.sampler),
+            Self::User(user) => (user.texture, user.sampler),
         }
     }
 }
 
+/// A deferred free. egui asks for textures to be freed — and full updates
+/// replace textures — while in-flight frames may still sample their heap
+/// slots, so destruction is deferred per frame-in-flight slot and applied
+/// when the slot comes around again.
+enum DeferredFree {
+    /// egui freed this id; the map entry is removed (and dropped) at drain.
+    Id(TextureId),
+    /// An entry already replaced in the map by a full update; dropped at
+    /// drain (returning its heap slot) once no frame can reference it.
+    Replaced(TextureEntry),
+}
+
 /// The egui texture store: egui-managed textures, registered user textures,
-/// the upload command pool, and the deferred-free ring. egui asks for a
-/// texture to be freed while in-flight frames may still sample it, so frees
-/// are deferred per frame-in-flight slot and applied when the slot comes
-/// around again.
+/// the upload command pool, and the deferred-free ring.
 pub struct EguiTextures {
     textures: HashMap<TextureId, TextureEntry>,
     next_user_texture_id: u64,
     /// Frame-scoped uploader staging this frame's texture deltas; flushed
     /// once per frame by the caller (one submit).
     uploader: FrameUploader,
-    free_ring: [Vec<TextureId>; MAX_FRAMES_IN_FLIGHT],
+    free_ring: [Vec<DeferredFree>; MAX_FRAMES_IN_FLIGHT],
     /// Held so `Drop` can idle the device before the textures are destroyed:
     /// render-world resources drop in arbitrary order, and the last presented
     /// frame may still be in flight (the `OffscreenTarget` /
@@ -336,14 +339,16 @@ impl EguiTextures {
 
     /// Create or update an egui-managed texture from an [`ImageDelta`]. A
     /// delta with `pos: None` (re)allocates the texture; a delta with a
-    /// `pos` updates a sub-region of the existing one. Uploads are blocking
-    /// one-shot submissions on the graphics queue.
+    /// `pos` updates a sub-region of the existing one. A replaced texture
+    /// goes to `frame_slot`'s deferred-free ring: in-flight frames may still
+    /// sample its heap slot.
     pub fn update_texture(
         &mut self,
         device: &Device,
         pipeline: &mut EguiPipeline,
         id: TextureId,
         delta: &ImageDelta,
+        frame_slot: usize,
     ) -> Result<(), String> {
         let egui::epaint::ImageData::Color(image) = &delta.image;
         let width = image.width() as u32;
@@ -357,7 +362,8 @@ impl EguiTextures {
         }
 
         if let Some(pos) = delta.pos {
-            // Partial update of an existing managed texture.
+            // Partial update of an existing managed texture: the heap slot
+            // and its descriptor are untouched, only the pixels move.
             match self.textures.get(&id) {
                 Some(TextureEntry::User(_)) => {
                     return Err(format!("partial update of user texture {id:?}"));
@@ -367,7 +373,7 @@ impl EguiTextures {
                 }
                 Some(TextureEntry::Managed(_)) => {}
             }
-            let Some(TextureEntry::Managed(entry)) = self.textures.get(&id) else {
+            let Some(TextureEntry::Managed(entry)) = self.textures.get_mut(&id) else {
                 unreachable!("managed texture was just matched");
             };
             entry
@@ -379,41 +385,45 @@ impl EguiTextures {
                     (width, height),
                 )
                 .map_err(|e| e.to_string())?;
-            // Sampler options changed: rebuild the descriptor set against the
-            // cached-or-new sampler (egui-wgpu parity).
+            // Sampler options changed: just swap the sampler slot the draw's
+            // root data carries (egui-wgpu parity, minus the rebind).
             if entry.options != delta.options {
-                let set =
-                    pipeline.texture_bind_group(device, &entry.texture.view(), delta.options)?;
-                let Some(TextureEntry::Managed(entry)) = self.textures.get_mut(&id) else {
-                    unreachable!("managed texture was just matched");
-                };
-                entry.set = set;
+                entry.sampler = pipeline.sampler_slot(delta.options)?;
                 entry.options = delta.options;
             }
             return Ok(());
         }
 
-        let texture = Texture::new(device, width, height, Format::R8G8B8A8Unorm)
-            .map_err(|e| e.to_string())?;
-        texture
-            .upload(&mut self.uploader, &bytes, None, (width, height))
-            .map_err(|e| e.to_string())?;
-        let set = pipeline.texture_bind_group(device, &texture.view(), delta.options)?;
-        self.textures.insert(
-            id,
-            TextureEntry::Managed(Box::new(ManagedTexture {
-                texture,
-                set,
-                options: delta.options,
-            })),
-        );
+        let sampler = pipeline.sampler_slot(delta.options)?;
+        let texture = Texture::bindless(
+            device,
+            &mut self.uploader,
+            width,
+            height,
+            Format::R8G8B8A8Unorm,
+            &bytes,
+        )
+        .map_err(|e| e.to_string())?;
+        let texture_handle = texture
+            .handle()
+            .expect("Texture::bindless always has a slot");
+        let entry = TextureEntry::Managed(Box::new(ManagedTexture {
+            texture,
+            texture_handle,
+            sampler,
+            options: delta.options,
+        }));
+        if let Some(replaced) = self.textures.insert(id, entry) {
+            self.free_ring[frame_slot % MAX_FRAMES_IN_FLIGHT]
+                .push(DeferredFree::Replaced(replaced));
+        }
         Ok(())
     }
 
     /// Free a texture. Managed textures are destroyed; user textures only
-    /// lose their descriptor set (the image belongs to the caller). Prefer
-    /// [`defer_free`](Self::defer_free) — this is the immediate path the ring
-    /// drains into.
+    /// lose their registration (the image and its heap slots belong to the
+    /// caller). Prefer [`defer_free`](Self::defer_free) — this is the
+    /// immediate path the ring drains into.
     pub fn free_texture(&mut self, id: &TextureId) {
         self.textures.remove(id);
     }
@@ -425,145 +435,81 @@ impl EguiTextures {
         }
     }
 
-    /// Free the textures deferred into `slot` when it last came around: their
+    /// Apply the frees deferred into `slot` when it last came around: their
     /// frame-in-flight fence has passed, so the GPU no longer samples them.
     pub fn deferred_free_slot(&mut self, slot: usize) {
-        let ids = std::mem::take(&mut self.free_ring[slot % MAX_FRAMES_IN_FLIGHT]);
-        self.free_textures(&ids);
+        for free in std::mem::take(&mut self.free_ring[slot % MAX_FRAMES_IN_FLIGHT]) {
+            match free {
+                DeferredFree::Id(id) => self.free_texture(&id),
+                DeferredFree::Replaced(entry) => drop(entry),
+            }
+        }
     }
 
     /// Defer freeing `ids` until `slot` comes around again
     /// ([`MAX_FRAMES_IN_FLIGHT`] frames later).
     pub fn defer_free(&mut self, slot: usize, ids: Vec<TextureId>) {
-        self.free_ring[slot % MAX_FRAMES_IN_FLIGHT].extend(ids);
+        self.free_ring[slot % MAX_FRAMES_IN_FLIGHT].extend(ids.into_iter().map(DeferredFree::Id));
     }
 
-    /// The descriptor set bound when a mesh references `id`, for inspection
+    /// The heap handles bound when a mesh references `id`, for inspection
     /// and future paint callbacks (egui-wgpu parity: `Renderer::texture`).
-    pub fn texture(&self, id: &TextureId) -> Option<&BindGroup> {
-        self.textures.get(id).map(TextureEntry::set)
+    pub fn texture(&self, id: &TextureId) -> Option<(TextureHandle, SamplerHandle)> {
+        self.textures.get(id).map(TextureEntry::handles)
     }
 
-    /// Register an external image as a `TextureId::User`, sampling it with
-    /// the given sampler (egui-wgpu parity: `register_native_texture`). The
-    /// caller keeps the image alive until [`free_texture`](Self::free_texture).
+    /// Register an external image's heap slots as a `TextureId::User`
+    /// (egui-wgpu parity: `register_native_texture`). The caller keeps the
+    /// image alive and its slots valid until [`free_texture`](Self::free_texture).
     pub fn register_native_texture(
         &mut self,
-        device: &Device,
-        pipeline: &mut EguiPipeline,
-        view: &TextureView,
-        sampler: &Sampler,
-    ) -> Result<TextureId, String> {
-        let set = BindGroup::new(
-            device,
-            &pipeline.texture_layout,
-            &[BindGroupEntry {
-                binding: 0,
-                resource: BindingResource::Texture { view, sampler },
-            }],
-        )
-        .map_err(|e| e.to_string())?;
+        texture: TextureHandle,
+        sampler: SamplerHandle,
+    ) -> TextureId {
         let id = TextureId::User(self.next_user_texture_id);
         self.next_user_texture_id += 1;
-        self.textures.insert(id, TextureEntry::User(Box::new(set)));
-        Ok(id)
+        self.textures
+            .insert(id, TextureEntry::User(UserTexture { texture, sampler }));
+        id
     }
 
-    /// Register an external image with a sampler created from egui sampler
-    /// options (egui-wgpu parity: `register_native_texture_with_sampler_options`).
+    /// Register an external image's texture slot with a sampler slot created
+    /// from egui sampler options (egui-wgpu parity:
+    /// `register_native_texture_with_sampler_options`).
     pub fn register_native_texture_with_options(
         &mut self,
-        device: &Device,
         pipeline: &mut EguiPipeline,
-        view: &TextureView,
+        texture: TextureHandle,
         options: TextureOptions,
     ) -> Result<TextureId, String> {
-        let set = pipeline.texture_bind_group(device, view, options)?;
-        let id = TextureId::User(self.next_user_texture_id);
-        self.next_user_texture_id += 1;
-        self.textures.insert(id, TextureEntry::User(Box::new(set)));
-        Ok(id)
-    }
-
-    /// Rebind an existing user texture id to a new image (egui-wgpu parity:
-    /// `update_egui_texture_from_wgpu_texture`) — the path a resizable
-    /// offscreen target uses to keep its `TextureId` stable.
-    pub fn update_native_texture(
-        &mut self,
-        device: &Device,
-        pipeline: &mut EguiPipeline,
-        id: TextureId,
-        view: &TextureView,
-        sampler: &Sampler,
-    ) -> Result<(), String> {
-        let Some(entry) = self.textures.get_mut(&id) else {
-            return Err(format!("unknown user texture {id:?}"));
-        };
-        if !matches!(entry, TextureEntry::User(_)) {
-            return Err(format!("cannot rebind managed texture {id:?}"));
-        }
-        *entry = TextureEntry::User(Box::new(
-            BindGroup::new(
-                device,
-                &pipeline.texture_layout,
-                &[BindGroupEntry {
-                    binding: 0,
-                    resource: BindingResource::Texture { view, sampler },
-                }],
-            )
-            .map_err(|e| e.to_string())?,
-        ));
-        Ok(())
-    }
-
-    /// Rebind a user texture id with a sampler created from egui sampler
-    /// options (egui-wgpu parity:
-    /// `update_egui_texture_from_wgpu_texture_with_sampler_options`).
-    pub fn update_native_texture_with_options(
-        &mut self,
-        device: &Device,
-        pipeline: &mut EguiPipeline,
-        id: TextureId,
-        view: &TextureView,
-        options: TextureOptions,
-    ) -> Result<(), String> {
-        let Some(entry) = self.textures.get(&id) else {
-            return Err(format!("unknown user texture {id:?}"));
-        };
-        if !matches!(entry, TextureEntry::User(_)) {
-            return Err(format!("cannot rebind managed texture {id:?}"));
-        }
-        let set = pipeline.texture_bind_group(device, view, options)?;
-        self.textures.insert(id, TextureEntry::User(Box::new(set)));
-        Ok(())
+        let sampler = pipeline.sampler_slot(options)?;
+        Ok(self.register_native_texture(texture, sampler))
     }
 }
 
 impl Drop for EguiTextures {
     fn drop(&mut self) {
-        // SAFETY: best-effort wait so no texture or descriptor set is
-        // destroyed while the GPU still uses it (render-world resources drop
-        // in arbitrary order, and the last presented frame may be in flight).
+        // SAFETY: best-effort wait so no texture or heap slot is destroyed
+        // while the GPU still uses it (render-world resources drop in
+        // arbitrary order, and the last presented frame may be in flight).
         unsafe {
             let _ = self.device.device().raw().device_wait_idle();
         }
     }
 }
 
-/// Per-frame-in-flight GPU resources: vertex/index/uniform buffers plus the
-/// uniform descriptor set. Buffers grow by doubling and are never shrunk.
+/// Per-frame-in-flight GPU resources: vertex/index buffers. Buffers grow by
+/// doubling and are never shrunk.
 struct FrameResources {
     vertex_buffer: Buffer,
     index_buffer: Buffer,
-    uniform_buffer: Buffer,
-    uniform_set: BindGroup,
     vertex_capacity: usize,
     index_capacity: usize,
     mesh_draws: Vec<MeshDraw>,
 }
 
 impl FrameResources {
-    fn new(device: &Device, uniform_layout: &BindGroupLayout) -> Result<Self, String> {
+    fn new(device: &Device) -> Result<Self, String> {
         let vertex_buffer = Buffer::new(
             device,
             (INITIAL_VERTEX_CAPACITY * std::mem::size_of::<PodVertex>()) as u64,
@@ -578,31 +524,9 @@ impl FrameResources {
             MemoryLocation::CpuToGpu,
         )
         .map_err(|e| e.to_string())?;
-        let uniform_buffer = Buffer::new(
-            device,
-            std::mem::size_of::<Uniform>() as u64,
-            BufferUsage::UNIFORM,
-            MemoryLocation::CpuToGpu,
-        )
-        .map_err(|e| e.to_string())?;
-        let uniform_set = BindGroup::new(
-            device,
-            uniform_layout,
-            &[BindGroupEntry {
-                binding: 0,
-                resource: BindingResource::Buffer {
-                    buffer: &uniform_buffer,
-                    offset: 0,
-                    size: std::mem::size_of::<Uniform>() as u64,
-                },
-            }],
-        )
-        .map_err(|e| e.to_string())?;
         Ok(Self {
             vertex_buffer,
             index_buffer,
-            uniform_buffer,
-            uniform_set,
             vertex_capacity: INITIAL_VERTEX_CAPACITY,
             index_capacity: INITIAL_INDEX_CAPACITY,
             mesh_draws: Vec::new(),
@@ -618,46 +542,29 @@ pub struct EguiFrameResources {
 }
 
 impl EguiFrameResources {
-    /// Create one buffer set per frame-in-flight slot; uniform sets bind
-    /// against the pipeline's uniform layout.
-    pub fn new(
-        device: &Device,
-        pipeline: &EguiPipeline,
-        frames_in_flight: usize,
-    ) -> Result<Self, String> {
+    /// Create one buffer set per frame-in-flight slot.
+    pub fn new(device: &Device, frames_in_flight: usize) -> Result<Self, String> {
         let mut frames = Vec::with_capacity(frames_in_flight);
         for _ in 0..frames_in_flight {
-            frames.push(FrameResources::new(device, &pipeline.uniform_layout)?);
+            frames.push(FrameResources::new(device)?);
         }
         Ok(Self { frames })
     }
 
-    /// Upload the uniform block and tessellated mesh data into the given
-    /// frame slot's buffers, growing them by doubling when full. Must be
-    /// called after the slot's fence has passed and before [`record_egui`]
-    /// with the same `primitives`.
+    /// Upload the tessellated mesh data into the given frame slot's buffers,
+    /// growing them by doubling when full. Must be called after the slot's
+    /// fence has passed and before [`record_egui`] with the same
+    /// `primitives`.
     pub fn update(
         &mut self,
         device: &Device,
         frame_slot: usize,
         primitives: &[ClippedPrimitive],
-        screen_size_points: [f32; 2],
-        options: &EguiOptions,
     ) -> Result<(), String> {
         let frame = self
             .frames
             .get_mut(frame_slot)
             .ok_or_else(|| format!("frame slot {frame_slot} out of range"))?;
-
-        let uniform = Uniform {
-            screen_size_in_points: screen_size_points,
-            dithering: options.dithering as u32,
-            predictable_filtering: options.predictable_texture_filtering as u32,
-        };
-        frame
-            .uniform_buffer
-            .upload(device, &[uniform])
-            .map_err(|e| e.to_string())?;
 
         let mut vertices: Vec<PodVertex> = Vec::new();
         let mut indices: Vec<u32> = Vec::new();
@@ -721,7 +628,9 @@ impl EguiFrameResources {
 /// Record the draw commands for the primitives uploaded by
 /// [`EguiFrameResources::update`] into the caller's open render pass.
 /// `extent` is the render target's pixel extent; clip rects are in points
-/// and scaled by `pixels_per_point`.
+/// and scaled by `pixels_per_point`. Each mesh's root data (screen size,
+/// option flags, texture/sampler heap handles) is pushed with
+/// [`CommandBuffer::push_data`] right before its draw.
 #[allow(clippy::too_many_arguments)] // one parameter per resource the pass reads
 pub fn record_egui(
     command_buffer: &CommandBuffer,
@@ -736,6 +645,12 @@ pub fn record_egui(
     let Some(frame) = frames.frames.get(frame_slot) else {
         return;
     };
+    // Heap binding is command-buffer scoped; binding here keeps the pass
+    // self-contained for the editor and for tests alike.
+    if let Err(e) = pipeline.heap.cmd_bind(command_buffer) {
+        moonfield_log::error!("failed to bind descriptor heaps: {e}");
+        return;
+    }
     // egui draws with premultiplied-alpha blending, no culling, no depth.
     command_buffer.set_blend_state(BlendMode::PremultipliedAlpha);
     command_buffer.set_cull_state(CullState {
@@ -748,14 +663,14 @@ pub fn record_egui(
         compare_op: CompareOp::GreaterOrEqual,
     });
     command_buffer.bind_graphics_pipeline(&pipeline.pipeline);
-    command_buffer.bind_graphics_descriptor_sets(
-        pipeline.pipeline.layout(),
-        0,
-        &[&frame.uniform_set],
-    );
     command_buffer.bind_vertex_buffers(0, &[&frame.vertex_buffer], &[0]);
     command_buffer.bind_index_buffer(&frame.index_buffer, 0, IndexFormat::Uint32);
 
+    let options = pipeline.options();
+    let screen_size_in_points = [
+        extent.0 as f32 / pixels_per_point,
+        extent.1 as f32 / pixels_per_point,
+    ];
     let mut draws = frame.mesh_draws.iter();
     for clipped in primitives {
         let Primitive::Mesh(mesh) = &clipped.primitive else {
@@ -771,8 +686,16 @@ pub fn record_egui(
         let Some(entry) = textures.textures.get(&mesh.texture_id) else {
             continue;
         };
+        let (texture, sampler) = entry.handles();
+        let root = EguiRoot {
+            screen_size_in_points,
+            texture: texture.0,
+            sampler: sampler.0,
+            dithering: options.dithering as u32,
+            predictable_filtering: options.predictable_texture_filtering as u32,
+        };
         command_buffer.set_scissor(scissor);
-        command_buffer.bind_graphics_descriptor_sets(pipeline.pipeline.layout(), 1, &[entry.set()]);
+        command_buffer.push_data(0, bytemuck::bytes_of(&root));
         command_buffer.draw_indexed(
             draw.index_count,
             1,
@@ -818,7 +741,8 @@ fn clip_rect_to_scissor(
 
 /// The egui shader file (`<repo root>/assets/shaders/egui.slang`), ported
 /// from egui-wgpu's `egui.wgsl` (0.36): one Slang module with one vertex
-/// entry and two fragment entries (gamma vs. sRGB target).
+/// entry and two fragment entries (gamma vs. sRGB target), all resources
+/// sourced from the descriptor heaps and push data.
 ///
 /// `CARGO_MANIFEST_DIR` is a compile-time absolute path, so the file resolves
 /// whichever directory the process runs from.

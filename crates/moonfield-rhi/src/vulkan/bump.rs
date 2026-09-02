@@ -61,6 +61,7 @@ impl GpuBumpAllocator {
                 block_size,
                 Memory::Default,
                 align as u64,
+                false,
             )?,
             align,
         };
@@ -167,6 +168,7 @@ impl GpuBumpAllocator {
                         size,
                         Memory::Default,
                         align as u64,
+                        false,
                     )?;
                     Self::check_co_align(&alloc, align)?;
                     self.blocks[slot] = Block { alloc, align };
@@ -180,6 +182,7 @@ impl GpuBumpAllocator {
                     size,
                     Memory::Default,
                     align as u64,
+                    false,
                 )?;
                 Self::check_co_align(&alloc, align)?;
                 self.blocks.push(Block { alloc, align });

@@ -53,6 +53,7 @@ fn heap_texture_sampling_roundtrip() {
 
     // The sampler slot must hold a valid sampler before the shader samples:
     // the heap encodes the create info straight into slot 0.
+    eprintln!("MARK: device ok");
     let heap = device.descriptor_heap();
     let sampler = heap.alloc_sampler_slot().expect("sampler slot");
     heap.write_samplers(&[(sampler, SamplerDesc::default())])
@@ -63,6 +64,7 @@ fn heap_texture_sampling_roundtrip() {
     for _ in 0..4 * 4 {
         pixels.extend_from_slice(&[255, 0, 0, 255]);
     }
+    eprintln!("MARK: heap writes ok");
     let mut uploader = moonfield_rhi::FrameUploader::new(&device, moonfield_rhi::UPLOAD_ARENA_SIZE)
         .expect("uploader");
     let texture = Texture::bindless(&device, &mut uploader, 4, 4, Format::R8G8B8A8Unorm, &pixels)
@@ -71,9 +73,11 @@ fn heap_texture_sampling_roundtrip() {
     // Submit the queued upload before dispatching the sampler, so the pixels
     // are actually in GPU memory (FrameUploader submits on `end_frame`).
     uploader.end_frame().expect("submit uploads");
+    eprintln!("MARK: upload submitted");
 
     // The pipeline has no descriptor set layout at all: the heap binding
     // alone must feed the shader's ResourceDescriptorHeap accesses.
+    eprintln!("MARK: texture ok");
     let compiler = Compiler::new().expect("compiler");
     let spirv = compiler
         .compile_source_to_spirv_with_capabilities(
@@ -83,20 +87,24 @@ fn heap_texture_sampling_roundtrip() {
             &["spvDescriptorHeapEXT"],
         )
         .expect("shader compilation");
+    eprintln!("MARK: compiled");
     let module = ShaderModule::from_spirv(&device, &spirv).expect("shader module");
     let pipeline = ComputePipeline::new(&device, &module).expect("compute pipeline");
 
     let out = GpuAllocation::new(&device, 4 * 16, Memory::Default).expect("out allocation");
 
+    eprintln!("MARK: pipeline ok");
     let pool = CommandPool::new(&device, device.queue_family_indices().graphics).expect("pool");
     let mut cmd = pool.allocate_command_buffer().expect("command buffer");
     cmd.begin(CommandBufferUsage::ONE_TIME_SUBMIT)
         .expect("begin");
     heap.cmd_bind(&cmd).expect("bind heaps");
+    eprintln!("MARK: heaps bound");
     cmd.bind_compute_pipeline(pipeline.raw());
     cmd.set_bindless_root(pipeline.layout(), out.gpu(), out.gpu());
     cmd.dispatch(4, 1, 1);
     cmd.end().expect("end");
+    eprintln!("MARK: recorded");
 
     let commands = [cmd.raw()];
     let submit_info = ash::vk::SubmitInfo::default().command_buffers(&commands);

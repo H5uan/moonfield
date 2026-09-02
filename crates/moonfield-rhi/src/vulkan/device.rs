@@ -19,6 +19,9 @@ use std::sync::{Arc, Mutex, OnceLock};
 const REQUIRED_DEVICE_EXTENSIONS: &[&CStr] = &[
     ash::khr::swapchain::NAME,
     ash::ext::descriptor_heap::NAME,
+    // `VkPipelineCreateFlags2CreateInfo` — the only way to flag a pipeline as
+    // descriptor-heap-backed (`VK_PIPELINE_CREATE_2_DESCRIPTOR_HEAP_BIT_EXT`).
+    ash::khr::maintenance5::NAME,
     // Shader-side descriptor-heap access (`ResourceDescriptorHeap[]` +
     // `spvDescriptorHeapEXT` lowers to untyped pointer chains that read the
     // bound heap directly). The RHI's bindless sampling path requires it.
@@ -62,6 +65,10 @@ pub struct DescriptorHeapProperties {
     pub resource_heap_alignment: u64,
     pub image_descriptor_size: u64,
     pub image_descriptor_alignment: u64,
+    /// Buffer descriptors share the resource heap with image descriptors;
+    /// a resource slot is sized for the larger of the two.
+    pub buffer_descriptor_size: u64,
+    pub buffer_descriptor_alignment: u64,
     pub max_sampler_heap_size: u64,
     pub sampler_heap_alignment: u64,
     pub sampler_descriptor_size: u64,
@@ -273,6 +280,8 @@ impl Device {
                     resource_heap_alignment: heap_props.resource_heap_alignment,
                     image_descriptor_size: heap_props.image_descriptor_size,
                     image_descriptor_alignment: heap_props.image_descriptor_alignment,
+                    buffer_descriptor_size: heap_props.buffer_descriptor_size,
+                    buffer_descriptor_alignment: heap_props.buffer_descriptor_alignment,
                     max_sampler_heap_size: heap_props.max_sampler_heap_size,
                     sampler_heap_alignment: heap_props.sampler_heap_alignment,
                     sampler_descriptor_size: heap_props.sampler_descriptor_size,

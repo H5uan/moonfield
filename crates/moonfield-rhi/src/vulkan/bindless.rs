@@ -172,7 +172,19 @@ impl GpuAllocation {
         memory: Memory,
         align: u64,
     ) -> Result<Self> {
-        Self::from_resources(device.raw(), device.allocator(), size, memory, align)
+        Self::from_resources(device.raw(), device.allocator(), size, memory, align, false)
+    }
+
+    /// Like [`new_aligned`], but marks the buffer as descriptor-heap backing
+    /// memory (`VK_BUFFER_USAGE_DESCRIPTOR_HEAP_EXT` — required by the
+    /// extension's bind commands; some drivers fault binding a heap without
+    /// it).
+    pub(crate) fn new_heap(
+        device: &crate::vulkan::device::Device,
+        size: u64,
+        align: u64,
+    ) -> Result<Self> {
+        Self::from_resources(device.raw(), device.allocator(), size, Memory::Default, align, true)
     }
 
     /// Resource-level constructor for long-lived owners that keep their own
@@ -185,6 +197,7 @@ impl GpuAllocation {
         size: u64,
         memory: Memory,
         align: u64,
+        descriptor_heap: bool,
     ) -> Result<Self> {
         // The buffer is a pure address carrier: Vulkan settles buffer device
         // addresses and memory requirements on an existing buffer object, so
@@ -193,18 +206,18 @@ impl GpuAllocation {
         // transfer copies, indirect-argument reads, and descriptor-heap
         // backing — consumers fetch the address and dereference it from
         // shaders. Exclusive sharing keeps the buffer on one queue family.
+        let mut usage = vk::BufferUsageFlags::SHADER_DEVICE_ADDRESS
+            | vk::BufferUsageFlags::TRANSFER_SRC
+            | vk::BufferUsageFlags::TRANSFER_DST;
+        if descriptor_heap {
+            usage |= vk::BufferUsageFlags::DESCRIPTOR_HEAP_EXT;
+        }
         let buffer = unsafe {
             device
                 .create_buffer(
                     &vk::BufferCreateInfo::default()
                         .size(size)
-                        .usage(
-                            vk::BufferUsageFlags::SHADER_DEVICE_ADDRESS
-                                | vk::BufferUsageFlags::TRANSFER_SRC
-                                | vk::BufferUsageFlags::TRANSFER_DST
-                                | vk::BufferUsageFlags::INDIRECT_BUFFER
-                                | vk::BufferUsageFlags::DESCRIPTOR_HEAP_EXT,
-                        )
+                        .usage(usage)
                         .sharing_mode(vk::SharingMode::EXCLUSIVE),
                     None,
                 )

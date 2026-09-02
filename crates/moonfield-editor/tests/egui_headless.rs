@@ -4,9 +4,9 @@
 //! `ui.image` of a user-registered texture — into an offscreen target, reads
 //! the pixels back, and asserts the output is not blank and the user texture
 //! sampled through. The second frame exercises the editor's resize flow: the
-//! source image is recreated and the user texture id is rebound to the new
-//! view. Skips gracefully on machines without a Vulkan driver; Linux CI runs
-//! it against lavapipe.
+//! source image is resized, which rewrites its descriptor-heap slot in place
+//! while the registered texture id stays valid. Skips gracefully on machines
+//! without a Vulkan driver.
 
 use moonfield_editor::egui_vk::{
     record_egui, EguiFrameResources, EguiOptions, EguiPipeline, EguiTextures,
@@ -46,38 +46,23 @@ fn egui_headless_frame_is_not_blank() {
     )
     .expect("egui pipeline");
     let mut textures = EguiTextures::new(&render_device).expect("egui textures");
-    let mut frames = EguiFrameResources::new(&device, &pipeline, 1).expect("egui frame resources");
+    let mut frames = EguiFrameResources::new(&device, 1).expect("egui frame resources");
 
-    let user_texture = textures
-        .register_native_texture(
-            &device,
-            &mut pipeline,
-            &user_image.view(),
-            &user_image.sampler_view(),
-        )
-        .expect("register user texture");
+    let user_texture =
+        textures.register_native_texture(user_image.texture_handle(), user_image.sampler_handle());
 
     let ctx = egui::Context::default();
     let command_pool =
         CommandPool::new(&device, device.queue_family_indices().graphics).expect("command pool");
 
-    // Frame 1: fresh registration. Frame 2: the source image was resized
-    // (recreating its view) and the texture id rebound — the editor's
-    // viewport-resize flow.
+    // Frame 1: fresh registration. Frame 2: the source image was resized,
+    // rewriting its heap slot in place — the registered id and handles stay
+    // valid (the editor's viewport-resize flow).
     for frame in 0..2 {
         if frame == 1 {
             user_image
                 .resize(&device, 16, 16)
                 .expect("resize user image");
-            textures
-                .update_native_texture(
-                    &device,
-                    &mut pipeline,
-                    user_texture,
-                    &user_image.view(),
-                    &user_image.sampler_view(),
-                )
-                .expect("rebind user texture");
         }
 
         let raw_input = egui::RawInput {
@@ -104,7 +89,7 @@ fn egui_headless_frame_is_not_blank() {
         for (id, deltas) in textures_delta.set.drain() {
             for delta in deltas {
                 textures
-                    .update_texture(&device, &mut pipeline, id, &delta)
+                    .update_texture(&device, &mut pipeline, id, &delta, 0)
                     .expect("texture upload");
             }
         }
@@ -113,13 +98,7 @@ fn egui_headless_frame_is_not_blank() {
         let primitives = ctx.tessellate(shapes, pixels_per_point);
         assert!(!primitives.is_empty(), "egui produced no primitives");
         frames
-            .update(
-                &device,
-                0,
-                &primitives,
-                [WIDTH as f32, HEIGHT as f32],
-                pipeline.options(),
-            )
+            .update(&device, 0, &primitives)
             .expect("buffer upload");
 
         let mut command_buffer = command_pool
