@@ -1,14 +1,14 @@
 //! Vulkan command pool and command buffer abstractions.
 
-use crate::bind::{BindGroup, TextureView};
 use crate::bindless::{BarrierHazard, GpuAllocation, GpuPtr, Stage};
 use crate::error::{Error, Result};
 use crate::types::{
     AttachmentLayout, ClearValue, CommandBufferUsage, CompareOp, CullMode, FrontFace, LoadOp,
-    Rect2d, ShaderStages, StoreOp, Viewport,
+    Rect2d, StoreOp, Viewport,
 };
+use crate::view::TextureView;
 use crate::vulkan::device::Device;
-use crate::{BlendMode, Buffer, GraphicsPipeline, IndexFormat, PipelineLayout};
+use crate::{BlendMode, Buffer, GraphicsPipeline, IndexFormat};
 use ash::vk;
 use std::sync::Arc;
 
@@ -335,52 +335,13 @@ impl CommandBuffer {
         }
     }
 
-    /// Bind descriptor sets to the graphics bind point.
-    pub fn bind_graphics_descriptor_sets(
-        &self,
-        layout: PipelineLayout,
-        first_set: u32,
-        sets: &[&BindGroup],
-    ) {
-        let raw: Vec<vk::DescriptorSet> = sets.iter().map(|set| set.raw_vk()).collect();
-        unsafe {
-            self.device.cmd_bind_descriptor_sets(
-                self.buffer,
-                vk::PipelineBindPoint::GRAPHICS,
-                layout.to_vk(),
-                first_set,
-                &raw,
-                &[],
-            );
-        }
-    }
-
-    /// Push raw bytes into the pipeline layout's push-constant block.
-    pub fn push_constants(
-        &self,
-        layout: PipelineLayout,
-        stages: ShaderStages,
-        offset: u32,
-        data: &[u8],
-    ) {
-        unsafe {
-            self.device.cmd_push_constants(
-                self.buffer,
-                layout.to_vk(),
-                stages.to_vk(),
-                offset,
-                data,
-            );
-        }
-    }
-
     /// Update push data — the extension's push-constant storage class,
     /// available to all shader stages. This is the fast path for root data
     /// that does not fit inline: store device addresses of per-draw structs,
-    /// like a larger push constant block. Recording push data invalidates
-    /// non-heap descriptor state and vice versa, so it pairs with pure-heap
-    /// pipelines. The total written is bounded by `max_push_data_size` at
-    /// record time (validation flags overruns).
+    /// like a larger push constant block. Push data aliases the push-constant
+    /// bank, and every pipeline is a descriptor-heap pipeline, so this is the
+    /// only root-data path. The total written is bounded by
+    /// `max_push_data_size` at record time (validation flags overruns).
     pub fn push_data(&self, offset: u32, data: &[u8]) {
         let range = vk::HostAddressRangeConstEXT {
             address: data.as_ptr().cast(),
@@ -416,23 +377,16 @@ impl CommandBuffer {
 
     /// Push the entry-point root pointers for a compute dispatch.
     ///
-    /// Writes two 64-bit GPU addresses as one push-constant struct: `layout`
-    /// must be the layout of the bound pipeline, whose root struct matches
-    /// the kernel's pointer parameters (input @ 0, output @ 8).
-    pub fn set_bindless_root(&self, layout: vk::PipelineLayout, input: GpuPtr, output: GpuPtr) {
+    /// Writes two 64-bit GPU addresses as one push-data block (16 bytes),
+    /// matching the kernel's pointer parameters (input @ 0, output @ 8) read
+    /// from the push-constant storage class.
+    pub fn set_bindless_root(&self, input: GpuPtr, output: GpuPtr) {
         let root: [u64; 2] = [input.as_raw(), output.as_raw()];
+        // SAFETY: `root` is a stack array; the byte view is valid for the call.
         let bytes = unsafe {
             std::slice::from_raw_parts(root.as_ptr() as *const u8, std::mem::size_of_val(&root))
         };
-        unsafe {
-            self.device.cmd_push_constants(
-                self.buffer,
-                layout,
-                vk::ShaderStageFlags::COMPUTE,
-                0,
-                bytes,
-            );
-        }
+        self.push_data(0, bytes);
     }
 
     /// Launch a compute kernel with the given workgroup counts.

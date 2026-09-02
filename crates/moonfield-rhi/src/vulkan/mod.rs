@@ -49,7 +49,7 @@ pub use device::{DescriptorHeapProperties, Device, QueueFamilyIndices};
 pub use instance::Instance;
 pub use offscreen::OffscreenTarget;
 pub use pipeline::{
-    BlendMode, GraphicsPipeline, HeapMapping, HeapMappingResource, PipelineLayout, PipelineOptions,
+    BlendMode, GraphicsPipeline, HeapMapping, HeapMappingResource, PipelineOptions,
 };
 pub use plugin::RenderDevice;
 pub use shader::Compiler;

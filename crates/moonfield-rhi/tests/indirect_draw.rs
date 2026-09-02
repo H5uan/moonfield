@@ -122,7 +122,6 @@ PsOutput main(PsInput input)
         &vertex_shader,
         &fragment_shader,
         &vertex_layout,
-        &[],
     )
     .expect("graphics pipeline");
 

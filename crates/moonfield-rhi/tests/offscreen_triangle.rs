@@ -113,7 +113,6 @@ float4 main(PsInput input) : SV_TARGET
                 },
             ],
         },
-        &[],
     )
     .expect("pipeline");
 

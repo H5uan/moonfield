@@ -97,7 +97,7 @@ fn run_pair(device: &Device, hazard: BarrierHazard) -> u32 {
 
     // Dispatch A: write 42 into every payload slot.
     cmd.bind_compute_pipeline(write_pipeline.raw());
-    cmd.set_bindless_root(write_pipeline.layout(), payload.gpu(), payload.gpu());
+    cmd.set_bindless_root(payload.gpu(), payload.gpu());
     cmd.dispatch(1, 1, 1);
 
     // The barrier is the point under test: it must make A's writes visible
@@ -106,7 +106,7 @@ fn run_pair(device: &Device, hazard: BarrierHazard) -> u32 {
 
     // Dispatch B: read payload, pass an all-42 check.
     cmd.bind_compute_pipeline(check_pipeline.raw());
-    cmd.set_bindless_root(check_pipeline.layout(), payload.gpu(), result.gpu());
+    cmd.set_bindless_root(payload.gpu(), result.gpu());
     cmd.dispatch(1, 1, 1);
 
     cmd.end().expect("end");

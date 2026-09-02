@@ -71,7 +71,7 @@ fn bindless_compute_roundtrip() {
     cmd.begin(CommandBufferUsage::ONE_TIME_SUBMIT)
         .expect("begin");
     cmd.bind_compute_pipeline(pipeline.raw());
-    cmd.set_bindless_root(pipeline.layout(), input.gpu(), output.gpu());
+    cmd.set_bindless_root(input.gpu(), output.gpu());
     cmd.dispatch(1, 1, 1);
     cmd.end().expect("end");
 

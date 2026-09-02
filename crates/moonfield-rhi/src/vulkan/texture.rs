@@ -204,8 +204,8 @@ impl Texture {
 
     /// Borrow the image view as a backend-neutral
     /// [`TextureView`](crate::TextureView); it must not outlive the texture.
-    pub fn view(&self) -> crate::bind::TextureView {
-        crate::bind::TextureView::borrow_raw(self.image_view, self.device.clone())
+    pub fn view(&self) -> crate::view::TextureView {
+        crate::view::TextureView::borrow_raw(self.image_view, self.device.clone())
     }
 
     /// The `(width, height)` of the texture.

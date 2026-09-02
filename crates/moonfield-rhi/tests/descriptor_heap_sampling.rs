@@ -101,7 +101,7 @@ fn heap_texture_sampling_roundtrip() {
     heap.cmd_bind(&cmd).expect("bind heaps");
     eprintln!("MARK: heaps bound");
     cmd.bind_compute_pipeline(pipeline.raw());
-    cmd.set_bindless_root(pipeline.layout(), out.gpu(), out.gpu());
+    cmd.set_bindless_root(out.gpu(), out.gpu());
     cmd.dispatch(4, 1, 1);
     cmd.end().expect("end");
     eprintln!("MARK: recorded");

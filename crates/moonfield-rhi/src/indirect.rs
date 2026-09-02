@@ -8,9 +8,10 @@
 //! [`BufferUsage::INDIRECT`](crate::BufferUsage::INDIRECT) and pass it to the
 //! command buffer's indirect draw methods.
 //!
-//! Compute indirect dispatch is reserved (`DispatchIndirectArgs` is defined
-//! here for forward compatibility) but not yet wired into a command — there is
-//! no `ComputePipeline` in the RHI yet.
+//! Compute indirect dispatch is wired through the bindless path:
+//! [`CommandBuffer::dispatch_indirect`](crate::CommandBuffer::dispatch_indirect)
+//! takes a [`GpuAllocation`](crate::vulkan::bindless::GpuAllocation) holding
+//! these arguments.
 
 use crate::types::BufferUsage;
 
@@ -53,10 +54,8 @@ pub struct DrawIndexedIndirectArgs {
 
 /// Argument buffer layout for `dispatch_workgroups_indirect` commands.
 ///
-/// 12 bytes; matches `vk::DispatchIndirectCommand`.
-///
-/// *Reserved for compute:* defined here for forward compatibility, but not yet
-/// wired into a RHI command because there is no `ComputePipeline` yet.
+/// 12 bytes; matches `vk::DispatchIndirectCommand`. Consumed by
+/// [`CommandBuffer::dispatch_indirect`](crate::CommandBuffer::dispatch_indirect).
 #[repr(C)]
 #[derive(Clone, Copy, Debug, Default, bytemuck::Pod, bytemuck::Zeroable)]
 pub struct DispatchIndirectArgs {

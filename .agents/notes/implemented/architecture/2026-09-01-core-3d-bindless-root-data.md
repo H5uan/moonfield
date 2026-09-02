@@ -25,11 +25,12 @@ buffer.
   finished; `alloc_draw_data` carves a `DrawData` from the current slot. The
   interior `Mutex` matches the `DescriptorHeap` precedent so draw functions,
   which receive only `&World`, can still allocate.
-- The pipeline's push-constant range shrinks from 80 B to 8 B
-  (`ROOT_POINTER_SIZE`, one `GpuPtr`); `DrawMesh` writes `DrawData` through
-  the bump host pointer and pushes the device address as the root. Vertex and
-  index buffers keep their classic binding — this milestone changes root data
-  only.
+- The pipeline is created in descriptor-heap mode — null layout, no push
+  ranges — and the root is a single `GpuPtr` (`ROOT_POINTER_SIZE`, 8 B)
+  delivered through push data (`push_data`); `DrawMesh` writes `DrawData`
+  through the bump host pointer and pushes the device address as the root.
+  Vertex and index buffers keep their classic binding — this milestone changes
+  root data only.
 - Shaders declare `Ptr<DrawData> root` as an entry parameter and read
   `root[0].mvp` / `root[0].color`; the matrix stays `column_major` with
   `to_cols_array()`, so the bytes reaching the GPU are unchanged.
@@ -39,10 +40,12 @@ buffer.
 ## Alternatives considered
 
 - Literal `push_data` (the descriptor-heap root bank) instead of a root
-  pointer in push constants: the GPU-side consumer of `vkCmdPushDataEXT` is
-  not wired — `command_push_data` only verifies recording, and Slang's entry
-  `Ptr` parameter lowering is verified for push constants only. Adopting it
-  would require unproven RHI/shader work first, so it is deferred.
+  pointer in push constants: at the time, the GPU-side consumer of
+  `vkCmdPushDataEXT` was unwired and Slang's entry `Ptr` lowering was verified
+  for push constants only, so the pointer-through-push-constant form shipped
+  first. Once `command_push_data` verified GPU-side consumption, the
+  [push-data-only cleanup](../simplification/2026-09-02-descriptor-heap-push-data-only.md)
+  moved every pipeline onto push data and deleted the retained model.
 - Keeping the 80-byte payload inline in push constants: leaves the pass on
   the retained model; nothing about the bindless pipeline changes.
 
@@ -51,8 +54,9 @@ buffer.
 - The graphics pass is bindless-shaped: per-draw root data is a single GPU
   pointer, payloads live in reused GPU memory, and textures/materials later
   plug into the same root struct.
-- Push-constant usage drops from 80 B to 8 B per draw on a pure-heap
-  pipeline (no descriptor set layouts).
+- Root data shrinks from an 80 B inline push to a single device address
+  through the descriptor-heap push-data bank — no set layouts, no push-constant
+  ranges anywhere in the pipeline.
 - The draw arena's frame pacing rides the window frame timeline; the
   single-window slot assumption is documented for the multi-window future.
 - Tests: `test_opaque_pass_draws_mesh` and `test_opaque_pass_depth_occludes`

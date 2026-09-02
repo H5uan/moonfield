@@ -10,9 +10,9 @@ mod common;
 use moonfield_rhi::vulkan::bindless::{GpuAllocation, Memory};
 use moonfield_rhi::{
     AttachmentLayout, Buffer, BufferUsage, ClearValue, CommandBufferUsage, CommandPool, Compiler,
-    Device, Format, GraphicsPipeline, Instance, LoadOp, OffscreenTarget, PushConstantRange, Rect2d,
-    RenderAttachment, RenderPassDesc, SamplerDesc, ShaderModule, ShaderStages, StoreOp, Texture,
-    VertexAttribute, VertexBufferLayout, VertexFormat,
+    Device, Format, GraphicsPipeline, Instance, LoadOp, OffscreenTarget, PipelineOptions, Rect2d,
+    RenderAttachment, RenderPassDesc, SamplerDesc, ShaderModule, StoreOp, Texture, VertexAttribute,
+    VertexBufferLayout, VertexFormat,
 };
 
 const SIZE: u32 = 64;
@@ -123,11 +123,12 @@ fn fragment_heap_sampling_roundtrip() {
     let fragment_shader = ShaderModule::from_spirv(&device, &fragment_spirv).expect("fs module");
 
     let target = OffscreenTarget::new(&device, SIZE, SIZE, Format::B8G8R8A8Unorm).expect("target");
-    // No descriptor set layout at all, one 8-byte push-constant range for the
-    // root pointer (the fragment entry point's `Ptr<float4>` parameter).
-    let pipeline = GraphicsPipeline::new(
+    // Descriptor-heap pipeline: the fragment entry point's `Ptr<float4>` root
+    // parameter is delivered through push data.
+    let pipeline = GraphicsPipeline::new_with_options(
         &device,
-        Format::B8G8R8A8Unorm,
+        &[Format::B8G8R8A8Unorm],
+        None,
         &vertex_shader,
         &fragment_shader,
         &VertexBufferLayout {
@@ -138,11 +139,7 @@ fn fragment_heap_sampling_roundtrip() {
                 offset: 0,
             }],
         },
-        &[PushConstantRange {
-            stages: ShaderStages::FRAGMENT,
-            offset: 0,
-            size: 8,
-        }],
+        &PipelineOptions::default(),
     )
     .expect("pipeline");
 
@@ -179,12 +176,9 @@ fn fragment_heap_sampling_roundtrip() {
     });
     command_buffer.bind_graphics_pipeline(&pipeline);
     command_buffer.bind_vertex_buffers(0, &[&vertex_buffer], &[0]);
-    command_buffer.push_constants(
-        pipeline.layout(),
-        ShaderStages::FRAGMENT,
-        0,
-        &tint.gpu().as_raw().to_le_bytes(),
-    );
+    // The tint pointer is the fragment root data: the 64-bit address pushed
+    // through push data (the push-constant storage class).
+    command_buffer.push_data(0, &tint.gpu().as_raw().to_le_bytes());
     command_buffer.draw(3, 1, 0, 0);
     command_buffer.end_rendering();
     command_buffer.end().expect("end");

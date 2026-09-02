@@ -77,8 +77,7 @@ impl Core3dPipeline {
                 offset: 0,
             }],
         };
-        // Descriptor-heap pipeline: no set layouts, no push constant ranges —
-        // per-draw root pointers go through `push_data` instead.
+        // Descriptor-heap pipeline: per-draw root pointers go through `push_data`.
         let pipeline = GraphicsPipeline::new_with_options(
             device,
             &[VIEW_TARGET_FORMAT],
@@ -86,11 +85,7 @@ impl Core3dPipeline {
             &vertex_shader,
             &fragment_shader,
             &vertex_layout,
-            &[],
-            &PipelineOptions {
-                descriptor_heap: true,
-                ..PipelineOptions::default()
-            },
+            &PipelineOptions::default(),
         )?;
         Ok(Self { pipeline })
     }

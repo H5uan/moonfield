@@ -104,11 +104,8 @@ fn graphics_heap_sampling_roundtrip() {
         &vertex_shader,
         &fragment_shader,
         &vertex_layout,
-        &[],
         &PipelineOptions {
-            descriptor_heap: true,
             heap_mappings: &heap_mappings,
-            ..PipelineOptions::default()
         },
     )
     .expect("pipeline");
@@ -228,11 +225,7 @@ float4 main() : SV_TARGET
         &vertex_shader,
         &fragment_shader,
         &vertex_layout,
-        &[],
-        &PipelineOptions {
-            descriptor_heap: true,
-            ..PipelineOptions::default()
-        },
+        &PipelineOptions::default(),
     )
     .expect("pipeline");
 

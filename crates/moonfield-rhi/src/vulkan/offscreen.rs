@@ -252,15 +252,15 @@ impl OffscreenTarget {
     ///
     /// The returned view borrows this target's underlying `vk::ImageView`; it
     /// does not own it and must not outlive the target.
-    pub fn view(&self) -> crate::bind::TextureView {
-        crate::bind::TextureView::borrow_raw(self.image_view, self.device.clone())
+    pub fn view(&self) -> crate::view::TextureView {
+        crate::view::TextureView::borrow_raw(self.image_view, self.device.clone())
     }
 
     /// Borrow the depth image view, if present (for the depth attachment of a
     /// [`RenderPassDesc`](crate::RenderPassDesc)).
-    pub fn depth_view(&self) -> Option<crate::bind::TextureView> {
+    pub fn depth_view(&self) -> Option<crate::view::TextureView> {
         self.depth_image_view
-            .map(|view| crate::bind::TextureView::borrow_raw(view, self.device.clone()))
+            .map(|view| crate::view::TextureView::borrow_raw(view, self.device.clone()))
     }
 
     /// The color attachment format of this target.

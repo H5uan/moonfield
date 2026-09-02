@@ -150,7 +150,7 @@ fn bindless_dispatch_indirect_roundtrip() {
     cmd.begin(CommandBufferUsage::ONE_TIME_SUBMIT)
         .expect("begin");
     cmd.bind_compute_pipeline(pipeline.raw());
-    cmd.set_bindless_root(pipeline.layout(), input.gpu(), output.gpu());
+    cmd.set_bindless_root(input.gpu(), output.gpu());
     cmd.dispatch_indirect(&args);
     cmd.end().expect("end");
 

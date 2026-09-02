@@ -187,11 +187,8 @@ impl EguiPipeline {
             &vertex_shader,
             &fragment_shader,
             &vertex_layout,
-            &[],
             &PipelineOptions {
-                descriptor_heap: true,
                 heap_mappings: &heap_mappings,
-                ..PipelineOptions::default()
             },
         )
         .map_err(|e| e.to_string())?;

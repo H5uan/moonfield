@@ -5,22 +5,19 @@
 //! snapshots, the window frame loop, `RenderPlugin`) lives in
 //! `moonfield-render-core` (Selene), not here.
 
-pub mod bind;
 pub mod error;
 pub mod indirect;
 pub mod types;
+pub mod view;
 
 pub mod vulkan;
 
-pub use bind::{
-    BindGroup, BindGroupEntry, BindGroupLayout, BindGroupLayoutEntry, BindingResource, BindingType,
-    BufferRef, Sampler, ShaderStage, TextureView,
-};
 pub use error::{Error, Result};
 pub use indirect::{DispatchIndirectArgs, DrawIndexedIndirectArgs, DrawIndirectArgs, IndexFormat};
 pub use types::{
     AttachmentLayout, BufferUsage, ClearValue, CommandBufferUsage, CompareOp, CullMode, Extent2d,
-    Filter, Format, FrontFace, LoadOp, Offset2d, PushConstantRange, Rect2d, SamplerDesc,
-    ShaderStages, StoreOp, VertexAttribute, VertexBufferLayout, VertexFormat, Viewport, WrapMode,
+    Filter, Format, FrontFace, LoadOp, Offset2d, Rect2d, SamplerDesc, StoreOp, VertexAttribute,
+    VertexBufferLayout, VertexFormat, Viewport, WrapMode,
 };
+pub use view::TextureView;
 pub use vulkan::*;

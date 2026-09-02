@@ -5,7 +5,6 @@
 //! buffers are uploaded via a one-shot staging copy so the RHI can hold
 //! GPU-resident resources (indirect args, workgraph backing, vertex data).
 
-use crate::bind::BufferRef;
 use crate::error::{Error, Result};
 use crate::types::BufferUsage;
 use crate::vulkan::device::Device;
@@ -222,12 +221,6 @@ impl Buffer {
             );
         }
         Ok(())
-    }
-}
-
-impl BufferRef for Buffer {
-    fn raw_vk(&self) -> vk::Buffer {
-        self.buffer
     }
 }
 

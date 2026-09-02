@@ -9,6 +9,7 @@
 use std::sync::{Arc, Mutex};
 
 use ash::vk;
+use ash::vk::TaggedStructure as _;
 use gpu_allocator::{
     vulkan::{Allocation, AllocationCreateDesc, AllocationScheme, Allocator},
     MemoryLocation,
@@ -184,7 +185,14 @@ impl GpuAllocation {
         size: u64,
         align: u64,
     ) -> Result<Self> {
-        Self::from_resources(device.raw(), device.allocator(), size, Memory::Default, align, true)
+        Self::from_resources(
+            device.raw(),
+            device.allocator(),
+            size,
+            Memory::Default,
+            align,
+            true,
+        )
     }
 
     /// Resource-level constructor for long-lived owners that keep their own
@@ -367,13 +375,14 @@ pub enum BarrierHazard {
 
 /// A Vulkan compute pipeline for the bindless model.
 ///
-/// Root data is a single push-constant range holding the entry point's GPU
-/// pointers (two 64-bit addresses: input @ offset 0, output @ offset 8),
-/// matching the Slang `EntryPointParams_std430` layout of a kernel with two
-/// pointer parameters.
+/// Like its graphics counterpart, the pipeline is a descriptor-heap pipeline
+/// with a null layout: root data is delivered through push data
+/// ([`CommandBuffer::push_data`](crate::CommandBuffer::push_data)) as the
+/// entry point's GPU pointers (two 64-bit addresses: input @ offset 0,
+/// output @ offset 8), matching the Slang `EntryPointParams_std430` layout of
+/// a kernel with two pointer parameters.
 pub struct ComputePipeline {
     pipeline: vk::Pipeline,
-    layout: vk::PipelineLayout,
     device: ash::Device,
 }
 
@@ -385,18 +394,15 @@ impl ComputePipeline {
             .stage(vk::ShaderStageFlags::COMPUTE)
             .module(shader.raw())
             .name(&entry);
-        // Match EntryPointParams_std430: struct { input@0, output@8 }.
-        let push_constant_range = vk::PushConstantRange::default()
-            .stage_flags(vk::ShaderStageFlags::COMPUTE)
-            .offset(0)
-            .size(16);
-        let layout_info = vk::PipelineLayoutCreateInfo::default()
-            .push_constant_ranges(std::slice::from_ref(&push_constant_range));
-        let layout = unsafe { device.raw().create_pipeline_layout(&layout_info, None) }
-            .map_err(|e| Error::Backend(format!("failed to create pipeline layout: {:?}", e)))?;
+        // Descriptor-heap pipelines have no pipeline layout at all (per the
+        // extension: the layout must be NULL when the flag is set).
+        let layout = vk::PipelineLayout::null();
+        let mut flags2_info = vk::PipelineCreateFlags2CreateInfo::default()
+            .flags(vk::PipelineCreateFlags2::DESCRIPTOR_HEAP_EXT);
         let pipeline_info = vk::ComputePipelineCreateInfo::default()
             .stage(stage)
-            .layout(layout);
+            .layout(layout)
+            .push(&mut flags2_info);
         let pipelines = unsafe {
             device.raw().create_compute_pipelines(
                 vk::PipelineCache::null(),
@@ -407,7 +413,6 @@ impl ComputePipeline {
         .map_err(|e| Error::Backend(format!("failed to create compute pipeline: {:?}", e)))?;
         Ok(Self {
             pipeline: pipelines[0],
-            layout,
             device: device.raw().clone(),
         })
     }
@@ -416,18 +421,12 @@ impl ComputePipeline {
     pub fn raw(&self) -> vk::Pipeline {
         self.pipeline
     }
-
-    /// Access the raw `vk::PipelineLayout` handle.
-    pub fn layout(&self) -> vk::PipelineLayout {
-        self.layout
-    }
 }
 
 impl Drop for ComputePipeline {
     fn drop(&mut self) {
         unsafe {
             self.device.destroy_pipeline(self.pipeline, None);
-            self.device.destroy_pipeline_layout(self.layout, None);
         }
     }
 }

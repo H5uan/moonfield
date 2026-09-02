@@ -1,23 +1,11 @@
 //! Vulkan graphics pipeline abstraction.
 
-use crate::bind::BindGroupLayout;
 use crate::error::{Error, Result};
-use crate::types::{Format, PushConstantRange, VertexBufferLayout};
+use crate::types::{Format, VertexBufferLayout};
 use crate::vulkan::device::Device;
 use crate::vulkan::shader_module::ShaderModule;
 use ash::vk;
 use ash::vk::TaggedStructure as _;
-
-/// A pipeline layout handle, in the crate's own vocabulary. `Copy` like the
-/// underlying Vulkan handle; the owning pipeline keeps it alive.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub struct PipelineLayout(pub(crate) vk::PipelineLayout);
-
-impl PipelineLayout {
-    pub(crate) fn to_vk(self) -> vk::PipelineLayout {
-        self.0
-    }
-}
 
 /// How the pipeline's single color attachment blends with existing pixels.
 ///
@@ -72,33 +60,26 @@ pub struct HeapMapping {
 }
 
 /// Optional pipeline configuration beyond the [`GraphicsPipeline::new`]
-/// defaults: descriptor set layouts. Rasterizer state (blend, cull, depth)
-/// is dynamic and applied per draw through the command buffer.
+/// defaults: binding→heap mappings. Rasterizer state (blend, cull, depth) is
+/// dynamic and applied per draw through the command buffer.
+///
+/// Every pipeline is a descriptor-heap pipeline
+/// (`VK_PIPELINE_CREATE_2_DESCRIPTOR_HEAP_BIT_EXT` with a null layout), so
+/// descriptor-set bindings and push constants are unavailable — shaders read
+/// the bound heaps and push data
+/// ([`CommandBuffer::push_data`](crate::CommandBuffer::push_data)) instead.
 #[derive(Default)]
 pub struct PipelineOptions<'a> {
-    /// Descriptor set layouts baked into the pipeline layout (set 0, 1, …).
-    /// Borrowed; the caller keeps them alive as long as sets are bound.
-    /// Must be empty when [`descriptor_heap`](Self::descriptor_heap) is set.
-    pub set_layouts: &'a [&'a BindGroupLayout],
-    /// Source all shader resources from the descriptor heap
-    /// (`VK_PIPELINE_CREATE_2_DESCRIPTOR_HEAP_BIT_EXT`): the pipeline is
-    /// created with a null layout, so descriptor-set bindings and push
-    /// constants are unavailable — shaders read the bound heaps and push
-    /// data ([`CommandBuffer::push_data`](crate::CommandBuffer::push_data))
-    /// instead.
-    pub descriptor_heap: bool,
-    /// Binding→heap mappings for heap pipelines whose shaders declare
+    /// Binding→heap mappings for pipelines whose shaders declare
     /// `DescriptorSet`/`Binding` resources (the driver resolves them against
     /// the bound heaps; each shader stage gets the same list, which the spec
-    /// explicitly allows to overspecify). Requires
-    /// [`descriptor_heap`](Self::descriptor_heap).
+    /// explicitly allows to overspecify).
     pub heap_mappings: &'a [HeapMapping],
 }
 
-/// A Vulkan graphics pipeline and its layout.
+/// A Vulkan graphics pipeline.
 pub struct GraphicsPipeline {
     pipeline: vk::Pipeline,
-    layout: vk::PipelineLayout,
     device: ash::Device,
 }
 
@@ -118,7 +99,6 @@ impl GraphicsPipeline {
         vertex_shader: &ShaderModule,
         fragment_shader: &ShaderModule,
         vertex_layout: &VertexBufferLayout,
-        push_constant_ranges: &[PushConstantRange],
     ) -> Result<Self> {
         Self::new_with_options(
             device,
@@ -127,13 +107,12 @@ impl GraphicsPipeline {
             vertex_shader,
             fragment_shader,
             vertex_layout,
-            push_constant_ranges,
             &PipelineOptions::default(),
         )
     }
 
     /// Create a graphics pipeline with explicit attachment formats and
-    /// [`PipelineOptions`] (descriptor set layouts).
+    /// [`PipelineOptions`] (binding→heap mappings).
     ///
     /// `color_formats` are the color attachment formats the pipeline will be
     /// used against (typically one; multiple for MRT); `depth_format` is the
@@ -148,7 +127,6 @@ impl GraphicsPipeline {
         vertex_shader: &ShaderModule,
         fragment_shader: &ShaderModule,
         vertex_layout: &VertexBufferLayout,
-        push_constant_ranges: &[PushConstantRange],
         options: &PipelineOptions,
     ) -> Result<Self> {
         let vertex_entry = std::ffi::CString::new("main").unwrap();
@@ -303,32 +281,9 @@ impl GraphicsPipeline {
             .logic_op_enable(false)
             .attachments(&color_blend_attachments);
 
-        let layout = if options.descriptor_heap {
-            // Heap-backed pipelines have no pipeline layout at all (per the
-            // extension: the layout must be NULL when the flag is set).
-            vk::PipelineLayout::null()
-        } else {
-            let set_layouts: Vec<vk::DescriptorSetLayout> = options
-                .set_layouts
-                .iter()
-                .map(|layout| layout.raw_vk())
-                .collect();
-            let push_constant_ranges_vk: Vec<vk::PushConstantRange> = push_constant_ranges
-                .iter()
-                .map(|range| range.to_vk())
-                .collect();
-            let pipeline_layout_info = vk::PipelineLayoutCreateInfo::default()
-                .push_constant_ranges(&push_constant_ranges_vk)
-                .set_layouts(&set_layouts);
-            unsafe {
-                device
-                    .raw()
-                    .create_pipeline_layout(&pipeline_layout_info, None)
-                    .map_err(|e| {
-                        Error::Backend(format!("failed to create pipeline layout: {:?}", e))
-                    })?
-            }
-        };
+        // Descriptor-heap pipelines have no pipeline layout at all (per the
+        // extension: the layout must be NULL when the flag is set).
+        let layout = vk::PipelineLayout::null();
 
         // Dynamic rendering replaces the compatible render pass: formats are
         // baked in through VkPipelineRenderingCreateInfo, and the pipeline
@@ -338,12 +293,12 @@ impl GraphicsPipeline {
             .color_attachment_formats(&color_formats_vk)
             .depth_attachment_format(depth_format.map_or(vk::Format::UNDEFINED, |f| f.to_vk()));
 
-        // Descriptor-heap pipelines are flagged through the flags2 struct
+        // Pipelines are flagged through the flags2 struct
         // (VK_KHR_maintenance5), chained next to the rendering info.
         let mut flags2_info = vk::PipelineCreateFlags2CreateInfo::default()
             .flags(vk::PipelineCreateFlags2::DESCRIPTOR_HEAP_EXT);
 
-        let mut pipeline_info = vk::GraphicsPipelineCreateInfo::default()
+        let pipeline_info = vk::GraphicsPipelineCreateInfo::default()
             .stages(&shader_stages)
             .vertex_input_state(&vertex_input_info)
             .input_assembly_state(&input_assembly)
@@ -356,10 +311,8 @@ impl GraphicsPipeline {
             .layout(layout)
             .subpass(0)
             .render_pass(vk::RenderPass::null())
-            .push(&mut rendering_info);
-        if options.descriptor_heap {
-            pipeline_info = pipeline_info.push(&mut flags2_info);
-        }
+            .push(&mut rendering_info)
+            .push(&mut flags2_info);
 
         let pipelines = unsafe {
             device
@@ -376,7 +329,6 @@ impl GraphicsPipeline {
 
         Ok(Self {
             pipeline: pipelines[0],
-            layout,
             device: device.raw().clone(),
         })
     }
@@ -385,18 +337,12 @@ impl GraphicsPipeline {
     pub fn raw(&self) -> vk::Pipeline {
         self.pipeline
     }
-
-    /// The pipeline's layout, for descriptor-set and push-constant commands.
-    pub fn layout(&self) -> PipelineLayout {
-        PipelineLayout(self.layout)
-    }
 }
 
 impl Drop for GraphicsPipeline {
     fn drop(&mut self) {
         unsafe {
             self.device.destroy_pipeline(self.pipeline, None);
-            self.device.destroy_pipeline_layout(self.layout, None);
         }
     }
 }
