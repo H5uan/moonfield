@@ -153,8 +153,7 @@ impl GpuAllocation {
     /// this allocation relies on — `vkGetBufferMemoryRequirements` and
     /// `vkGetBufferDeviceAddress` — since Vulkan has no object-less BDA or
     /// requirement queries. The buffer exists only as that address carrier;
-    /// it carries no fixed usage, and consumers use the returned pointers
-    /// directly.
+    /// consumers use the returned pointers directly.
     pub fn new(device: &crate::vulkan::device::Device, size: u64, memory: Memory) -> Result<Self> {
         // The allocator's default base alignment (16 bytes) satisfies every
         // standard use; arena-style carving that needs co-aligned CPU/GPU
@@ -202,8 +201,10 @@ impl GpuAllocation {
     ) -> Result<Self> {
         // The buffer is a pure address carrier: Vulkan settles buffer device
         // addresses and memory requirements on an existing buffer object, so
-        // one must exist before either can be queried. It is not bound to any
-        // fixed usage; consumers fetch the address and dereference it from
+        // one must exist before either can be queried. Its usage set covers
+        // every way the bindless model touches memory — address taking,
+        // transfer copies, indirect-argument reads, and descriptor-heap
+        // backing — consumers fetch the address and dereference it from
         // shaders. Exclusive sharing keeps the buffer on one queue family.
         let mut usage = vk::BufferUsageFlags::SHADER_DEVICE_ADDRESS
             | vk::BufferUsageFlags::TRANSFER_SRC
