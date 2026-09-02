@@ -1,8 +1,8 @@
 // egui's per-draw root data, pushed via vkCmdPushDataEXT (`push_data`) and
-// read through the PushConstant storage class. The texture/sampler slot
-// indices are consumed by the pipeline's binding→heap mappings
-// (HEAP_WITH_PUSH_INDEX), not by the shader; the shader reads only the
-// scalars. Layout must match `EguiRoot` in egui_vk.rs.
+// read through the PushConstant storage class. The texture/sampler fields
+// are the descriptor-heap slot indices the fragment stage indexes the
+// untyped `ResourceDescriptorHeap` / `SamplerDescriptorHeap` with. Layout
+// must match `EguiRoot` in egui_vk.rs.
 struct EguiRoot
 {
     float2 screen_size_in_points;
@@ -11,11 +11,6 @@ struct EguiRoot
     uint dithering;
     uint predictable_filtering;
 };
-
-// Classic binding declaration, resolved through the pipeline's
-// binding→heap mapping at draw time — no descriptor set is ever allocated.
-[[vk::binding(0, 0)]]
-Sampler2D tex;
 
 struct VsInput
 {
@@ -78,10 +73,15 @@ float linear_from_gamma(float srgb)
 
 float4 sample_texture(EguiRoot root, float2 uv)
 {
+    // Untyped descriptor-heap access (spvDescriptorHeapEXT): the texture and
+    // sampler are fetched straight from the bound heaps at the slot indices
+    // carried in root data — no descriptor set, binding, or mapping anywhere.
+    Texture2D tex = ResourceDescriptorHeap[NonUniformResourceIndex(root.texture)];
+    SamplerState s = SamplerDescriptorHeap[NonUniformResourceIndex(root.sampler)];
     if (root.predictable_filtering == 0)
     {
         // Hardware filtering: fast, but varies across GPUs and drivers.
-        return tex.Sample(uv);
+        return tex.Sample(s, uv);
     }
     // Manual bilinear filtering with four taps at pixel centers, for
     // deterministic snapshot output (egui-wgpu parity).

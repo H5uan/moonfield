@@ -18,9 +18,9 @@ use moonfield_log::{error, info};
 use moonfield_render_core::{ViewTargets, WindowSurfaces};
 use moonfield_rhi::{
     AttachmentLayout, ClearValue, CommandBuffer, CompareOp, Compiler, CullMode, CullState,
-    DepthState, Format, FrontFace, GraphicsPipeline, LoadOp, OffscreenTarget, PipelineOptions,
-    Rect2d, RenderAttachment, RenderDevice, RenderPassDesc, Result, ShaderModule, StoreOp,
-    VertexAttribute, VertexBufferLayout, VertexFormat, Viewport,
+    DepthState, Format, FrontFace, GraphicsPipeline, LoadOp, OffscreenTarget, Rect2d,
+    RenderAttachment, RenderDevice, RenderPassDesc, Result, ShaderModule, StoreOp, VertexAttribute,
+    VertexBufferLayout, VertexFormat, Viewport,
 };
 use std::collections::HashMap;
 use std::path::PathBuf;
@@ -85,7 +85,6 @@ impl Core3dPipeline {
             &vertex_shader,
             &fragment_shader,
             &vertex_layout,
-            &PipelineOptions::default(),
         )?;
         Ok(Self { pipeline })
     }

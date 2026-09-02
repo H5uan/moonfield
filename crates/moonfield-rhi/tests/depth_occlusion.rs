@@ -1,8 +1,9 @@
 //! Depth-occlusion test for Lunar Mare's reverse-Z depth path.
 //!
 //! Renders two fully overlapping quads into an `OffscreenTarget::new_with_depth`
-//! target with `PipelineOptions::depth_test` enabled: the near (red) quad is
-//! drawn *first*, the far (blue) quad second. Without depth testing the blue
+//! target with reverse-Z depth testing enabled per draw through
+//! `CommandBuffer::set_depth_state`: the near (red) quad is drawn *first*, the
+//! far (blue) quad second. Without depth testing the blue
 //! quad would overwrite the red one; with reverse-Z depth (clear 0.0, compare
 //! `GREATER_OR_EQUAL`) the near quad must win. Skips gracefully on machines
 //! without a Vulkan driver.
@@ -11,8 +12,8 @@ use ash::vk;
 use moonfield_rhi::{
     AttachmentLayout, Buffer, BufferUsage, ClearValue, CommandBufferUsage, CommandPool, CompareOp,
     Compiler, CullMode, CullState, DepthState, Device, Format, FrontFace, GraphicsPipeline,
-    Instance, LoadOp, OffscreenTarget, PipelineOptions, Rect2d, RenderAttachment, RenderPassDesc,
-    ShaderModule, StoreOp, VertexAttribute, VertexBufferLayout, VertexFormat,
+    Instance, LoadOp, OffscreenTarget, Rect2d, RenderAttachment, RenderPassDesc, ShaderModule,
+    StoreOp, VertexAttribute, VertexBufferLayout, VertexFormat,
 };
 
 mod common;
@@ -140,7 +141,6 @@ float4 main(PsInput input) : SV_TARGET
                 },
             ],
         },
-        &PipelineOptions::default(),
     )
     .expect("pipeline");
 

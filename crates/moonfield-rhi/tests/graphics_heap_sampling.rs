@@ -3,7 +3,8 @@
 //! The compute sibling (`descriptor_heap_sampling`) passes on the real
 //! driver; the same heap read in a fragment shader must too. A fullscreen
 //! triangle with no vertex inputs, no push data, and no sampler — the
-//! fragment stage only loads texel (0,0) of heap slot 0. Deliberately
+//! fragment stage reads texel (0,0) of heap slot 0 through the untyped
+//! `ResourceDescriptorHeap` path (no bindings, no mappings). Deliberately
 //! independent of the editor/egui machinery.
 
 mod common;
@@ -11,9 +12,8 @@ mod common;
 use moonfield_rhi::bindless::{GpuAllocation, Memory};
 use moonfield_rhi::{
     AttachmentLayout, ClearValue, CommandBufferUsage, CommandPool, Compiler, Device, Format,
-    FrameUploader, GraphicsPipeline, Instance, LoadOp, OffscreenTarget, PipelineOptions, Rect2d,
-    RenderAttachment, RenderPassDesc, ShaderModule, StoreOp, Texture, VertexBufferLayout,
-    UPLOAD_ARENA_SIZE,
+    FrameUploader, GraphicsPipeline, Instance, LoadOp, OffscreenTarget, Rect2d, RenderAttachment,
+    RenderPassDesc, ShaderModule, StoreOp, Texture, VertexBufferLayout, UPLOAD_ARENA_SIZE,
 };
 
 const VERTEX: &str = r#"
@@ -29,20 +29,18 @@ VsOutput main(uint vid : SV_VertexID)
 "#;
 
 const FRAGMENT: &str = r#"
-[[vk::binding(0, 0)]]
-Texture2D tex;
 [shader("fragment")]
 float4 main() : SV_TARGET
 {
+    Texture2D tex = ResourceDescriptorHeap[NonUniformResourceIndex(0)];
     return tex.Load(int3(int2(0, 0), 0));
 }
 "#;
 
 #[test]
-// AMD 26.8.1 (RX 9070 XT) loses the device on any graphics-stage heap
-// descriptor read; kept as the minimal repro for the driver report. Run
-// explicitly with `--ignored`.
-#[ignore = "driver bug: graphics-stage descriptor heap read faults (AMD 26.8.1)"]
+// AMD 26.8.1 (RX 9070 XT) lost the device on any graphics-stage heap
+// descriptor read; 26.9.1 fixed it (cargo run + these tests pass), so the
+// pair now runs unignored and doubles as the driver regression guard.
 fn graphics_heap_sampling_roundtrip() {
     let instance = match Instance::new_headless() {
         Ok(instance) => instance,
@@ -79,7 +77,12 @@ fn graphics_heap_sampling_roundtrip() {
         .compile_source_to_spirv("vs", VERTEX, "main")
         .expect("vertex shader");
     let fragment_spirv = compiler
-        .compile_source_to_spirv("fs", FRAGMENT, "main")
+        .compile_source_to_spirv_with_capabilities(
+            "fs",
+            FRAGMENT,
+            "main",
+            &["spvDescriptorHeapEXT"],
+        )
         .expect("fragment shader");
     let vertex_shader = ShaderModule::from_spirv(&device, &vertex_spirv).expect("vs module");
     let fragment_shader = ShaderModule::from_spirv(&device, &fragment_spirv).expect("fs module");
@@ -88,15 +91,8 @@ fn graphics_heap_sampling_roundtrip() {
         stride: 0,
         attributes: vec![],
     };
-    // The fragment's Texture2D binding is resolved against the resource heap
-    // through a push-index mapping: slot index comes from push data @ 0.
-    let heap_mappings = [moonfield_rhi::HeapMapping {
-        set: 0,
-        binding: 0,
-        resource: moonfield_rhi::HeapMappingResource::SampledImage,
-        push_offset: 0,
-        sampler_push_offset: 0,
-    }];
+    // The fragment reads heap slot 0 through the untyped
+    // `ResourceDescriptorHeap` path; the pipeline needs no bindings at all.
     let pipeline = GraphicsPipeline::new_with_options(
         &device,
         &[Format::B8G8R8A8Unorm],
@@ -104,9 +100,6 @@ fn graphics_heap_sampling_roundtrip() {
         &vertex_shader,
         &fragment_shader,
         &vertex_layout,
-        &PipelineOptions {
-            heap_mappings: &heap_mappings,
-        },
     )
     .expect("pipeline");
 
@@ -132,8 +125,6 @@ fn graphics_heap_sampling_roundtrip() {
         depth_attachment: None,
     });
     cmd.bind_graphics_pipeline(&pipeline);
-    // The mapping's push index: texture slot 0.
-    cmd.push_data(0, &0u32.to_le_bytes());
     cmd.draw(3, 1, 0, 0);
     cmd.end_rendering();
     cmd.end().expect("end");
@@ -152,9 +143,8 @@ fn graphics_heap_sampling_roundtrip() {
 /// the fragment shader reads it through the untyped heap path. Isolates
 /// image-descriptor reads from buffer-descriptor reads in the graphics stage.
 #[test]
-// Same driver bug as `graphics_heap_sampling_roundtrip`; this variant reads
-// a storage-buffer descriptor instead of an image descriptor.
-#[ignore = "driver bug: graphics-stage descriptor heap read faults (AMD 26.8.1)"]
+// Same graphics-stage heap-read path as `graphics_heap_sampling_roundtrip`,
+// but the slot holds a storage-buffer descriptor instead of an image one.
 fn graphics_heap_buffer_descriptor_read() {
     let instance = match Instance::new_headless() {
         Ok(instance) => instance,
@@ -225,7 +215,6 @@ float4 main() : SV_TARGET
         &vertex_shader,
         &fragment_shader,
         &vertex_layout,
-        &PipelineOptions::default(),
     )
     .expect("pipeline");
 

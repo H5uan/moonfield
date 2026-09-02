@@ -6,9 +6,10 @@
 //! buffer binds by device address (`cmd_bind_resource_heap` /
 //! `cmd_bind_sampler_heap`) — the blog's "no update-API abstraction" model.
 //!
-//! The shader sees two descriptor arrays, `binding 0` as `SAMPLED_IMAGE` and
-//! `binding 1` as `SAMPLER`, both indexed with non-uniform 32-bit handles:
-//! [`TextureHandle`] and [`SamplerHandle`].
+//! Shaders index the two untyped heaps (`ResourceDescriptorHeap` /
+//! `SamplerDescriptorHeap`, `spvDescriptorHeapEXT`) with non-uniform 32-bit
+//! handles: [`TextureHandle`] and [`SamplerHandle`] — no bindings, no
+//! mappings, no descriptor objects on the Rust side.
 //!
 //! Slot semantics follow the bump-arena contract: freeing a slot invalidates
 //! it, and a re-allocated slot must be written again before it is referenced —
@@ -28,12 +29,13 @@ use std::sync::Mutex;
 pub const DESCRIPTOR_HEAP_IMAGE_CAPACITY: u32 = 4096;
 pub const DESCRIPTOR_HEAP_SAMPLER_CAPACITY: u32 = 1024;
 
-/// A slot index in the image descriptor array (`binding 0`), the handle
-/// shaders store in root data and index with `NonUniformResourceIndex`.
+/// A slot index in the resource descriptor heap (`ResourceDescriptorHeap`),
+/// the handle shaders store in root data and index with
+/// `NonUniformResourceIndex`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub struct TextureHandle(pub u32);
 
-/// A slot index in the sampler descriptor array (`binding 1`).
+/// A slot index in the sampler descriptor heap (`SamplerDescriptorHeap`).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub struct SamplerHandle(pub u32);
 

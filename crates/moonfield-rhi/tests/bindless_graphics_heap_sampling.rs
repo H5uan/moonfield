@@ -10,8 +10,8 @@ mod common;
 use moonfield_rhi::vulkan::bindless::{GpuAllocation, Memory};
 use moonfield_rhi::{
     AttachmentLayout, Buffer, BufferUsage, ClearValue, CommandBufferUsage, CommandPool, Compiler,
-    Device, Format, GraphicsPipeline, Instance, LoadOp, OffscreenTarget, PipelineOptions, Rect2d,
-    RenderAttachment, RenderPassDesc, SamplerDesc, ShaderModule, StoreOp, Texture, VertexAttribute,
+    Device, Format, GraphicsPipeline, Instance, LoadOp, OffscreenTarget, Rect2d, RenderAttachment,
+    RenderPassDesc, SamplerDesc, ShaderModule, StoreOp, Texture, VertexAttribute,
     VertexBufferLayout, VertexFormat,
 };
 
@@ -139,7 +139,6 @@ fn fragment_heap_sampling_roundtrip() {
                 offset: 0,
             }],
         },
-        &PipelineOptions::default(),
     )
     .expect("pipeline");
 

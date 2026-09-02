@@ -31,9 +31,9 @@ use moonfield_rhi::types::WrapMode;
 use moonfield_rhi::{
     BlendMode, Buffer, BufferUsage, CommandBuffer, CompareOp, Compiler, CullMode, CullState,
     DepthState, DescriptorHeap, Device, Extent2d, Filter, Format, FrameUploader, FrontFace,
-    GraphicsPipeline, HeapMapping, HeapMappingResource, IndexFormat, Offset2d, PipelineOptions,
-    Rect2d, RenderDevice, SamplerDesc, SamplerHandle, ShaderModule, Texture, TextureHandle,
-    VertexAttribute, VertexBufferLayout, VertexFormat, UPLOAD_ARENA_SIZE,
+    GraphicsPipeline, IndexFormat, Offset2d, Rect2d, RenderDevice, SamplerDesc, SamplerHandle,
+    ShaderModule, Texture, TextureHandle, VertexAttribute, VertexBufferLayout, VertexFormat,
+    UPLOAD_ARENA_SIZE,
 };
 use std::collections::HashMap;
 use std::path::PathBuf;
@@ -142,7 +142,11 @@ impl EguiPipeline {
             "fs_gamma"
         };
         let fragment_spirv = compiler
-            .compile_file_to_spirv(&egui_shader_path(), fragment_entry)
+            .compile_file_to_spirv_with_capabilities(
+                &egui_shader_path(),
+                fragment_entry,
+                &["spvDescriptorHeapEXT"],
+            )
             .map_err(|e| e.to_string())?;
         let vertex_shader =
             ShaderModule::from_spirv(device, &vertex_spirv).map_err(|e| e.to_string())?;
@@ -170,16 +174,9 @@ impl EguiPipeline {
             ],
         };
         // Descriptor-heap pipeline: null layout, no set layouts, no push
-        // constant ranges. The shader's one combined-image-sampler binding is
-        // resolved against the bound heaps through a push-index mapping: the
-        // texture and sampler slot indices live in the draw's push data.
-        let heap_mappings = [HeapMapping {
-            set: 0,
-            binding: 0,
-            resource: HeapMappingResource::CombinedImageSampler,
-            push_offset: std::mem::offset_of!(EguiRoot, texture) as u32,
-            sampler_push_offset: std::mem::offset_of!(EguiRoot, sampler) as u32,
-        }];
+        // constant ranges, no bindings. The fragment shader reads the texture
+        // and sampler straight from the untyped descriptor heaps at the slot
+        // indices carried in each draw's push data.
         let pipeline = GraphicsPipeline::new_with_options(
             device,
             &[color_format],
@@ -187,9 +184,6 @@ impl EguiPipeline {
             &vertex_shader,
             &fragment_shader,
             &vertex_layout,
-            &PipelineOptions {
-                heap_mappings: &heap_mappings,
-            },
         )
         .map_err(|e| e.to_string())?;
 

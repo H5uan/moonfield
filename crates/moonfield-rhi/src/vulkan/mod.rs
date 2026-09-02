@@ -48,9 +48,7 @@ pub use descriptor_heap::{
 pub use device::{DescriptorHeapProperties, Device, QueueFamilyIndices};
 pub use instance::Instance;
 pub use offscreen::OffscreenTarget;
-pub use pipeline::{
-    BlendMode, GraphicsPipeline, HeapMapping, HeapMappingResource, PipelineOptions,
-};
+pub use pipeline::{BlendMode, GraphicsPipeline};
 pub use plugin::RenderDevice;
 pub use shader::Compiler;
 pub use shader_module::ShaderModule;
