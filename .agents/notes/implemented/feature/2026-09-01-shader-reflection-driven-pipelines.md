@@ -71,6 +71,9 @@ of truth, reading everything else off Slang reflection:
   construct from reflection), and 5 new RHI unit tests cover cache
   memoization, variant defines, vertex-layout derivation, root blobs, and
   multi-stage (compute+graphics) files.
-- Known limitation: `field_user_attributes` returns empty with the pinned
-  shader-slang-rs rev on SPIR-V targets (verified by probe); the API shape
-  is kept and asserted loosely so a Slang upgrade surfaces it.
+- `field_user_attributes` reads `[Attr(...)]` marks for the editor-metadata
+  seam. Slang reflects only attributes declared as `{Name}Attribute` structs
+  with `[__AttributeUsage(...)]` — an undeclared `[Foo]` stays an unchecked
+  attribute, invisible to reflection. `assets/shaders/editor_metadata.slang`
+  declares `EditorColor` and `Range`, and `codegen_and_user_attributes`
+  asserts the exact names and arguments on SPIR-V.

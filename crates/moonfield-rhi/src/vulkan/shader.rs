@@ -1369,7 +1369,12 @@ mod tests {
     /// reflected layout; `field_user_attributes` surfaces `[Attr(...)]` marks.
     #[test]
     fn codegen_and_user_attributes() {
-        const SOURCE: &str = r#"
+        // The attributes are declared in `assets/shaders/editor_metadata.slang`
+        // (Slang reflects only declared user attributes — `{Name}Attribute`
+        // structs with `[__AttributeUsage(...)]`).
+        const SOURCE: &str = concat!(
+            include_str!("../../../../assets/shaders/editor_metadata.slang"),
+            r#"
             struct DrawData
             {
                 column_major float4x4 mvp;
@@ -1388,7 +1393,8 @@ mod tests {
                 o.position = mul(root.mvp, float4(input.position, 1.0)) + root.tint * root.opacity;
                 return o;
             }
-        "#;
+        "#,
+        );
         let compiler = Compiler::new().expect("compiler");
         let refl = compiler
             .compile_source_to_reflection("gen", SOURCE, "main")
@@ -1400,18 +1406,27 @@ mod tests {
         assert!(src.contains("pub opacity: f32"), "scalar: {src}");
         assert!(src.contains("offset 0"), "first field at 0: {src}");
 
-        // Field lookup succeeds for both annotated fields. Whether Slang
-        // surfaces the `[Attr]` payload itself depends on the bound
-        // shader-slang-rs rev + SPIR-V target (the pinned fork currently
-        // returns empty); the API shape is asserted loosely so a Slang
-        // upgrade that starts exposing them is caught here.
+        // The payloads are asserted exactly — Slang reflects declared user
+        // attributes on SPIR-V, so an empty result is a real regression.
         let tint = refl
             .field_user_attributes("DrawData", "tint")
             .expect("field exists");
-        assert!(tint.iter().all(|a| a.name == "EditorColor"));
+        assert_eq!(
+            tint,
+            vec![UserAttributeRef {
+                name: "EditorColor".into(),
+                args: vec![],
+            }]
+        );
         let opacity = refl
             .field_user_attributes("DrawData", "opacity")
             .expect("field exists");
-        assert!(opacity.iter().all(|a| a.name == "Range"));
+        assert_eq!(
+            opacity,
+            vec![UserAttributeRef {
+                name: "Range".into(),
+                args: vec![UserAttributeArg::Int(0), UserAttributeArg::Int(1)],
+            }]
+        );
     }
 }

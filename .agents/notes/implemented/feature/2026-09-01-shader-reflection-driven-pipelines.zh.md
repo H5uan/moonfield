@@ -32,4 +32,4 @@ bindless 描述符堆管线在每个层面都硬编码了 shader 管线形态。
 - stage/entry/顶点布局/根布局契约现在在管线构造时被机器校验：`[shader(...)]` 标注不匹配、缺 stage 信息、结构体尺寸漂移都会大声失败（egui 在管线构建时用反射断言 `EguiRoot` 尺寸）。
 - shader 编辑不再需要为常见形态（双 stage 图形、单 compute）同步改宿主代码；新 stage 只是数据。
 - GPU 管线测试原样通过（两条主管线现在都从反射构造），5 个新 RHI 单测覆盖缓存记忆化、变体 defines、顶点布局推导、root blob 与多 stage（compute+graphics）文件。
-- 已知限制：在锁定的 shader-slang-rs rev + SPIR-V target 下 `field_user_attributes` 返回空（probe 验证）；API 形态保留并宽松断言，Slang 升级时会暴露出来。
+- `field_user_attributes` 为编辑器元数据接缝读取 `[Attr(...)]` 标注。Slang 只反射声明为 `{Name}Attribute` 结构体并带 `[__AttributeUsage(...)]` 的属性——未声明的 `[Foo]` 停留在 unchecked 属性、对反射不可见。`assets/shaders/editor_metadata.slang` 声明了 `EditorColor` 与 `Range`，`codegen_and_user_attributes` 在 SPIR-V 下断言精确的名称与参数。
