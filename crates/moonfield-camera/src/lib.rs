@@ -3,7 +3,7 @@
 //! This crate owns camera data shared by scene, editor, and rendering crates.
 //! It has no dependency on the Vulkan RHI.
 
-use moonfield_math::{camera, GlobalTransform, Mat4};
+use moonfield_math::{GlobalTransform, Mat4, camera};
 
 /// Right-handed reverse infinite-Z perspective projection with Moonfield's
 /// clip convention: the camera looks down -Z, NDC Y points up, and depth maps

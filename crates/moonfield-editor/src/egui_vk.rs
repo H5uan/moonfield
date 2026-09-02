@@ -31,9 +31,8 @@ use moonfield_rhi::types::WrapMode;
 use moonfield_rhi::{
     BlendMode, Buffer, BufferUsage, CommandBuffer, CompareOp, Compiler, CullMode, CullState,
     DepthState, DescriptorHeap, Device, Extent2d, Filter, Format, FrameUploader, FrontFace,
-    GraphicsPipeline, IndexFormat, Offset2d, Rect2d, RenderDevice, SamplerDesc, SamplerHandle,
-    ShaderModule, Texture, TextureHandle, VertexAttribute, VertexBufferLayout, VertexFormat,
-    UPLOAD_ARENA_SIZE,
+    GraphicsPipeline, IndexFormat, Offset2d, Rect2d, RenderDevice, RootBinder, SamplerDesc,
+    SamplerHandle, ShaderModule, Texture, TextureHandle, UPLOAD_ARENA_SIZE,
 };
 use std::collections::HashMap;
 use std::path::PathBuf;
@@ -115,6 +114,9 @@ struct MeshDraw {
 /// shader's gamma values verbatim.
 pub struct EguiPipeline {
     pipeline: GraphicsPipeline,
+    /// Reflection-built root blob template (`uniform EguiRoot` → the inline
+    /// struct); draws clone it, write the fields, and push it.
+    root: RootBinder,
     /// The shared descriptor heap every egui texture/sampler slot lives in.
     heap: Arc<DescriptorHeap>,
     /// Sampler heap slots cached by egui sampler options; freed on drop.
@@ -133,46 +135,53 @@ impl EguiPipeline {
         options: EguiOptions,
     ) -> Result<Self, String> {
         let compiler = Compiler::new().map_err(|e| e.to_string())?;
-        let vertex_spirv = compiler
-            .compile_file_to_spirv(&egui_shader_path(), "vs_main")
-            .map_err(|e| e.to_string())?;
         let fragment_entry = if srgb_framebuffer {
             "fs_linear"
         } else {
             "fs_gamma"
         };
-        let fragment_spirv = compiler
-            .compile_file_to_spirv_with_capabilities(
-                &egui_shader_path(),
-                fragment_entry,
-                &["spvDescriptorHeapEXT"],
-            )
-            .map_err(|e| e.to_string())?;
-        let vertex_shader =
-            ShaderModule::from_spirv(device, &vertex_spirv).map_err(|e| e.to_string())?;
-        let fragment_shader =
-            ShaderModule::from_spirv(device, &fragment_spirv).map_err(|e| e.to_string())?;
+        let vertex_shader = ShaderModule::from_compiled(
+            device,
+            &compiler
+                .compile_file_to_spirv(&egui_shader_path(), "vs_main")
+                .map_err(|e| e.to_string())?,
+        )
+        .map_err(|e| e.to_string())?;
+        let fragment_shader = ShaderModule::from_compiled(
+            device,
+            &compiler
+                .compile_file_to_spirv_with_capabilities(
+                    &egui_shader_path(),
+                    fragment_entry,
+                    &["spvDescriptorHeapEXT"],
+                )
+                .map_err(|e| e.to_string())?,
+        )
+        .map_err(|e| e.to_string())?;
 
-        let vertex_layout = VertexBufferLayout {
-            stride: std::mem::size_of::<PodVertex>() as u32,
-            attributes: vec![
-                VertexAttribute {
-                    location: 0,
-                    format: VertexFormat::Float32x2,
-                    offset: 0,
-                },
-                VertexAttribute {
-                    location: 1,
-                    format: VertexFormat::Float32x2,
-                    offset: 8,
-                },
-                VertexAttribute {
-                    location: 2,
-                    format: VertexFormat::Uint32,
-                    offset: 16,
-                },
-            ],
-        };
+        // Derive the vertex layout from the vertex shader's reflected inputs
+        // (pos f32×2, uv f32×2, packed color u32 — the shader is the single
+        // source of truth; `PodVertex` must match, enforced by the upload
+        // path's layout assertions).
+        let reflection = compiler
+            .compile_file_to_reflection(&egui_shader_path(), "vs_main")
+            .map_err(|e| e.to_string())?;
+        let vertex_layout = reflection
+            .vertex_layout("vs_main")
+            .map_err(|e| e.to_string())?;
+        let root = RootBinder::new(&reflection, "vs_main").map_err(|e| e.to_string())?;
+        // Layout alignment guard: the Rust `EguiRoot` struct written into the
+        // root blob must be exactly as large as the shader's reflected
+        // `uniform EguiRoot`, so the two can never silently drift.
+        if root.blob().len() != std::mem::size_of::<EguiRoot>() {
+            return Err(format!(
+                "EguiRoot layout mismatch: Rust struct is {} bytes, egui.slang \
+                 root is {} bytes",
+                std::mem::size_of::<EguiRoot>(),
+                root.blob().len()
+            ));
+        }
+        drop(reflection);
         // Descriptor-heap pipeline: null layout, no set layouts, no push
         // constant ranges, no bindings. The fragment shader reads the texture
         // and sampler straight from the untyped descriptor heaps at the slot
@@ -189,6 +198,7 @@ impl EguiPipeline {
 
         Ok(Self {
             pipeline,
+            root,
             heap: device.descriptor_heap(),
             samplers: HashMap::new(),
             options,
@@ -685,8 +695,15 @@ pub fn record_egui(
             dithering: options.dithering as u32,
             predictable_filtering: options.predictable_texture_filtering as u32,
         };
+        // The root blob is built from reflection: clone the pipeline's
+        // template and write the whole `uniform EguiRoot` struct into it.
+        let mut root_blob = pipeline.root.clone();
+        if let Err(e) = root_blob.set_bytes("root", bytemuck::bytes_of(&root)) {
+            moonfield_log::error!("egui root binding failed: {e}");
+            continue;
+        }
         command_buffer.set_scissor(scissor);
-        command_buffer.push_data(0, bytemuck::bytes_of(&root));
+        command_buffer.push_data(0, root_blob.blob());
         command_buffer.draw_indexed(
             draw.index_count,
             1,

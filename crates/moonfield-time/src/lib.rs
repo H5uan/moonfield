@@ -32,10 +32,10 @@ mod real;
 mod time;
 mod virt;
 
-pub use fixed::{run_fixed_main_schedule, Fixed};
+pub use fixed::{Fixed, run_fixed_main_schedule};
 pub use real::Real;
 pub use time::Time;
-pub use virt::{update_virtual_time, Virtual};
+pub use virt::{Virtual, update_virtual_time};
 
 /// Common time imports.
 pub mod prelude {

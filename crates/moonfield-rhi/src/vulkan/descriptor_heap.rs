@@ -16,11 +16,11 @@
 //! the next frame's write, not slot zeroing, is what makes the new contents
 //! visible.
 
+use crate::CommandBuffer;
 use crate::bindless::GpuAllocation;
 use crate::error::{Error, Result};
 use crate::types::{Filter, SamplerDesc};
 use crate::vulkan::device::{DescriptorHeapProperties, Device};
-use crate::CommandBuffer;
 use ash::vk;
 use moonfield_math::gpu::align_up;
 use std::sync::Mutex;

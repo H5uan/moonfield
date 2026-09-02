@@ -94,9 +94,9 @@ PsOutput main(PsInput input)
         .expect("fragment shader compilation");
 
     let vertex_shader =
-        ShaderModule::from_spirv(&device, &vertex_spirv).expect("vertex shader module");
+        ShaderModule::from_compiled(&device, &vertex_spirv).expect("vertex shader module");
     let fragment_shader =
-        ShaderModule::from_spirv(&device, &fragment_spirv).expect("fragment shader module");
+        ShaderModule::from_compiled(&device, &fragment_spirv).expect("fragment shader module");
 
     let vertex_layout = VertexBufferLayout {
         stride: std::mem::size_of::<Vertex>() as u32,

@@ -145,16 +145,14 @@ impl PluginGroupBuilder {
     pub fn finish(self, app: &mut App) {
         let mut plugins = self.plugins;
         for id in &self.order {
-            if let Some(entry) = plugins.remove(id) {
-                if entry.enabled {
-                    if let Err(AppError::DuplicatePlugin { plugin_name }) =
-                        app.add_boxed_plugin(entry.plugin)
-                    {
-                        panic!(
-                            "Error adding plugin {plugin_name} in group: plugin was already added in application"
-                        );
-                    }
-                }
+            if let Some(entry) = plugins.remove(id)
+                && entry.enabled
+                && let Err(AppError::DuplicatePlugin { plugin_name }) =
+                    app.add_boxed_plugin(entry.plugin)
+            {
+                panic!(
+                    "Error adding plugin {plugin_name} in group: plugin was already added in application"
+                );
             }
         }
     }

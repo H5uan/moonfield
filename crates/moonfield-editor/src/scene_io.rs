@@ -24,7 +24,7 @@ use moonfield_math::Transform;
 use moonfield_render_feature::mesh::{Mesh, MeshHandle, MeshRenderer};
 #[cfg(feature = "splat")]
 use moonfield_render_feature::splat::cloud::{SplatCloud, SplatCloudHandle};
-use moonfield_scene::{HandleTemplate, SceneError, SceneRegistry, SceneTemplate, NAME};
+use moonfield_scene::{HandleTemplate, NAME, SceneError, SceneRegistry, SceneTemplate};
 
 /// The color a mesh entity gets when it is created from a file: fresh
 /// `load_asset` spawns and scene-file loads (the path-string entry does not

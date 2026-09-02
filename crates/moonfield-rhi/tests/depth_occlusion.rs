@@ -113,8 +113,8 @@ float4 main(PsInput input) : SV_TARGET
             "main",
         )
         .expect("fragment shader");
-    let vertex_shader = ShaderModule::from_spirv(&device, &vertex_spirv).expect("vs module");
-    let fragment_shader = ShaderModule::from_spirv(&device, &fragment_spirv).expect("fs module");
+    let vertex_shader = ShaderModule::from_compiled(&device, &vertex_spirv).expect("vs module");
+    let fragment_shader = ShaderModule::from_compiled(&device, &fragment_spirv).expect("fs module");
 
     let target = OffscreenTarget::new_with_depth(&device, SIZE, SIZE, Format::B8G8R8A8Unorm)
         .expect("target");

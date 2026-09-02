@@ -6,7 +6,7 @@
 //! iteration is cache-friendly.
 
 use std::{
-    alloc::{alloc, dealloc, handle_alloc_error, Layout},
+    alloc::{Layout, alloc, dealloc, handle_alloc_error},
     any::TypeId,
     collections::HashMap,
     hash::{BuildHasher, BuildHasherDefault, Hasher},
@@ -14,7 +14,7 @@ use std::{
 };
 
 use crate::{
-    borrow::AtomicBorrow, change_detection::ComponentTicks, component_ref::ComponentRef, Component,
+    Component, borrow::AtomicBorrow, change_detection::ComponentTicks, component_ref::ComponentRef,
 };
 
 /// A [`Hasher`] that forwards the `TypeId` value directly.
@@ -121,7 +121,9 @@ impl ComponentMeta {
     /// Construct a component meta for a given component type.
     pub fn of<T: 'static>() -> Self {
         unsafe fn drop_ptr<T>(x: *mut u8) {
-            x.cast::<T>().drop_in_place();
+            unsafe {
+                x.cast::<T>().drop_in_place();
+            }
         }
 
         Self {
@@ -164,7 +166,7 @@ impl ComponentMeta {
     /// `data` must point to a valid, initialized value of the component type
     /// described by this meta, and must not be used again afterward.
     pub unsafe fn drop_in_place(&self, data: *mut u8) {
-        (self.drop_fn)(data)
+        unsafe { (self.drop_fn)(data) }
     }
 
     /// The raw drop shim function pointer.
@@ -346,8 +348,10 @@ impl Archetype {
     /// The caller must ensure the row is live and tick access does not race
     /// with a writer.
     pub(crate) unsafe fn read_ticks(&self, column: usize, row: u32) -> ComponentTicks {
-        debug_assert!(row < self.len);
-        *self.data[column].ticks.as_ptr().add(row as usize)
+        unsafe {
+            debug_assert!(row < self.len);
+            *self.data[column].ticks.as_ptr().add(row as usize)
+        }
     }
 
     /// Get the address of the tick array for `column`, parallel to the column's
@@ -358,7 +362,7 @@ impl Archetype {
     /// `column` must be in bounds. Access to the rows must respect the column's
     /// borrow state.
     pub(crate) unsafe fn ticks_base(&self, column: usize) -> NonNull<ComponentTicks> {
-        self.data.get_unchecked(column).ticks
+        unsafe { self.data.get_unchecked(column).ticks }
     }
 
     /// Get the address of the first `T` component, given a state index from
@@ -533,15 +537,17 @@ impl Archetype {
         size: usize,
         index: u32,
     ) -> Option<NonNull<u8>> {
-        debug_assert!(index <= self.len());
-        Some(NonNull::new_unchecked(
-            self.data
-                .get_unchecked(*self.index.get(&ty)?)
-                .raw_data
-                .as_ptr()
-                .add(size * index as usize)
-                .cast::<u8>(),
-        ))
+        unsafe {
+            debug_assert!(index <= self.len());
+            Some(NonNull::new_unchecked(
+                self.data
+                    .get_unchecked(*self.index.get(&ty)?)
+                    .raw_data
+                    .as_ptr()
+                    .add(size * index as usize)
+                    .cast::<u8>(),
+            ))
+        }
     }
 
     /// Increase capacity by exactly `increment`, reallocating every column.
@@ -685,35 +691,37 @@ impl Archetype {
     ///
     /// `index` must be in-bounds and no column may be borrowed.
     pub(crate) unsafe fn remove(&mut self, index: u32, drop: bool) -> Option<u32> {
-        let last = self.len - 1;
+        unsafe {
+            let last = self.len - 1;
 
-        for (component_meta, data) in self.metas.iter().zip(&*self.data) {
-            let removed = data
-                .raw_data
-                .as_ptr()
-                .add(index as usize * component_meta.layout().size());
-            if drop {
-                (component_meta.drop_fn)(removed);
-            }
-            // use the last to overwrite the removed entity
-            if index != last {
-                let moved = data
+            for (component_meta, data) in self.metas.iter().zip(&*self.data) {
+                let removed = data
                     .raw_data
                     .as_ptr()
-                    .add(last as usize * component_meta.layout().size());
-                ptr::copy_nonoverlapping(moved, removed, component_meta.layout().size());
-                // The tick row follows its component row.
-                let ticks = data.ticks.as_ptr();
-                *ticks.add(index as usize) = *ticks.add(last as usize);
+                    .add(index as usize * component_meta.layout().size());
+                if drop {
+                    (component_meta.drop_fn)(removed);
+                }
+                // use the last to overwrite the removed entity
+                if index != last {
+                    let moved = data
+                        .raw_data
+                        .as_ptr()
+                        .add(last as usize * component_meta.layout().size());
+                    ptr::copy_nonoverlapping(moved, removed, component_meta.layout().size());
+                    // The tick row follows its component row.
+                    let ticks = data.ticks.as_ptr();
+                    *ticks.add(index as usize) = *ticks.add(last as usize);
+                }
             }
-        }
 
-        self.len = last;
-        if index != last {
-            self.entities[index as usize] = self.entities[last as usize];
-            Some(self.entities[last as usize])
-        } else {
-            None
+            self.len = last;
+            if index != last {
+                self.entities[index as usize] = self.entities[last as usize];
+                Some(self.entities[last as usize])
+            } else {
+                None
+            }
         }
     }
 
@@ -731,30 +739,32 @@ impl Archetype {
         index: u32,
         mut f: impl FnMut(*mut u8, TypeId, usize),
     ) -> Option<u32> {
-        let last = self.len - 1;
-        for (component_meta, data) in self.metas.iter().zip(&*self.data) {
-            let moved_out = data
-                .raw_data
-                .as_ptr()
-                .add(index as usize * component_meta.layout.size());
-            f(moved_out, component_meta.id, component_meta.layout().size());
-            if index != last {
-                let moved = data
+        unsafe {
+            let last = self.len - 1;
+            for (component_meta, data) in self.metas.iter().zip(&*self.data) {
+                let moved_out = data
                     .raw_data
                     .as_ptr()
-                    .add(last as usize * component_meta.layout.size());
-                ptr::copy_nonoverlapping(moved, moved_out, component_meta.layout.size());
-                // The tick row follows its component row.
-                let ticks = data.ticks.as_ptr();
-                *ticks.add(index as usize) = *ticks.add(last as usize);
+                    .add(index as usize * component_meta.layout.size());
+                f(moved_out, component_meta.id, component_meta.layout().size());
+                if index != last {
+                    let moved = data
+                        .raw_data
+                        .as_ptr()
+                        .add(last as usize * component_meta.layout.size());
+                    ptr::copy_nonoverlapping(moved, moved_out, component_meta.layout.size());
+                    // The tick row follows its component row.
+                    let ticks = data.ticks.as_ptr();
+                    *ticks.add(index as usize) = *ticks.add(last as usize);
+                }
             }
-        }
-        self.len -= 1;
-        if index != last {
-            self.entities[index as usize] = self.entities[last as usize];
-            Some(self.entities[last as usize])
-        } else {
-            None
+            self.len -= 1;
+            if index != last {
+                self.entities[index as usize] = self.entities[last as usize];
+                Some(self.entities[last as usize])
+            } else {
+                None
+            }
         }
     }
 
@@ -771,8 +781,10 @@ impl Archetype {
         size: usize,
         index: u32,
     ) {
-        let ptr = self.get_ptr(ty, size, index).unwrap().as_ptr().cast::<u8>();
-        ptr::copy_nonoverlapping(component, ptr, size);
+        unsafe {
+            let ptr = self.get_ptr(ty, size, index).unwrap().as_ptr().cast::<u8>();
+            ptr::copy_nonoverlapping(component, ptr, size);
+        }
     }
 
     /// Add components from another archetype with identical components.
@@ -783,23 +795,25 @@ impl Archetype {
     ///
     /// Component types must match exactly.
     pub(crate) unsafe fn merge(&mut self, mut other: Archetype) {
-        self.reserve(other.len);
-        for ((info, dst), src) in self.metas.iter().zip(&*self.data).zip(&*other.data) {
-            dst.raw_data
-                .as_ptr()
-                .add(self.len as usize * info.layout.size())
-                .copy_from_nonoverlapping(
-                    src.raw_data.as_ptr(),
-                    other.len as usize * info.layout.size(),
-                );
-            dst.ticks
-                .as_ptr()
-                .add(self.len as usize)
-                .copy_from_nonoverlapping(src.ticks.as_ptr(), other.len as usize);
+        unsafe {
+            self.reserve(other.len);
+            for ((info, dst), src) in self.metas.iter().zip(&*self.data).zip(&*other.data) {
+                dst.raw_data
+                    .as_ptr()
+                    .add(self.len as usize * info.layout.size())
+                    .copy_from_nonoverlapping(
+                        src.raw_data.as_ptr(),
+                        other.len as usize * info.layout.size(),
+                    );
+                dst.ticks
+                    .as_ptr()
+                    .add(self.len as usize)
+                    .copy_from_nonoverlapping(src.ticks.as_ptr(), other.len as usize);
+            }
+            self.len += other.len;
+            // Transfer ownership of the rows to `self`; `other` must not drop them.
+            other.len = 0;
         }
-        self.len += other.len;
-        // Transfer ownership of the rows to `self`; `other` must not drop them.
-        other.len = 0;
     }
 
     /// Raw IDs of the entities in this archetype.

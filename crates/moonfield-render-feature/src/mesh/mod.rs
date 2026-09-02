@@ -15,7 +15,7 @@ use moonfield_app::prelude::World;
 use moonfield_asset::{AssetId, AssetRevision, Assets, Handle};
 use moonfield_rhi::{Buffer, BufferUsage, RenderDevice};
 
-use crate::mesh::gltf::{import_gltf_mesh, parse_gltf_mesh, MeshGltfError};
+use crate::mesh::gltf::{MeshGltfError, import_gltf_mesh, parse_gltf_mesh};
 
 /// Errors loading a [`Mesh`] from a file.
 #[derive(Debug, thiserror::Error)]

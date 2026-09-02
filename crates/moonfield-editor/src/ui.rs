@@ -6,14 +6,14 @@
 //! as a pure world-reading function so it can be tested without a display.
 
 use egui_dock::{DockArea, DockState, NodeIndex, TabViewer};
-use moonfield_camera::{view_matrix, Camera, PrimaryCamera};
+use moonfield_camera::{Camera, PrimaryCamera, view_matrix};
 use moonfield_ecs::{ChildOf, Children, Entity, Name, RelationshipTarget, World};
 use moonfield_math::{GlobalTransform, Transform};
 use moonfield_scene::SceneRegistry;
 
 use crate::interaction::{
-    hit_test, screen_to_ray, world_to_screen, world_trs_to_local, GizmoDrag, GizmoFrame,
-    GizmoHandle, GizmoMode, OrbitCamera,
+    GizmoDrag, GizmoFrame, GizmoHandle, GizmoMode, OrbitCamera, hit_test, screen_to_ray,
+    world_to_screen, world_trs_to_local,
 };
 use crate::theme;
 
@@ -524,24 +524,25 @@ fn gizmo(ui: &egui::Ui, context: &mut TabContext, rect: egui::Rect, response: &e
     }
 
     // A new drag starts when the primary button goes down on a handle.
-    if drag.is_none() && response.drag_started_by(egui::PointerButton::Primary) {
-        if let (Some(pointer), Some(center)) = (response.interact_pointer_pos(), center) {
-            // Debug seam: MOONFIELD_EDITOR_DEBUG_GIZMO=1 logs drag starts.
-            if std::env::var_os("MOONFIELD_EDITOR_DEBUG_GIZMO").is_some() {
-                let hit = hit_test(mode, &frame, view_proj, rect, pointer);
-                eprintln!("[gizmo-debug] drag_started pointer={pointer:?} hit={hit:?}");
-            }
-            if let Some(handle) = hit_test(mode, &frame, view_proj, rect, pointer) {
-                drag = GizmoDrag::begin(
-                    mode,
-                    handle,
-                    &frame,
-                    screen_to_ray(pointer, rect, view_proj),
-                    pointer,
-                    center,
-                    (translation, rotation, scale),
-                );
-            }
+    if drag.is_none()
+        && response.drag_started_by(egui::PointerButton::Primary)
+        && let (Some(pointer), Some(center)) = (response.interact_pointer_pos(), center)
+    {
+        // Debug seam: MOONFIELD_EDITOR_DEBUG_GIZMO=1 logs drag starts.
+        if std::env::var_os("MOONFIELD_EDITOR_DEBUG_GIZMO").is_some() {
+            let hit = hit_test(mode, &frame, view_proj, rect, pointer);
+            eprintln!("[gizmo-debug] drag_started pointer={pointer:?} hit={hit:?}");
+        }
+        if let Some(handle) = hit_test(mode, &frame, view_proj, rect, pointer) {
+            drag = GizmoDrag::begin(
+                mode,
+                handle,
+                &frame,
+                screen_to_ray(pointer, rect, view_proj),
+                pointer,
+                center,
+                (translation, rotation, scale),
+            );
         }
     }
     *context.gizmo_drag = drag;

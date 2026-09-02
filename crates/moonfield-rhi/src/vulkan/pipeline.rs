@@ -21,6 +21,18 @@ pub enum BlendMode {
     PremultipliedAlpha,
 }
 
+/// One pipeline stage: a compiled shader module bound to a stage slot.
+///
+/// The stage and entry-point name come from the module itself (recorded by
+/// [`ShaderModule::from_compiled`]), so a stage is described by pointing at a
+/// compiled module — the caller never names `VERTEX`/`FRAGMENT` by hand and
+/// cannot mislabel a shader. Two modules compiled from the same file (e.g.
+/// `egui.slang`'s `vs_main` and `fs_gamma`) are two entries of this type.
+pub struct ShaderStageDesc<'a> {
+    /// The compiled module.
+    pub module: &'a ShaderModule,
+}
+
 /// A Vulkan graphics pipeline.
 pub struct GraphicsPipeline {
     pipeline: vk::Pipeline,
@@ -70,18 +82,73 @@ impl GraphicsPipeline {
         fragment_shader: &ShaderModule,
         vertex_layout: &VertexBufferLayout,
     ) -> Result<Self> {
-        let vertex_entry = std::ffi::CString::new("main").unwrap();
-        let fragment_entry = std::ffi::CString::new("main").unwrap();
+        Self::new_with_stages(
+            device,
+            color_formats,
+            depth_format,
+            &[
+                ShaderStageDesc {
+                    module: vertex_shader,
+                },
+                ShaderStageDesc {
+                    module: fragment_shader,
+                },
+            ],
+            vertex_layout,
+        )
+    }
 
-        let vertex_stage = vk::PipelineShaderStageCreateInfo::default()
-            .stage(vk::ShaderStageFlags::VERTEX)
-            .module(vertex_shader.raw())
-            .name(&vertex_entry);
-        let fragment_stage = vk::PipelineShaderStageCreateInfo::default()
-            .stage(vk::ShaderStageFlags::FRAGMENT)
-            .module(fragment_shader.raw())
-            .name(&fragment_entry);
-        let shader_stages = [vertex_stage, fragment_stage];
+    /// Create a graphics pipeline from an explicit stage list.
+    ///
+    /// Every module's stage (from its `[shader("...")]` compilation) and
+    /// emitted entry-point name are read off the module; the pipeline names
+    /// exactly those stages. This is the general form — the two-stage
+    /// `new_with_options` is a special case, and mesh-shader or tessellation
+    /// pipelines are just longer stage lists. Modules without stage
+    /// information (raw `from_spirv`) are rejected: slot guessing is exactly
+    /// the bug this API removes.
+    pub fn new_with_stages(
+        device: &Device,
+        color_formats: &[Format],
+        depth_format: Option<Format>,
+        stages: &[ShaderStageDesc<'_>],
+        vertex_layout: &VertexBufferLayout,
+    ) -> Result<Self> {
+        // Entry names and the create infos that point at them must live for the
+        // whole pipeline construction; collect the names first so the infos
+        // can borrow them safely.
+        let entries: Result<Vec<_>> = stages
+            .iter()
+            .map(|desc| {
+                std::ffi::CString::new(desc.module.entry().ok_or_else(|| {
+                    Error::Validation(
+                        "shader module has no entry-point name; compile through \
+                             `Compiler` + `ShaderModule::from_compiled`"
+                            .to_string(),
+                    )
+                })?)
+                .map_err(|e| Error::Validation(format!("entry point name is not valid C: {e}")))
+            })
+            .collect();
+        let entries = entries?;
+        let shader_stages: Result<Vec<_>> = stages
+            .iter()
+            .zip(&entries)
+            .map(|(desc, entry)| {
+                let stage = desc.module.stage().ok_or_else(|| {
+                    Error::Validation(
+                        "shader module has no stage information; compile through \
+                         `Compiler` + `ShaderModule::from_compiled`"
+                            .to_string(),
+                    )
+                })?;
+                Ok(vk::PipelineShaderStageCreateInfo::default()
+                    .stage(stage)
+                    .module(desc.module.raw())
+                    .name(entry))
+            })
+            .collect();
+        let shader_stages = shader_stages?;
 
         let binding = vk::VertexInputBindingDescription::default()
             .binding(0)

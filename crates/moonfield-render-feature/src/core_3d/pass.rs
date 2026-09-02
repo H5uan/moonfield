@@ -19,8 +19,8 @@ use moonfield_render_core::{ViewTargets, WindowSurfaces};
 use moonfield_rhi::{
     AttachmentLayout, ClearValue, CommandBuffer, CompareOp, Compiler, CullMode, CullState,
     DepthState, Format, FrontFace, GraphicsPipeline, LoadOp, OffscreenTarget, Rect2d,
-    RenderAttachment, RenderDevice, RenderPassDesc, Result, ShaderModule, StoreOp, VertexAttribute,
-    VertexBufferLayout, VertexFormat, Viewport,
+    RenderAttachment, RenderDevice, RenderPassDesc, Result, RootBinder, ShaderModule, StoreOp,
+    VertexBufferLayout, Viewport,
 };
 use std::collections::HashMap;
 use std::path::PathBuf;
@@ -49,12 +49,39 @@ fn shader_path(name: &str) -> String {
         .into_owned()
 }
 
+/// Compile both stages of `core_3d.slang` and derive the vertex layout and
+/// root blob from the reflected entry points — the shader is the single
+/// source of truth for both.
+fn compile_core_3d(
+    compiler: &Compiler,
+    device: &moonfield_rhi::Device,
+) -> Result<(ShaderModule, ShaderModule, VertexBufferLayout, RootBinder)> {
+    let reflection =
+        compiler.compile_file_to_reflection(&shader_path("core_3d.slang"), "vs_main")?;
+    let vertex_layout = reflection.vertex_layout("vs_main")?;
+    let root = RootBinder::new(&reflection, "vs_main")?;
+    drop(reflection);
+
+    let vertex_shader = ShaderModule::from_compiled(
+        device,
+        &compiler.compile_file_to_spirv(&shader_path("core_3d.slang"), "vs_main")?,
+    )?;
+    let fragment_shader = ShaderModule::from_compiled(
+        device,
+        &compiler.compile_file_to_spirv(&shader_path("core_3d.slang"), "fs_main")?,
+    )?;
+    Ok((vertex_shader, fragment_shader, vertex_layout, root))
+}
+
 /// The flat-lit mesh pipeline of the core 3D pass, as a render-world
 /// resource (lazily created by [`main_opaque_pass_3d`] from the
 /// [`RenderDevice`], the plain-data counterpart of Bevy's
 /// `init_gpu_resource`).
 pub struct Core3dPipeline {
     pipeline: GraphicsPipeline,
+    /// Reflection-built root blob template (`Ptr<DrawData>` → one GPU
+    /// address); draws clone it, set the pointer, and push it.
+    root: RootBinder,
 }
 
 impl Core3dPipeline {
@@ -62,21 +89,8 @@ impl Core3dPipeline {
     pub fn new(render_device: &RenderDevice) -> Result<Self> {
         let device = render_device.device();
         let compiler = Compiler::new()?;
-        let vertex_spirv =
-            compiler.compile_file_to_spirv(&shader_path("core_3d_vs.slang"), "main")?;
-        let fragment_spirv =
-            compiler.compile_file_to_spirv(&shader_path("core_3d_fs.slang"), "main")?;
-        let vertex_shader = ShaderModule::from_spirv(device, &vertex_spirv)?;
-        let fragment_shader = ShaderModule::from_spirv(device, &fragment_spirv)?;
-
-        let vertex_layout = VertexBufferLayout {
-            stride: std::mem::size_of::<[f32; 3]>() as u32,
-            attributes: vec![VertexAttribute {
-                location: 0,
-                format: VertexFormat::Float32x3,
-                offset: 0,
-            }],
-        };
+        let (vertex_shader, fragment_shader, vertex_layout, root) =
+            compile_core_3d(&compiler, device)?;
         // Descriptor-heap pipeline: per-draw root pointers go through `push_data`.
         let pipeline = GraphicsPipeline::new_with_options(
             device,
@@ -86,12 +100,18 @@ impl Core3dPipeline {
             &fragment_shader,
             &vertex_layout,
         )?;
-        Ok(Self { pipeline })
+        Ok(Self { pipeline, root })
     }
 
     /// The graphics pipeline for per-draw binding.
     pub fn pipeline(&self) -> &GraphicsPipeline {
         &self.pipeline
+    }
+
+    /// A cloneable root-blob template; draws fill the `root` pointer and push
+    /// the blob before each draw.
+    pub fn root(&self) -> &RootBinder {
+        &self.root
     }
 }
 
@@ -241,12 +261,12 @@ pub fn record_view_pass(
 /// Ordering: registered `.after(acquire_window_frames)` and
 /// `.before(submit_window_frames)` by [`RenderFeaturePlugin`].
 pub fn main_opaque_pass_3d(world: &mut World) {
-    if !world.contains_resource::<FrameDrawArena>() {
-        if let Some(render_device) = world.get_resource::<RenderDevice>().map(|d| (*d).clone()) {
-            match FrameDrawArena::new(render_device.device()) {
-                Ok(arena) => world.insert_resource(arena),
-                Err(e) => error!("failed to create frame draw arena: {e}"),
-            }
+    if !world.contains_resource::<FrameDrawArena>()
+        && let Some(render_device) = world.get_resource::<RenderDevice>().map(|d| (*d).clone())
+    {
+        match FrameDrawArena::new(render_device.device()) {
+            Ok(arena) => world.insert_resource(arena),
+            Err(e) => error!("failed to create frame draw arena: {e}"),
         }
     }
     if !world.contains_resource::<Core3dPipeline>() {
@@ -287,10 +307,10 @@ pub fn main_opaque_pass_3d(world: &mut World) {
         return;
     };
 
-    if let Some(slot) = frame_slot {
-        if let Some(arena) = world.get_resource::<FrameDrawArena>() {
-            arena.begin_frame(slot);
-        }
+    if let Some(slot) = frame_slot
+        && let Some(arena) = world.get_resource::<FrameDrawArena>()
+    {
+        arena.begin_frame(slot);
     }
 
     // Record every offscreen target: views draw into their target; targets

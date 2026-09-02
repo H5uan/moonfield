@@ -38,7 +38,7 @@ pub mod transform;
 pub mod volumes;
 
 pub use bounding::{
-    aabb_from_points, intersects_volume, sphere_from_points, BoundingVolume, IntersectsVolume,
+    BoundingVolume, IntersectsVolume, aabb_from_points, intersects_volume, sphere_from_points,
 };
 pub use direction::{Dir3, DirError};
 pub use ray::Ray3d;

@@ -2,10 +2,10 @@
 
 use moonfield_app::prelude::IntoSystemConfigs;
 use moonfield_app::{App, Plugin, Render, RenderPrepare, RenderQueue};
-use moonfield_render_core::{extract_with_transform, DrawFunctions};
+use moonfield_render_core::{DrawFunctions, extract_with_transform};
 
-use crate::mesh::{extract_mesh_assets, prepare_meshes, Mesh, MeshRenderer, PreparedGpuMeshes};
-use crate::render_phase::{queue_opaque_3d, DrawMesh, Opaque3d, Opaque3dDrawFunction};
+use crate::mesh::{Mesh, MeshRenderer, PreparedGpuMeshes, extract_mesh_assets, prepare_meshes};
+use crate::render_phase::{DrawMesh, Opaque3d, Opaque3dDrawFunction, queue_opaque_3d};
 #[cfg(feature = "splat")]
 use crate::splat::cloud::SplatCloud;
 
@@ -63,14 +63,16 @@ mod tests {
     fn render_feature_plugin_registers_asset_stores() {
         let mut app = App::new();
         app.add_plugin(RenderFeaturePlugin);
-        assert!(app
-            .world()
-            .contains_resource::<moonfield_asset::Assets<Mesh>>());
+        assert!(
+            app.world()
+                .contains_resource::<moonfield_asset::Assets<Mesh>>()
+        );
         assert!(app.render_world().contains_resource::<PreparedGpuMeshes>());
         #[cfg(feature = "splat")]
-        assert!(app
-            .world()
-            .contains_resource::<moonfield_asset::Assets<SplatCloud>>());
+        assert!(
+            app.world()
+                .contains_resource::<moonfield_asset::Assets<SplatCloud>>()
+        );
     }
 
     #[test]
@@ -101,12 +103,13 @@ mod tests {
             .get(referenced.id())
             .unwrap()
             .revision;
-        assert!(app
-            .render_world()
-            .get_resource::<crate::mesh::ExtractedMeshes>()
-            .unwrap()
-            .get(unused.id())
-            .is_none());
+        assert!(
+            app.render_world()
+                .get_resource::<crate::mesh::ExtractedMeshes>()
+                .unwrap()
+                .get(unused.id())
+                .is_none()
+        );
 
         app.world()
             .get_resource_mut::<moonfield_asset::Assets<Mesh>>()
@@ -129,12 +132,13 @@ mod tests {
             .remove(&referenced)
             .unwrap();
         app.render();
-        assert!(app
-            .render_world()
-            .get_resource::<crate::mesh::ExtractedMeshes>()
-            .unwrap()
-            .get(referenced.id())
-            .is_none());
+        assert!(
+            app.render_world()
+                .get_resource::<crate::mesh::ExtractedMeshes>()
+                .unwrap()
+                .get(referenced.id())
+                .is_none()
+        );
     }
 
     #[test]

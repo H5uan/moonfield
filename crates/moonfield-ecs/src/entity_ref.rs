@@ -1,4 +1,4 @@
-use crate::{archetype::Archetype, entities::EntityMeta, Component, Entity};
+use crate::{Component, Entity, archetype::Archetype, entities::EntityMeta};
 
 #[derive(Copy, Clone)]
 pub struct EntityRef<'a> {

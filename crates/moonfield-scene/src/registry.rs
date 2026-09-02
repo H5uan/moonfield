@@ -25,8 +25,8 @@
 use std::collections::HashMap;
 
 use moonfield_ecs::{Component, Entity, World};
-use serde::de::DeserializeOwned;
 use serde::Serialize;
+use serde::de::DeserializeOwned;
 
 use crate::{SceneError, SceneTemplate};
 

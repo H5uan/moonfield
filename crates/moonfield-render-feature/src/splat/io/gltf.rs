@@ -532,10 +532,12 @@ mod tests {
         let scene = load_splat_gltf(&splat_glb(&attrs, Some(KERNEL_ELLIPSE)), None).unwrap();
         assert_eq!(scene.len(), 2);
         assert_eq!(scene.sh_dc[0], [0.1, -0.2, 0.3]);
-        assert!(scene
-            .sh_rest
-            .iter()
-            .all(|rest| rest.iter().all(|&v| v == 0.0)));
+        assert!(
+            scene
+                .sh_rest
+                .iter()
+                .all(|rest| rest.iter().all(|&v| v == 0.0))
+        );
     }
 
     #[test]

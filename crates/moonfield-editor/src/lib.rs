@@ -34,9 +34,9 @@ pub use scene_io::{editor_asset_server, load_asset};
 use moonfield_app::prelude::{IntoSystemConfigs, PreRender, Render, World};
 use moonfield_app::{App, Plugin};
 use moonfield_camera::{PrimaryCamera, RenderTarget};
-use moonfield_ecs::{ensure_global_transforms, MessageCursor, Messages};
+use moonfield_ecs::{MessageCursor, Messages, ensure_global_transforms};
 use moonfield_log::error;
-use moonfield_render_core::{ViewTargets, WindowFrameDemand, WindowSurfaces, MAX_FRAMES_IN_FLIGHT};
+use moonfield_render_core::{MAX_FRAMES_IN_FLIGHT, ViewTargets, WindowFrameDemand, WindowSurfaces};
 use moonfield_render_feature::core_3d::pass::RenderTargetSizes;
 use moonfield_rhi::{
     AttachmentLayout, ClearValue, LoadOp, Rect2d, RenderAttachment, RenderDevice, RenderPassDesc,
@@ -374,14 +374,12 @@ fn editor_prepare(world: &mut World) {
     });
     drop(pending);
 
-    if let Ok(frames) = std::env::var("MOONFIELD_EDITOR_AUTO_CLOSE") {
-        if let Ok(limit) = frames.parse::<u64>() {
-            if state.frames_rendered >= limit {
-                if let Some(ctrl) = world.get_resource::<WindowControl>() {
-                    ctrl.request_exit();
-                }
-            }
-        }
+    if let Ok(frames) = std::env::var("MOONFIELD_EDITOR_AUTO_CLOSE")
+        && let Ok(limit) = frames.parse::<u64>()
+        && state.frames_rendered >= limit
+        && let Some(ctrl) = world.get_resource::<WindowControl>()
+    {
+        ctrl.request_exit();
     }
 
     world
@@ -404,10 +402,10 @@ fn apply_orbit_camera(world: &mut World, camera: &interaction::OrbitCamera) {
             break;
         }
     }
-    if let Some(entity) = target {
-        if let Some(mut transform) = world.get_component_mut::<moonfield_math::Transform>(entity) {
-            *transform = camera.transform();
-        }
+    if let Some(entity) = target
+        && let Some(mut transform) = world.get_component_mut::<moonfield_math::Transform>(entity)
+    {
+        *transform = camera.transform();
     }
 }
 
@@ -438,7 +436,7 @@ fn prepare_egui_frame(world: &mut World) {
         let Some(mut surfaces) = world.get_resource_mut::<WindowSurfaces>() else {
             return;
         };
-        let info = surfaces.values_mut().next().and_then(|surface| {
+        surfaces.values_mut().next().and_then(|surface| {
             // Only prepare against an acquired frame: its slot's fence was
             // waited in `acquire_window_frames`, so writing the slot's buffers
             // and deferred-free ring cannot race the GPU.
@@ -449,8 +447,7 @@ fn prepare_egui_frame(world: &mut World) {
                 .format()
                 .ok()
                 .map(|(format, srgb)| (format, srgb, surface.frame_index(), surface.extent()))
-        });
-        info
+        })
     };
     let Some((color_format, srgb_framebuffer, frame_slot, _extent)) = surface_info else {
         return;
@@ -653,10 +650,9 @@ fn editor_frame_done(world: &mut World) {
             .ok()
             .and_then(|value| value.parse::<u64>().ok())
             == Some(presented_frames)
+        && let Err(error) = dump_viewport_target(world)
     {
-        if let Err(error) = dump_viewport_target(world) {
-            error!("failed to dump viewport target: {error}");
-        }
+        error!("failed to dump viewport target: {error}");
     }
 }
 
@@ -688,8 +684,8 @@ fn dump_viewport_target(world: &World) -> Result<(), String> {
 #[cfg(test)]
 mod tests {
     use super::{
-        merge_prepared_frames, EditorFeedback, EditorFeedbackChannel, EditorPlugin,
-        PendingEditorFrame, PreparedEditorFrame,
+        EditorFeedback, EditorFeedbackChannel, EditorPlugin, PendingEditorFrame,
+        PreparedEditorFrame, merge_prepared_frames,
     };
     use moonfield_app::App;
     use moonfield_render_core::WindowFrameDemand;
@@ -723,14 +719,18 @@ mod tests {
 
         let mut merged = merge_prepared_frames(stale, latest);
 
-        assert!(merged
-            .textures_delta
-            .set
-            .contains_key(&egui::TextureId::Managed(1)));
-        assert!(merged
-            .textures_delta
-            .free
-            .contains(&egui::TextureId::Managed(7)));
+        assert!(
+            merged
+                .textures_delta
+                .set
+                .contains_key(&egui::TextureId::Managed(1))
+        );
+        assert!(
+            merged
+                .textures_delta
+                .free
+                .contains(&egui::TextureId::Managed(7))
+        );
         // Dropping must not trip epaint's applied-deltas assert — the
         // merged delta was deliberately left applied here.
         merged.textures_delta.clear();
@@ -780,15 +780,17 @@ mod tests {
             .expect("PendingEditorFrame registered in build")
             .0 = Some(prepared_frame());
         app.render();
-        assert!(app
-            .render_world()
-            .contains_resource::<PreparedEditorFrame>());
-        assert!(app
-            .world()
-            .get_resource::<PendingEditorFrame>()
-            .expect("PendingEditorFrame registered in build")
-            .0
-            .is_none());
+        assert!(
+            app.render_world()
+                .contains_resource::<PreparedEditorFrame>()
+        );
+        assert!(
+            app.world()
+                .get_resource::<PendingEditorFrame>()
+                .expect("PendingEditorFrame registered in build")
+                .0
+                .is_none()
+        );
 
         // The render-world frame was never consumed (no device), so the next
         // frame must merge into it rather than replace it.
@@ -806,9 +808,11 @@ mod tests {
             .render_world()
             .get_resource::<PreparedEditorFrame>()
             .expect("merged frame in render world");
-        assert!(merged
-            .textures_delta
-            .free
-            .contains(&egui::TextureId::Managed(3)));
+        assert!(
+            merged
+                .textures_delta
+                .free
+                .contains(&egui::TextureId::Managed(3))
+        );
     }
 }

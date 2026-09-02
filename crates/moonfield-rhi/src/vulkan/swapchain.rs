@@ -164,7 +164,7 @@ impl Swapchain {
         let present_modes = surface.present_modes(physical_device)?;
 
         if formats.is_empty() {
-            return Err(Error::Unsupported);
+            return Err(Error::Unsupported("no surface formats".to_string()));
         }
 
         let surface_format = formats

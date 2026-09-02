@@ -11,10 +11,10 @@
 //! MOONFIELD_EDITOR_AUTO_CLOSE=5 cargo run
 //! ```
 
-use moonfield_app::prelude::{HierarchyPlugin, Name, Startup, World};
 use moonfield_app::App;
+use moonfield_app::prelude::{HierarchyPlugin, Name, Startup, World};
 use moonfield_camera::{Camera, PrimaryCamera};
-use moonfield_editor::{load_asset, EditorPlugin};
+use moonfield_editor::{EditorPlugin, load_asset};
 use moonfield_log::LogPlugin;
 use moonfield_math::{Transform, Vec3};
 use moonfield_render_core::RenderPlugin;

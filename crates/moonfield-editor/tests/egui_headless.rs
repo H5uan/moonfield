@@ -9,7 +9,7 @@
 //! without a Vulkan driver.
 
 use moonfield_editor::egui_vk::{
-    record_egui, EguiFrameResources, EguiOptions, EguiPipeline, EguiTextures,
+    EguiFrameResources, EguiOptions, EguiPipeline, EguiTextures, record_egui,
 };
 use moonfield_rhi::{
     AttachmentLayout, ClearValue, CommandBufferUsage, CommandPool, Format, LoadOp, OffscreenTarget,

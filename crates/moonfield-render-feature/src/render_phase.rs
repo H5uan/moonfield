@@ -15,8 +15,8 @@ use moonfield_math::{GlobalTransform, Mat4, Vec3A};
 use moonfield_render_core::{DrawFunction, DrawFunctionId, MainEntity, OrderedFloat, PhaseItem};
 use moonfield_rhi::{BumpAlloc, CommandBuffer, GpuBumpAllocator, IndexFormat};
 
-use crate::core_3d::pass::{Core3dPipeline, RenderTargetSizes, INITIAL_HEIGHT, INITIAL_WIDTH};
 use crate::core_3d::Core3dFrame;
+use crate::core_3d::pass::{Core3dPipeline, INITIAL_HEIGHT, INITIAL_WIDTH, RenderTargetSizes};
 use crate::mesh::{ExtractedMeshes, MeshRenderer, PreparedGpuMeshes};
 
 /// One opaque mesh draw queued for a view.
@@ -131,12 +131,21 @@ impl DrawFunction<Opaque3d> for DrawMesh {
             };
         }
 
-        let pipeline = pipeline.pipeline();
-        command_buffer.bind_graphics_pipeline(pipeline);
+        let graphics_pipeline = pipeline.pipeline();
+        command_buffer.bind_graphics_pipeline(graphics_pipeline);
         command_buffer.bind_vertex_buffers(0, &[gpu.vertex()], &[0]);
         command_buffer.bind_index_buffer(gpu.index(), 0, IndexFormat::Uint32);
 
-        command_buffer.push_data(0, bytemuck::bytes_of(&[root.gpu.as_raw()]));
+        // The root blob is built from reflection: clone the pipeline's
+        // template, write the per-draw GPU address into the `Ptr<DrawData>`
+        // root, and push the blob. Offsets/sizes come from the shader, not a
+        // hand-synced struct.
+        let mut root_blob = pipeline.root().clone();
+        if let Err(e) = root_blob.set_pointer("root", root.gpu.as_raw()) {
+            moonfield_log::error!("root binding failed: {e}");
+            return;
+        }
+        command_buffer.push_data(0, root_blob.blob());
         command_buffer.draw_indexed(gpu.index_count(), 1, 0, 0, 0);
     }
 }
@@ -216,7 +225,7 @@ pub fn queue_opaque_3d(world: &mut World) {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::{mesh::Mesh, RenderFeaturePlugin};
+    use crate::{RenderFeaturePlugin, mesh::Mesh};
     use moonfield_app::App;
     use moonfield_asset::Assets;
     use moonfield_camera::{Camera, PrimaryCamera};
@@ -260,9 +269,11 @@ mod tests {
         assert_eq!(phase.items().len(), 2);
         assert_eq!(phase.items()[0].mesh, near_mesh.id());
         assert_eq!(phase.items()[1].mesh, far_mesh.id());
-        assert!(!phase
-            .items()
-            .iter()
-            .any(|item| item.mesh == removed_mesh.id()));
+        assert!(
+            !phase
+                .items()
+                .iter()
+                .any(|item| item.mesh == removed_mesh.id())
+        );
     }
 }

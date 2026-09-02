@@ -25,14 +25,14 @@ pub mod prelude {
 
 pub use crate::once::*;
 pub use tracing::{
-    self, debug, debug_span, error, error_span, event, info, info_span, trace, trace_span, warn,
-    warn_span, Level,
+    self, Level, debug, debug_span, error, error_span, event, info, info_span, trace, trace_span,
+    warn, warn_span,
 };
 pub use tracing_subscriber;
 
 use moonfield_app::{App, Plugin};
 use tracing_log::LogTracer;
-use tracing_subscriber::{layer::Layered, prelude::*, registry::Registry, EnvFilter, Layer};
+use tracing_subscriber::{EnvFilter, Layer, layer::Layered, prelude::*, registry::Registry};
 
 /// A boxed [`Layer`] that can be used with [`LogPlugin::custom_layer`].
 pub type BoxedLayer = Box<dyn Layer<Registry> + Send + Sync + 'static>;

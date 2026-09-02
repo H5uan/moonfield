@@ -88,7 +88,7 @@ fn heap_texture_sampling_roundtrip() {
         )
         .expect("shader compilation");
     eprintln!("MARK: compiled");
-    let module = ShaderModule::from_spirv(&device, &spirv).expect("shader module");
+    let module = ShaderModule::from_compiled(&device, &spirv).expect("shader module");
     let pipeline = ComputePipeline::new(&device, &module).expect("compute pipeline");
 
     let out = GpuAllocation::new(&device, 4 * 16, Memory::Default).expect("out allocation");

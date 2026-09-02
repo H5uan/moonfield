@@ -1,6 +1,6 @@
 //! Render-world camera snapshots and resolved view targets.
 
-use moonfield_camera::{view_matrix, Camera, RenderTarget};
+use moonfield_camera::{Camera, RenderTarget, view_matrix};
 use moonfield_log::error;
 use moonfield_math::{GlobalTransform, Mat4};
 use moonfield_rhi::{Format, OffscreenTarget, RenderDevice};
@@ -86,13 +86,12 @@ impl ViewTargets {
                 }
             }
             std::collections::hash_map::Entry::Occupied(mut entry) => {
-                if entry.get().extent() != (width, height) {
-                    if let Err(e) = entry
+                if entry.get().extent() != (width, height)
+                    && let Err(e) = entry
                         .get_mut()
                         .resize(render_device.device(), width, height)
-                    {
-                        error!("failed to resize view target: {e}");
-                    }
+                {
+                    error!("failed to resize view target: {e}");
                 }
             }
         }

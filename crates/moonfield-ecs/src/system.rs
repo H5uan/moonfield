@@ -22,7 +22,7 @@ use std::cell::{Ref, RefMut};
 use std::marker::PhantomData;
 use std::ops::{Deref, DerefMut};
 
-use crate::{filter::QueryFilter, query::WorldQuery, Entity, Resource, World};
+use crate::{Entity, Resource, World, filter::QueryFilter, query::WorldQuery};
 
 /// A unit of work that operates on a [`World`].
 ///

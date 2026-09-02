@@ -26,12 +26,12 @@ use std::path::Path;
 
 use gltf_json::scene::UnitQuaternion;
 use gltf_json::validation::Checked;
-use gltf_json::{camera, Index, Node, Root, Scene};
+use gltf_json::{Index, Node, Root, Scene, camera};
 use moonfield_camera::Camera;
 use moonfield_ecs::{ChildOf, Children, Entity, TemplateError, World};
 use moonfield_math::{Quat, Transform, Vec3};
 
-use crate::registry::{EntryKind, SceneRegistry, CAMERA, HIERARCHY, NAME, TRANSFORM};
+use crate::registry::{CAMERA, EntryKind, HIERARCHY, NAME, SceneRegistry, TRANSFORM};
 use crate::{ResolvedScene, SceneTemplate};
 
 /// Errors produced while saving or loading a scene document.
@@ -79,37 +79,37 @@ fn save_node(
     let mut components = serde_json::Map::new();
     let mut camera_extras = None;
 
-    if matches!(registry.kind(TRANSFORM), Some(EntryKind::NativeTransform)) {
-        if let Some(transform) = world.get_component::<Transform>(entity) {
-            node.translation = Some(transform.translation.to_array());
-            let rotation = transform.rotation;
-            node.rotation = Some(UnitQuaternion([
-                rotation.x, rotation.y, rotation.z, rotation.w,
-            ]));
-            node.scale = Some(transform.scale.to_array());
-        }
+    if matches!(registry.kind(TRANSFORM), Some(EntryKind::NativeTransform))
+        && let Some(transform) = world.get_component::<Transform>(entity)
+    {
+        node.translation = Some(transform.translation.to_array());
+        let rotation = transform.rotation;
+        node.rotation = Some(UnitQuaternion([
+            rotation.x, rotation.y, rotation.z, rotation.w,
+        ]));
+        node.scale = Some(transform.scale.to_array());
     }
 
-    if matches!(registry.kind(CAMERA), Some(EntryKind::NativeCamera)) {
-        if let Some(engine_camera) = world.get_component::<Camera>(entity) {
-            let camera = camera::Camera {
-                name: None,
-                orthographic: None,
-                perspective: Some(camera::Perspective {
-                    aspect_ratio: None,
-                    yfov: engine_camera.fov_y_radians,
-                    zfar: None,
-                    znear: engine_camera.near,
-                    extensions: None,
-                    extras: None,
-                }),
-                type_: Checked::Valid(camera::Type::Perspective),
+    if matches!(registry.kind(CAMERA), Some(EntryKind::NativeCamera))
+        && let Some(engine_camera) = world.get_component::<Camera>(entity)
+    {
+        let camera = camera::Camera {
+            name: None,
+            orthographic: None,
+            perspective: Some(camera::Perspective {
+                aspect_ratio: None,
+                yfov: engine_camera.fov_y_radians,
+                zfar: None,
+                znear: engine_camera.near,
                 extensions: None,
                 extras: None,
-            };
-            node.camera = Some(root.push(camera));
-            camera_extras = Some(serde_json::json!({ "clear_color": engine_camera.clear_color }));
-        }
+            }),
+            type_: Checked::Valid(camera::Type::Perspective),
+            extensions: None,
+            extras: None,
+        };
+        node.camera = Some(root.push(camera));
+        camera_extras = Some(serde_json::json!({ "clear_color": engine_camera.clear_color }));
     }
 
     for (name, save) in registry.extras_entries() {
@@ -145,19 +145,17 @@ fn save_node(
         )?);
     }
 
-    if hierarchy {
-        if let Some(children) = world.get_component::<Children>(entity) {
-            let mut indices = Vec::new();
-            for &child in children.iter() {
-                // Children without any registered component carry no data;
-                // they (and their subtrees) stay out of the document.
-                if has_registered_component(world, registry, child) {
-                    indices.push(save_node(world, registry, root, child, hierarchy)?);
-                }
+    if hierarchy && let Some(children) = world.get_component::<Children>(entity) {
+        let mut indices = Vec::new();
+        for &child in children.iter() {
+            // Children without any registered component carry no data;
+            // they (and their subtrees) stay out of the document.
+            if has_registered_component(world, registry, child) {
+                indices.push(save_node(world, registry, root, child, hierarchy)?);
             }
-            if !indices.is_empty() {
-                node.children = Some(indices);
-            }
+        }
+        if !indices.is_empty() {
+            node.children = Some(indices);
         }
     }
 
@@ -221,10 +219,10 @@ fn load_node(
 
     let mut templates: Vec<Box<dyn SceneTemplate>> = Vec::new();
 
-    if let Some(node_name) = &node.name {
-        if let Some(EntryKind::Extras { load, .. }) = registry.kind(NAME) {
-            templates.push(load(&serde_json::Value::String(node_name.clone()))?);
-        }
+    if let Some(node_name) = &node.name
+        && let Some(EntryKind::Extras { load, .. }) = registry.kind(NAME)
+    {
+        templates.push(load(&serde_json::Value::String(node_name.clone()))?);
     }
 
     if matches!(registry.kind(TRANSFORM), Some(EntryKind::NativeTransform))
@@ -244,28 +242,28 @@ fn load_node(
         }));
     }
 
-    if matches!(registry.kind(CAMERA), Some(EntryKind::NativeCamera)) {
-        if let Some(camera_index) = node.camera {
-            let gltf_camera = root.cameras.get(camera_index.value()).ok_or_else(|| {
-                SceneError::Invalid(format!(
-                    "camera index {} out of bounds",
-                    camera_index.value()
-                ))
-            })?;
-            // Only perspective cameras map onto the engine's Camera.
-            if let Some(perspective) = &gltf_camera.perspective {
-                let clear_color = extras
-                    .as_ref()
-                    .and_then(|v| v.get("camera"))
-                    .and_then(|v| v.get("clear_color"))
-                    .and_then(|v| serde_json::from_value(v.clone()).ok())
-                    .unwrap_or_else(|| Camera::default().clear_color);
-                templates.push(Box::new(Camera {
-                    fov_y_radians: perspective.yfov,
-                    near: perspective.znear,
-                    clear_color,
-                }));
-            }
+    if matches!(registry.kind(CAMERA), Some(EntryKind::NativeCamera))
+        && let Some(camera_index) = node.camera
+    {
+        let gltf_camera = root.cameras.get(camera_index.value()).ok_or_else(|| {
+            SceneError::Invalid(format!(
+                "camera index {} out of bounds",
+                camera_index.value()
+            ))
+        })?;
+        // Only perspective cameras map onto the engine's Camera.
+        if let Some(perspective) = &gltf_camera.perspective {
+            let clear_color = extras
+                .as_ref()
+                .and_then(|v| v.get("camera"))
+                .and_then(|v| v.get("clear_color"))
+                .and_then(|v| serde_json::from_value(v.clone()).ok())
+                .unwrap_or_else(|| Camera::default().clear_color);
+            templates.push(Box::new(Camera {
+                fov_y_radians: perspective.yfov,
+                near: perspective.znear,
+                clear_color,
+            }));
         }
     }
 

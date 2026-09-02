@@ -11,11 +11,11 @@ use std::sync::{Arc, Mutex};
 use ash::vk;
 use ash::vk::TaggedStructure as _;
 use gpu_allocator::{
-    vulkan::{Allocation, AllocationCreateDesc, AllocationScheme, Allocator},
     MemoryLocation,
+    vulkan::{Allocation, AllocationCreateDesc, AllocationScheme, Allocator},
 };
 
-use crate::{device::Device, shader_module::ShaderModule, Error, Result};
+use crate::{Error, Result, device::Device, shader_module::ShaderModule};
 
 /// GPU memory classes for bindless allocations.
 #[derive(Copy, Clone, Debug, PartialEq, Eq, Default)]
@@ -302,15 +302,14 @@ impl Drop for GpuAllocation {
             self.device.destroy_buffer(self.buffer, None);
         }
 
-        if let Some(allocation) = self.allocation.take() {
-            if let Err(e) = self
+        if let Some(allocation) = self.allocation.take()
+            && let Err(e) = self
                 .allocator
                 .lock()
                 .unwrap_or_else(|e| e.into_inner())
                 .free(allocation)
-            {
-                moonfield_log::error!("failed to free bindless allocation: {e}");
-            }
+        {
+            moonfield_log::error!("failed to free bindless allocation: {e}");
         }
     }
 }
@@ -389,7 +388,26 @@ pub struct ComputePipeline {
 impl ComputePipeline {
     /// Create a compute pipeline from a compiled compute shader module.
     pub fn new(device: &Device, shader: &ShaderModule) -> Result<Self> {
-        let entry = std::ffi::CString::new("main").unwrap();
+        let stage = shader.stage().ok_or_else(|| {
+            Error::Validation(
+                "compute shader module has no stage information; compile through \
+                 `Compiler` + `ShaderModule::from_compiled`"
+                    .to_string(),
+            )
+        })?;
+        if stage != vk::ShaderStageFlags::COMPUTE {
+            return Err(Error::Validation(format!(
+                "compute pipeline received a {stage:?} shader module"
+            )));
+        }
+        let entry = std::ffi::CString::new(shader.entry().ok_or_else(|| {
+            Error::Validation(
+                "compute shader module has no entry-point name; compile through \
+                 `Compiler` + `ShaderModule::from_compiled`"
+                    .to_string(),
+            )
+        })?)
+        .map_err(|e| Error::Validation(format!("entry point name is not valid C: {e}")))?;
         let stage = vk::PipelineShaderStageCreateInfo::default()
             .stage(vk::ShaderStageFlags::COMPUTE)
             .module(shader.raw())

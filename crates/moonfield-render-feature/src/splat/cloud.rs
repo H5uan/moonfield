@@ -12,7 +12,7 @@ use std::path::Path;
 
 use moonfield_asset::Handle;
 
-use crate::splat::io::gltf::{load_splat_gltf, SplatGltfError};
+use crate::splat::io::gltf::{SplatGltfError, load_splat_gltf};
 use crate::splat::scene::GaussianScene;
 
 /// Errors loading a [`SplatCloud`] from a file.

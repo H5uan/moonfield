@@ -2,7 +2,7 @@
 
 use crate::error::{Error, Result};
 use ash::vk;
-use std::ffi::{c_char, CStr};
+use std::ffi::{CStr, c_char};
 
 /// Vulkan instance and entry point.
 pub struct Instance {

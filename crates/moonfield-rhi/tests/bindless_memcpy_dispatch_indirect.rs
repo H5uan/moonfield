@@ -124,7 +124,7 @@ fn bindless_dispatch_indirect_roundtrip() {
     let spirv = compiler
         .compile_source_to_spirv("plus_one", PLUS_ONE_KERNEL, "main")
         .expect("kernel compilation");
-    let module = ShaderModule::from_spirv(&device, &spirv).expect("shader module");
+    let module = ShaderModule::from_compiled(&device, &spirv).expect("shader module");
     let pipeline = ComputePipeline::new(&device, &module).expect("compute pipeline");
 
     let input = GpuAllocation::new(&device, 64, Memory::Default).expect("input allocation");

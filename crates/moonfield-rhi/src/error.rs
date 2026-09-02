@@ -9,7 +9,7 @@ pub type Result<T> = std::result::Result<T, Error>;
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Error {
     /// A requested device capability is not supported.
-    Unsupported,
+    Unsupported(String),
     /// A Vulkan API call returned an error.
     Backend(String),
     /// A resource handle was invalid or already destroyed.
@@ -29,7 +29,7 @@ pub enum Error {
 impl fmt::Display for Error {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
-            Error::Unsupported => write!(f, "unsupported operation"),
+            Error::Unsupported(msg) => write!(f, "unsupported operation: {}", msg),
             Error::Backend(msg) => write!(f, "backend error: {}", msg),
             Error::InvalidHandle => write!(f, "invalid handle"),
             Error::ShaderCompilation(msg) => write!(f, "shader compilation failed: {}", msg),

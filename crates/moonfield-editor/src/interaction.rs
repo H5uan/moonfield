@@ -263,10 +263,10 @@ pub fn hit_test(
                     );
                 }
             }
-            if mode == GizmoMode::Scale {
-                if let Some(center) = world_to_screen(frame.origin, view_proj, rect) {
-                    consider(center.distance(pointer) - 6.0, GizmoHandle::Uniform);
-                }
+            if mode == GizmoMode::Scale
+                && let Some(center) = world_to_screen(frame.origin, view_proj, rect)
+            {
+                consider(center.distance(pointer) - 6.0, GizmoHandle::Uniform);
             }
         }
         GizmoMode::Rotate => {
@@ -532,7 +532,7 @@ pub fn world_trs_to_local(world_trs: WorldTrs, parent: Option<Affine3A>) -> Tran
 #[cfg(test)]
 mod tests {
     use super::*;
-    use moonfield_camera::{view_matrix, Camera};
+    use moonfield_camera::{Camera, view_matrix};
     use moonfield_math::GlobalTransform;
 
     const RECT: egui::Rect =

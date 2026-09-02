@@ -4,12 +4,12 @@ use crate::error::{Error, Result};
 use crate::vulkan::instance::Instance;
 use crate::vulkan::sync::Semaphore;
 use crate::{
-    bindless, DescriptorHeap, DESCRIPTOR_HEAP_IMAGE_CAPACITY, DESCRIPTOR_HEAP_SAMPLER_CAPACITY,
+    DESCRIPTOR_HEAP_IMAGE_CAPACITY, DESCRIPTOR_HEAP_SAMPLER_CAPACITY, DescriptorHeap, bindless,
 };
 use crate::{FrameUploader, UPLOAD_ARENA_SIZE};
 use ash::vk::{self, TaggedStructure as _};
 use gpu_allocator::vulkan::{Allocator, AllocatorCreateDesc};
-use std::ffi::{c_char, CStr};
+use std::ffi::{CStr, c_char};
 use std::sync::{Arc, Mutex, OnceLock};
 
 // Required extensions are demanded unconditionally: the RHI targets recent
@@ -116,16 +116,16 @@ impl QueueFamilyIndices {
                 compute = Some(index);
             }
 
-            if let Some(surface) = surface {
-                if present.is_none()
-                    && instance.get_physical_device_surface_support(physical_device, index, surface)
-                {
-                    present = Some(index);
-                }
+            if let Some(surface) = surface
+                && present.is_none()
+                && instance.get_physical_device_surface_support(physical_device, index, surface)
+            {
+                present = Some(index);
             }
         }
 
-        let graphics = graphics.ok_or(Error::Unsupported)?;
+        let graphics =
+            graphics.ok_or_else(|| Error::Unsupported("no graphics queue family".to_string()))?;
         let present = present.unwrap_or(graphics);
         let compute = compute.unwrap_or(graphics);
 
@@ -206,7 +206,7 @@ impl Device {
                     _ => 2,
                 }
             })
-            .ok_or(Error::Unsupported)?;
+            .ok_or_else(|| Error::Unsupported("no suitable physical device".to_string()))?;
 
         Self::from_physical_device(instance, physical_device, surface)
     }
@@ -664,10 +664,10 @@ impl Drop for Device {
         // (`Buffer`, images) drop before their owning device and release their
         // allocator `Arc`s, so by the time the device drops it is the last
         // referent and `try_unwrap` succeeds.
-        if let Some(allocator) = self.allocator.take() {
-            if let Ok(allocator) = Arc::try_unwrap(allocator) {
-                drop(allocator);
-            }
+        if let Some(allocator) = self.allocator.take()
+            && let Ok(allocator) = Arc::try_unwrap(allocator)
+        {
+            drop(allocator);
         }
         unsafe {
             self.device.destroy_device(None);

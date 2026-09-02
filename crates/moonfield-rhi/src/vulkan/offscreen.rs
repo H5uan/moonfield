@@ -18,8 +18,8 @@ use crate::types::{Filter, Format, SamplerDesc, WrapMode};
 use crate::vulkan::device::Device;
 use crate::{CommandBuffer, CommandPool, DescriptorHeap, SamplerHandle, TextureHandle};
 use ash::vk;
-use gpu_allocator::vulkan::{Allocation, AllocationCreateDesc, AllocationScheme};
 use gpu_allocator::MemoryLocation;
+use gpu_allocator::vulkan::{Allocation, AllocationCreateDesc, AllocationScheme};
 use std::sync::Arc;
 
 /// The target's descriptor-heap slots: the color view's image slot and the

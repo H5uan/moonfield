@@ -69,8 +69,8 @@ PsOutput main(PsInput input)
     let fragment_spirv =
         compiler.compile_source_to_spirv("triangle_fs", fragment_source, "main")?;
 
-    let vertex_shader = ShaderModule::from_spirv(&device, &vertex_spirv)?;
-    let fragment_shader = ShaderModule::from_spirv(&device, &fragment_spirv)?;
+    let vertex_shader = ShaderModule::from_compiled(&device, &vertex_spirv)?;
+    let fragment_shader = ShaderModule::from_compiled(&device, &fragment_spirv)?;
 
     let vertex_layout = VertexBufferLayout {
         stride: std::mem::size_of::<Vertex>() as u32,

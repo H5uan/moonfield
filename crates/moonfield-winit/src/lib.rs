@@ -426,10 +426,10 @@ impl ApplicationHandler<WinitUserEvent> for WinitHandler<'_> {
             WindowEvent::Focused(false) => Some(InputEvent::FocusLost),
             _ => None,
         };
-        if let Some(event) = input_event {
-            if let Some(mut input) = self.app.get_resource_mut::<InputState>() {
-                input.apply_event(event);
-            }
+        if let Some(event) = input_event
+            && let Some(mut input) = self.app.get_resource_mut::<InputState>()
+        {
+            input.apply_event(event);
         }
 
         // Resolve the window entity this event fired for (multi-window
@@ -442,12 +442,11 @@ impl ApplicationHandler<WinitUserEvent> for WinitHandler<'_> {
 
         match event {
             WindowEvent::CloseRequested => {
-                if let Some(window) = window_entity {
-                    if let Some(mut events) =
+                if let Some(window) = window_entity
+                    && let Some(mut events) =
                         self.app.get_resource_mut::<Messages<WindowEventKind>>()
-                    {
-                        events.write(WindowEventKind::CloseRequested { window });
-                    }
+                {
+                    events.write(WindowEventKind::CloseRequested { window });
                 }
                 // Godot's auto_accept_quit: exit immediately by default, unless
                 // `auto_exit_on_close` was turned off to take over close
@@ -496,16 +495,15 @@ impl ApplicationHandler<WinitUserEvent> for WinitHandler<'_> {
             }
             WindowEvent::Focused(focused) => {
                 self.focused = focused;
-                if let Some(window) = window_entity {
-                    if let Some(mut events) =
+                if let Some(window) = window_entity
+                    && let Some(mut events) =
                         self.app.get_resource_mut::<Messages<WindowEventKind>>()
-                    {
-                        events.write(if focused {
-                            WindowEventKind::FocusGained { window }
-                        } else {
-                            WindowEventKind::FocusLost { window }
-                        });
-                    }
+                {
+                    events.write(if focused {
+                        WindowEventKind::FocusGained { window }
+                    } else {
+                        WindowEventKind::FocusLost { window }
+                    });
                 }
             }
             WindowEvent::ModifiersChanged(modifiers) => {

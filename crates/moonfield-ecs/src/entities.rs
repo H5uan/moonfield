@@ -421,7 +421,7 @@ impl Entities {
     pub fn alloc_at(&mut self, entity: Entity) -> Option<Location> {
         self.verify_flushed();
 
-        let loc = if entity.id as usize >= self.meta.len() {
+        if entity.id as usize >= self.meta.len() {
             // ID was never used. We need to resize the meta list and fill the gap between the last used id and the new id.
             self.pending.extend(self.meta.len() as u32..entity.id);
             let new_free_cursor = self.pending.len() as isize;
@@ -442,9 +442,7 @@ impl Entities {
                 &mut self.meta[entity.id as usize].location,
                 EntityMeta::EMPTY.location,
             ))
-        };
-
-        loc
+        }
     }
 
     fn needs_flush(&mut self) -> bool {

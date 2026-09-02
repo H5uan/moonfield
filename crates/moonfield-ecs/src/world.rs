@@ -1,6 +1,6 @@
 use std::any::TypeId;
 use std::borrow::Borrow;
-use std::collections::{hash_map::Entry, HashMap};
+use std::collections::{HashMap, hash_map::Entry};
 use std::hash::{BuildHasherDefault, Hasher};
 use std::sync::atomic::AtomicU64;
 
@@ -292,17 +292,17 @@ impl World {
         self.flush();
 
         let loc = self.entities.alloc_at(entity);
-        if let Some(loc) = loc {
-            if let Some(moved) = unsafe {
+        if let Some(loc) = loc
+            && let Some(moved) = unsafe {
                 // It is possible that entity already exists in this location.
                 // If so, we need to move it to the new location.
                 // Otherwise, we can just insert it.
                 self.archetypes
                     .get_mut(loc.archetype)
                     .remove(loc.index, true)
-            } {
-                self.entities.meta[moved as usize].location.index = loc.index;
             }
+        {
+            self.entities.meta[moved as usize].location.index = loc.index;
         }
 
         self.spawn_inner(entity, components);

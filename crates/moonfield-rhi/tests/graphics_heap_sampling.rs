@@ -13,7 +13,7 @@ use moonfield_rhi::bindless::{GpuAllocation, Memory};
 use moonfield_rhi::{
     AttachmentLayout, ClearValue, CommandBufferUsage, CommandPool, Compiler, Device, Format,
     FrameUploader, GraphicsPipeline, Instance, LoadOp, OffscreenTarget, Rect2d, RenderAttachment,
-    RenderPassDesc, ShaderModule, StoreOp, Texture, VertexBufferLayout, UPLOAD_ARENA_SIZE,
+    RenderPassDesc, ShaderModule, StoreOp, Texture, UPLOAD_ARENA_SIZE, VertexBufferLayout,
 };
 
 const VERTEX: &str = r#"
@@ -84,8 +84,8 @@ fn graphics_heap_sampling_roundtrip() {
             &["spvDescriptorHeapEXT"],
         )
         .expect("fragment shader");
-    let vertex_shader = ShaderModule::from_spirv(&device, &vertex_spirv).expect("vs module");
-    let fragment_shader = ShaderModule::from_spirv(&device, &fragment_spirv).expect("fs module");
+    let vertex_shader = ShaderModule::from_compiled(&device, &vertex_spirv).expect("vs module");
+    let fragment_shader = ShaderModule::from_compiled(&device, &fragment_spirv).expect("fs module");
 
     let vertex_layout = VertexBufferLayout {
         stride: 0,
@@ -201,8 +201,8 @@ float4 main() : SV_TARGET
             &["spvDescriptorHeapEXT"],
         )
         .expect("fragment shader");
-    let vertex_shader = ShaderModule::from_spirv(&device, &vertex_spirv).expect("vs module");
-    let fragment_shader = ShaderModule::from_spirv(&device, &fragment_spirv).expect("fs module");
+    let vertex_shader = ShaderModule::from_compiled(&device, &vertex_spirv).expect("vs module");
+    let fragment_shader = ShaderModule::from_compiled(&device, &fragment_spirv).expect("fs module");
 
     let vertex_layout = VertexBufferLayout {
         stride: 0,

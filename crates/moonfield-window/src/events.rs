@@ -13,8 +13,8 @@
 //! [`WindowControl::set_auto_exit_on_close`] to `false` and later calling
 //! [`WindowControl::request_exit`] (which sets [`WindowControl::exit_requested`]).
 
-use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
 
 use moonfield_ecs::Entity;
 

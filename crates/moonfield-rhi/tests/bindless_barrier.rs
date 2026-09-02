@@ -75,8 +75,8 @@ fn run_pair(device: &Device, hazard: BarrierHazard) -> u32 {
     let check_spirv = compiler
         .compile_source_to_spirv("check", CHECK_KERNEL, "main")
         .expect("check kernel compilation");
-    let write_module = ShaderModule::from_spirv(device, &write_spirv).expect("write module");
-    let check_module = ShaderModule::from_spirv(device, &check_spirv).expect("check module");
+    let write_module = ShaderModule::from_compiled(device, &write_spirv).expect("write module");
+    let check_module = ShaderModule::from_compiled(device, &check_spirv).expect("check module");
     let write_pipeline = ComputePipeline::new(device, &write_module).expect("write pipeline");
     let check_pipeline = ComputePipeline::new(device, &check_module).expect("check pipeline");
 

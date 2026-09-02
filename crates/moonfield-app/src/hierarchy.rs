@@ -1,7 +1,7 @@
 //! Plugin wiring the ECS hierarchy into an [`App`].
 
 use crate::{App, Plugin, PreRender, Update};
-use moonfield_ecs::{ensure_global_transforms, propagate_transforms, IntoSystemConfigs};
+use moonfield_ecs::{IntoSystemConfigs, ensure_global_transforms, propagate_transforms};
 
 /// Registers the `ChildOf`/`Children` relationship (lifecycle hooks incl.
 /// cycle prevention and linked-spawn despawn) and schedules transform

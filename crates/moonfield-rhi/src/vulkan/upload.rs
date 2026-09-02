@@ -2,8 +2,8 @@ use ash::vk;
 use gpu_allocator::MemoryLocation;
 
 use crate::error::{Error, Result};
-use crate::{vulkan::Device, CommandBuffer, CommandPool, GpuBumpAllocator, Semaphore};
 use crate::{Buffer, CommandBufferUsage};
+use crate::{CommandBuffer, CommandPool, GpuBumpAllocator, Semaphore, vulkan::Device};
 pub const UPLOAD_FRAME_RING: usize = 2;
 
 pub const UPLOAD_ARENA_SIZE: u64 = 4 * 1024 * 1024;

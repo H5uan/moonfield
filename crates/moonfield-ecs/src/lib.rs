@@ -63,11 +63,11 @@ pub use commands::{Commands, EntityCommands};
 pub use component::Component;
 pub use entities::Entity;
 pub use filter::{Or, QueryFilter, With, Without};
-pub use hierarchy::{ensure_global_transforms, propagate_transforms, ChildOf, Children};
+pub use hierarchy::{ChildOf, Children, ensure_global_transforms, propagate_transforms};
 pub use hooks::{ComponentHook, ComponentHooks};
 pub use message::{
-    message_update_system, Message, MessageCursor, MessageId, MessageReader, MessageRegistry,
-    MessageWriter, Messages,
+    Message, MessageCursor, MessageId, MessageReader, MessageRegistry, MessageWriter, Messages,
+    message_update_system,
 };
 pub use name::Name;
 pub use query::{EntityMut, EntityRef, WorldQuery};
@@ -394,9 +394,11 @@ mod tests {
         assert!(world.get_component::<Velocity>(e).is_none());
 
         // Insert a new component (cross-archetype move).
-        assert!(world
-            .insert_component(e, Velocity { x: 3.0, y: 4.0 })
-            .is_some());
+        assert!(
+            world
+                .insert_component(e, Velocity { x: 3.0, y: 4.0 })
+                .is_some()
+        );
         assert_eq!(world.get_component::<Velocity>(e).map(|v| v.x), Some(3.0));
 
         // Mutate through get_component_mut.
@@ -404,9 +406,11 @@ mod tests {
         assert_eq!(world.get_component::<Velocity>(e).map(|v| v.x), Some(9.0));
 
         // Replace when already present (no archetype change).
-        assert!(world
-            .insert_component(e, Velocity { x: 5.0, y: 6.0 })
-            .is_some());
+        assert!(
+            world
+                .insert_component(e, Velocity { x: 5.0, y: 6.0 })
+                .is_some()
+        );
         assert_eq!(world.get_component::<Velocity>(e).map(|v| v.x), Some(5.0));
 
         // Entity remains queryable with both components after the move.

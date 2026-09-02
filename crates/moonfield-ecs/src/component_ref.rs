@@ -1,4 +1,4 @@
-use crate::{archetype::Archetype, entity_ref::EntityRef, Component};
+use crate::{Component, archetype::Archetype, entity_ref::EntityRef};
 
 pub trait ComponentRef<'a> {
     type Ref;

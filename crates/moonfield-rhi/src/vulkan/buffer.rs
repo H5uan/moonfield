@@ -9,8 +9,8 @@ use crate::error::{Error, Result};
 use crate::types::BufferUsage;
 use crate::vulkan::device::Device;
 use ash::vk;
-use gpu_allocator::vulkan::{Allocation, AllocationCreateDesc, AllocationScheme, Allocator};
 use gpu_allocator::MemoryLocation;
+use gpu_allocator::vulkan::{Allocation, AllocationCreateDesc, AllocationScheme, Allocator};
 use std::sync::{Arc, Mutex};
 
 /// A Vulkan buffer backed by `gpu_allocator`-managed memory.
@@ -229,15 +229,14 @@ impl Drop for Buffer {
         unsafe {
             self.device.destroy_buffer(self.buffer, None);
         }
-        if let Some(allocation) = self.allocation.take() {
-            if let Err(e) = self
+        if let Some(allocation) = self.allocation.take()
+            && let Err(e) = self
                 .allocator
                 .lock()
                 .unwrap_or_else(|e| e.into_inner())
                 .free(allocation)
-            {
-                moonfield_log::error!("failed to free buffer allocation: {e}");
-            }
+        {
+            moonfield_log::error!("failed to free buffer allocation: {e}");
         }
     }
 }

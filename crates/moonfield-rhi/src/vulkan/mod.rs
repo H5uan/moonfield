@@ -42,15 +42,18 @@ pub use command::{
     CommandBuffer, CommandPool, CullState, DepthState, RenderAttachment, RenderPassDesc,
 };
 pub use descriptor_heap::{
-    DescriptorHeap, SamplerHandle, TextureHandle, TextureSlotDesc, DESCRIPTOR_HEAP_IMAGE_CAPACITY,
-    DESCRIPTOR_HEAP_SAMPLER_CAPACITY,
+    DESCRIPTOR_HEAP_IMAGE_CAPACITY, DESCRIPTOR_HEAP_SAMPLER_CAPACITY, DescriptorHeap,
+    SamplerHandle, TextureHandle, TextureSlotDesc,
 };
 pub use device::{DescriptorHeapProperties, Device, QueueFamilyIndices};
 pub use instance::Instance;
 pub use offscreen::OffscreenTarget;
-pub use pipeline::{BlendMode, GraphicsPipeline};
+pub use pipeline::{BlendMode, GraphicsPipeline, ShaderStageDesc};
 pub use plugin::RenderDevice;
-pub use shader::Compiler;
+pub use shader::{
+    CompiledShader, Compiler, RootBinder, RootParam, RootParamKind, ShaderCache, UserAttributeArg,
+    UserAttributeRef,
+};
 pub use shader_module::ShaderModule;
 pub use swapchain::{Surface, Swapchain};
 pub use sync::{Fence, Semaphore};

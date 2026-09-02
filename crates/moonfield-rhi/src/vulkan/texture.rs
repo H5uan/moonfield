@@ -13,8 +13,8 @@ use crate::types::Format;
 use crate::vulkan::device::Device;
 use crate::{DescriptorHeap, FrameUploader, TextureHandle};
 use ash::vk;
-use gpu_allocator::vulkan::{Allocation, AllocationCreateDesc, AllocationScheme};
 use gpu_allocator::MemoryLocation;
+use gpu_allocator::vulkan::{Allocation, AllocationCreateDesc, AllocationScheme};
 
 struct TextureSlot {
     handle: TextureHandle,
@@ -225,10 +225,10 @@ impl Drop for Texture {
         // Return the bindless slot before tearing down the image: the heap
         // keeps the slot's view create info alive until then (bump contract:
         // a freed slot is never referenced again).
-        if let Some(slot) = self.slot.take() {
-            if let Err(e) = slot.heap.free_image_slot(slot.handle) {
-                moonfield_log::error!("failed to free texture slot: {e}");
-            }
+        if let Some(slot) = self.slot.take()
+            && let Err(e) = slot.heap.free_image_slot(slot.handle)
+        {
+            moonfield_log::error!("failed to free texture slot: {e}");
         }
         // SAFETY: the caller defers destruction past the in-flight frames
         // that sampled this texture.
@@ -236,15 +236,14 @@ impl Drop for Texture {
             self.device.destroy_image_view(self.image_view, None);
             self.device.destroy_image(self.image, None);
         }
-        if let Some(allocation) = self.allocation.take() {
-            if let Err(e) = self
+        if let Some(allocation) = self.allocation.take()
+            && let Err(e) = self
                 .allocator
                 .lock()
                 .unwrap_or_else(|e| e.into_inner())
                 .free(allocation)
-            {
-                moonfield_log::error!("failed to free texture allocation: {e}");
-            }
+        {
+            moonfield_log::error!("failed to free texture allocation: {e}");
         }
     }
 }

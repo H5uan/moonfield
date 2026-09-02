@@ -76,7 +76,7 @@ pub fn prepare_core_3d_frame(world: &mut World) {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::{mesh::Mesh, mesh::MeshHandle, mesh::MeshRenderer, RenderFeaturePlugin};
+    use crate::{RenderFeaturePlugin, mesh::Mesh, mesh::MeshHandle, mesh::MeshRenderer};
     use moonfield_app::App;
     use moonfield_asset::Assets;
     use moonfield_camera::{Camera, CameraTarget, RenderTarget};

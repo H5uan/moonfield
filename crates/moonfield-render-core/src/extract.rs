@@ -108,9 +108,11 @@ mod tests {
             .map(|(entity, _)| entity)
             .collect();
         assert_eq!(extracted_sources.len(), main_sources.len());
-        assert!(main_sources
-            .iter()
-            .all(|entity| extracted_sources.contains(entity)));
+        assert!(
+            main_sources
+                .iter()
+                .all(|entity| extracted_sources.contains(entity))
+        );
 
         // The copied values match the main world's cameras.
         let main_cameras: Vec<Camera> = app
@@ -163,7 +165,7 @@ mod tests {
             .query::<(&SpinningCube, &GlobalTransform)>()
             .collect();
         assert_eq!(extracted.len(), 1);
-        assert_eq!(extracted[0].1 .0.speed, 1.0);
+        assert_eq!(extracted[0].1.0.speed, 1.0);
         let source = app
             .render_world()
             .get_component::<MainEntity>(extracted[0].0)

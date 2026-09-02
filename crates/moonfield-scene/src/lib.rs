@@ -27,7 +27,7 @@ mod registry;
 mod resolved;
 mod template_ext;
 
-pub use file::{load_scene, load_scene_from_file, save_scene, save_scene_to_file, SceneError};
-pub use registry::{LoadFn, SaveFn, SceneRegistry, CAMERA, HIERARCHY, NAME, TRANSFORM};
+pub use file::{SceneError, load_scene, load_scene_from_file, save_scene, save_scene_to_file};
+pub use registry::{CAMERA, HIERARCHY, LoadFn, NAME, SaveFn, SceneRegistry, TRANSFORM};
 pub use resolved::{ResolvedScene, SceneTemplate};
 pub use template_ext::HandleTemplate;

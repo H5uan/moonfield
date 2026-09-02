@@ -10,8 +10,8 @@
 mod common;
 
 use ash::vk;
-use gpu_allocator::vulkan::{Allocation, AllocationCreateDesc, AllocationScheme};
 use gpu_allocator::MemoryLocation;
+use gpu_allocator::vulkan::{Allocation, AllocationCreateDesc, AllocationScheme};
 use moonfield_rhi::{
     DescriptorHeap, Device, Instance, SamplerDesc, TextureHandle, TextureSlotDesc,
 };

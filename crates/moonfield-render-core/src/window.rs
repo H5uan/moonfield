@@ -418,13 +418,12 @@ pub fn create_window_surfaces(world: &mut World) {
             std::collections::hash_map::Entry::Occupied(mut entry) => {
                 let data = entry.get_mut();
                 let extent = data.extent();
-                if data.needs_recreate
+                if (data.needs_recreate
                     || (extent.width != window.physical_width
-                        || extent.height != window.physical_height)
+                        || extent.height != window.physical_height))
+                    && let Err(e) = data.recreate(window.physical_width, window.physical_height)
                 {
-                    if let Err(e) = data.recreate(window.physical_width, window.physical_height) {
-                        error!("failed to recreate window surface: {e}");
-                    }
+                    error!("failed to recreate window surface: {e}");
                 }
             }
         }

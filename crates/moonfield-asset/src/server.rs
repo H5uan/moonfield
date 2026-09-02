@@ -142,8 +142,8 @@ impl AssetServer {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::sync::atomic::{AtomicUsize, Ordering};
     use std::sync::Arc;
+    use std::sync::atomic::{AtomicUsize, Ordering};
 
     /// Loads `.txt` files into `String` assets, counting invocations.
     struct TxtLoader {

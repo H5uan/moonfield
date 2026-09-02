@@ -6,7 +6,7 @@
 
 use proc_macro2::TokenStream;
 use quote::quote;
-use syn::{parse_macro_input, Data, DeriveInput, Fields};
+use syn::{Data, DeriveInput, Fields, parse_macro_input};
 
 #[proc_macro_derive(Reflect, attributes(reflect))]
 pub fn derive_reflect(input: proc_macro::TokenStream) -> proc_macro::TokenStream {
@@ -31,14 +31,14 @@ fn expand_reflect(input: &DeriveInput) -> syn::Result<TokenStream> {
                 return Err(syn::Error::new_spanned(
                     &input.ident,
                     "Reflect derive only supports structs with named fields",
-                ))
+                ));
             }
         },
         _ => {
             return Err(syn::Error::new_spanned(
                 &input.ident,
                 "Reflect derive only supports structs with named fields",
-            ))
+            ));
         }
     };
 

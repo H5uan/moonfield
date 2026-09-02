@@ -1,5 +1,5 @@
-use crate::{archetype::ComponentMeta, Component};
-use std::any::{type_name, TypeId};
+use crate::{Component, archetype::ComponentMeta};
+use std::any::{TypeId, type_name};
 use std::fmt;
 use std::mem;
 use std::ptr::NonNull;
@@ -200,6 +200,9 @@ macro_rules! tuple_impl {
             }
 
             #[allow(unused_variables, unused_mut)]
+            // The 0-tuple expansion reads nothing, so the unsafe block inside
+            // is flagged as needless; larger tuples need it for `read()`.
+            #[allow(unused_unsafe, clippy::unused_unit)]
             unsafe fn get(
                 mut f: impl FnMut(ComponentMeta) -> Option<NonNull<u8>>,
             ) -> Result<Self, MissingComponent> {
@@ -210,7 +213,9 @@ macro_rules! tuple_impl {
                         .as_ptr()
                         .cast::<$name>(),)*
                 );
-                Ok(($($name.read(),)*))
+                // SAFETY: every pointer came from `f`, which hands out valid
+                // pointers to live components of that type.
+                Ok(unsafe { ($($name.read(),)*) })
             }
         }
     };

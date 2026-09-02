@@ -14,9 +14,9 @@ mod plugin_group;
 mod time;
 
 pub use app::{
-    run_once, App, AppError, AppExit, First, FixedFirst, FixedLast, FixedMain, FixedPostUpdate,
+    App, AppError, AppExit, First, FixedFirst, FixedLast, FixedMain, FixedPostUpdate,
     FixedPreUpdate, FixedUpdate, Last, Plugins, PreRender, Render, RenderPrepare, RenderQueue,
-    Runner, Shutdown, Startup, Update,
+    Runner, Shutdown, Startup, Update, run_once,
 };
 pub use hierarchy::HierarchyPlugin;
 pub use moonfield_ecs::Resource;
@@ -458,9 +458,9 @@ mod tests {
             .get_resource_mut::<Time<Fixed>>()
             .unwrap()
             .set_timestep_hz(2.0); // 500 ms steps
-                                   // The manual strategy feeds raw deltas through the virtual clock,
-                                   // whose 250 ms max_delta would clamp the large test steps; disable it
-                                   // (the old advance_by path never clamped either).
+        // The manual strategy feeds raw deltas through the virtual clock,
+        // whose 250 ms max_delta would clamp the large test steps; disable it
+        // (the old advance_by path never clamped either).
         app.world_mut()
             .get_resource_mut::<Time<Virtual>>()
             .unwrap()
