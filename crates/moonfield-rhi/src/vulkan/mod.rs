@@ -14,6 +14,7 @@ pub mod memory;
 pub mod offscreen;
 pub mod pipeline;
 pub mod plugin;
+pub mod retire;
 pub mod shader;
 pub mod shader_module;
 pub mod swapchain;
@@ -52,6 +53,7 @@ pub use memory::{GpuAllocation, GpuPtr, HostPtr, Memory};
 pub use offscreen::OffscreenTarget;
 pub use pipeline::{BlendMode, ComputePipeline, GraphicsPipeline, ShaderStageDesc};
 pub use plugin::RenderDevice;
+pub use retire::RETIRE_RING;
 pub use shader::{
     CompiledShader, Compiler, RootBinder, RootParam, RootParamKind, ShaderCache, UserAttributeArg,
     UserAttributeRef,

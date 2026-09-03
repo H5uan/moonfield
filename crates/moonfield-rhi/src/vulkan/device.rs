@@ -1,6 +1,7 @@
 //! Vulkan logical device abstraction.
 
 use crate::error::{Error, Result};
+use crate::retire::RetirementRing;
 use crate::vulkan::instance::Instance;
 use crate::vulkan::sync::Semaphore;
 use crate::{DESCRIPTOR_HEAP_IMAGE_CAPACITY, DESCRIPTOR_HEAP_SAMPLER_CAPACITY, DescriptorHeap};
@@ -172,6 +173,9 @@ pub struct Device {
     /// Lazily-built shared descriptor heap serving bindless resources. Same shape
     /// as `uploader`: built once, shared by `Arc`, outlives `&Device`.
     descriptor_heap: OnceLock<Arc<DescriptorHeap>>,
+    /// Deferred GPU resource teardown, keyed by frame slot. Not lazy: every
+    /// resource's `Drop` enqueues into it, so it exists from construction.
+    retirement_ring: Arc<RetirementRing>,
     /// Shared GPU memory allocator for buffers and images. Wrapped in
     /// `Arc<Mutex>` so resources can hold clones and free their allocations
     /// on drop without a borrow on the device. `Option` so `Drop` can take it
@@ -478,6 +482,7 @@ impl Device {
             optional_extensions: optional_enabled,
             uploader: OnceLock::new(),
             descriptor_heap: OnceLock::new(),
+            retirement_ring: Arc::new(RetirementRing::new()),
             allocator: Some(Arc::new(Mutex::new(allocator))),
         })
     }
@@ -637,6 +642,26 @@ impl Device {
             .clone()
     }
 
+    /// The device-level retirement ring. Crate-internal: resources obtain it
+    /// at construction so their `Drop` can enqueue teardown.
+    pub(crate) fn retirement_ring(&self) -> Arc<RetirementRing> {
+        self.retirement_ring.clone()
+    }
+
+    /// Frame-loop boundary: the caller has waited the in-flight timeline,
+    /// so the slot's previous submission completed — drain its retirements
+    /// and mark it the push target. Call once per acquired frame, before
+    /// recording.
+    pub fn begin_gpu_frame(&self, frame_slot: usize) {
+        self.retirement_ring.begin_frame(frame_slot);
+    }
+    /// Drain every retirement now. The GPU must be idle (device teardown,
+    /// or a test after submit-and-wait); in-flight work must not reference
+    /// retired resources.
+    pub fn flush_retirements(&self) {
+        self.retirement_ring.drain_all();
+    }
+
     /// Shared GPU memory allocator for buffers and images. Resources allocate
     /// through this and free their allocations on drop. Exposed so downstream
     /// code (e.g. the editor's egui backend) can share the same allocator.
@@ -649,6 +674,22 @@ impl Device {
 
 impl Drop for Device {
     fn drop(&mut self) {
+        // Retired teardown runs while the logical device is alive, and the
+        // GPU must be idle first — resources dropped by render-world
+        // teardown wait here for the last RenderDevice referent to go away.
+        let _ = self.wait_idle();
+        // Drop the lazy singletons while the device is alive: their arenas
+        // and heap backing retire into the ring and drain below, instead of
+        // tearing down after vkDestroyDevice during field teardown. Dropping
+        // the Arc destroys them only when this device is the last referent —
+        // the same invariant the allocator Arc relies on.
+        if let Some(uploader) = self.uploader.take() {
+            drop(uploader);
+        }
+        if let Some(heap) = self.descriptor_heap.take() {
+            drop(heap);
+        }
+        self.retirement_ring.drain_all();
         // The shared allocator's memory blocks must be freed while the logical
         // device is still alive (they call vkFreeMemory / vkUnmapMemory through
         // it), so the allocator is destroyed before vkDestroyDevice. Resources

@@ -2,7 +2,8 @@
 //!
 //! Verifies that a `GpuAllocation` pairs a writable CPU pointer with a
 //! non-zero buffer device address, that the memory classes map to the
-//! expected CPU visibility, and that dropping restores the pool.
+//! expected CPU visibility, and that dropping defers teardown to the
+//! retirement drain.
 
 use moonfield_rhi::{Device, GpuAllocation, Instance, Memory};
 use std::sync::Mutex;
@@ -100,5 +101,8 @@ fn bindless_allocation_write_and_drop() {
         assert_eq!(*host.typed::<u32>(), 1);
     }
 
-    drop(allocation); // must not panic; memory returned to pool
+    drop(allocation); // teardown deferred into the retirement ring
+    // No GPU work ever referenced the allocation, so draining now is safe
+    // and exercises the deferred teardown path.
+    device.flush_retirements();
 }

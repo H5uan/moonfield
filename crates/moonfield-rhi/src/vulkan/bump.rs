@@ -11,6 +11,7 @@
 use crate::error::{Error, Result};
 use crate::vulkan::device::Device;
 use crate::vulkan::memory::{GpuAllocation, GpuPtr, HostPtr, Memory};
+use crate::vulkan::retire::RetirementRing;
 use ash::vk;
 use gpu_allocator::vulkan::Allocator;
 use moonfield_math::gpu::align_up;
@@ -43,6 +44,7 @@ pub struct GpuBumpAllocator {
     // resources) can store it directly.
     device: ash::Device,
     allocator: Arc<Mutex<Allocator>>,
+    ring: Arc<RetirementRing>,
     blocks: Vec<Block>, // 每块独立 buffer + 一次地址翻译 + 底座对齐
     block_size: u64,
     block_idx: usize,
@@ -56,6 +58,7 @@ impl GpuBumpAllocator {
             alloc: GpuAllocation::from_resources(
                 device.raw(),
                 device.allocator(),
+                device.retirement_ring(),
                 block_size,
                 Memory::Default,
                 align as u64,
@@ -67,6 +70,7 @@ impl GpuBumpAllocator {
         Ok(Self {
             device: device.raw().clone(),
             allocator: device.allocator().clone(),
+            ring: device.retirement_ring(),
             blocks: vec![first],
             block_size,
             block_idx: 0,
@@ -163,6 +167,7 @@ impl GpuBumpAllocator {
                     let alloc = GpuAllocation::from_resources(
                         &self.device,
                         &self.allocator,
+                        self.ring.clone(),
                         size,
                         Memory::Default,
                         align as u64,
@@ -177,6 +182,7 @@ impl GpuBumpAllocator {
                 let alloc = GpuAllocation::from_resources(
                     &self.device,
                     &self.allocator,
+                    self.ring.clone(),
                     size,
                     Memory::Default,
                     align as u64,

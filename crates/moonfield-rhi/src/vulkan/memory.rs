@@ -14,7 +14,10 @@ use gpu_allocator::{
     vulkan::{Allocation, AllocationCreateDesc, AllocationScheme, Allocator},
 };
 
-use crate::{Error, Result};
+use crate::{
+    Error, Result,
+    retire::{RetireAction, RetirementRing},
+};
 
 /// GPU memory classes for allocations.
 #[derive(Copy, Clone, Debug, PartialEq, Eq, Default)]
@@ -125,8 +128,8 @@ unsafe impl Sync for HostPtr {}
 /// This is the Rust counterpart of the blog's `gpuMalloc` result — one
 /// allocation, two views over the same bytes: [`HostPtr`] for direct CPU
 /// writes, [`GpuPtr`] for shader access. The allocation owns its Vulkan
-/// buffer and allocator chunk; dropping it destroys the buffer and returns
-/// the memory to the pool.
+/// buffer and allocator chunk; dropping it defers the buffer's destruction
+/// to the device's retirement ring.
 pub struct GpuAllocation {
     /// Address carrier: BDA and memory requirements settle on this object.
     buffer: vk::Buffer,
@@ -142,6 +145,8 @@ pub struct GpuAllocation {
     device: ash::Device,
     /// Pool handle for returning the chunk in `Drop`.
     allocator: Arc<Mutex<Allocator>>,
+    /// Device-level retirement ring; `Drop` enqueues the teardown here.
+    ring: Arc<RetirementRing>,
 }
 
 impl GpuAllocation {
@@ -171,7 +176,15 @@ impl GpuAllocation {
         memory: Memory,
         align: u64,
     ) -> Result<Self> {
-        Self::from_resources(device.raw(), device.allocator(), size, memory, align, false)
+        Self::from_resources(
+            device.raw(),
+            device.allocator(),
+            device.retirement_ring(),
+            size,
+            memory,
+            align,
+            false,
+        )
     }
 
     /// Like [`new_aligned`], but marks the buffer as descriptor-heap backing
@@ -186,6 +199,7 @@ impl GpuAllocation {
         Self::from_resources(
             device.raw(),
             device.allocator(),
+            device.retirement_ring(),
             size,
             Memory::Default,
             align,
@@ -200,6 +214,7 @@ impl GpuAllocation {
     pub(crate) fn from_resources(
         device: &ash::Device,
         allocator: &Arc<Mutex<Allocator>>,
+        ring: Arc<RetirementRing>,
         size: u64,
         memory: Memory,
         align: u64,
@@ -270,6 +285,7 @@ impl GpuAllocation {
             gpu: gpu_ptr,
             device: device.clone(),
             allocator,
+            ring,
         })
     }
 
@@ -299,18 +315,13 @@ impl GpuAllocation {
 
 impl Drop for GpuAllocation {
     fn drop(&mut self) {
-        unsafe {
-            self.device.destroy_buffer(self.buffer, None);
-        }
-
-        if let Some(allocation) = self.allocation.take()
-            && let Err(e) = self
-                .allocator
-                .lock()
-                .unwrap_or_else(|e| e.into_inner())
-                .free(allocation)
-        {
-            moonfield_log::error!("failed to free bindless allocation: {e}");
-        }
+        // Teardown is deferred: in-flight frames may still dereference the
+        // device address. The ring drains RETIRE_RING frames later.
+        self.ring.push(RetireAction::Buffer {
+            device: self.device.clone(),
+            buffer: self.buffer,
+            allocation: self.allocation.take(),
+            allocator: self.allocator.clone(),
+        });
     }
 }

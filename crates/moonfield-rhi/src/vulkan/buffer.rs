@@ -9,6 +9,7 @@ use crate::error::{Error, Result};
 use crate::types::BufferUsage;
 use crate::vulkan::device::Device;
 use crate::vulkan::memory::Memory;
+use crate::vulkan::retire::{RetireAction, RetirementRing};
 use ash::vk;
 use gpu_allocator::vulkan::{Allocation, AllocationCreateDesc, AllocationScheme, Allocator};
 use std::sync::{Arc, Mutex};
@@ -21,6 +22,8 @@ pub struct Buffer {
     memory: Memory,
     device: ash::Device,
     allocator: Arc<Mutex<Allocator>>,
+    /// Device-level retirement ring; `Drop` enqueues the teardown here.
+    ring: Arc<RetirementRing>,
 }
 
 impl Buffer {
@@ -73,6 +76,7 @@ impl Buffer {
             memory,
             device: device.raw().clone(),
             allocator,
+            ring: device.retirement_ring(),
         })
     }
 
@@ -221,17 +225,13 @@ impl Buffer {
 
 impl Drop for Buffer {
     fn drop(&mut self) {
-        unsafe {
-            self.device.destroy_buffer(self.buffer, None);
-        }
-        if let Some(allocation) = self.allocation.take()
-            && let Err(e) = self
-                .allocator
-                .lock()
-                .unwrap_or_else(|e| e.into_inner())
-                .free(allocation)
-        {
-            moonfield_log::error!("failed to free buffer allocation: {e}");
-        }
+        // Teardown is deferred: in-flight frames may still read the buffer.
+        // The ring drains RETIRE_RING frames later.
+        self.ring.push(RetireAction::Buffer {
+            device: self.device.clone(),
+            buffer: self.buffer,
+            allocation: self.allocation.take(),
+            allocator: self.allocator.clone(),
+        });
     }
 }
