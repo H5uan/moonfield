@@ -28,10 +28,10 @@ use egui::{TextureFilter, TextureOptions, TextureWrapMode};
 use moonfield_rhi::Memory;
 use moonfield_rhi::types::WrapMode;
 use moonfield_rhi::{
-    BlendMode, Buffer, BufferUsage, CommandBuffer, CompareOp, Compiler, CullMode, CullState,
-    DepthState, DescriptorHeap, Device, Extent2d, Filter, Format, FrameUploader, FrontFace,
-    GraphicsPipeline, IndexFormat, Offset2d, Rect2d, RenderDevice, RootBinder, SamplerDesc,
-    SamplerHandle, ShaderModule, Texture, TextureHandle,
+    BlendMode, CommandBuffer, CompareOp, Compiler, CullMode, CullState, DepthState, DescriptorHeap,
+    Device, Extent2d, Filter, Format, FrameUploader, FrontFace, GpuAllocation, GraphicsPipeline,
+    Offset2d, Rect2d, RenderDevice, RootBinder, SamplerDesc, SamplerHandle, ShaderModule, Texture,
+    TextureHandle,
 };
 use std::collections::HashMap;
 use std::path::PathBuf;
@@ -72,19 +72,23 @@ pub struct CallbackResources {
     _private: (),
 }
 
-/// Per-draw root data, pushed via [`CommandBuffer::push_data`] and read by
-/// the shader through the PushConstant storage class. The static fields
-/// (screen size, option flags) are pushed once per pass; the varying tail
-/// (texture/sampler heap slots) is pushed per draw. Layout must match
-/// `EguiRoot` in `egui.slang`.
+/// Root data, pushed via [`CommandBuffer::push_data`] and read by the shader
+/// through the PushConstant storage class. The static fields (screen size,
+/// option flags, vertex/index array pointers) are pushed once per pass; the
+/// varying tail (texture/sampler heap slots, the draw's index base) is
+/// pushed per draw. Layout must match `EguiRoot` in `egui.slang`.
 #[repr(C)]
 #[derive(Clone, Copy, bytemuck::Pod, bytemuck::Zeroable)]
 struct EguiRoot {
     screen_size_in_points: [f32; 2],
     dithering: u32,
     predictable_filtering: u32,
+    vertices: u64,
+    indices: u64,
     texture: u32,
     sampler: u32,
+    index_base: u32,
+    _pad0: u32,
 }
 
 /// `egui::epaint::Vertex` laid out for upload: pos (f32×2), uv (f32×2),
@@ -97,12 +101,13 @@ struct PodVertex {
     color: u32,
 }
 
-/// One mesh's draw parameters within a frame slot's shared buffers.
+/// One mesh's draw parameters within a frame slot's shared arrays. The
+/// upload rewrites each mesh's local indices to absolute vertex indices, so
+/// a draw needs only its index range.
 #[derive(Clone, Copy)]
 struct MeshDraw {
-    index_offset: u32,
+    index_base: u32,
     index_count: u32,
-    vertex_offset: i32,
 }
 
 /// The egui graphics pipeline: a descriptor-heap pipeline (null layout, no
@@ -156,15 +161,9 @@ impl EguiPipeline {
         )
         .map_err(|e| e.to_string())?;
 
-        // Derive the vertex layout from the vertex shader's reflected inputs
-        // (pos f32×2, uv f32×2, packed color u32 — the shader is the single
-        // source of truth; `PodVertex` must match, enforced by the upload
-        // path's layout assertions).
+        // Reflect the entry point for the root blob and the layout guards.
         let reflection = compiler
             .compile_file_to_reflection(&egui_shader_path(), "vs_main")
-            .map_err(|e| e.to_string())?;
-        let vertex_layout = reflection
-            .vertex_layout("vs_main")
             .map_err(|e| e.to_string())?;
         let root = RootBinder::new(&reflection, "vs_main").map_err(|e| e.to_string())?;
         // Layout alignment guard: the Rust `EguiRoot` struct pushed as root
@@ -178,13 +177,13 @@ impl EguiPipeline {
                 root.blob().len()
             ));
         }
-        // The varying fields (texture, sampler) must be the struct's tail:
-        // the pass pushes the static prefix once and every draw pushes only
-        // the tail.
-        if core::mem::offset_of!(EguiRoot, texture) + 8 != std::mem::size_of::<EguiRoot>() {
+        // The varying fields (texture, sampler, index base) must be the
+        // struct's tail: the pass pushes the static prefix once and every
+        // draw pushes only the tail.
+        if core::mem::offset_of!(EguiRoot, texture) + 16 != std::mem::size_of::<EguiRoot>() {
             return Err(
-                "EguiRoot layout mismatch: the varying fields (texture, sampler) \
-                 must be the struct's tail"
+                "EguiRoot layout mismatch: the varying fields (texture, sampler, \
+                 index base) must be the struct's tail"
                     .to_string(),
             );
         }
@@ -199,7 +198,6 @@ impl EguiPipeline {
             None,
             &vertex_shader,
             &fragment_shader,
-            &vertex_layout,
         )
         .map_err(|e| e.to_string())?;
 
@@ -432,11 +430,12 @@ impl EguiTextures {
     }
 }
 
-/// Per-frame-in-flight GPU resources: vertex/index buffers. Buffers grow by
-/// doubling and are never shrunk.
+/// Per-frame-in-flight GPU resources: the vertex and index arrays. Allocated
+/// in host-visible memory (rewritten wholesale every frame) and grown by
+/// doubling, never shrunk.
 struct FrameResources {
-    vertex_buffer: Buffer,
-    index_buffer: Buffer,
+    vertices: GpuAllocation,
+    indices: GpuAllocation,
     vertex_capacity: usize,
     index_capacity: usize,
     mesh_draws: Vec<MeshDraw>,
@@ -444,23 +443,21 @@ struct FrameResources {
 
 impl FrameResources {
     fn new(device: &Device) -> Result<Self, String> {
-        let vertex_buffer = Buffer::new(
+        let vertices = GpuAllocation::new(
             device,
             (INITIAL_VERTEX_CAPACITY * std::mem::size_of::<PodVertex>()) as u64,
-            BufferUsage::VERTEX,
             Memory::Default,
         )
         .map_err(|e| e.to_string())?;
-        let index_buffer = Buffer::new(
+        let indices = GpuAllocation::new(
             device,
             (INITIAL_INDEX_CAPACITY * std::mem::size_of::<u32>()) as u64,
-            BufferUsage::INDEX,
             Memory::Default,
         )
         .map_err(|e| e.to_string())?;
         Ok(Self {
-            vertex_buffer,
-            index_buffer,
+            vertices,
+            indices,
             vertex_capacity: INITIAL_VERTEX_CAPACITY,
             index_capacity: INITIAL_INDEX_CAPACITY,
             mesh_draws: Vec::new(),
@@ -486,10 +483,11 @@ impl EguiFrameResources {
         Ok(Self { frames })
     }
 
-    /// Upload the tessellated mesh data into the given frame slot's buffers,
-    /// growing them by doubling when full. Must be called after the slot's
-    /// fence has passed and before [`record_egui`] with the same
-    /// `primitives`.
+    /// Upload the tessellated mesh data into the given frame slot's arrays,
+    /// growing them by doubling when full. Each mesh's local indices are
+    /// rewritten to absolute vertex indices, so a draw needs only its index
+    /// range. Must be called after the slot's fence has passed and before
+    /// [`record_egui`] with the same `primitives`.
     pub fn update(
         &mut self,
         device: &Device,
@@ -511,49 +509,61 @@ impl EguiFrameResources {
                 continue;
             };
             mesh_draws.push(MeshDraw {
-                index_offset: indices.len() as u32,
+                index_base: indices.len() as u32,
                 index_count: mesh.indices.len() as u32,
-                vertex_offset: vertices.len() as i32,
             });
+            let vertex_offset = vertices.len() as u32;
             vertices.extend(mesh.vertices.iter().map(|v| PodVertex {
                 pos: [v.pos.x, v.pos.y],
                 uv: [v.uv.x, v.uv.y],
                 color: u32::from_le_bytes(v.color.to_array()),
             }));
-            indices.extend_from_slice(&mesh.indices);
+            indices.extend(mesh.indices.iter().map(|i| i + vertex_offset));
         }
 
         if vertices.len() > frame.vertex_capacity {
             frame.vertex_capacity = vertices.len().next_power_of_two();
-            frame.vertex_buffer = Buffer::new(
+            frame.vertices = GpuAllocation::new(
                 device,
                 (frame.vertex_capacity * std::mem::size_of::<PodVertex>()) as u64,
-                BufferUsage::VERTEX,
                 Memory::Default,
             )
             .map_err(|e| e.to_string())?;
         }
         if indices.len() > frame.index_capacity {
             frame.index_capacity = indices.len().next_power_of_two();
-            frame.index_buffer = Buffer::new(
+            frame.indices = GpuAllocation::new(
                 device,
                 (frame.index_capacity * std::mem::size_of::<u32>()) as u64,
-                BufferUsage::INDEX,
                 Memory::Default,
             )
             .map_err(|e| e.to_string())?;
         }
+        // Host-visible allocations: write through the mapped view directly.
         if !vertices.is_empty() {
-            frame
-                .vertex_buffer
-                .upload(device, &vertices)
-                .map_err(|e| e.to_string())?;
+            let host = frame
+                .vertices
+                .host()
+                .ok_or_else(|| "vertex allocation lost its host view".to_string())?;
+            // SAFETY: the allocation spans `vertex_capacity` slots (grown
+            // above to fit) and nothing else aliases this frame slot's view.
+            unsafe {
+                std::ptr::copy_nonoverlapping(
+                    vertices.as_ptr(),
+                    host.typed::<PodVertex>(),
+                    vertices.len(),
+                );
+            }
         }
         if !indices.is_empty() {
-            frame
-                .index_buffer
-                .upload(device, &indices)
-                .map_err(|e| e.to_string())?;
+            let host = frame
+                .indices
+                .host()
+                .ok_or_else(|| "index allocation lost its host view".to_string())?;
+            // SAFETY: as above, `index_capacity` slots, no aliases.
+            unsafe {
+                std::ptr::copy_nonoverlapping(indices.as_ptr(), host.typed::<u32>(), indices.len());
+            }
         }
         frame.mesh_draws = mesh_draws;
         Ok(())
@@ -594,24 +604,27 @@ pub fn record_egui(
         compare_op: CompareOp::GreaterOrEqual,
     });
     command_buffer.bind_graphics_pipeline(&pipeline.pipeline);
-    command_buffer.bind_vertex_buffers(0, &[&frame.vertex_buffer], &[0]);
-    command_buffer.bind_index_buffer(&frame.index_buffer, 0, IndexFormat::Uint32);
 
     let options = pipeline.options();
     let screen_size_in_points = [
         extent.0 as f32 / pixels_per_point,
         extent.1 as f32 / pixels_per_point,
     ];
-    // The static root prefix (screen size + option flags) is pushed once per
-    // pass; every draw pushes only the varying tail (texture + sampler
-    // slots) at its offset — bytes outside a written range keep their values
+    // The static root prefix (screen size, option flags, and the vertex/
+    // index array pointers) is pushed once per pass; every draw pushes only
+    // the varying tail (texture + sampler slots, its index base) at its
+    // offset — bytes outside a written range keep their values
     // (GPU-verified by `command_push_data`).
     let static_prefix = EguiRoot {
         screen_size_in_points,
         dithering: options.dithering as u32,
         predictable_filtering: options.predictable_texture_filtering as u32,
+        vertices: frame.vertices.gpu().as_raw(),
+        indices: frame.indices.gpu().as_raw(),
         texture: 0,
         sampler: 0,
+        index_base: 0,
+        _pad0: 0,
     };
     let static_len = core::mem::offset_of!(EguiRoot, texture);
     command_buffer.push_data(0, &bytemuck::bytes_of(&static_prefix)[..static_len]);
@@ -633,15 +646,11 @@ pub fn record_egui(
         };
         let (texture, sampler) = entry.handles();
         command_buffer.set_scissor(scissor);
-        let varying = [texture.0, sampler.0];
+        let varying = [texture.0, sampler.0, draw.index_base, 0u32];
         command_buffer.push_data(varying_offset, bytemuck::bytes_of(&varying));
-        command_buffer.draw_indexed(
-            draw.index_count,
-            1,
-            draw.index_offset,
-            draw.vertex_offset,
-            0,
-        );
+        // Non-indexed draw: `vid` runs over the mesh's index range and the
+        // vertex shader pulls both arrays through the root's pointers.
+        command_buffer.draw(draw.index_count, 1, 0, 0);
     }
 }
 

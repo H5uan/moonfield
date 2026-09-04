@@ -1,26 +1,28 @@
 //! Headless end-to-end test for bindless heap sampling in the fragment stage:
 //! a graphics pipeline with no descriptor set layout samples a heap texture
 //! through `ResourceDescriptorHeap` / `SamplerDescriptorHeap` and multiplies
-//! it by a tint read through a root BDA pointer (one pushed address).
-//! Validates the whole chain on the real driver: heap write → `cmd_bind` →
-//! fragment-stage untyped heap access → sampled color readback.
+//! it by a tint read through a root BDA pointer (pushed addresses, like the
+//! vertex array the vertex stage pulls). Validates the whole chain on the
+//! real driver: heap write → `cmd_bind` → fragment-stage untyped heap access
+//! → sampled color readback.
 
 mod common;
 
 use moonfield_rhi::{
-    AttachmentLayout, Buffer, BufferUsage, ClearValue, CommandBufferUsage, CommandPool, Compiler,
-    Device, Format, GpuAllocation, GraphicsPipeline, Instance, LoadOp, Memory, OffscreenTarget,
-    Rect2d, RenderAttachment, RenderPassDesc, SamplerDesc, ShaderModule, StoreOp, Texture,
-    VertexAttribute, VertexBufferLayout, VertexFormat,
+    AttachmentLayout, ClearValue, CommandBufferUsage, CommandPool, Compiler, Device, Format,
+    GpuAllocation, GraphicsPipeline, Instance, LoadOp, Memory, OffscreenTarget, Rect2d,
+    RenderAttachment, RenderPassDesc, RootBinder, SamplerDesc, ShaderModule, StoreOp, Texture,
 };
 
 const SIZE: u32 = 64;
 
 /// Fullscreen triangle; the UV spans the 4x4 test texture across the screen.
+/// Pull-based vertex path: the only stage input is SV_VertexID; geometry is
+/// fetched through the `vertices` root pointer (push data, not a bound buffer).
 const VERTEX_SHADER: &str = r#"
-struct VsInput
+struct VertexData
 {
-    float2 position : POSITION;
+    float2 position;
 };
 
 struct VsOutput
@@ -30,11 +32,11 @@ struct VsOutput
 };
 
 [shader("vertex")]
-VsOutput main(VsInput input)
+VsOutput main(uint vid : SV_VertexID, Ptr<VertexData> vertices)
 {
     VsOutput output;
-    output.position = float4(input.position, 0.0, 1.0);
-    output.uv = input.position * 0.5 + 0.5;
+    output.position = float4(vertices[vid].position, 0.0, 1.0);
+    output.uv = vertices[vid].position * 0.5 + 0.5;
     return output;
 }
 "#;
@@ -42,14 +44,24 @@ VsOutput main(VsInput input)
 /// Samples heap texture slot 0 with heap sampler slot 0 and applies a tint
 /// read through the root pointer. The pipeline has no descriptor set layout;
 /// the bound heaps alone feed the shader.
+///
+/// The push-data bank is shared by both stages, so the fragment entry
+/// declares the blob's leading root (the vertex array pointer) before its
+/// own `tint` root — each stage's reflected placement then addresses the
+/// same blob (vertices at 0, tint behind it).
 const FRAGMENT_SHADER: &str = r#"
+struct VertexData
+{
+    float2 position;
+};
+
 struct PsInput
 {
     float2 uv : TEXCOORD0;
 };
 
 [shader("fragment")]
-float4 main(PsInput input, Ptr<float4, Access.Read> tint) : SV_TARGET
+float4 main(PsInput input, Ptr<VertexData> vertices, Ptr<float4, Access.Read> tint) : SV_TARGET
 {
     Texture2D tex = ResourceDescriptorHeap[NonUniformResourceIndex(0)];
     SamplerState s = SamplerDescriptorHeap[NonUniformResourceIndex(0)];
@@ -107,6 +119,22 @@ fn fragment_heap_sampling_roundtrip() {
     }
 
     let compiler = Compiler::new().expect("compiler");
+    // Each stage's root placement comes from its own reflected entry point:
+    // the vertex array pointer from the vertex entry, the tint pointer from
+    // the fragment entry (whose signature carries the shared blob's leading
+    // root, so `tint` sits behind the vertex pointer).
+    let vs_reflection = compiler
+        .compile_source_to_reflection("fullscreen_vs", VERTEX_SHADER, "main")
+        .expect("vertex shader reflection");
+    let vs_binder = RootBinder::new(&vs_reflection, "main").expect("vertex root binder");
+    let vertices_place = vs_binder.pointer_param("vertices").expect("vertices place");
+    drop(vs_reflection);
+    let fs_reflection = compiler
+        .compile_source_to_reflection("heap_sampler_fs", FRAGMENT_SHADER, "main")
+        .expect("fragment shader reflection");
+    let fs_binder = RootBinder::new(&fs_reflection, "main").expect("fragment root binder");
+    let tint_place = fs_binder.pointer_param("tint").expect("tint place");
+    drop(fs_reflection);
     let vertex_spirv = compiler
         .compile_source_to_spirv("fullscreen_vs", VERTEX_SHADER, "main")
         .expect("vertex shader");
@@ -130,26 +158,24 @@ fn fragment_heap_sampling_roundtrip() {
         None,
         &vertex_shader,
         &fragment_shader,
-        &VertexBufferLayout {
-            stride: std::mem::size_of::<[f32; 2]>() as u32,
-            attributes: vec![VertexAttribute {
-                location: 0,
-                format: VertexFormat::Float32x2,
-                offset: 0,
-            }],
-        },
     )
     .expect("pipeline");
 
     let vertices: [[f32; 2]; 3] = [[-1.0, -1.0], [3.0, -1.0], [-1.0, 3.0]];
-    let vertex_buffer = Buffer::new(
+    let vertex_alloc = GpuAllocation::new(
         &device,
         std::mem::size_of_val(&vertices) as u64,
-        BufferUsage::VERTEX,
-        moonfield_rhi::Memory::Default,
+        Memory::Default,
     )
-    .expect("vertex buffer");
-    vertex_buffer.upload(&device, &vertices).expect("upload");
+    .expect("vertex allocation");
+    // SAFETY: host-visible allocation, written once before recording.
+    unsafe {
+        std::ptr::copy_nonoverlapping(
+            vertices.as_ptr(),
+            vertex_alloc.host().expect("host view").typed::<[f32; 2]>(),
+            vertices.len(),
+        );
+    }
 
     let command_pool =
         CommandPool::new(&device, device.queue_family_indices().graphics).expect("pool");
@@ -173,10 +199,19 @@ fn fragment_heap_sampling_roundtrip() {
         depth_attachment: None,
     });
     command_buffer.bind_graphics_pipeline(&pipeline);
-    command_buffer.bind_vertex_buffers(0, &[&vertex_buffer], &[0]);
+    // The vertex allocation's address is pushed; the shader pulls vertices
+    // through it. One push before the draw: the array does not change.
+    let vertices_bytes = vertices_place
+        .pointer_bytes(vertex_alloc.gpu().as_raw())
+        .expect("vertices pointer encode");
+    command_buffer.push_data(vertices_place.offset as u32, &vertices_bytes);
     // The tint pointer is the fragment root data: the 64-bit address pushed
-    // through push data (the push-constant storage class).
-    command_buffer.push_data(0, &tint.gpu().as_raw().to_le_bytes());
+    // through push data (the push-constant storage class) at its reflected
+    // place, behind the vertex pointer.
+    let tint_bytes = tint_place
+        .pointer_bytes(tint.gpu().as_raw())
+        .expect("tint pointer encode");
+    command_buffer.push_data(tint_place.offset as u32, &tint_bytes);
     command_buffer.draw(3, 1, 0, 0);
     command_buffer.end_rendering();
     command_buffer.end().expect("end");

@@ -13,7 +13,7 @@ use moonfield_rhi::{
     AttachmentLayout, BufferRange, ClearValue, CommandBufferUsage, CommandPool, Compiler, Device,
     Format, FrameUploader, GpuAllocation, GraphicsPipeline, Instance, LoadOp, Memory,
     OffscreenTarget, Rect2d, RenderAttachment, RenderPassDesc, ShaderModule, StoreOp, Texture,
-    UPLOAD_ARENA_SIZE, VertexBufferLayout,
+    UPLOAD_ARENA_SIZE,
 };
 
 const VERTEX: &str = r#"
@@ -87,19 +87,16 @@ fn graphics_heap_sampling_roundtrip() {
     let vertex_shader = ShaderModule::from_compiled(&device, &vertex_spirv).expect("vs module");
     let fragment_shader = ShaderModule::from_compiled(&device, &fragment_spirv).expect("fs module");
 
-    let vertex_layout = VertexBufferLayout {
-        stride: 0,
-        attributes: vec![],
-    };
     // The fragment reads heap slot 0 through the untyped
     // `ResourceDescriptorHeap` path; the pipeline needs no bindings at all.
+    // The vertex stage has no root data either — the fullscreen triangle is
+    // synthesized from SV_VertexID, so nothing is pushed before the draw.
     let pipeline = GraphicsPipeline::new_with_options(
         &device,
         &[Format::B8G8R8A8Unorm],
         None,
         &vertex_shader,
         &fragment_shader,
-        &vertex_layout,
     )
     .expect("pipeline");
 
@@ -204,17 +201,12 @@ float4 main() : SV_TARGET
     let vertex_shader = ShaderModule::from_compiled(&device, &vertex_spirv).expect("vs module");
     let fragment_shader = ShaderModule::from_compiled(&device, &fragment_spirv).expect("fs module");
 
-    let vertex_layout = VertexBufferLayout {
-        stride: 0,
-        attributes: vec![],
-    };
     let pipeline = GraphicsPipeline::new_with_options(
         &device,
         &[Format::B8G8R8A8Unorm],
         None,
         &vertex_shader,
         &fragment_shader,
-        &vertex_layout,
     )
     .expect("pipeline");
 

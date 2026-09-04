@@ -12,10 +12,9 @@ pub mod types;
 pub mod vulkan;
 
 pub use error::{Error, Result};
-pub use indirect::{DispatchIndirectArgs, DrawIndexedIndirectArgs, DrawIndirectArgs, IndexFormat};
+pub use indirect::{DispatchIndirectArgs, DrawIndirectArgs};
 pub use types::{
     AttachmentLayout, BufferUsage, ClearValue, CommandBufferUsage, CompareOp, CullMode, Extent2d,
-    Filter, Format, FrontFace, LoadOp, Offset2d, Rect2d, SamplerDesc, StoreOp, VertexAttribute,
-    VertexBufferLayout, VertexFormat, Viewport, WrapMode,
+    Filter, Format, FrontFace, LoadOp, Offset2d, Rect2d, SamplerDesc, StoreOp, Viewport, WrapMode,
 };
 pub use vulkan::*;

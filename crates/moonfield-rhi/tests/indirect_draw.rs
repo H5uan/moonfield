@@ -1,15 +1,14 @@
 //! Headless smoke test for the indirect-draw path of the Lunar Mare Vulkan RHI.
 //!
 //! Verifies that a `DrawIndirectArgs` buffer can be created with
-//! `BufferUsage::INDIRECT` and that a command buffer can record a
-//! `draw_indirect` call without panicking. Mirrors `headless_triangle.rs`'s
-//! GPU-less skip behavior.
+//! `BufferUsage::INDIRECT` and that command buffers can record
+//! `draw_indirect` calls — a single-record draw and a multi-record draw —
+//! without panicking. Mirrors `headless_triangle.rs`'s GPU-less skip behavior.
 
 use ash::vk;
 use moonfield_rhi::{
     Buffer, BufferUsage, CommandBufferUsage, CommandPool, Compiler, Device, DrawIndirectArgs,
-    Format, GraphicsPipeline, IndexFormat, Instance, ShaderModule, VertexAttribute,
-    VertexBufferLayout, VertexFormat,
+    Format, GpuAllocation, GraphicsPipeline, Instance, Memory, RootBinder, ShaderModule,
 };
 
 mod common;
@@ -45,11 +44,13 @@ fn indirect_draw_records_without_panic() {
 
     let compiler = Compiler::new().expect("compiler creation");
 
+    // Pull-based vertex path: the only stage input is SV_VertexID; geometry is
+    // fetched through the `vertices` root pointer (push data, not a bound buffer).
     let vertex_source = r#"
-struct VsInput
+struct VertexData
 {
-    float3 position : POSITION;
-    float3 color : COLOR;
+    float3 position;
+    float3 color;
 };
 
 struct VsOutput
@@ -59,11 +60,11 @@ struct VsOutput
 };
 
 [shader("vertex")]
-VsOutput main(VsInput input)
+VsOutput main(uint vid : SV_VertexID, Ptr<VertexData> vertices)
 {
     VsOutput output;
-    output.position = float4(input.position, 1.0);
-    output.color = input.color;
+    output.position = float4(vertices[vid].position, 1.0);
+    output.color = vertices[vid].color;
     return output;
 }
 "#;
@@ -95,33 +96,25 @@ PsOutput main(PsInput input)
         .compile_source_to_spirv("triangle_fs", fragment_source, "main")
         .expect("fragment shader compilation");
 
+    // The vertex array's device address is delivered through push data; its
+    // placement comes from the reflected entry point, not a hand-synced constant.
+    let reflection = compiler
+        .compile_source_to_reflection("triangle_vs", vertex_source, "main")
+        .expect("vertex shader reflection");
+    let binder = RootBinder::new(&reflection, "main").expect("root binder");
+    let vertices_place = binder.pointer_param("vertices").expect("vertices place");
+    drop(reflection);
+
     let vertex_shader =
         ShaderModule::from_compiled(&device, &vertex_spirv).expect("vertex shader module");
     let fragment_shader =
         ShaderModule::from_compiled(&device, &fragment_spirv).expect("fragment shader module");
-
-    let vertex_layout = VertexBufferLayout {
-        stride: std::mem::size_of::<Vertex>() as u32,
-        attributes: vec![
-            VertexAttribute {
-                location: 0,
-                format: VertexFormat::Float32x3,
-                offset: 0,
-            },
-            VertexAttribute {
-                location: 1,
-                format: VertexFormat::Float32x3,
-                offset: std::mem::size_of::<[f32; 3]>() as u32,
-            },
-        ],
-    };
 
     let pipeline = GraphicsPipeline::new(
         &device,
         Format::B8G8R8A8Unorm,
         &vertex_shader,
         &fragment_shader,
-        &vertex_layout,
     )
     .expect("graphics pipeline");
 
@@ -140,16 +133,20 @@ PsOutput main(PsInput input)
         },
     ];
 
-    let vertex_buffer = Buffer::new(
+    let vertex_alloc = GpuAllocation::new(
         &device,
         std::mem::size_of_val(&vertices) as u64,
-        BufferUsage::VERTEX,
-        moonfield_rhi::Memory::Default,
+        Memory::Default,
     )
-    .expect("vertex buffer");
-    vertex_buffer
-        .upload(&device, &vertices)
-        .expect("vertex upload");
+    .expect("vertex allocation");
+    // SAFETY: host-visible allocation, written once before recording.
+    unsafe {
+        std::ptr::copy_nonoverlapping(
+            vertices.as_ptr(),
+            vertex_alloc.host().expect("host view").typed::<Vertex>(),
+            vertices.len(),
+        );
+    }
 
     // A single indirect draw record: 3 vertices, 1 instance.
     let args = [DrawIndirectArgs {
@@ -186,7 +183,12 @@ PsOutput main(PsInput input)
         .begin(CommandBufferUsage::ONE_TIME_SUBMIT)
         .expect("begin command buffer");
     command_buffer.bind_graphics_pipeline(&pipeline);
-    command_buffer.bind_vertex_buffers(0, &[&vertex_buffer], &[0]);
+    // The vertex allocation's address is pushed; the shader pulls vertices
+    // through it. One push before the draw: the array does not change.
+    let bytes = vertices_place
+        .pointer_bytes(vertex_alloc.gpu().as_raw())
+        .expect("vertices pointer encode");
+    command_buffer.push_data(vertices_place.offset as u32, &bytes);
     command_buffer.draw_indirect(
         &args_buffer,
         0,
@@ -195,38 +197,34 @@ PsOutput main(PsInput input)
     );
     command_buffer.end().expect("end command buffer");
 
-    // Exercise the indexed-indirect API surface too: build a trivial index
-    // buffer + indexed args record and record (but do not submit) the command,
-    // confirming the binding/indexed-indirect path compiles and records.
-    let indices: [u32; 3] = [0, 1, 2];
-    let index_buffer = Buffer::new(
+    // Exercise the multi-draw side of the args parsing too: two records in
+    // one buffer — different vertex counts, one starting mid-array — consumed
+    // by a single `draw_indirect` call, confirming the draw-count and stride
+    // arithmetic records (but is not submitted).
+    let multi_args = [
+        DrawIndirectArgs {
+            vertex_count: 3,
+            instance_count: 1,
+            first_vertex: 0,
+            first_instance: 0,
+        },
+        DrawIndirectArgs {
+            vertex_count: 2,
+            instance_count: 1,
+            first_vertex: 1,
+            first_instance: 0,
+        },
+    ];
+    let multi_args_buffer = Buffer::new(
         &device,
-        std::mem::size_of_val(&indices) as u64,
-        BufferUsage::INDEX,
-        moonfield_rhi::Memory::Default,
-    )
-    .expect("index buffer");
-    index_buffer
-        .upload(&device, &indices)
-        .expect("index upload");
-
-    let indexed_args = [moonfield_rhi::DrawIndexedIndirectArgs {
-        index_count: 3,
-        instance_count: 1,
-        first_index: 0,
-        base_vertex: 0,
-        first_instance: 0,
-    }];
-    let indexed_args_buffer = Buffer::new(
-        &device,
-        std::mem::size_of_val(&indexed_args) as u64,
+        std::mem::size_of_val(&multi_args) as u64,
         BufferUsage::INDIRECT,
         moonfield_rhi::Memory::Default,
     )
-    .expect("indexed indirect args buffer");
-    indexed_args_buffer
-        .upload(&device, &indexed_args)
-        .expect("indexed indirect args upload");
+    .expect("multi-draw args buffer");
+    multi_args_buffer
+        .upload(&device, &multi_args)
+        .expect("multi-draw args upload");
 
     let mut second = command_pool
         .allocate_command_buffer()
@@ -235,13 +233,14 @@ PsOutput main(PsInput input)
         .begin(CommandBufferUsage::ONE_TIME_SUBMIT)
         .expect("begin second command buffer");
     second.bind_graphics_pipeline(&pipeline);
-    second.bind_vertex_buffers(0, &[&vertex_buffer], &[0]);
-    second.bind_index_buffer(&index_buffer, 0, IndexFormat::Uint32);
-    second.draw_indexed_indirect(
-        &indexed_args_buffer,
+    // Push-data state is per command buffer: the second recording needs its
+    // own copy of the vertex array pointer.
+    second.push_data(vertices_place.offset as u32, &bytes);
+    second.draw_indirect(
+        &multi_args_buffer,
         0,
-        1,
-        std::mem::size_of::<moonfield_rhi::DrawIndexedIndirectArgs>() as u32,
+        2,
+        std::mem::size_of::<DrawIndirectArgs>() as u32,
     );
     second.end().expect("end second command buffer");
 }

@@ -1,7 +1,7 @@
 //! Vulkan pipeline abstractions (graphics and compute).
 
 use crate::error::{Error, Result};
-use crate::types::{Format, VertexBufferLayout};
+use crate::types::Format;
 use crate::vulkan::device::Device;
 use crate::vulkan::shader_module::ShaderModule;
 use ash::vk;
@@ -49,12 +49,14 @@ impl GraphicsPipeline {
     /// so the pipeline is independent of the target extent. Attachment
     /// formats are baked into the pipeline (they affect shader microcode);
     /// `color_format` declares the single color target.
+    ///
+    /// The pipeline has no vertex input: vertex shaders pull geometry
+    /// through root-data pointers (`SV_VertexID` is the only stage input).
     pub fn new(
         device: &Device,
         color_format: Format,
         vertex_shader: &ShaderModule,
         fragment_shader: &ShaderModule,
-        vertex_layout: &VertexBufferLayout,
     ) -> Result<Self> {
         Self::new_with_options(
             device,
@@ -62,7 +64,6 @@ impl GraphicsPipeline {
             None,
             vertex_shader,
             fragment_shader,
-            vertex_layout,
         )
     }
 
@@ -80,7 +81,6 @@ impl GraphicsPipeline {
         depth_format: Option<Format>,
         vertex_shader: &ShaderModule,
         fragment_shader: &ShaderModule,
-        vertex_layout: &VertexBufferLayout,
     ) -> Result<Self> {
         Self::new_with_stages(
             device,
@@ -94,7 +94,6 @@ impl GraphicsPipeline {
                     module: fragment_shader,
                 },
             ],
-            vertex_layout,
         )
     }
 
@@ -112,7 +111,6 @@ impl GraphicsPipeline {
         color_formats: &[Format],
         depth_format: Option<Format>,
         stages: &[ShaderStageDesc<'_>],
-        vertex_layout: &VertexBufferLayout,
     ) -> Result<Self> {
         // Entry names and the create infos that point at them must live for the
         // whole pipeline construction; collect the names first so the infos
@@ -150,32 +148,10 @@ impl GraphicsPipeline {
             .collect();
         let shader_stages = shader_stages?;
 
-        // Vertex input: a non-empty layout becomes one binding plus one
-        // attribute per field. An empty layout (a pulling vertex shader,
-        // whose only input is SV_VertexID) emits no descriptions — the
-        // pipeline has no input assembler, like a mesh-shader pipeline.
-        let mut binding = vk::VertexInputBindingDescription::default();
-        let attributes: Vec<vk::VertexInputAttributeDescription> = vertex_layout
-            .attributes
-            .iter()
-            .map(|attribute| {
-                vk::VertexInputAttributeDescription::default()
-                    .binding(0)
-                    .location(attribute.location)
-                    .format(attribute.format.to_vk())
-                    .offset(attribute.offset)
-            })
-            .collect();
-        let mut vertex_input_info = vk::PipelineVertexInputStateCreateInfo::default();
-        if !vertex_layout.attributes.is_empty() {
-            binding = binding
-                .binding(0)
-                .stride(vertex_layout.stride)
-                .input_rate(vk::VertexInputRate::VERTEX);
-            vertex_input_info = vertex_input_info
-                .vertex_binding_descriptions(std::slice::from_ref(&binding))
-                .vertex_attribute_descriptions(&attributes);
-        }
+        // Vertex input: none — vertex shaders pull geometry through
+        // root-data pointers (`SV_VertexID` is the only stage input), the
+        // shape mesh-shader pipelines use.
+        let vertex_input_info = vk::PipelineVertexInputStateCreateInfo::default();
 
         let input_assembly = vk::PipelineInputAssemblyStateCreateInfo::default()
             .topology(vk::PrimitiveTopology::TRIANGLE_LIST)

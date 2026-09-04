@@ -106,51 +106,6 @@ impl BufferUsage {
     }
 }
 
-/// Vertex attribute formats supported by the Vulkan renderer. Grow as needed.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum VertexFormat {
-    /// Two 32-bit floats.
-    Float32x2,
-    /// Three 32-bit floats.
-    Float32x3,
-    /// Four 32-bit floats.
-    Float32x4,
-    /// One 32-bit unsigned integer (e.g. a packed RGBA color).
-    Uint32,
-}
-
-impl VertexFormat {
-    /// Convert to the equivalent Vulkan format.
-    pub(crate) fn to_vk(self) -> ash::vk::Format {
-        match self {
-            Self::Float32x2 => ash::vk::Format::R32G32_SFLOAT,
-            Self::Float32x3 => ash::vk::Format::R32G32B32_SFLOAT,
-            Self::Float32x4 => ash::vk::Format::R32G32B32A32_SFLOAT,
-            Self::Uint32 => ash::vk::Format::R32_UINT,
-        }
-    }
-}
-
-/// A single vertex attribute within a [`VertexBufferLayout`].
-#[derive(Debug, Clone, Copy)]
-pub struct VertexAttribute {
-    /// The shader input location.
-    pub location: u32,
-    /// The attribute format.
-    pub format: VertexFormat,
-    /// Byte offset of the attribute within a vertex.
-    pub offset: u32,
-}
-
-/// The layout of a single vertex buffer (binding 0, per-vertex input rate).
-#[derive(Debug, Clone)]
-pub struct VertexBufferLayout {
-    /// Byte stride between consecutive vertices.
-    pub stride: u32,
-    /// The vertex attributes.
-    pub attributes: Vec<VertexAttribute>,
-}
-
 // ===========================================================================
 // Pass-recording vocabulary
 //

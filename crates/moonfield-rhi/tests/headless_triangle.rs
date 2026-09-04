@@ -1,12 +1,13 @@
 //! Headless smoke test for Lunar Mare Vulkan RHI.
 //!
 //! Verifies that instance, device, command pool, command buffer, shader modules,
-//! render pass, graphics pipeline, and buffer can be created and that a command
-//! buffer can be recorded with a pipeline bind and draw command.
+//! render pass, graphics pipeline, and vertex allocation can be created and that
+//! a command buffer can be recorded with a pipeline bind, a pushed vertex-array
+//! pointer, and a draw command.
 
 use moonfield_rhi::{
-    Buffer, BufferUsage, CommandBufferUsage, CommandPool, Compiler, Device, Format,
-    GraphicsPipeline, Instance, ShaderModule, VertexAttribute, VertexBufferLayout, VertexFormat,
+    CommandBufferUsage, CommandPool, Compiler, Device, Format, GpuAllocation, GraphicsPipeline,
+    Instance, Memory, RootBinder, ShaderModule,
 };
 
 mod common;
@@ -43,11 +44,13 @@ fn headless_pipeline_and_command_buffer() {
 
     let compiler = Compiler::new().expect("compiler creation");
 
+    // Pull-based vertex path: the only stage input is SV_VertexID; geometry is
+    // fetched through the `vertices` root pointer (push data, not a bound buffer).
     let vertex_source = r#"
-struct VsInput
+struct VertexData
 {
-    float3 position : POSITION;
-    float3 color : COLOR;
+    float3 position;
+    float3 color;
 };
 
 struct VsOutput
@@ -57,11 +60,11 @@ struct VsOutput
 };
 
 [shader("vertex")]
-VsOutput main(VsInput input)
+VsOutput main(uint vid : SV_VertexID, Ptr<VertexData> vertices)
 {
     VsOutput output;
-    output.position = float4(input.position, 1.0);
-    output.color = input.color;
+    output.position = float4(vertices[vid].position, 1.0);
+    output.color = vertices[vid].color;
     return output;
 }
 "#;
@@ -93,33 +96,25 @@ PsOutput main(PsInput input)
         .compile_source_to_spirv("triangle_fs", fragment_source, "main")
         .expect("fragment shader compilation");
 
+    // The vertex array's device address is delivered through push data; its
+    // placement comes from the reflected entry point, not a hand-synced constant.
+    let reflection = compiler
+        .compile_source_to_reflection("triangle_vs", vertex_source, "main")
+        .expect("vertex shader reflection");
+    let binder = RootBinder::new(&reflection, "main").expect("root binder");
+    let vertices_place = binder.pointer_param("vertices").expect("vertices place");
+    drop(reflection);
+
     let vertex_shader =
         ShaderModule::from_compiled(&device, &vertex_spirv).expect("vertex shader module");
     let fragment_shader =
         ShaderModule::from_compiled(&device, &fragment_spirv).expect("fragment shader module");
-
-    let vertex_layout = VertexBufferLayout {
-        stride: std::mem::size_of::<Vertex>() as u32,
-        attributes: vec![
-            VertexAttribute {
-                location: 0,
-                format: VertexFormat::Float32x3,
-                offset: 0,
-            },
-            VertexAttribute {
-                location: 1,
-                format: VertexFormat::Float32x3,
-                offset: std::mem::size_of::<[f32; 3]>() as u32,
-            },
-        ],
-    };
 
     let _pipeline = GraphicsPipeline::new(
         &device,
         Format::B8G8R8A8Unorm,
         &vertex_shader,
         &fragment_shader,
-        &vertex_layout,
     )
     .expect("graphics pipeline");
 
@@ -138,16 +133,20 @@ PsOutput main(PsInput input)
         },
     ];
 
-    let vertex_buffer = Buffer::new(
+    let vertex_alloc = GpuAllocation::new(
         &device,
         std::mem::size_of_val(&vertices) as u64,
-        BufferUsage::VERTEX,
-        moonfield_rhi::Memory::Default,
+        Memory::Default,
     )
-    .expect("vertex buffer");
-    vertex_buffer
-        .upload(&device, &vertices)
-        .expect("vertex upload");
+    .expect("vertex allocation");
+    // SAFETY: host-visible allocation, written once before recording.
+    unsafe {
+        std::ptr::copy_nonoverlapping(
+            vertices.as_ptr(),
+            vertex_alloc.host().expect("host view").typed::<Vertex>(),
+            vertices.len(),
+        );
+    }
 
     let queue_family_index = device.queue_family_indices().graphics;
     let command_pool = CommandPool::new(&device, queue_family_index).expect("command pool");
@@ -159,7 +158,11 @@ PsOutput main(PsInput input)
         .begin(CommandBufferUsage::ONE_TIME_SUBMIT)
         .expect("begin command buffer");
     command_buffer.bind_graphics_pipeline(&_pipeline);
-    command_buffer.bind_vertex_buffers(0, &[&vertex_buffer], &[0]);
+    // One push before the draw: the vertex array does not change during the pass.
+    let bytes = vertices_place
+        .pointer_bytes(vertex_alloc.gpu().as_raw())
+        .expect("vertices pointer encode");
+    command_buffer.push_data(vertices_place.offset as u32, &bytes);
     command_buffer.draw(3, 1, 0, 0);
     command_buffer.end().expect("end command buffer");
 }

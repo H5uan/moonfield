@@ -5,8 +5,8 @@
 //! triangle. It does not require a window or surface.
 
 use moonfield_rhi::{
-    Buffer, BufferUsage, CommandBufferUsage, CommandPool, Compiler, Device, Format,
-    GraphicsPipeline, Instance, ShaderModule, VertexAttribute, VertexBufferLayout, VertexFormat,
+    CommandBufferUsage, CommandPool, Compiler, Device, Format, GpuAllocation, GraphicsPipeline,
+    Instance, Memory, RootBinder, ShaderModule,
 };
 
 #[repr(C)]
@@ -22,11 +22,13 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     let compiler = Compiler::new()?;
 
+    // Pull-based vertex path: the only stage input is SV_VertexID; geometry is
+    // fetched through the `vertices` root pointer (push data, not a bound buffer).
     let vertex_source = r#"
-struct VsInput
+struct VertexData
 {
-    float3 position : POSITION;
-    float3 color : COLOR;
+    float3 position;
+    float3 color;
 };
 
 struct VsOutput
@@ -36,11 +38,11 @@ struct VsOutput
 };
 
 [shader("vertex")]
-VsOutput main(VsInput input)
+VsOutput main(uint vid : SV_VertexID, Ptr<VertexData> vertices)
 {
     VsOutput output;
-    output.position = float4(input.position, 1.0);
-    output.color = input.color;
+    output.position = float4(vertices[vid].position, 1.0);
+    output.color = vertices[vid].color;
     return output;
 }
 "#;
@@ -69,31 +71,21 @@ PsOutput main(PsInput input)
     let fragment_spirv =
         compiler.compile_source_to_spirv("triangle_fs", fragment_source, "main")?;
 
+    // The vertex array's device address is delivered through push data; its
+    // placement comes from the reflected entry point, not a hand-synced constant.
+    let reflection = compiler.compile_source_to_reflection("triangle_vs", vertex_source, "main")?;
+    let binder = RootBinder::new(&reflection, "main")?;
+    let vertices_place = binder.pointer_param("vertices")?;
+    drop(reflection);
+
     let vertex_shader = ShaderModule::from_compiled(&device, &vertex_spirv)?;
     let fragment_shader = ShaderModule::from_compiled(&device, &fragment_spirv)?;
-
-    let vertex_layout = VertexBufferLayout {
-        stride: std::mem::size_of::<Vertex>() as u32,
-        attributes: vec![
-            VertexAttribute {
-                location: 0,
-                format: VertexFormat::Float32x3,
-                offset: 0,
-            },
-            VertexAttribute {
-                location: 1,
-                format: VertexFormat::Float32x3,
-                offset: std::mem::size_of::<[f32; 3]>() as u32,
-            },
-        ],
-    };
 
     let pipeline = GraphicsPipeline::new(
         &device,
         Format::B8G8R8A8Unorm,
         &vertex_shader,
         &fragment_shader,
-        &vertex_layout,
     )?;
 
     let vertices = [
@@ -111,13 +103,22 @@ PsOutput main(PsInput input)
         },
     ];
 
-    let vertex_buffer = Buffer::new(
+    let vertex_alloc = GpuAllocation::new(
         &device,
         std::mem::size_of_val(&vertices) as u64,
-        BufferUsage::VERTEX,
-        moonfield_rhi::Memory::Default,
+        Memory::Default,
     )?;
-    vertex_buffer.upload(&device, &vertices)?;
+    // SAFETY: host-visible allocation, written once before recording.
+    unsafe {
+        std::ptr::copy_nonoverlapping(
+            vertices.as_ptr(),
+            vertex_alloc
+                .host()
+                .ok_or("vertex allocation lost its host view")?
+                .typed::<Vertex>(),
+            vertices.len(),
+        );
+    }
 
     let queue_family_index = device.queue_family_indices().graphics;
     let command_pool = CommandPool::new(&device, queue_family_index)?;
@@ -129,7 +130,10 @@ PsOutput main(PsInput input)
     // headless recording demo we bind the pipeline and issue the draw call
     // directly to exercise the command buffer API.
     command_buffer.bind_graphics_pipeline(&pipeline);
-    command_buffer.bind_vertex_buffers(0, &[&vertex_buffer], &[0]);
+    // The vertex allocation's address is pushed; the shader pulls vertices
+    // through it. One push before the draw: the array does not change.
+    let bytes = vertices_place.pointer_bytes(vertex_alloc.gpu().as_raw())?;
+    command_buffer.push_data(vertices_place.offset as u32, &bytes);
     command_buffer.draw(3, 1, 0, 0);
 
     command_buffer.end()?;

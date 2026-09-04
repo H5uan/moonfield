@@ -1,23 +1,30 @@
 // egui's per-draw root data, pushed via vkCmdPushDataEXT (`push_data`) and
 // read through the PushConstant storage class. The static fields (screen
-// size, option flags) are pushed once per pass; the varying tail (the
-// descriptor-heap slot indices the fragment stage indexes the untyped
-// `ResourceDescriptorHeap` / `SamplerDescriptorHeap` with) is pushed per
+// size, option flags, the vertex/index array pointers) are pushed once per
+// pass; the varying tail — the descriptor-heap slot indices the fragment
+// stage indexes the untyped `ResourceDescriptorHeap` /
+// `SamplerDescriptorHeap` with, plus this draw's index base — is pushed per
 // draw. Layout must match `EguiRoot` in egui_vk.rs.
 struct EguiRoot
 {
     float2 screen_size_in_points;
     uint dithering;
     uint predictable_filtering;
+    Ptr<PodVertex> vertices;
+    Ptr<uint32_t> indices;
     uint texture;
     uint sampler;
+    uint index_base;
+    uint _pad0;
 };
 
-struct VsInput
+// `egui::epaint::Vertex` laid out for the GPU: pos (f32×2), uv (f32×2),
+// packed sRGB color (u32, little-endian RGBA).
+struct PodVertex
 {
-    float2 pos : POSITION;
-    float2 uv : TEXCOORD0;
-    uint color : COLOR0;
+    float2 pos;
+    float2 uv;
+    uint color;
 };
 
 struct VsOutput
@@ -37,16 +44,20 @@ float4 unpack_color(uint color)
 }
 
 [shader("vertex")]
-VsOutput vs_main(VsInput input, uniform EguiRoot root)
+VsOutput vs_main(uint vid : SV_VertexID, uniform EguiRoot root)
 {
+    // Pull the mesh's geometry: the draw's `vid` indexes into the shared
+    // index array at this draw's base; the fetched value is an absolute
+    // vertex index (the upload rewrote per-mesh indices to absolute).
+    PodVertex v = root.vertices[root.indices[vid + root.index_base]];
     VsOutput output;
-    output.uv = input.uv;
-    output.color = unpack_color(input.color);
+    output.uv = v.uv;
+    output.color = unpack_color(v.color);
     // Vulkan with a positive-height viewport: +y in points maps to +y in NDC
     // (down the framebuffer), so the y axis needs no flip.
     output.position = float4(
-        2.0 * input.pos.x / root.screen_size_in_points.x - 1.0,
-        2.0 * input.pos.y / root.screen_size_in_points.y - 1.0,
+        2.0 * v.pos.x / root.screen_size_in_points.x - 1.0,
+        2.0 * v.pos.y / root.screen_size_in_points.y - 1.0,
         0.0,
         1.0);
     return output;

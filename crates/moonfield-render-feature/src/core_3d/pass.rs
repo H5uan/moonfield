@@ -20,7 +20,7 @@ use moonfield_rhi::{
     AttachmentLayout, ClearValue, CommandBuffer, CompareOp, Compiler, CullMode, CullState,
     DepthState, Format, FrontFace, GraphicsPipeline, LoadOp, OffscreenTarget, Rect2d,
     RenderAttachment, RenderDevice, RenderPassDesc, Result, RootBinder, RootParamPlace,
-    ShaderModule, StoreOp, VertexBufferLayout, Viewport,
+    ShaderModule, StoreOp, Viewport,
 };
 use std::collections::HashMap;
 use std::path::PathBuf;
@@ -48,23 +48,15 @@ fn shader_path(name: &str) -> String {
         .into_owned()
 }
 
-/// Compile both stages of `core_3d.slang` and derive the vertex layout and
-/// the `Ptr<DrawData>` / `Ptr<ViewUniforms>` root placements from the
-/// reflected entry points — the shader is the single source of truth for
-/// all three.
+/// Compile both stages of `core_3d.slang` and resolve the
+/// `Ptr<DrawData>` / `Ptr<ViewUniforms>` root placements from the reflected
+/// entry points — the shader is the single source of truth for both.
 fn compile_core_3d(
     compiler: &Compiler,
     device: &moonfield_rhi::Device,
-) -> Result<(
-    ShaderModule,
-    ShaderModule,
-    VertexBufferLayout,
-    RootParamPlace,
-    RootParamPlace,
-)> {
+) -> Result<(ShaderModule, ShaderModule, RootParamPlace, RootParamPlace)> {
     let reflection =
         compiler.compile_file_to_reflection(&shader_path("core_3d.slang"), "vs_main")?;
-    let vertex_layout = reflection.vertex_layout("vs_main")?;
     let binder = RootBinder::new(&reflection, "vs_main")?;
     let root = binder.pointer_param("root")?;
     let view = binder.pointer_param("view")?;
@@ -78,7 +70,7 @@ fn compile_core_3d(
         device,
         &compiler.compile_file_to_spirv(&shader_path("core_3d.slang"), "fs_main")?,
     )?;
-    Ok((vertex_shader, fragment_shader, vertex_layout, root, view))
+    Ok((vertex_shader, fragment_shader, root, view))
 }
 
 /// The flat-lit mesh pipeline of the core 3D pass, as a render-world
@@ -101,8 +93,7 @@ impl Core3dPipeline {
     pub fn new(render_device: &RenderDevice) -> Result<Self> {
         let device = render_device.device();
         let compiler = Compiler::new()?;
-        let (vertex_shader, fragment_shader, vertex_layout, root, view) =
-            compile_core_3d(&compiler, device)?;
+        let (vertex_shader, fragment_shader, root, view) = compile_core_3d(&compiler, device)?;
         // Descriptor-heap pipeline: per-draw root pointers go through `push_data`.
         let pipeline = GraphicsPipeline::new_with_options(
             device,
@@ -110,7 +101,6 @@ impl Core3dPipeline {
             Some(Format::D32Sfloat),
             &vertex_shader,
             &fragment_shader,
-            &vertex_layout,
         )?;
         Ok(Self {
             pipeline,

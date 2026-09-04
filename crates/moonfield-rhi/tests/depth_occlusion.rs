@@ -10,10 +10,10 @@
 
 use ash::vk;
 use moonfield_rhi::{
-    AttachmentLayout, Buffer, BufferUsage, ClearValue, CommandBufferUsage, CommandPool, CompareOp,
-    Compiler, CullMode, CullState, DepthState, Device, Format, FrontFace, GraphicsPipeline,
-    Instance, LoadOp, OffscreenTarget, Rect2d, RenderAttachment, RenderPassDesc, ShaderModule,
-    StoreOp, VertexAttribute, VertexBufferLayout, VertexFormat,
+    AttachmentLayout, ClearValue, CommandBufferUsage, CommandPool, CompareOp, Compiler, CullMode,
+    CullState, DepthState, Device, Format, FrontFace, GpuAllocation, GraphicsPipeline, Instance,
+    LoadOp, Memory, OffscreenTarget, Rect2d, RenderAttachment, RenderPassDesc, RootBinder,
+    ShaderModule, StoreOp,
 };
 
 mod common;
@@ -67,14 +67,14 @@ fn depth_test_near_quad_occludes_far_quad() {
     };
 
     let compiler = Compiler::new().expect("compiler");
-    let vertex_spirv = compiler
-        .compile_source_to_spirv(
-            "quad_vs",
-            r#"
-struct VsInput
+
+    // Pull-based vertex path: the only stage input is SV_VertexID; geometry is
+    // fetched through the `vertices` root pointer (push data, not a bound buffer).
+    let vertex_source = r#"
+struct VertexData
 {
-    float3 position : POSITION;
-    float3 color : COLOR;
+    float3 position;
+    float3 color;
 };
 
 struct VsOutput
@@ -84,21 +84,16 @@ struct VsOutput
 };
 
 [shader("vertex")]
-VsOutput main(VsInput input)
+VsOutput main(uint vid : SV_VertexID, Ptr<VertexData> vertices)
 {
     VsOutput output;
-    output.position = float4(input.position, 1.0);
-    output.color = input.color;
+    output.position = float4(vertices[vid].position, 1.0);
+    output.color = vertices[vid].color;
     return output;
 }
-"#,
-            "main",
-        )
-        .expect("vertex shader");
-    let fragment_spirv = compiler
-        .compile_source_to_spirv(
-            "quad_fs",
-            r#"
+"#;
+
+    let fragment_source = r#"
 struct PsInput
 {
     float3 color : COLOR;
@@ -109,10 +104,24 @@ float4 main(PsInput input) : SV_TARGET
 {
     return float4(input.color, 1.0);
 }
-"#,
-            "main",
-        )
+"#;
+
+    let vertex_spirv = compiler
+        .compile_source_to_spirv("quad_vs", vertex_source, "main")
+        .expect("vertex shader");
+    let fragment_spirv = compiler
+        .compile_source_to_spirv("quad_fs", fragment_source, "main")
         .expect("fragment shader");
+
+    // The vertex array's device address is delivered through push data; its
+    // placement comes from the reflected entry point, not a hand-synced constant.
+    let reflection = compiler
+        .compile_source_to_reflection("quad_vs", vertex_source, "main")
+        .expect("vertex shader reflection");
+    let binder = RootBinder::new(&reflection, "main").expect("root binder");
+    let vertices_place = binder.pointer_param("vertices").expect("vertices place");
+    drop(reflection);
+
     let vertex_shader = ShaderModule::from_compiled(&device, &vertex_spirv).expect("vs module");
     let fragment_shader = ShaderModule::from_compiled(&device, &fragment_spirv).expect("fs module");
 
@@ -126,21 +135,6 @@ float4 main(PsInput input) : SV_TARGET
         Some(Format::D32Sfloat),
         &vertex_shader,
         &fragment_shader,
-        &VertexBufferLayout {
-            stride: std::mem::size_of::<Vertex>() as u32,
-            attributes: vec![
-                VertexAttribute {
-                    location: 0,
-                    format: VertexFormat::Float32x3,
-                    offset: 0,
-                },
-                VertexAttribute {
-                    location: 1,
-                    format: VertexFormat::Float32x3,
-                    offset: 12,
-                },
-            ],
-        },
     )
     .expect("pipeline");
 
@@ -149,16 +143,20 @@ float4 main(PsInput input) : SV_TARGET
     let near = quad(0.8, RED);
     let far = quad(0.5, BLUE);
     let vertices = [&near[..], &far[..]].concat();
-    let vertex_buffer = Buffer::new(
+    let vertex_alloc = GpuAllocation::new(
         &device,
         std::mem::size_of_val(vertices.as_slice()) as u64,
-        BufferUsage::VERTEX,
-        moonfield_rhi::Memory::Default,
+        Memory::Default,
     )
-    .expect("vertex buffer");
-    vertex_buffer
-        .upload(&device, vertices.as_slice())
-        .expect("upload");
+    .expect("vertex allocation");
+    // SAFETY: host-visible allocation, written once before recording.
+    unsafe {
+        std::ptr::copy_nonoverlapping(
+            vertices.as_ptr(),
+            vertex_alloc.host().expect("host view").typed::<Vertex>(),
+            vertices.len(),
+        );
+    }
 
     let command_pool =
         CommandPool::new(&device, device.queue_family_indices().graphics).expect("pool");
@@ -202,7 +200,13 @@ float4 main(PsInput input) : SV_TARGET
         front_face: FrontFace::CounterClockwise,
     });
     command_buffer.bind_graphics_pipeline(&pipeline);
-    command_buffer.bind_vertex_buffers(0, &[&vertex_buffer], &[0]);
+    // The vertex allocation's address is pushed once; the shader pulls both
+    // quads through it — each draw's `first_vertex` offsets SV_VertexID into
+    // the array (near quad at 0, far quad at 6).
+    let bytes = vertices_place
+        .pointer_bytes(vertex_alloc.gpu().as_raw())
+        .expect("vertices pointer encode");
+    command_buffer.push_data(vertices_place.offset as u32, &bytes);
     command_buffer.draw(6, 1, 0, 0); // near red quad first
     command_buffer.draw(6, 1, 6, 0); // far blue quad second — must lose
     command_buffer.end_rendering();

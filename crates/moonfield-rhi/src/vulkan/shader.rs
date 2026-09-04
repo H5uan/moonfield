@@ -721,88 +721,6 @@ impl Reflection {
             .ok_or_else(|| RenderError::Backend(format!("no layout for type '{name}'")))?;
         Ok(Layout { layout })
     }
-
-    /// Derive the vertex input layout of a vertex entry point from its varying
-    /// input parameters: location by declaration order, format from the
-    /// parameter type, and offsets packed 4-byte aligned (the engine's vertex
-    /// stream convention — matches `PodVertex`, `[f32;3]`, etc.).
-    ///
-    /// This replaces hand-written `VertexBufferLayout`s: the shader becomes the
-    /// single source of truth for what a vertex looks like. Rejects entry
-    /// points that are not vertex shaders or that use unsupported input types.
-    pub fn vertex_layout(
-        &self,
-        entry_name: &str,
-    ) -> RenderResult<crate::types::VertexBufferLayout> {
-        let reflection = unsafe { &*self.reflection };
-        let entry = reflection
-            .find_entry_point_by_name(entry_name)
-            .map_err(map_slang_error)?
-            .ok_or_else(|| RenderError::Backend(format!("entry point '{entry_name}' not found")))?;
-        if entry.stage() != shader_slang::Stage::Vertex {
-            return Err(RenderError::Backend(format!(
-                "entry point '{entry_name}' is not a vertex shader (stage {:?})",
-                entry.stage()
-            )));
-        }
-
-        let mut attributes = Vec::new();
-        let mut offset = 0usize;
-        // Only varying inputs describe vertex data; root parameters
-        // (`Ptr<DrawData>` / `uniform Root`) and outputs do not. A struct-typed
-        // input (the usual Slang shape, e.g. `VsInput input`) is unwrapped:
-        // each struct field is one vertex attribute.
-        for param in entry
-            .parameters()
-            .filter(|p| p.category() == Some(shader_slang::ParameterCategory::VaryingInput))
-        {
-            let param_layout = param.type_layout().ok_or_else(|| {
-                RenderError::Backend(format!(
-                    "vertex input '{}' has no reflected layout",
-                    param.name().unwrap_or("<unnamed>")
-                ))
-            })?;
-            let mut field_layouts = param_layout.fields().peekable();
-            if field_layouts.peek().is_none() {
-                // A scalar/vector input (no struct): the parameter itself is
-                // the attribute.
-                let format = vertex_input_format(param_layout).ok_or_else(|| {
-                    RenderError::Backend(format!(
-                        "vertex input '{}' has an unsupported type for vertex layouts",
-                        param.name().unwrap_or("<unnamed>")
-                    ))
-                })?;
-                attributes.push(crate::types::VertexAttribute {
-                    location: attributes.len() as u32,
-                    format,
-                    offset: offset as u32,
-                });
-                offset = align4(offset + format_size(format));
-            } else {
-                for field in field_layouts {
-                    let field_type = field
-                        .type_layout()
-                        .ok_or_else(|| RenderError::Backend("field has no layout".to_string()))?;
-                    let format = vertex_input_format(field_type).ok_or_else(|| {
-                        RenderError::Backend(format!(
-                            "vertex input field '{}' has an unsupported type for vertex layouts",
-                            field.name().unwrap_or("<unnamed>")
-                        ))
-                    })?;
-                    attributes.push(crate::types::VertexAttribute {
-                        location: attributes.len() as u32,
-                        format,
-                        offset: offset as u32,
-                    });
-                    offset = align4(offset + format_size(format));
-                }
-            }
-        }
-        Ok(crate::types::VertexBufferLayout {
-            stride: align4(offset) as u32,
-            attributes,
-        })
-    }
 }
 
 /// How a root parameter is delivered to the shader on descriptor-heap
@@ -1094,44 +1012,6 @@ fn rust_type(layout: &shader_slang::reflection::TypeLayout) -> Option<(&'static 
     }
 }
 
-/// Map a varying input's reflected type to a [`VertexFormat`].
-///
-/// Supported: `float2/3/4` vectors and `uint` scalars (packed colors). The
-/// scalar type comes from the reflected type; a vector's element count from
-/// its column count.
-fn vertex_input_format(
-    layout: &shader_slang::reflection::TypeLayout,
-) -> Option<crate::types::VertexFormat> {
-    use shader_slang::{ScalarType, TypeKind};
-    let ty = layout.ty()?;
-    match ty.kind() {
-        TypeKind::Vector if ty.scalar_type() == ScalarType::Float32 => match ty.column_count() {
-            2 => Some(crate::types::VertexFormat::Float32x2),
-            3 => Some(crate::types::VertexFormat::Float32x3),
-            4 => Some(crate::types::VertexFormat::Float32x4),
-            _ => None,
-        },
-        TypeKind::Scalar if ty.scalar_type() == ScalarType::Uint32 => {
-            Some(crate::types::VertexFormat::Uint32)
-        }
-        _ => None,
-    }
-}
-
-fn format_size(format: crate::types::VertexFormat) -> usize {
-    use crate::types::VertexFormat;
-    match format {
-        VertexFormat::Float32x2 => 8,
-        VertexFormat::Float32x3 => 12,
-        VertexFormat::Float32x4 => 16,
-        VertexFormat::Uint32 => 4,
-    }
-}
-
-fn align4(n: usize) -> usize {
-    (n + 3) & !3
-}
-
 /// A struct's GPU memory layout, queried from Slang reflection.
 pub struct Layout<'a> {
     layout: &'a shader_slang::reflection::TypeLayout,
@@ -1265,42 +1145,6 @@ mod tests {
             return output;
         }
     "#;
-
-    /// Reflection-derived vertex layout: locations by declaration order,
-    /// formats from the types, offsets packed 4-byte aligned.
-    #[test]
-    fn reflection_derives_vertex_layout() {
-        let compiler = Compiler::new().expect("compiler");
-        let reflection = compiler
-            .compile_source_to_reflection("vert", VERTEX_SOURCE, "main")
-            .expect("reflection");
-        let layout = reflection.vertex_layout("main").expect("layout");
-
-        // Compact packing: 12 (pos) + 8 (uv) + 4 (color) = 24, offsets
-        // contiguous — the engine's vertex stream convention.
-        assert_eq!(layout.stride, 24);
-        assert_eq!(layout.attributes.len(), 3);
-        assert_eq!(
-            (layout.attributes[0].location, layout.attributes[0].offset),
-            (0, 0)
-        );
-        assert_eq!(
-            layout.attributes[0].format,
-            crate::types::VertexFormat::Float32x3
-        );
-        assert_eq!(
-            (layout.attributes[1].location, layout.attributes[1].offset),
-            (1, 12)
-        );
-        assert_eq!(
-            layout.attributes[1].format,
-            crate::types::VertexFormat::Float32x2
-        );
-        assert_eq!(
-            (layout.attributes[2].location, layout.attributes[2].offset),
-            (2, 20)
-        );
-    }
 
     /// RootBinder writes the reflected blob for both root kinds: a `Ptr<T>`
     /// root gets a GPU address, a `uniform` root gets its inline struct bytes.
@@ -1521,13 +1365,6 @@ mod tests {
         let binder = RootBinder::new(&reflection, "main").expect("binder");
         assert_eq!(binder.pointer_param("root").expect("root place").size, 8);
         assert_eq!(binder.pointer_param("view").expect("view place").size, 8);
-        // The varying input is untouched by the pointer roots.
-        let layout = reflection.vertex_layout("main").expect("vertex layout");
-        assert_eq!(layout.attributes.len(), 1);
-        assert_eq!(
-            layout.attributes[0].format,
-            crate::types::VertexFormat::Float32x3
-        );
 
         // The emitted SPIR-V names the `Ptr` pointee types `..._natural`
         // (Slang's C-like natural layout — offsets baked into the pointer
@@ -1590,17 +1427,7 @@ mod tests {
         assert_eq!(binder.pointer_param("root").expect("root place").size, 8);
         assert_eq!(binder.pointer_param("view").expect("view place").size, 8);
 
-        // (a) System-value inputs reflect with category `None` and the
-        // semantic name (e.g. "SV_VERTEXID") — the varying-input filter
-        // excludes them, so a pulling vertex shader derives an empty
-        // vertex layout.
-        let layout = reflection.vertex_layout("main").expect("vertex layout");
-        assert!(
-            layout.attributes.is_empty(),
-            "SV_VertexID must not become a vertex attribute"
-        );
-
-        // (b) Pointer fields inside the uniform struct: natural offsets —
+        // Pointer fields inside the uniform struct: natural offsets —
         // model @0, color @64, positions @80, indices @88, size 96.
         let draw = reflection.struct_layout("DrawData").expect("layout");
         assert_eq!(draw.field_offset("model").expect("field"), 0);
