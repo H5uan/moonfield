@@ -2,9 +2,9 @@
 //!
 //! There is no "renderer" object. Persistent GPU state lives in three
 //! resources the render world owns — [`EguiPipeline`] (shader modules,
-//! graphics pipeline, the descriptor heap, cached sampler slots),
-//! [`EguiTextures`] (egui-managed textures, user-texture registrations, the
-//! shared frame uploader), and [`EguiFrameResources`] (per-frame-in-flight
+//! graphics pipeline, the descriptor heap), [`EguiTextures`] (egui-managed
+//! textures, user-texture registrations, the shared frame uploader), and
+//! [`EguiFrameResources`] (per-frame-in-flight
 //! vertex/index buffers) — while [`record_egui`] records the draw commands
 //! into a render pass the caller has open. The editor's `prepare_egui_frame`
 //! / `egui_pass` systems drive them; tests drive them directly.
@@ -116,10 +116,9 @@ pub struct EguiPipeline {
     /// Reflection-built root blob template (`uniform EguiRoot` → the inline
     /// struct); draws clone it, write the fields, and push it.
     root: RootBinder,
-    /// The shared descriptor heap every egui texture/sampler slot lives in.
+    /// The shared descriptor heap every egui texture/sampler slot lives in
+    /// (samplers through its description cache).
     heap: Arc<DescriptorHeap>,
-    /// Sampler heap slots cached by egui sampler options; freed on drop.
-    samplers: HashMap<TextureOptions, SamplerHandle>,
     options: EguiOptions,
     /// Reserved for future paint callbacks; see [`CallbackResources`].
     pub callback_resources: CallbackResources,
@@ -199,7 +198,6 @@ impl EguiPipeline {
             pipeline,
             root,
             heap: device.descriptor_heap(),
-            samplers: HashMap::new(),
             options,
             callback_resources: CallbackResources { _private: () },
         })
@@ -211,30 +209,13 @@ impl EguiPipeline {
         &self.options
     }
 
-    /// Create-or-fetch the descriptor-heap slot of the sampler for the given
-    /// egui options (egui mip levels are always 1, so the mipmap mode only
-    /// selects the enum).
-    fn sampler_slot(&mut self, options: TextureOptions) -> Result<SamplerHandle, String> {
-        Ok(match self.samplers.entry(options) {
-            std::collections::hash_map::Entry::Occupied(entry) => *entry.get(),
-            std::collections::hash_map::Entry::Vacant(entry) => {
-                let handle = self.heap.alloc_sampler_slot().map_err(|e| e.to_string())?;
-                self.heap
-                    .write_samplers(&[(handle, sampler_desc(options))])
-                    .map_err(|e| e.to_string())?;
-                *entry.insert(handle)
-            }
-        })
-    }
-}
-
-impl Drop for EguiPipeline {
-    fn drop(&mut self) {
-        for (_, handle) in self.samplers.drain() {
-            if let Err(e) = self.heap.free_sampler_slot(handle) {
-                moonfield_log::error!("failed to free egui sampler slot: {e}");
-            }
-        }
+    /// The descriptor-heap slot of the sampler for the given egui options
+    /// (egui mip levels are always 1, so the mipmap mode only selects the
+    /// enum), from the heap's sampler cache.
+    fn sampler_slot(&self, options: TextureOptions) -> Result<SamplerHandle, String> {
+        self.heap
+            .sampler_for(sampler_desc(options))
+            .map_err(|e| e.to_string())
     }
 }
 
@@ -316,7 +297,7 @@ impl EguiTextures {
     pub fn update_texture(
         &mut self,
         device: &Device,
-        pipeline: &mut EguiPipeline,
+        pipeline: &EguiPipeline,
         id: TextureId,
         delta: &ImageDelta,
     ) -> Result<(), String> {
@@ -434,7 +415,7 @@ impl EguiTextures {
     /// `register_native_texture_with_sampler_options`).
     pub fn register_native_texture_with_options(
         &mut self,
-        pipeline: &mut EguiPipeline,
+        pipeline: &EguiPipeline,
         texture: TextureHandle,
         options: TextureOptions,
     ) -> Result<TextureId, String> {
@@ -591,12 +572,8 @@ pub fn record_egui(
     let Some(frame) = frames.frames.get(frame_slot) else {
         return;
     };
-    // Heap binding is command-buffer scoped; binding here keeps the pass
-    // self-contained for the editor and for tests alike.
-    if let Err(e) = pipeline.heap.cmd_bind(command_buffer) {
-        moonfield_log::error!("failed to bind descriptor heaps: {e}");
-        return;
-    }
+    // The command buffer's owner (the frame loop, or the test) has bound
+    // the descriptor heaps; this pass only records state and draws.
     // egui draws with premultiplied-alpha blending, no culling, no depth.
     command_buffer.set_blend_state(BlendMode::PremultipliedAlpha);
     command_buffer.set_cull_state(CullState {

@@ -5,11 +5,9 @@
 //! it afterwards. The caller picks the attachment layout when beginning a
 //! rendering pass; `SHADER_READ_ONLY_OPTIMAL` outside a pass keeps the image
 //! sampleable with no explicit transitions. Sampling goes through the
-//! descriptor heap: the target owns one image slot and one sampler slot
-//! ([`texture_handle`](OffscreenTarget::texture_handle) /
-//! [`sampler_handle`](OffscreenTarget::sampler_handle)); a resize allocates
-//! new slots and retires the old ones, so holders re-register when the
-//! handles change.
+//! descriptor heap: the target owns one image slot, and its sampler comes
+//! from the heap's description cache; a resize allocates a new image slot
+//! and retires the old one, so holders re-register when the handles change.
 //!
 //! [`OffscreenTarget::new_with_depth`] adds a `D32Sfloat` depth attachment for
 //! depth-tested scene rendering (reverse-Z: the depth clear value is 0.0).
@@ -26,9 +24,10 @@ use gpu_allocator::vulkan::{Allocation, AllocationCreateDesc, AllocationScheme};
 use std::sync::Arc;
 
 /// The target's descriptor-heap slots: the color view's image slot and the
-/// fixed linear/clamp sampler slot. A resize allocates a fresh pair and
-/// drops the old one into the retirement ring, so the handles identify one
-/// image for the pair's whole lifetime.
+/// linear/clamp sampler from the heap's description cache. A resize
+/// allocates a fresh image slot (the old one retires through the ring);
+/// the cached sampler handle is shared by every target with the same
+/// description.
 struct HeapSlots {
     texture: TextureHandle,
     sampler: SamplerHandle,
@@ -43,7 +42,8 @@ struct HeapSlots {
 }
 
 impl HeapSlots {
-    /// Allocate the image and sampler slots and write both descriptors.
+    /// Allocate the image slot, write its descriptor, and fetch the cached
+    /// sampler.
     fn new(device: &Device, view_create_info: vk::ImageViewCreateInfo<'static>) -> Result<Self> {
         let heap = device.descriptor_heap();
         let texture = heap.alloc_image_slot()?;
@@ -54,8 +54,7 @@ impl HeapSlots {
                 vk::ImageLayout::GENERAL,
             ),
         )])?;
-        let sampler = heap.alloc_sampler_slot()?;
-        heap.write_samplers(&[(sampler, target_sampler_desc())])?;
+        let sampler = heap.sampler_for(target_sampler_desc())?;
         Ok(Self {
             texture,
             sampler,
@@ -68,17 +67,14 @@ impl HeapSlots {
 
 impl Drop for HeapSlots {
     fn drop(&mut self) {
-        // Teardown is deferred: in-flight frames may still index these
-        // slots. The image slot's action carries the view create info (the
-        // heap's encoded descriptor references it by pointer).
+        // Teardown is deferred: in-flight frames may still index the image
+        // slot. The action carries the view create info (the heap's
+        // encoded descriptor references it by pointer). The sampler slot
+        // is cached and never freed.
         self.ring.push(RetireAction::ImageSlot {
             heap: self.heap.clone(),
             handle: self.texture,
             view_create_info: self.view_create_info,
-        });
-        self.ring.push(RetireAction::SamplerSlot {
-            heap: self.heap.clone(),
-            handle: self.sampler,
         });
     }
 }
@@ -188,8 +184,8 @@ impl OffscreenTarget {
         })
     }
 
-    /// Resize the target: allocate a new image, view, and heap slots; the
-    /// old ones retire through the ring when the fields are replaced, so
+    /// Resize the target: allocate a new image, view, and image slot; the
+    /// old one retires through the ring when the fields are replaced, so
     /// in-flight frames keep sampling valid memory. Holders re-register
     /// when [`texture_handle`](Self::texture_handle) changes. Zero
     /// dimensions are ignored (e.g. a minimized viewport panel).
@@ -272,8 +268,8 @@ impl OffscreenTarget {
     }
 
     /// The target's fixed sampler's descriptor-heap slot (linear filtering,
-    /// clamp-to-edge). Changed by a resize; holders re-register when it
-    /// changes.
+    /// clamp-to-edge), from the heap's sampler cache — every target with
+    /// this description shares it.
     pub fn sampler_handle(&self) -> SamplerHandle {
         self.heap_slots.sampler
     }

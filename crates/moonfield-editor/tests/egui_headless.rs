@@ -38,7 +38,7 @@ fn egui_headless_frame_is_not_blank() {
     let mut user_image =
         OffscreenTarget::new(&device, 8, 8, Format::B8G8R8A8Unorm).expect("user image");
 
-    let mut pipeline = EguiPipeline::new(
+    let pipeline = EguiPipeline::new(
         &device,
         Format::B8G8R8A8Unorm,
         false,
@@ -92,7 +92,7 @@ fn egui_headless_frame_is_not_blank() {
         for (id, deltas) in textures_delta.set.drain() {
             for delta in deltas {
                 textures
-                    .update_texture(&device, &mut pipeline, id, &delta)
+                    .update_texture(&device, &pipeline, id, &delta)
                     .expect("texture upload");
             }
         }
@@ -119,6 +119,12 @@ fn egui_headless_frame_is_not_blank() {
         command_buffer
             .begin(CommandBufferUsage::ONE_TIME_SUBMIT)
             .expect("begin");
+        // The command buffer's owner binds the descriptor heaps (the frame
+        // loop does it at acquire for the editor).
+        device
+            .descriptor_heap()
+            .cmd_bind(&command_buffer)
+            .expect("bind descriptor heaps");
 
         // Clear the user-texture source to opaque red.
         clear_to_red(&command_buffer, &user_image);

@@ -14,7 +14,8 @@
 //! Slot semantics follow the bump-arena contract: freeing a slot invalidates
 //! it, and a re-allocated slot must be written again before it is referenced —
 //! the next frame's write, not slot zeroing, is what makes the new contents
-//! visible.
+//! visible. Sampler slots bypass the contract: they are allocated through the
+//! description cache ([`DescriptorHeap::sampler_for`]) and never freed.
 
 use crate::CommandBuffer;
 use crate::error::{Error, Result};
@@ -23,6 +24,7 @@ use crate::vulkan::device::{DescriptorHeapProperties, Device};
 use crate::vulkan::memory::{GpuAllocation, GpuPtr};
 use ash::vk;
 use moonfield_math::gpu::align_up;
+use std::collections::HashMap;
 use std::sync::Mutex;
 
 /// Default descriptor heap capacities, matching the bindless texture budget.
@@ -131,6 +133,9 @@ impl SlotAllocator {
 pub struct DescriptorHeap {
     image_slots: Mutex<SlotAllocator>,
     sampler_slots: Mutex<SlotAllocator>,
+    /// Sampler slots by description — the immortal sampler cache behind
+    /// [`DescriptorHeap::sampler_for`].
+    sampler_cache: Mutex<HashMap<SamplerDesc, SamplerHandle>>,
     resource_heap: GpuAllocation,
     sampler_heap: GpuAllocation,
     image_stride: usize,
@@ -160,6 +165,7 @@ impl DescriptorHeap {
         Ok(Self {
             image_slots: Mutex::new(SlotAllocator::new(image_cap)),
             sampler_slots: Mutex::new(SlotAllocator::new(sampler_cap)),
+            sampler_cache: Mutex::new(HashMap::new()),
             resource_heap,
             sampler_heap,
             image_stride,
@@ -243,13 +249,19 @@ impl DescriptorHeap {
         ))
     }
 
-    /// Return a sampler slot to the pool (see
-    /// [`free_image_slot`](Self::free_image_slot)).
-    pub fn free_sampler_slot(&self, handle: SamplerHandle) -> Result<()> {
-        self.sampler_slots
-            .lock()
-            .unwrap_or_else(|e| e.into_inner())
-            .free(handle.0)
+    /// The slot of a sampler with the given description, allocating and
+    /// encoding it on first use. Cached samplers are never freed: distinct
+    /// descriptions are few and bounded by configuration space, so one slot
+    /// per description costs less than any reference count.
+    pub fn sampler_for(&self, desc: SamplerDesc) -> Result<SamplerHandle> {
+        let mut cache = self.sampler_cache.lock().unwrap_or_else(|e| e.into_inner());
+        if let Some(&handle) = cache.get(&desc) {
+            return Ok(handle);
+        }
+        let handle = self.alloc_sampler_slot()?;
+        self.write_samplers(&[(handle, desc)])?;
+        cache.insert(desc, handle);
+        Ok(handle)
     }
 
     /// Write texture descriptors into their slots.
@@ -390,12 +402,11 @@ impl DescriptorHeap {
         Ok(())
     }
 
-    /// Bind both heaps to the command buffer: call once per frame while
-    /// recording, before the draw/dispatch that samples texture slots. Heap
-    /// binding is command-buffer scoped and bind-point agnostic — one call
-    /// serves graphics and compute work (the extension spec makes the bound
-    /// heap available to all subsequent shaders). `reserved_range_size`
-    /// satisfies the driver's minimum reserved range.
+    /// Bind both heaps to the command buffer. The frame loop binds once per
+    /// frame command buffer at acquire (heap binding is command-buffer
+    /// scoped and bind-point agnostic — one call serves graphics and compute
+    /// work); direct command-buffer owners (tests) bind their own.
+    /// `reserved_range_size` satisfies the driver's minimum reserved range.
     pub fn cmd_bind(&self, cb: &CommandBuffer) -> Result<()> {
         let resource_bind = vk::BindHeapInfoEXT::default()
             .heap_range(vk::DeviceAddressRangeEXT {

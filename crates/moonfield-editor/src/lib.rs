@@ -493,8 +493,8 @@ fn prepare_egui_frame(world: &mut World) {
     };
 
     {
-        let mut pipeline = world
-            .get_resource_mut::<egui_vk::EguiPipeline>()
+        let pipeline = world
+            .get_resource::<egui_vk::EguiPipeline>()
             .expect("EguiPipeline was just ensured");
         let mut textures = world
             .get_resource_mut::<egui_vk::EguiTextures>()
@@ -505,7 +505,7 @@ fn prepare_egui_frame(world: &mut World) {
         // the window frame loop flushes at submit.
         for (id, deltas) in frame.textures_delta.set.drain() {
             for delta in deltas {
-                if let Err(e) = textures.update_texture(&device, &mut pipeline, id, &delta) {
+                if let Err(e) = textures.update_texture(&device, &pipeline, id, &delta) {
                     error!("failed to update egui texture {id:?}: {e}");
                 }
             }

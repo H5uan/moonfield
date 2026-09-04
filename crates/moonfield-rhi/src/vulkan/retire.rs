@@ -9,7 +9,7 @@
 //! remains once the device is idle.
 //!
 
-use crate::vulkan::descriptor_heap::{DescriptorHeap, SamplerHandle, TextureHandle};
+use crate::vulkan::descriptor_heap::{DescriptorHeap, TextureHandle};
 use ash::vk;
 use gpu_allocator::vulkan::{Allocation, Allocator};
 use std::sync::{Arc, Mutex};
@@ -36,11 +36,6 @@ pub(crate) enum RetireAction {
         /// freed — they live as long as this action does.
         #[allow(dead_code)]
         view_create_info: vk::ImageViewCreateInfo<'static>,
-    },
-    /// Return a sampler slot to the heap's freelist.
-    SamplerSlot {
-        heap: Arc<DescriptorHeap>,
-        handle: SamplerHandle,
     },
     /// Destroy an image view and image, then free the allocation.
     Image {
@@ -70,11 +65,6 @@ impl RetireAction {
                 // be read; the action's copy drops when `run` returns.
                 if let Err(e) = heap.free_image_slot(handle) {
                     moonfield_log::error!("failed to free retired image slot: {e}");
-                }
-            }
-            Self::SamplerSlot { heap, handle } => {
-                if let Err(e) = heap.free_sampler_slot(handle) {
-                    moonfield_log::error!("failed to free retired sampler slot: {e}");
                 }
             }
             Self::Image {

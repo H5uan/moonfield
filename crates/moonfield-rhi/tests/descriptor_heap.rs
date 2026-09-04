@@ -11,7 +11,7 @@
 mod common;
 
 use moonfield_rhi::{
-    BufferRange, DescriptorHeap, Device, GpuAllocation, Instance, Memory, SamplerDesc,
+    BufferRange, DescriptorHeap, Device, Filter, GpuAllocation, Instance, Memory, SamplerDesc,
     TextureHandle,
 };
 
@@ -77,11 +77,6 @@ fn slots_alloc_reuse_and_exhaust() {
         heap.free_image_slot(TextureHandle(99)).is_err(),
         "never-allocated slot"
     );
-
-    // Sampler slots have the same contract.
-    let s = heap.alloc_sampler_slot().expect("sampler slot 0");
-    assert_eq!(s.0, 0);
-    heap.free_sampler_slot(s).expect("free sampler slot");
 }
 
 #[test]
@@ -131,4 +126,28 @@ fn write_samplers_encodes_slots() {
     heap.write_samplers(&[(s, desc)]).expect("rewrite sampler");
     let s2 = heap.alloc_sampler_slot().expect("sampler slot 2");
     assert_ne!(s, s2, "slots are distinct until freed");
+}
+
+/// The sampler cache shares one slot per description and never frees it.
+#[test]
+fn sampler_for_dedupes_descriptions() {
+    let Some((_instance, device)) = setup() else {
+        return;
+    };
+    let heap = DescriptorHeap::new(&device, 16, 8).expect("descriptor heap");
+
+    let a = heap.sampler_for(SamplerDesc::default()).expect("sampler a");
+    let b = heap.sampler_for(SamplerDesc::default()).expect("sampler b");
+    assert_eq!(a, b, "identical descriptions share one slot");
+
+    let c = heap
+        .sampler_for(SamplerDesc {
+            min_filter: Filter::Nearest,
+            ..SamplerDesc::default()
+        })
+        .expect("sampler c");
+    assert_ne!(a, c, "distinct descriptions get distinct slots");
+
+    // The cached slot survives use after use.
+    assert_eq!(heap.sampler_for(SamplerDesc::default()).expect("again"), a);
 }

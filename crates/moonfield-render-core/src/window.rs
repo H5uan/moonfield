@@ -213,6 +213,11 @@ impl WindowSurfaceData {
 
         let command_buffer = &mut self.command_buffers[frame];
         command_buffer.begin(CommandBufferUsage::ONE_TIME_SUBMIT)?;
+        // Bind the descriptor heaps once per frame command buffer (heap
+        // binding is command-buffer scoped): every heap-indexed shader
+        // access in the frame reads them. Direct command-buffer owners
+        // (tests) bind their own.
+        self.device.descriptor_heap().cmd_bind(command_buffer)?;
         Ok(true)
     }
 
