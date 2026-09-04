@@ -1545,4 +1545,68 @@ mod tests {
         assert_eq!(draw.field_offset("model").expect("field"), 0);
         assert_eq!(draw.field_offset("color").expect("field"), 64);
     }
+
+    /// The pulling-shape probe: a vertex entry whose only input is
+    /// `SV_VertexID` — geometry arrives through `Ptr` fields inside the
+    /// per-draw record. Verifies that (a) the system-value input does not
+    /// become a vertex attribute, (b) pointer fields inside the uniform
+    /// struct lay out at natural (C-like) offsets, and (c) both pointer
+    /// roots resolve.
+    #[test]
+    fn pulling_vertex_shape() {
+        let compiler = Compiler::new().expect("compiler");
+        const SOURCE: &str = r#"
+            struct ViewUniforms
+            {
+                column_major float4x4 view_proj;
+                float3 view_pos;
+                float _pad0;
+            };
+            struct DrawData
+            {
+                column_major float4x4 model;
+                float4 color;
+                Ptr<float3> positions;
+                Ptr<uint32_t> indices;
+            };
+            struct VsOutput { float4 position : SV_POSITION; float3 local_pos : TEXCOORD0; };
+            [shader("vertex")]
+            VsOutput main(uint vid : SV_VertexID, Ptr<DrawData> root, Ptr<ViewUniforms> view)
+            {
+                VsOutput o;
+                uint vi = root[0].indices[vid];
+                float3 position = root[0].positions[vi];
+                float4 world = mul(root[0].model, float4(position, 1.0));
+                o.position = mul(view[0].view_proj, world);
+                o.local_pos = position;
+                return o;
+            }
+        "#;
+        let reflection = compiler
+            .compile_source_to_reflection("pulling", SOURCE, "main")
+            .expect("reflection");
+
+        let binder = RootBinder::new(&reflection, "main").expect("binder");
+        assert_eq!(binder.pointer_param("root").expect("root place").size, 8);
+        assert_eq!(binder.pointer_param("view").expect("view place").size, 8);
+
+        // (a) System-value inputs reflect with category `None` and the
+        // semantic name (e.g. "SV_VERTEXID") — the varying-input filter
+        // excludes them, so a pulling vertex shader derives an empty
+        // vertex layout.
+        let layout = reflection.vertex_layout("main").expect("vertex layout");
+        assert!(
+            layout.attributes.is_empty(),
+            "SV_VertexID must not become a vertex attribute"
+        );
+
+        // (b) Pointer fields inside the uniform struct: natural offsets —
+        // model @0, color @64, positions @80, indices @88, size 96.
+        let draw = reflection.struct_layout("DrawData").expect("layout");
+        assert_eq!(draw.field_offset("model").expect("field"), 0);
+        assert_eq!(draw.field_offset("color").expect("field"), 64);
+        assert_eq!(draw.field_offset("positions").expect("field"), 80);
+        assert_eq!(draw.field_offset("indices").expect("field"), 88);
+        assert_eq!(draw.size(), 96);
+    }
 }

@@ -12,7 +12,7 @@ use std::{collections::HashMap, collections::HashSet};
 
 use moonfield_app::prelude::World;
 use moonfield_asset::{AssetId, AssetRevision, Assets, Handle};
-use moonfield_rhi::{Buffer, BufferUsage, Memory, RenderDevice};
+use moonfield_rhi::{GpuAllocation, GpuPtr, Memory, RenderDevice};
 
 use crate::mesh::gltf::{MeshGltfError, import_gltf_mesh, parse_gltf_mesh};
 
@@ -98,50 +98,44 @@ impl<T> Default for PreparedMeshes<T> {
 
 /// Vertex and index buffers prepared for one extracted mesh.
 pub struct GpuMesh {
-    vertex: Buffer,
-    index: Buffer,
+    positions: GpuAllocation,
+    indices: GpuAllocation,
     index_count: u32,
-    _render_device: RenderDevice,
 }
 
 impl GpuMesh {
-    /// Upload positions and indices into GPU buffers.
+    /// Allocate GPU-only storage and stage the geometry through the shared
+    /// uploader (one flush per frame, ordered ahead of the frame command
+    /// buffer by same-queue submission order).
     pub fn new(
         render_device: &RenderDevice,
         positions: &[[f32; 3]],
         indices: &[u32],
     ) -> moonfield_rhi::Result<Self> {
         let device = render_device.device();
-        let vertex = Buffer::new(
-            device,
-            std::mem::size_of_val(positions) as u64,
-            BufferUsage::VERTEX,
-            Memory::Default,
-        )?;
-        vertex.upload(device, positions)?;
-        let index = Buffer::new(
-            device,
-            std::mem::size_of_val(indices) as u64,
-            BufferUsage::INDEX,
-            Memory::Default,
-        )?;
-        index.upload(device, indices)?;
+        let uploader = device.uploader();
+        let mut uploader = uploader.lock().unwrap_or_else(|e| e.into_inner());
+        let positions_alloc =
+            GpuAllocation::new(device, std::mem::size_of_val(positions) as u64, Memory::Gpu)?;
+        let indices_alloc =
+            GpuAllocation::new(device, std::mem::size_of_val(indices) as u64, Memory::Gpu)?;
+        uploader.upload_alloc(&positions_alloc, bytemuck::cast_slice(positions))?;
+        uploader.upload_alloc(&indices_alloc, bytemuck::cast_slice(indices))?;
         Ok(Self {
-            vertex,
-            index,
+            positions: positions_alloc,
+            indices: indices_alloc,
             index_count: indices.len() as u32,
-            _render_device: render_device.clone(),
         })
     }
 
-    /// Prepared vertex buffer.
-    pub fn vertex(&self) -> &Buffer {
-        &self.vertex
+    /// The positions array's device address — `Ptr<float3>` in the shader.
+    pub fn positions(&self) -> GpuPtr {
+        self.positions.gpu()
     }
 
-    /// Prepared index buffer.
-    pub fn index(&self) -> &Buffer {
-        &self.index
+    /// The index array's device address — `Ptr<uint>` in the shader.
+    pub fn indices(&self) -> GpuPtr {
+        self.indices.gpu()
     }
 
     /// Number of indices recorded for this mesh.

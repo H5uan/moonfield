@@ -152,8 +152,12 @@ mod tests {
             }
         };
         let mut app = App::new();
-        app.add_plugin(RenderFeaturePlugin);
+        // Insert the device first, mirroring the real plugin order
+        // (`RenderPlugin` creates the `RenderDevice` before feature plugins
+        // add their render-world resources): resources LIFO-drop before the
+        // device, and the device's teardown guard stays on the clean path.
         app.render_world_mut().insert_resource(render_device);
+        app.add_plugin(RenderFeaturePlugin);
         let mesh = app
             .world()
             .get_resource_mut::<moonfield_asset::Assets<Mesh>>()
@@ -175,8 +179,8 @@ mod tests {
             .get_resource::<PreparedGpuMeshes>()
             .unwrap();
         let gpu_mesh = prepared.get(mesh.id()).expect("mesh prepared before queue");
-        assert_eq!(gpu_mesh.vertex().size(), 36);
-        assert_eq!(gpu_mesh.index().size(), 12);
+        assert_ne!(gpu_mesh.positions().as_raw(), 0);
+        assert_ne!(gpu_mesh.indices().as_raw(), 0);
         assert_eq!(gpu_mesh.index_count(), 3);
     }
 }

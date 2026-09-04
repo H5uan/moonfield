@@ -181,6 +181,11 @@ pub struct Device {
     /// on drop without a borrow on the device. `Option` so `Drop` can take it
     /// out and destroy it while the device handle is still valid.
     allocator: Option<Arc<Mutex<Allocator>>>,
+    /// The instance's live-device counter, shared with the `Instance` that
+    /// created this device. Decremented exactly when `Drop` destroys the
+    /// handle; the leak guard (see `Drop`) deliberately keeps the count so
+    /// `Instance::drop` leaks instead of destroying around a live device.
+    live_devices: std::sync::Arc<std::sync::atomic::AtomicUsize>,
 }
 
 impl Device {
@@ -470,6 +475,13 @@ impl Device {
         })
         .map_err(|e| Error::Backend(format!("failed to create GPU allocator: {e}")))?;
 
+        // Register with the instance's live-device counter: `Instance::drop`
+        // refuses to destroy an instance whose devices are still alive, and
+        // this device's `Drop` decrements exactly when it destroys its
+        // handle.
+        let live_devices = instance.live_devices();
+        live_devices.fetch_add(1, std::sync::atomic::Ordering::Release);
+
         Ok(Self {
             physical_device,
             device,
@@ -483,6 +495,7 @@ impl Device {
             uploader: OnceLock::new(),
             descriptor_heap: OnceLock::new(),
             retirement_ring: Arc::new(RetirementRing::new()),
+            live_devices,
             allocator: Some(Arc::new(Mutex::new(allocator))),
         })
     }
@@ -690,17 +703,31 @@ impl Drop for Device {
             drop(heap);
         }
         self.retirement_ring.drain_all();
-        // The shared allocator's memory blocks must be freed while the logical
-        // device is still alive (they call vkFreeMemory / vkUnmapMemory through
-        // it), so the allocator is destroyed before vkDestroyDevice. Resources
-        // (`Buffer`, images) drop before their owning device and release their
-        // allocator `Arc`s, so by the time the device drops it is the last
-        // referent and `try_unwrap` succeeds.
+        // The allocator's memory blocks must be freed while the logical
+        // device is still alive (they call vkFreeMemory through it), so the
+        // device is destroyed only after the last allocation Arc is gone.
+        // Resources (`Buffer`, `GpuAllocation`) still alive at this point —
+        // a teardown order where GPU state outlives the `RenderDevice` —
+        // would call into a destroyed device when their retirement actions
+        // later run; leak the device instead. A teardown-time leak is
+        // recoverable; use-after-destroy is not.
         if let Some(allocator) = self.allocator.take()
             && let Ok(allocator) = Arc::try_unwrap(allocator)
         {
             drop(allocator);
+        } else if self.allocator.is_some() {
+            moonfield_log::error!(
+                "device dropped while GPU resources are still alive; \
+                 leaking the device and its allocator"
+            );
+            // Deliberately keep the live-device count registered so
+            // `Instance::drop` leaks rather than destroying around the
+            // still-referenced device.
+            std::mem::forget(self.allocator.take());
+            return;
         }
+        self.live_devices
+            .fetch_sub(1, std::sync::atomic::Ordering::Release);
         unsafe {
             self.device.destroy_device(None);
         }

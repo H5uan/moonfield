@@ -13,7 +13,7 @@ use moonfield_asset::AssetId;
 use moonfield_camera::view_matrix;
 use moonfield_math::{GlobalTransform, Mat4, Vec3A};
 use moonfield_render_core::{DrawFunction, DrawFunctionId, MainEntity, OrderedFloat, PhaseItem};
-use moonfield_rhi::{BumpAlloc, CommandBuffer, GpuBumpAllocator, IndexFormat};
+use moonfield_rhi::{BumpAlloc, CommandBuffer, GpuBumpAllocator};
 
 use crate::core_3d::Core3dFrame;
 use crate::core_3d::pass::Core3dPipeline;
@@ -49,13 +49,19 @@ impl PhaseItem for Opaque3d {
     }
 }
 
-/// Per-draw push data: object-to-world matrix + flat color. The
-/// view-projection lives in the pass's [`ViewUniforms`] record.
+/// Per-draw data: the object's transform and color plus its geometry
+/// pointers. Layout must match `DrawData` in `core_3d.slang` — the natural
+/// (C-like) layout Slang uses behind `Ptr`, verified by
+/// `pulling_vertex_shape`.
 #[repr(C)]
 #[derive(Clone, Copy, bytemuck::Pod, bytemuck::Zeroable)]
 struct DrawData {
     model: [f32; 16],
     color: [f32; 4],
+    positions: u64,
+    indices: u64,
+    index_count: u32,
+    _pad0: u32,
 }
 
 /// Per-view constants, one arena record per pass. Layout must match
@@ -148,13 +154,18 @@ impl DrawFunction<Opaque3d> for DrawMesh {
             *root.cpu.typed::<DrawData>() = DrawData {
                 model: item.model.to_cols_array(),
                 color: item.color,
+                positions: gpu.positions().as_raw(),
+                indices: gpu.indices().as_raw(),
+                index_count: gpu.index_count(),
+                _pad0: 0,
             };
         }
 
-        let graphics_pipeline = pipeline.pipeline();
-        command_buffer.bind_graphics_pipeline(graphics_pipeline);
-        command_buffer.bind_vertex_buffers(0, &[gpu.vertex()], &[0]);
-        command_buffer.bind_index_buffer(gpu.index(), 0, IndexFormat::Uint32);
+        // The whole draw state is one arena record behind one pointer: bind
+        // the pipeline, push the record's address, and issue a non-indexed
+        // draw whose vertex count is the index count — the vertex shader
+        // pulls both arrays through the record's pointers.
+        command_buffer.bind_graphics_pipeline(pipeline.pipeline());
 
         // The root is the reflected `Ptr<DrawData>` placement: encode the
         // arena address on the stack and push it at the place's offset —
@@ -167,7 +178,7 @@ impl DrawFunction<Opaque3d> for DrawMesh {
             }
         };
         command_buffer.push_data(pipeline.root().offset as u32, &root_bytes);
-        command_buffer.draw_indexed(gpu.index_count(), 1, 0, 0, 0);
+        command_buffer.draw(gpu.index_count(), 1, 0, 0);
     }
 }
 

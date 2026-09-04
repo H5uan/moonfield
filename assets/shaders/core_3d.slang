@@ -11,15 +11,19 @@ struct ViewUniforms
     float _pad0;
 };
 
+// Per-draw data: the object's transform and color plus its geometry —
+// device addresses of the positions and index arrays, the count of the
+// latter. Everything one draw needs, in one record; the vertex shader
+// pulls geometry through the pointers (SV_VertexID is the only stage
+// input, so the pipeline has no input assembler).
 struct DrawData
 {
     column_major float4x4 model;
     float4 color;
-};
-
-struct VsInput
-{
-    float3 position : POSITION;
+    Ptr<float3> positions;
+    Ptr<uint32_t> indices;
+    uint32_t index_count;
+    uint32_t _pad0;
 };
 
 struct VsOutput
@@ -29,12 +33,14 @@ struct VsOutput
 };
 
 [shader("vertex")]
-VsOutput vs_main(VsInput input, Ptr<DrawData> root, Ptr<ViewUniforms> view)
+VsOutput vs_main(uint vid : SV_VertexID, Ptr<DrawData> root, Ptr<ViewUniforms> view)
 {
     VsOutput output;
-    float4 world = mul(root[0].model, float4(input.position, 1.0));
+    uint vi = root[0].indices[vid];
+    float3 position = root[0].positions[vi];
+    float4 world = mul(root[0].model, float4(position, 1.0));
     output.position = mul(view[0].view_proj, world);
-    output.local_pos = input.position;
+    output.local_pos = position;
     return output;
 }
 

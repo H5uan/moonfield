@@ -1,7 +1,7 @@
 use ash::vk;
 
 use crate::error::{Error, Result};
-use crate::vulkan::memory::Memory;
+use crate::vulkan::memory::{GpuAllocation, Memory};
 use crate::{Buffer, CommandBufferUsage};
 use crate::{CommandBuffer, CommandPool, GpuBumpAllocator, Semaphore, vulkan::Device};
 pub const UPLOAD_FRAME_RING: usize = 2;
@@ -102,6 +102,32 @@ impl FrameUploader {
 
             self.device
                 .cmd_copy_buffer(self.cb[slot].raw(), mem.src, dst.raw(), &[copy]);
+        }
+        Ok(())
+    }
+
+    /// Stage `bytes` into the frame's arena and record a copy into the
+    /// `GpuAllocation`'s address carrier — the upload path for GPU-only
+    /// allocations (static geometry). The copy executes when the frame
+    /// flushes (`end_frame`), ordered ahead of the frame command buffer by
+    /// same-queue submission order.
+    pub fn upload_alloc(&mut self, dst: &GpuAllocation, bytes: &[u8]) -> Result<()> {
+        self.begin_frame()?;
+        let slot = ((self.next_frame - 1) % UPLOAD_FRAME_RING as u64) as usize;
+        if bytes.len() as u64 > dst.size() {
+            return Err(Error::Validation(
+                "upload data exceeds allocation size".into(),
+            ));
+        }
+        let mem = self.arenas[slot].alloc(bytes.len(), 16)?;
+        unsafe {
+            std::ptr::copy_nonoverlapping(bytes.as_ptr(), mem.cpu.as_ptr(), bytes.len());
+            let copy = vk::BufferCopy::default()
+                .src_offset(mem.src_offset)
+                .dst_offset(0)
+                .size(bytes.len() as u64);
+            self.device
+                .cmd_copy_buffer(self.cb[slot].raw(), mem.src, dst.buffer(), &[copy]);
         }
         Ok(())
     }

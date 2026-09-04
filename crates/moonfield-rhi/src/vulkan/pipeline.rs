@@ -150,10 +150,11 @@ impl GraphicsPipeline {
             .collect();
         let shader_stages = shader_stages?;
 
-        let binding = vk::VertexInputBindingDescription::default()
-            .binding(0)
-            .stride(vertex_layout.stride)
-            .input_rate(vk::VertexInputRate::VERTEX);
+        // Vertex input: a non-empty layout becomes one binding plus one
+        // attribute per field. An empty layout (a pulling vertex shader,
+        // whose only input is SV_VertexID) emits no descriptions — the
+        // pipeline has no input assembler, like a mesh-shader pipeline.
+        let mut binding = vk::VertexInputBindingDescription::default();
         let attributes: Vec<vk::VertexInputAttributeDescription> = vertex_layout
             .attributes
             .iter()
@@ -165,10 +166,16 @@ impl GraphicsPipeline {
                     .offset(attribute.offset)
             })
             .collect();
-
-        let vertex_input_info = vk::PipelineVertexInputStateCreateInfo::default()
-            .vertex_binding_descriptions(std::slice::from_ref(&binding))
-            .vertex_attribute_descriptions(&attributes);
+        let mut vertex_input_info = vk::PipelineVertexInputStateCreateInfo::default();
+        if !vertex_layout.attributes.is_empty() {
+            binding = binding
+                .binding(0)
+                .stride(vertex_layout.stride)
+                .input_rate(vk::VertexInputRate::VERTEX);
+            vertex_input_info = vertex_input_info
+                .vertex_binding_descriptions(std::slice::from_ref(&binding))
+                .vertex_attribute_descriptions(&attributes);
+        }
 
         let input_assembly = vk::PipelineInputAssemblyStateCreateInfo::default()
             .topology(vk::PrimitiveTopology::TRIANGLE_LIST)

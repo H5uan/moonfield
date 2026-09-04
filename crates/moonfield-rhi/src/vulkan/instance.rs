@@ -9,6 +9,12 @@ pub struct Instance {
     entry: ash::Entry,
     instance: ash::Instance,
     surface_instance: ash::khr::surface::Instance,
+    /// Live logical devices created from this instance, shared with each
+    /// `Device` (which holds its own `Arc` to the counter). Destroying an
+    /// instance with live devices is invalid, so `Drop` leaks instead when
+    /// this is non-zero (a teardown order where a `Device` outlives its
+    /// `Instance` referent).
+    live_devices: std::sync::Arc<std::sync::atomic::AtomicUsize>,
 }
 
 impl Instance {
@@ -53,12 +59,20 @@ impl Instance {
             entry,
             instance,
             surface_instance,
+            live_devices: std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0)),
         })
     }
 
     /// Create a headless-friendly instance with no surface extensions.
     pub fn new_headless() -> Result<Self> {
         Self::new(&[])
+    }
+
+    /// The live-device counter, shared with every `Device` created from
+    /// this instance. Crate-internal: `Device` clones it at construction
+    /// and decrements it exactly when it destroys its handle.
+    pub(crate) fn live_devices(&self) -> std::sync::Arc<std::sync::atomic::AtomicUsize> {
+        self.live_devices.clone()
     }
 
     /// Access the `ash::Entry` (needed e.g. for surface creation).
@@ -134,6 +148,18 @@ impl Instance {
 
 impl Drop for Instance {
     fn drop(&mut self) {
+        if self.live_devices.load(std::sync::atomic::Ordering::Acquire) != 0 {
+            // Destroying an instance with live devices is invalid — skip
+            // the destroy and let the handle leak (a device leaked by
+            // `Device::drop`'s guard against out-of-order teardown keeps
+            // its count registered). `ash::Instance`'s own drop is a plain
+            // handle release; `vkDestroyInstance` is only ever this call.
+            moonfield_log::error!(
+                "instance dropped while logical devices are still alive; \
+                 leaking the instance"
+            );
+            return;
+        }
         unsafe {
             self.instance.destroy_instance(None);
         }

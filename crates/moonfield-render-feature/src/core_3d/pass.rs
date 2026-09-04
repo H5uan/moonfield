@@ -406,9 +406,11 @@ mod tests {
     /// order.
     fn mesh_world(render_device: &RenderDevice, meshes_to_spawn: &[([f32; 4], Transform)]) -> App {
         let mut app = App::new();
-        app.add_plugin(crate::RenderFeaturePlugin);
+        // Device first (the real plugin order), so resources LIFO-drop
+        // before it and the device's teardown guard stays on the clean path.
         app.render_world_mut()
             .insert_resource(render_device.clone());
+        app.add_plugin(crate::RenderFeaturePlugin);
         // The draw function reads the pipeline from the render world; insert
         // after `RenderDevice` so LIFO teardown destroys it first.
         app.render_world_mut()
@@ -447,6 +449,15 @@ mod tests {
     /// the editor's UI-pass pattern — to cover pass-to-pass state resets.
     fn record_and_readback(app: &App, render_device: &RenderDevice) -> ((u32, u32), Vec<u8>) {
         let device = render_device.device();
+        // The mesh uploads recorded during preparation ride the shared
+        // uploader; flush it ahead of this command buffer (the frame loop
+        // does the same at submit).
+        device
+            .uploader()
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .end_frame()
+            .expect("flush uploads");
         let target = OffscreenTarget::new_with_depth(
             device,
             INITIAL_WIDTH,
