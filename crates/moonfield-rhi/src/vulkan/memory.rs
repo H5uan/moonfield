@@ -229,7 +229,8 @@ impl GpuAllocation {
         // shaders. Exclusive sharing keeps the buffer on one queue family.
         let mut usage = vk::BufferUsageFlags::SHADER_DEVICE_ADDRESS
             | vk::BufferUsageFlags::TRANSFER_SRC
-            | vk::BufferUsageFlags::TRANSFER_DST;
+            | vk::BufferUsageFlags::TRANSFER_DST
+            | vk::BufferUsageFlags::INDIRECT_BUFFER;
         if descriptor_heap {
             usage |= vk::BufferUsageFlags::DESCRIPTOR_HEAP_EXT;
         }
