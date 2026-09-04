@@ -458,6 +458,10 @@ impl WrapMode {
 }
 
 /// Sampler creation parameters.
+///
+/// The configuration space is closed and small (36 combinations) — the
+/// descriptor heap's sampler cache keys on this; see the note
+/// `2026-09-04-frame-boundary-heap-bind-and-sampler-cache`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub struct SamplerDesc {
     /// Minification filter.

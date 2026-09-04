@@ -44,3 +44,9 @@ resize) — one cache duplicated three ways with three lifetime stories.
   slot.
 - The sampler slot allocator's freelist is never used; the image-slot
   freelist still serves retired image slots.
+- Immortality is safe because the `SamplerDesc` key space is closed and
+  small — 36 combinations against the 1024-slot default capacity. The
+  decision does not survive fields that open the space (mip-lod clamps,
+  border colors — floats; anisotropy levels): adding any such field
+  requires revisiting the cache with an eviction or reference-counting
+  scheme.

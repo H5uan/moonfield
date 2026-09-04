@@ -38,3 +38,7 @@ drop 时释放；每个 offscreen target 独占一个 slot、resize 时 retire�
   `HeapSlots` 只退役 image slot。
 - sampler slot 分配器的 freelist 永远不会被用到；image slot 的 freelist
   仍服务于退役的 image slot。
+- 永生之所以安全，是因为 `SamplerDesc` 的键空间封闭且小——36 种组合对着
+  默认 1024 的容量。这个决策无法在键空间被打开的字段（mip lod 钳制、
+  border color——浮点；各向异性档位）下存活：一旦加入此类字段，缓存必须
+  重新引入淘汰或引用计数方案。
