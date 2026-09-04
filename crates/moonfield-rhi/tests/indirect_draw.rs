@@ -1,14 +1,14 @@
 //! Headless smoke test for the indirect-draw path of the Lunar Mare Vulkan RHI.
 //!
-//! Verifies that a `DrawIndirectArgs` buffer can be created with
-//! `BufferUsage::INDIRECT` and that command buffers can record
-//! `draw_indirect` calls — a single-record draw and a multi-record draw —
-//! without panicking. Mirrors `headless_triangle.rs`'s GPU-less skip behavior.
+//! Verifies that a `DrawIndirectArgs` allocation can be written and that
+//! command buffers can record `draw_indirect` calls — a single-record draw
+//! and a multi-record draw — without panicking. Mirrors
+//! `headless_triangle.rs`'s GPU-less skip behavior.
 
 use ash::vk;
 use moonfield_rhi::{
-    Buffer, BufferUsage, CommandBufferUsage, CommandPool, Compiler, Device, DrawIndirectArgs,
-    Format, GpuAllocation, GraphicsPipeline, Instance, Memory, RootBinder, ShaderModule,
+    CommandBufferUsage, CommandPool, Compiler, Device, DrawIndirectArgs, Format, GpuAllocation,
+    GraphicsPipeline, Instance, Memory, RootBinder, ShaderModule,
 };
 
 mod common;
@@ -155,16 +155,23 @@ PsOutput main(PsInput input)
         first_vertex: 0,
         first_instance: 0,
     }];
-    let args_buffer = Buffer::new(
+    let args_alloc = GpuAllocation::new(
         &device,
         std::mem::size_of_val(&args) as u64,
-        BufferUsage::INDIRECT,
-        moonfield_rhi::Memory::Default,
+        Memory::Default,
     )
-    .expect("indirect args buffer");
-    args_buffer
-        .upload(&device, &args)
-        .expect("indirect args upload");
+    .expect("indirect args allocation");
+    // Host-visible: write through the mapped view.
+    unsafe {
+        std::ptr::copy_nonoverlapping(
+            args.as_ptr(),
+            args_alloc
+                .host()
+                .expect("host view")
+                .typed::<DrawIndirectArgs>(),
+            args.len(),
+        );
+    }
 
     // Sanity: the neutral layout's size matches the Vulkan command struct, so
     // the stride we pass to `draw_indirect` is correct for both backends.
@@ -190,7 +197,7 @@ PsOutput main(PsInput input)
         .expect("vertices pointer encode");
     command_buffer.push_data(vertices_place.offset as u32, &bytes);
     command_buffer.draw_indirect(
-        &args_buffer,
+        &args_alloc,
         0,
         1,
         std::mem::size_of::<DrawIndirectArgs>() as u32,
@@ -215,16 +222,23 @@ PsOutput main(PsInput input)
             first_instance: 0,
         },
     ];
-    let multi_args_buffer = Buffer::new(
+    let multi_args_alloc = GpuAllocation::new(
         &device,
         std::mem::size_of_val(&multi_args) as u64,
-        BufferUsage::INDIRECT,
-        moonfield_rhi::Memory::Default,
+        Memory::Default,
     )
-    .expect("multi-draw args buffer");
-    multi_args_buffer
-        .upload(&device, &multi_args)
-        .expect("multi-draw args upload");
+    .expect("multi-draw args allocation");
+    // Host-visible: write through the mapped view.
+    unsafe {
+        std::ptr::copy_nonoverlapping(
+            multi_args.as_ptr(),
+            multi_args_alloc
+                .host()
+                .expect("host view")
+                .typed::<DrawIndirectArgs>(),
+            multi_args.len(),
+        );
+    }
 
     let mut second = command_pool
         .allocate_command_buffer()
@@ -237,7 +251,7 @@ PsOutput main(PsInput input)
     // own copy of the vertex array pointer.
     second.push_data(vertices_place.offset as u32, &bytes);
     second.draw_indirect(
-        &multi_args_buffer,
+        &multi_args_alloc,
         0,
         2,
         std::mem::size_of::<DrawIndirectArgs>() as u32,

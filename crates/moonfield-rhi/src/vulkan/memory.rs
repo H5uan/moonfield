@@ -297,6 +297,27 @@ impl GpuAllocation {
     pub fn host(&self) -> Option<HostPtr> {
         self.host
     }
+
+    /// Read `out.len()` bytes from a host-visible allocation (the readback
+    /// path). Errors on device-local allocations and overlong ranges.
+    pub fn read_bytes(&self, out: &mut [u8]) -> Result<()> {
+        let Some(host) = self.host else {
+            return Err(Error::Validation(
+                "cannot read a device-local allocation".to_string(),
+            ));
+        };
+        if out.len() as u64 > self.size {
+            return Err(Error::Validation(
+                "read range exceeds allocation size".to_string(),
+            ));
+        }
+        // SAFETY: host-visible allocations are persistently mapped, and the
+        // range check above keeps the read inside the allocation.
+        unsafe {
+            std::ptr::copy_nonoverlapping(host.as_ptr(), out.as_mut_ptr(), out.len());
+        }
+        Ok(())
+    }
     /// The GPU address usable in shaders.
     pub fn gpu(&self) -> GpuPtr {
         self.gpu

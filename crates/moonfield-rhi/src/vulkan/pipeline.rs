@@ -253,7 +253,7 @@ impl GraphicsPipeline {
             device
                 .raw()
                 .create_graphics_pipelines(
-                    vk::PipelineCache::null(),
+                    device.pipeline_cache(),
                     std::slice::from_ref(&pipeline_info),
                     None,
                 )
@@ -335,7 +335,7 @@ impl ComputePipeline {
             .push(&mut flags2_info);
         let pipelines = unsafe {
             device.raw().create_compute_pipelines(
-                vk::PipelineCache::null(),
+                device.pipeline_cache(),
                 std::slice::from_ref(&pipeline_info),
                 None,
             )

@@ -4,16 +4,14 @@
 //! (`vk::DrawIndirectCommand`, etc.), so a buffer populated via
 //! `bytemuck::bytes_of` can be submitted directly. The RHI does not expose raw
 //! transmutation to Vulkan types — callers write these structs into a
-//! [`Buffer`](crate::vulkan::Buffer) with
-//! [`BufferUsage::INDIRECT`](crate::BufferUsage::INDIRECT) and pass it to the
-//! command buffer's indirect draw methods.
+//! [`GpuAllocation`](crate::vulkan::memory::GpuAllocation) (whose address
+//! carrier always carries `INDIRECT_BUFFER` usage) and pass it to the command
+//! buffer's indirect draw methods.
 //!
 //! Compute indirect dispatch is wired through the bindless path:
 //! [`CommandBuffer::dispatch_indirect`](crate::CommandBuffer::dispatch_indirect)
 //! takes a [`GpuAllocation`](crate::vulkan::memory::GpuAllocation) holding
 //! these arguments.
-
-use crate::types::BufferUsage;
 
 /// Argument buffer layout for non-indexed `draw_indirect` commands.
 ///
@@ -46,10 +44,3 @@ pub struct DispatchIndirectArgs {
     /// The number of work groups in the Z dimension.
     pub z: u32,
 }
-
-// Keep `BufferUsage` referenced so the module compiles even when only the
-// arg structs are exercised; the INDIRECT flag is consumed by the indirect
-// command paths.
-const _: fn() = || {
-    let _ = BufferUsage::INDIRECT;
-};

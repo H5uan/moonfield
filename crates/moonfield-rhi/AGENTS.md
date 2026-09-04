@@ -22,7 +22,7 @@ lives in `moonfield-render-core` (Selene), never here.
 
 - All Vulkan objects live on the main thread; nothing is `Send` across threads
   yet. Do not leak `Vk*` handles through public APIs.
-- Devices, descriptor layouts, pipelines, and swapchains are owned by the
+- Devices, descriptor heaps, pipelines, and swapchains are owned by the
   renderer and destroyed in reverse creation order; keep drop order explicit.
 
 ## Shaders

@@ -14,7 +14,7 @@ pub mod vulkan;
 pub use error::{Error, Result};
 pub use indirect::{DispatchIndirectArgs, DrawIndirectArgs};
 pub use types::{
-    AttachmentLayout, BufferUsage, ClearValue, CommandBufferUsage, CompareOp, CullMode, Extent2d,
-    Filter, Format, FrontFace, LoadOp, Offset2d, Rect2d, SamplerDesc, StoreOp, Viewport, WrapMode,
+    AttachmentLayout, ClearValue, CommandBufferUsage, CompareOp, CullMode, Extent2d, Filter,
+    Format, FrontFace, LoadOp, Offset2d, Rect2d, SamplerDesc, StoreOp, Viewport, WrapMode,
 };
 pub use vulkan::*;

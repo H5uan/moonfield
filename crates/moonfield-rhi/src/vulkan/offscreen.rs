@@ -15,6 +15,7 @@
 use crate::error::{Error, Result};
 use crate::types::{Filter, Format, SamplerDesc, WrapMode};
 use crate::vulkan::device::Device;
+use crate::vulkan::memory::{GpuAllocation, Memory};
 use crate::vulkan::retire::{RetireAction, RetirementRing};
 use crate::vulkan::sync::Fence;
 use crate::{CommandBuffer, CommandPool, DescriptorHeap, SamplerHandle, TextureHandle};
@@ -22,7 +23,6 @@ use ash::vk;
 use gpu_allocator::MemoryLocation;
 use gpu_allocator::vulkan::{Allocation, AllocationCreateDesc, AllocationScheme};
 use std::sync::Arc;
-
 /// The target's descriptor-heap slots: the color view's image slot and the
 /// linear/clamp sampler from the heap's description cache. A resize
 /// allocates a fresh image slot (the old one retires through the ring);
@@ -283,12 +283,7 @@ impl OffscreenTarget {
     /// row-major). Debug/readback path: blocks on the graphics queue.
     pub fn read_pixels(&self, device: &Device) -> Result<Vec<u8>> {
         let (width, height) = self.extent();
-        let readback = crate::Buffer::new(
-            device,
-            (width * height * 4) as u64,
-            crate::BufferUsage::COPY_DST,
-            crate::Memory::Readback,
-        )?;
+        let readback = GpuAllocation::new(device, (width * height * 4) as u64, Memory::Readback)?;
 
         let command_pool = CommandPool::new(device, device.queue_family_indices().graphics)?;
         let mut command_buffer = command_pool.allocate_command_buffer()?;
@@ -335,7 +330,7 @@ impl OffscreenTarget {
                 command_buffer.raw(),
                 self.image,
                 vk::ImageLayout::GENERAL,
-                readback.raw(),
+                readback.buffer(),
                 std::slice::from_ref(&region),
             );
         }
@@ -379,7 +374,7 @@ impl OffscreenTarget {
         }
 
         let mut pixels = vec![0u8; (width * height * 4) as usize];
-        readback.read(&mut pixels)?;
+        readback.read_bytes(&mut pixels)?;
         Ok(pixels)
     }
 

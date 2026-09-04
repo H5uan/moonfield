@@ -3,6 +3,7 @@
 use crate::error::{Error, Result};
 use crate::retire::RetirementRing;
 use crate::vulkan::instance::Instance;
+use crate::vulkan::shader::ShaderCache;
 use crate::vulkan::sync::Semaphore;
 use crate::{DESCRIPTOR_HEAP_IMAGE_CAPACITY, DESCRIPTOR_HEAP_SAMPLER_CAPACITY, DescriptorHeap};
 use crate::{FrameUploader, UPLOAD_ARENA_SIZE};
@@ -165,14 +166,22 @@ pub struct Device {
     /// Optional extensions that were actually enabled at creation (a subset
     /// of [`OPTIONAL_DEVICE_EXTENSIONS`]); empty on cards that lack them.
     optional_extensions: Vec<&'static CStr>,
-    /// Lazily-built shared frame uploader serving `Buffer::upload`'s GpuOnly
-    /// staging path. Declared before `allocator` so it drops first: its
-    /// arenas free chunks through the allocator's `Arc` while the device is
-    /// still alive, then the allocator itself is torn down (see `Drop`).
+    /// Lazily-built shared frame uploader serving GPU-only staging uploads.
+    /// Declared before `allocator` so it drops first: its arenas free chunks
+    /// through the allocator's `Arc` while the device is still alive, then
+    /// the allocator itself is torn down (see `Drop`).
     uploader: OnceLock<Arc<Mutex<FrameUploader>>>,
     /// Lazily-built shared descriptor heap serving bindless resources. Same shape
     /// as `uploader`: built once, shared by `Arc`, outlives `&Device`.
     descriptor_heap: OnceLock<Arc<DescriptorHeap>>,
+    /// Lazily-built shared shader cache: memoized Slang compiles (SPIR-V
+    /// and reflection) keyed by the compile inputs, so repeated pipeline
+    /// builds (and tests) compile each shader once per device.
+    shader_cache: OnceLock<Arc<ShaderCache>>,
+    /// Lazily-created Vulkan pipeline cache, seeded from disk and written
+    /// back on drop. Passed to every pipeline create call so the driver
+    /// skips recompiling pipelines it has already built in earlier runs.
+    pipeline_cache: OnceLock<vk::PipelineCache>,
     /// Deferred GPU resource teardown, keyed by frame slot. Not lazy: every
     /// resource's `Drop` enqueues into it, so it exists from construction.
     retirement_ring: Arc<RetirementRing>,
@@ -494,6 +503,8 @@ impl Device {
             optional_extensions: optional_enabled,
             uploader: OnceLock::new(),
             descriptor_heap: OnceLock::new(),
+            shader_cache: OnceLock::new(),
+            pipeline_cache: OnceLock::new(),
             retirement_ring: Arc::new(RetirementRing::new()),
             live_devices,
             allocator: Some(Arc::new(Mutex::new(allocator))),
@@ -625,10 +636,10 @@ impl Device {
         self.descriptor_heap_properties
     }
 
-    /// The shared frame-scoped uploader, built on first use. `Buffer::upload`
-    /// stages GpuOnly targets through it; the uploader owns a copy of the
-    /// device handle, so callers may hold the returned `Arc` past this
-    /// `&Device` borrow.
+    /// The shared frame-scoped uploader, built on first use. GPU-only
+    /// targets stage through it (`FrameUploader::upload_alloc`); the uploader
+    /// owns a copy of the device handle, so callers may hold the returned
+    /// `Arc` past this `&Device` borrow.
     pub fn uploader(&self) -> Arc<Mutex<FrameUploader>> {
         self.uploader
             .get_or_init(|| {
@@ -653,6 +664,39 @@ impl Device {
                 )
             })
             .clone()
+    }
+
+    /// The shared shader cache, built on first use. Pipeline constructors
+    /// compile through it; the cache memoizes SPIR-V and reflection by the
+    /// compile inputs, so repeated builds compile each shader once.
+    pub fn shader_cache(&self) -> Arc<ShaderCache> {
+        self.shader_cache
+            .get_or_init(|| {
+                Arc::new(ShaderCache::new().expect("failed to create the shared shader cache"))
+            })
+            .clone()
+    }
+
+    /// The shared Vulkan pipeline cache (crate-internal: pipeline
+    /// constructors pass it to their create calls). Seeded from
+    /// `<cache dir>/moonfield/pipeline_cache.bin`; `Drop` writes the merged
+    /// data back. A stale or corrupt file only costs a cold start.
+    pub(crate) fn pipeline_cache(&self) -> vk::PipelineCache {
+        *self.pipeline_cache.get_or_init(|| {
+            let initial = std::fs::read(pipeline_cache_path()).unwrap_or_default();
+            let create_info = vk::PipelineCacheCreateInfo::default().initial_data(&initial);
+            match unsafe { self.device.create_pipeline_cache(&create_info, None) } {
+                Ok(cache) => cache,
+                Err(e) => {
+                    moonfield_log::warn!("pipeline cache data rejected ({e:?}); starting cold");
+                    unsafe {
+                        self.device
+                            .create_pipeline_cache(&vk::PipelineCacheCreateInfo::default(), None)
+                            .expect("creating an empty pipeline cache cannot fail")
+                    }
+                }
+            }
+        })
     }
 
     /// The device-level retirement ring. Crate-internal: resources obtain it
@@ -691,6 +735,28 @@ impl Drop for Device {
         // GPU must be idle first — resources dropped by render-world
         // teardown wait here for the last RenderDevice referent to go away.
         let _ = self.wait_idle();
+        // Persist the pipeline cache: the merged data saves driver-side
+        // pipeline compilation on the next run. Before the teardown paths
+        // below, while the device is still fully functional.
+        if let Some(cache) = self.pipeline_cache.get() {
+            match unsafe { self.device.get_pipeline_cache_data(*cache) } {
+                Ok(data) => {
+                    let path = pipeline_cache_path();
+                    if let Some(dir) = path.parent() {
+                        let _ = std::fs::create_dir_all(dir);
+                    }
+                    if let Err(e) = std::fs::write(&path, &data) {
+                        moonfield_log::warn!("failed to write the pipeline cache: {e}");
+                    }
+                }
+                Err(e) => {
+                    moonfield_log::warn!("failed to read the pipeline cache data: {e:?}")
+                }
+            }
+            unsafe {
+                self.device.destroy_pipeline_cache(*cache, None);
+            }
+        }
         // Drop the lazy singletons while the device is alive: their arenas
         // and heap backing retire into the ring and drain below, instead of
         // tearing down after vkDestroyDevice during field teardown. Dropping
@@ -732,4 +798,16 @@ impl Drop for Device {
             self.device.destroy_device(None);
         }
     }
+}
+
+/// Where the pipeline cache lives on disk: `<XDG_CACHE_HOME or
+/// ~/.cache>/moonfield/pipeline_cache.bin`.
+fn pipeline_cache_path() -> std::path::PathBuf {
+    let dir = std::env::var_os("XDG_CACHE_HOME")
+        .map(std::path::PathBuf::from)
+        .or_else(|| {
+            std::env::var_os("HOME").map(|home| std::path::PathBuf::from(home).join(".cache"))
+        })
+        .unwrap_or_default();
+    dir.join("moonfield").join("pipeline_cache.bin")
 }

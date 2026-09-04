@@ -17,10 +17,10 @@ use moonfield_camera::RenderTarget;
 use moonfield_log::{error, info};
 use moonfield_render_core::{ViewTargets, WindowSurfaces};
 use moonfield_rhi::{
-    AttachmentLayout, ClearValue, CommandBuffer, CompareOp, Compiler, CullMode, CullState,
-    DepthState, Format, FrontFace, GraphicsPipeline, LoadOp, OffscreenTarget, Rect2d,
-    RenderAttachment, RenderDevice, RenderPassDesc, Result, RootBinder, RootParamPlace,
-    ShaderModule, StoreOp, Viewport,
+    AttachmentLayout, ClearValue, CommandBuffer, CompareOp, CullMode, CullState, DepthState,
+    Format, FrontFace, GraphicsPipeline, LoadOp, OffscreenTarget, Rect2d, RenderAttachment,
+    RenderDevice, RenderPassDesc, Result, RootBinder, RootParamPlace, ShaderCache, ShaderModule,
+    StoreOp, Viewport,
 };
 use std::collections::HashMap;
 use std::path::PathBuf;
@@ -51,25 +51,22 @@ fn shader_path(name: &str) -> String {
 /// Compile both stages of `core_3d.slang` and resolve the
 /// `Ptr<DrawData>` / `Ptr<ViewUniforms>` root placements from the reflected
 /// entry points — the shader is the single source of truth for both.
+/// Compilation goes through the device's shared shader cache, so repeated
+/// pipeline builds reuse the memoized artifacts.
 fn compile_core_3d(
-    compiler: &Compiler,
+    cache: &ShaderCache,
     device: &moonfield_rhi::Device,
 ) -> Result<(ShaderModule, ShaderModule, RootParamPlace, RootParamPlace)> {
-    let reflection =
-        compiler.compile_file_to_reflection(&shader_path("core_3d.slang"), "vs_main")?;
+    let path = shader_path("core_3d.slang");
+    let reflection = cache.compile_file_reflection(&path, "vs_main")?;
     let binder = RootBinder::new(&reflection, "vs_main")?;
     let root = binder.pointer_param("root")?;
     let view = binder.pointer_param("view")?;
-    drop(reflection);
 
-    let vertex_shader = ShaderModule::from_compiled(
-        device,
-        &compiler.compile_file_to_spirv(&shader_path("core_3d.slang"), "vs_main")?,
-    )?;
-    let fragment_shader = ShaderModule::from_compiled(
-        device,
-        &compiler.compile_file_to_spirv(&shader_path("core_3d.slang"), "fs_main")?,
-    )?;
+    let vertex_compiled = cache.compile_file(&path, "vs_main", &[], &[])?;
+    let vertex_shader = ShaderModule::from_compiled(device, &vertex_compiled)?;
+    let fragment_compiled = cache.compile_file(&path, "fs_main", &[], &[])?;
+    let fragment_shader = ShaderModule::from_compiled(device, &fragment_compiled)?;
     Ok((vertex_shader, fragment_shader, root, view))
 }
 
@@ -92,8 +89,8 @@ impl Core3dPipeline {
     /// Compile the shaders and build the pipeline for the view-target format.
     pub fn new(render_device: &RenderDevice) -> Result<Self> {
         let device = render_device.device();
-        let compiler = Compiler::new()?;
-        let (vertex_shader, fragment_shader, root, view) = compile_core_3d(&compiler, device)?;
+        let cache = device.shader_cache();
+        let (vertex_shader, fragment_shader, root, view) = compile_core_3d(&cache, device)?;
         // Descriptor-heap pipeline: per-draw root pointers go through `push_data`.
         let pipeline = GraphicsPipeline::new_with_options(
             device,

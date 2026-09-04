@@ -1,8 +1,8 @@
 use ash::vk;
 
+use crate::CommandBufferUsage;
 use crate::error::{Error, Result};
-use crate::vulkan::memory::{GpuAllocation, Memory};
-use crate::{Buffer, CommandBufferUsage};
+use crate::vulkan::memory::GpuAllocation;
 use crate::{CommandBuffer, CommandPool, GpuBumpAllocator, Semaphore, vulkan::Device};
 pub const UPLOAD_FRAME_RING: usize = 2;
 
@@ -77,35 +77,6 @@ impl FrameUploader {
         Ok(())
     }
 
-    pub fn upload<T: Copy>(&mut self, dst: &Buffer, data: &[T]) -> Result<()> {
-        if dst.memory() != Memory::Gpu {
-            return Err(Error::Validation(
-              "FrameUploader stages into Memory::Gpu buffers; host-visible targets are written directly".into(),
-          ));
-        }
-        let bytes = std::mem::size_of_val(data) as u64;
-        if bytes > dst.size() {
-            return Err(Error::Validation("upload data exceeds buffer size".into()));
-        }
-        let slot = ((self.next_frame - 1) % UPLOAD_FRAME_RING as u64) as usize;
-        let mem = self.arenas[slot].alloc(bytes as usize, 16)?;
-        unsafe {
-            std::ptr::copy_nonoverlapping(
-                data.as_ptr() as *const u8,
-                mem.cpu.as_ptr(),
-                bytes as usize,
-            );
-            let copy = vk::BufferCopy::default()
-                .src_offset(mem.src_offset)
-                .dst_offset(0)
-                .size(bytes);
-
-            self.device
-                .cmd_copy_buffer(self.cb[slot].raw(), mem.src, dst.raw(), &[copy]);
-        }
-        Ok(())
-    }
-
     /// Stage `bytes` into the frame's arena and record a copy into the
     /// `GpuAllocation`'s address carrier — the upload path for GPU-only
     /// allocations (static geometry). The copy executes when the frame
@@ -116,7 +87,7 @@ impl FrameUploader {
         let slot = ((self.next_frame - 1) % UPLOAD_FRAME_RING as u64) as usize;
         if bytes.len() as u64 > dst.size() {
             return Err(Error::Validation(
-                "upload data exceeds allocation size".into(),
+                "upload data exceeds allocation size".to_string(),
             ));
         }
         let mem = self.arenas[slot].alloc(bytes.len(), 16)?;
@@ -270,12 +241,5 @@ impl FrameUploader {
             self.timeline.wait(self.next_frame - 1, u64::MAX)?;
         }
         Ok(())
-    }
-
-    pub fn upload_and_wait<T: Copy>(&mut self, dst: &Buffer, data: &[T]) -> Result<()> {
-        self.begin_frame()?;
-        self.upload(dst, data)?;
-        self.end_frame()?;
-        self.wait_idle()
     }
 }

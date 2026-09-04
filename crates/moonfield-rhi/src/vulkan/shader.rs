@@ -116,8 +116,20 @@ pub struct Compiler {
 /// the cache itself is `Sync` for shared use from a render-world resource.
 pub struct ShaderCache {
     compiler: Compiler,
-    cache: std::sync::Mutex<std::collections::HashMap<ShaderCacheKey, std::rc::Rc<CompiledShader>>>,
+    cache:
+        std::sync::Mutex<std::collections::HashMap<ShaderCacheKey, std::sync::Arc<CompiledShader>>>,
+    reflections:
+        std::sync::Mutex<std::collections::HashMap<ShaderCacheKey, std::sync::Arc<Reflection>>>,
 }
+
+// SAFETY: every compiler access happens under one of the two mutexes (both
+// `get_or_compile` and `compile_file_reflection` hold their lock while
+// compiling), so the Slang session is used from one thread at a time; the
+// cached values (`CompiledShader`, `Reflection`) are themselves
+// `Send + Sync`. Slang's global session is documented as usable from
+// multiple threads.
+unsafe impl Send for ShaderCache {}
+unsafe impl Sync for ShaderCache {}
 
 /// The inputs that determine a compiled artifact. All variants are stored so
 /// the key is the exact identity of a compile, not a hash of it.
@@ -138,6 +150,7 @@ impl ShaderCache {
         Ok(Self {
             compiler: Compiler::new()?,
             cache: std::sync::Mutex::new(std::collections::HashMap::new()),
+            reflections: std::sync::Mutex::new(std::collections::HashMap::new()),
         })
     }
 
@@ -149,7 +162,7 @@ impl ShaderCache {
         entry_point: &str,
         capabilities: &[&str],
         defines: &[(&str, &str)],
-    ) -> RenderResult<std::rc::Rc<CompiledShader>> {
+    ) -> RenderResult<std::sync::Arc<CompiledShader>> {
         let key = ShaderCacheKey {
             module_name: path.to_string(),
             source: String::new(),
@@ -179,7 +192,7 @@ impl ShaderCache {
         entry_point: &str,
         capabilities: &[&str],
         defines: &[(&str, &str)],
-    ) -> RenderResult<std::rc::Rc<CompiledShader>> {
+    ) -> RenderResult<std::sync::Arc<CompiledShader>> {
         let key = ShaderCacheKey {
             module_name: module_name.to_string(),
             source: source.to_string(),
@@ -201,17 +214,44 @@ impl ShaderCache {
         })
     }
 
+    /// Compile a file and return its reflection, memoized by
+    /// `(path, entry)`. The reflection wrapper keeps its session and linked
+    /// component alive, so the cached value stays valid.
+    pub fn compile_file_reflection(
+        &self,
+        path: &str,
+        entry_point: &str,
+    ) -> RenderResult<std::sync::Arc<Reflection>> {
+        let key = ShaderCacheKey {
+            module_name: path.to_string(),
+            source: String::new(),
+            entry_point: entry_point.to_string(),
+            capabilities: Vec::new(),
+            defines: Vec::new(),
+        };
+        let mut reflections = self.reflections.lock().unwrap_or_else(|e| e.into_inner());
+        if let Some(reflection) = reflections.get(&key) {
+            return Ok(std::sync::Arc::clone(reflection));
+        }
+        let reflection = std::sync::Arc::new(
+            self.compiler
+                .compile_file_to_reflection(&key.module_name, &key.entry_point)?,
+        );
+        reflections.insert(key, std::sync::Arc::clone(&reflection));
+        Ok(reflection)
+    }
+
     fn get_or_compile(
         &self,
         key: ShaderCacheKey,
         compile: impl FnOnce(&Compiler, &ShaderCacheKey) -> RenderResult<CompiledShader>,
-    ) -> RenderResult<std::rc::Rc<CompiledShader>> {
+    ) -> RenderResult<std::sync::Arc<CompiledShader>> {
         let mut cache = self.cache.lock().unwrap_or_else(|e| e.into_inner());
         if let Some(compiled) = cache.get(&key) {
-            return Ok(std::rc::Rc::clone(compiled));
+            return Ok(std::sync::Arc::clone(compiled));
         }
-        let compiled = std::rc::Rc::new(compile(&self.compiler, &key)?);
-        cache.insert(key, std::rc::Rc::clone(&compiled));
+        let compiled = std::sync::Arc::new(compile(&self.compiler, &key)?);
+        cache.insert(key, std::sync::Arc::clone(&compiled));
         Ok(compiled)
     }
 }
@@ -1081,7 +1121,7 @@ mod tests {
             .compile_source("memo", KERNEL, "main", &[], &[])
             .expect("compile");
         assert!(
-            std::rc::Rc::ptr_eq(&first, &second),
+            std::sync::Arc::ptr_eq(&first, &second),
             "same key must share the artifact"
         );
         assert_eq!(first.stage, vk::ShaderStageFlags::COMPUTE);
@@ -1102,9 +1142,9 @@ mod tests {
         let variant_b = cache
             .compile_source("memo", VARIANT_SOURCE, "main", &[], &[("VARIANT", "2")])
             .expect("variant b");
-        assert!(std::rc::Rc::ptr_eq(&variant_a, &variant_a_again));
+        assert!(std::sync::Arc::ptr_eq(&variant_a, &variant_a_again));
         assert!(
-            !std::rc::Rc::ptr_eq(&variant_a, &variant_b),
+            !std::sync::Arc::ptr_eq(&variant_a, &variant_b),
             "different defines must be different artifacts"
         );
     }

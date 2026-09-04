@@ -28,9 +28,9 @@ use egui::{TextureFilter, TextureOptions, TextureWrapMode};
 use moonfield_rhi::Memory;
 use moonfield_rhi::types::WrapMode;
 use moonfield_rhi::{
-    BlendMode, CommandBuffer, CompareOp, Compiler, CullMode, CullState, DepthState, DescriptorHeap,
-    Device, Extent2d, Filter, Format, FrameUploader, FrontFace, GpuAllocation, GraphicsPipeline,
-    Offset2d, Rect2d, RenderDevice, RootBinder, SamplerDesc, SamplerHandle, ShaderModule, Texture,
+    BlendMode, CommandBuffer, CompareOp, CullMode, CullState, DepthState, DescriptorHeap, Device,
+    Extent2d, Filter, Format, FrameUploader, FrontFace, GpuAllocation, GraphicsPipeline, Offset2d,
+    Rect2d, RenderDevice, RootBinder, SamplerDesc, SamplerHandle, ShaderModule, Texture,
     TextureHandle,
 };
 use std::collections::HashMap;
@@ -130,40 +130,39 @@ pub struct EguiPipeline {
 
 impl EguiPipeline {
     /// Compile the egui shaders and build the pipeline for `color_format`.
+    /// Compilation goes through the device's shared shader cache, so
+    /// repeated pipeline builds reuse the memoized artifacts.
     pub fn new(
         device: &Device,
         color_format: Format,
         srgb_framebuffer: bool,
         options: EguiOptions,
     ) -> Result<Self, String> {
-        let compiler = Compiler::new().map_err(|e| e.to_string())?;
+        let cache = device.shader_cache();
         let fragment_entry = if srgb_framebuffer {
             "fs_linear"
         } else {
             "fs_gamma"
         };
-        let vertex_shader = ShaderModule::from_compiled(
-            device,
-            &compiler
-                .compile_file_to_spirv(&egui_shader_path(), "vs_main")
-                .map_err(|e| e.to_string())?,
-        )
-        .map_err(|e| e.to_string())?;
-        let fragment_shader = ShaderModule::from_compiled(
-            device,
-            &compiler
-                .compile_file_to_spirv_with_capabilities(
-                    &egui_shader_path(),
-                    fragment_entry,
-                    &["spvDescriptorHeapEXT"],
-                )
-                .map_err(|e| e.to_string())?,
-        )
-        .map_err(|e| e.to_string())?;
+        let vertex_compiled = cache
+            .compile_file(&egui_shader_path(), "vs_main", &[], &[])
+            .map_err(|e| e.to_string())?;
+        let vertex_shader =
+            ShaderModule::from_compiled(device, &vertex_compiled).map_err(|e| e.to_string())?;
+        let fragment_compiled = cache
+            .compile_file(
+                &egui_shader_path(),
+                fragment_entry,
+                &["spvDescriptorHeapEXT"],
+                &[],
+            )
+            .map_err(|e| e.to_string())?;
+        let fragment_shader =
+            ShaderModule::from_compiled(device, &fragment_compiled).map_err(|e| e.to_string())?;
 
         // Reflect the entry point for the root blob and the layout guards.
-        let reflection = compiler
-            .compile_file_to_reflection(&egui_shader_path(), "vs_main")
+        let reflection = cache
+            .compile_file_reflection(&egui_shader_path(), "vs_main")
             .map_err(|e| e.to_string())?;
         let root = RootBinder::new(&reflection, "vs_main").map_err(|e| e.to_string())?;
         // Layout alignment guard: the Rust `EguiRoot` struct pushed as root

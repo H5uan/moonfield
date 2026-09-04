@@ -4,7 +4,6 @@
 //! surface over instance, physical device, logical device, and swapchain
 //! creation.
 
-pub mod buffer;
 pub mod bump;
 pub mod command;
 pub mod descriptor_heap;
@@ -38,7 +37,6 @@ pub(crate) struct DeviceExtensionFunctions {
     pub(crate) descriptor_heap: ash::ext::descriptor_heap::Device,
 }
 
-pub use buffer::Buffer;
 pub use bump::{BumpAlloc, GpuBumpAllocator};
 pub use command::{
     CommandBuffer, CommandPool, CullState, DepthState, RenderAttachment, RenderPassDesc,

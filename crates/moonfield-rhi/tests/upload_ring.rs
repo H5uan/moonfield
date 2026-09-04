@@ -1,15 +1,13 @@
 //! Headless integration tests for the frame-scoped uploader.
 //!
 //! Verifies that many uploads in one frame complete with a single submit,
-//! that arena reuse across frames never clobbers in-flight copies, and that
-//! host-visible targets are rejected (they are written directly, not staged).
+//! and that arena reuse across frames never clobbers in-flight copies.
 
 mod common;
 
-use ash::vk;
 use moonfield_rhi::Memory;
 use moonfield_rhi::{
-    Buffer, BufferUsage, CommandBufferUsage, CommandPool, Device, Error, FrameUploader, Instance,
+    CommandBufferUsage, CommandPool, Device, FrameUploader, GpuAllocation, Instance,
 };
 
 /// Create a headless instance + device, skipping on machines without one
@@ -43,32 +41,21 @@ fn pattern(n: usize, seed: u8) -> Vec<u8> {
         .collect()
 }
 
-/// Copy a GpuOnly buffer into a fresh GpuToCpu buffer and read it back.
-/// A second, independent submit: the upload path is exercised, then the
-/// result is drained through a separate copy + `submit_and_wait`.
-fn readback(device: &Device, src: &Buffer, n: usize) -> Vec<u8> {
-    let dst = Buffer::new(device, n as u64, BufferUsage::STORAGE, Memory::Readback)
-        .expect("readback buffer");
+/// Copy a GPU-only allocation into a fresh readback allocation and read it
+/// back. A second, independent submit: the upload path is exercised, then
+/// the result is drained through a separate copy + `submit_and_wait`.
+fn readback(device: &Device, src: &GpuAllocation, n: usize) -> Vec<u8> {
+    let dst = GpuAllocation::new(device, n as u64, Memory::Readback).expect("readback allocation");
     let pool = CommandPool::new(device, device.queue_family_indices().graphics).expect("pool");
     let mut cb = pool.allocate_command_buffer().expect("command buffer");
     cb.begin(CommandBufferUsage::ONE_TIME_SUBMIT)
         .expect("begin");
-    let copy = vk::BufferCopy::default()
-        .src_offset(0)
-        .dst_offset(0)
-        .size(n as u64);
-    // SAFETY: both buffers exist, the copy fits, and the command buffer is
-    // recording.
-    unsafe {
-        device
-            .raw()
-            .cmd_copy_buffer(cb.raw(), src.raw(), dst.raw(), &[copy]);
-    }
+    cb.cmd_memcpy(&dst, src, n as u64);
     cb.end().expect("end");
     device.submit_and_wait(&[&cb]).expect("submit and wait");
 
     let mut out = vec![0u8; n];
-    dst.read(&mut out).expect("read back");
+    dst.read_bytes(&mut out).expect("read back");
     out
 }
 
@@ -79,33 +66,27 @@ fn one_frame_carries_many_uploads() {
     };
     let mut uploader = FrameUploader::new(&device, 1 << 20).expect("uploader");
 
-    // Three GpuOnly destinations; COPY_SRC so readback can use them as copy
-    // sources (uploads only need COPY_DST, which Buffer::new ORs in).
+    // Three GPU-only destinations; the carrier always carries TRANSFER_SRC,
+    // so readback can use them as copy sources.
     let sizes = [256usize, 512, 1024];
-    let bufs: Vec<Buffer> = sizes
+    let dsts: Vec<GpuAllocation> = sizes
         .iter()
         .map(|&n| {
-            Buffer::new(
-                &device,
-                n as u64,
-                BufferUsage::STORAGE | BufferUsage::COPY_SRC,
-                Memory::Gpu,
-            )
-            .expect("destination buffer")
+            GpuAllocation::new(&device, n as u64, Memory::Gpu).expect("destination allocation")
         })
         .collect();
     let expected: Vec<Vec<u8>> = sizes.iter().map(|&n| pattern(n, 1)).collect();
 
     uploader.begin_frame().expect("begin");
-    for (buf, data) in bufs.iter().zip(&expected) {
-        uploader.upload(buf, data.as_slice()).expect("upload");
+    for (dst, data) in dsts.iter().zip(&expected) {
+        uploader.upload_alloc(dst, data.as_slice()).expect("upload");
     }
     uploader.end_frame().expect("end");
     uploader.wait_idle().expect("wait");
 
     // All three copies were produced by the single end_frame submit.
-    for (buf, data) in bufs.iter().zip(&expected) {
-        assert_eq!(readback(&device, buf, data.len()), *data, "uploaded data");
+    for (dst, data) in dsts.iter().zip(&expected) {
+        assert_eq!(readback(&device, dst, data.len()), *data, "uploaded data");
     }
 }
 
@@ -121,70 +102,23 @@ fn cross_frame_reuse_does_not_clobber() {
     // copy finished, the reused arena bytes would corrupt the first result.
     let n = 4096usize;
     let seeds = [0xAAu8, 0x55, 0x5A];
-    let bufs: Vec<Buffer> = seeds
+    let dsts: Vec<GpuAllocation> = seeds
         .iter()
         .map(|_| {
-            Buffer::new(
-                &device,
-                n as u64,
-                BufferUsage::STORAGE | BufferUsage::COPY_SRC,
-                Memory::Gpu,
-            )
-            .expect("destination buffer")
+            GpuAllocation::new(&device, n as u64, Memory::Gpu).expect("destination allocation")
         })
         .collect();
     let expected: Vec<Vec<u8>> = seeds.iter().map(|&s| pattern(n, s)).collect();
 
-    for (buf, data) in bufs.iter().zip(&expected) {
+    for (dst, data) in dsts.iter().zip(&expected) {
         uploader.begin_frame().expect("begin");
-        uploader.upload(buf, data.as_slice()).expect("upload");
+        uploader.upload_alloc(dst, data.as_slice()).expect("upload");
         uploader.end_frame().expect("end");
         // No wait here: the next begin_frame's timeline wait is the reclaim.
     }
     uploader.wait_idle().expect("wait");
 
-    for (buf, data) in bufs.iter().zip(&expected) {
-        assert_eq!(readback(&device, buf, data.len()), *data, "frame data");
+    for (dst, data) in dsts.iter().zip(&expected) {
+        assert_eq!(readback(&device, dst, data.len()), *data, "frame data");
     }
-}
-
-#[test]
-fn host_visible_target_is_rejected() {
-    let Some((_instance, device)) = setup() else {
-        return;
-    };
-    let mut uploader = FrameUploader::new(&device, 1 << 20).expect("uploader");
-
-    // Host-visible buffers are written directly by the caller; the uploader
-    // refuses to stage into them so no one accidentally double-paths.
-    let host =
-        Buffer::new(&device, 64, BufferUsage::STORAGE, Memory::Default).expect("host buffer");
-    assert!(matches!(
-        uploader.upload(&host, &[1u8, 2, 3]),
-        Err(Error::Validation(_))
-    ));
-}
-
-#[test]
-fn upload_and_wait_sync_path() {
-    let Some((_instance, device)) = setup() else {
-        return;
-    };
-    let mut uploader = FrameUploader::new(&device, 1 << 20).expect("uploader");
-
-    // The one-shot helper runs a full frame and waits — the load-time path.
-    let n = 2048usize;
-    let data = pattern(n, 0x42);
-    let dst = Buffer::new(
-        &device,
-        n as u64,
-        BufferUsage::STORAGE | BufferUsage::COPY_SRC,
-        Memory::Gpu,
-    )
-    .expect("destination buffer");
-
-    uploader
-        .upload_and_wait(&dst, data.as_slice())
-        .expect("upload and wait");
-    assert_eq!(readback(&device, &dst, n), data);
 }

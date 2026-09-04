@@ -9,7 +9,7 @@ use crate::vulkan::device::Device;
 use crate::vulkan::memory::{GpuAllocation, GpuPtr};
 use crate::vulkan::sync::{BarrierHazard, Stage};
 use crate::vulkan::view::TextureView;
-use crate::{BlendMode, Buffer, ComputePipeline, GraphicsPipeline};
+use crate::{BlendMode, ComputePipeline, GraphicsPipeline};
 use ash::vk;
 use std::sync::Arc;
 
@@ -456,38 +456,39 @@ impl CommandBuffer {
         }
     }
 
-    /// Issue `draw_count` non-indexed draws from an indirect argument buffer.
+    /// Issue `draw_count` non-indexed draws from an indirect argument
+    /// allocation.
     ///
     /// `stride` is the byte stride between consecutive `DrawIndirectArgs`
     /// records and must be a multiple of 4.
-    pub fn draw_indirect(&self, buffer: &Buffer, offset: u64, draw_count: u32, stride: u32) {
+    pub fn draw_indirect(&self, args: &GpuAllocation, offset: u64, draw_count: u32, stride: u32) {
         unsafe {
             self.device
-                .cmd_draw_indirect(self.buffer, buffer.raw(), offset, draw_count, stride);
+                .cmd_draw_indirect(self.buffer, args.buffer(), offset, draw_count, stride);
         }
     }
 
     /// Issue non-indexed draws where the draw count is read from
-    /// `count_buffer` at runtime (GPU-driven count).
+    /// `count` at runtime (GPU-driven count).
     ///
     /// Requires Vulkan 1.2+ (promoted from `VK_KHR_draw_indirect_count`); the
     /// instance requests `API_VERSION_1_3` so this is always available.
     pub fn draw_indirect_count(
         &self,
-        buffer: &Buffer,
+        args: &GpuAllocation,
         offset: u64,
-        count_buffer: &Buffer,
-        count_buffer_offset: u64,
+        count: &GpuAllocation,
+        count_offset: u64,
         max_draw_count: u32,
         stride: u32,
     ) {
         unsafe {
             self.device.cmd_draw_indirect_count(
                 self.buffer,
-                buffer.raw(),
+                args.buffer(),
                 offset,
-                count_buffer.raw(),
-                count_buffer_offset,
+                count.buffer(),
+                count_offset,
                 max_draw_count,
                 stride,
             );
