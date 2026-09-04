@@ -4,7 +4,7 @@
 //! resources the render world owns — [`EguiPipeline`] (shader modules,
 //! graphics pipeline, the descriptor heap, cached sampler slots),
 //! [`EguiTextures`] (egui-managed textures, user-texture registrations, the
-//! deferred-free ring), and [`EguiFrameResources`] (per-frame-in-flight
+//! shared frame uploader), and [`EguiFrameResources`] (per-frame-in-flight
 //! vertex/index buffers) — while [`record_egui`] records the draw commands
 //! into a render pass the caller has open. The editor's `prepare_egui_frame`
 //! / `egui_pass` systems drive them; tests drive them directly.
@@ -25,18 +25,17 @@
 
 use egui::epaint::{ClippedPrimitive, ImageDelta, Primitive, TextureId};
 use egui::{TextureFilter, TextureOptions, TextureWrapMode};
-use moonfield_render_core::MAX_FRAMES_IN_FLIGHT;
 use moonfield_rhi::Memory;
 use moonfield_rhi::types::WrapMode;
 use moonfield_rhi::{
     BlendMode, Buffer, BufferUsage, CommandBuffer, CompareOp, Compiler, CullMode, CullState,
     DepthState, DescriptorHeap, Device, Extent2d, Filter, Format, FrameUploader, FrontFace,
     GraphicsPipeline, IndexFormat, Offset2d, Rect2d, RenderDevice, RootBinder, SamplerDesc,
-    SamplerHandle, ShaderModule, Texture, TextureHandle, UPLOAD_ARENA_SIZE,
+    SamplerHandle, ShaderModule, Texture, TextureHandle,
 };
 use std::collections::HashMap;
 use std::path::PathBuf;
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 
 /// Initial vertex buffer capacity, in vertices (egui-wgpu parity).
 const INITIAL_VERTEX_CAPACITY: usize = 1024;
@@ -289,67 +288,37 @@ impl TextureEntry {
     }
 }
 
-/// A deferred free. egui asks for textures to be freed — and full updates
-/// replace textures — while in-flight frames may still sample their heap
-/// slots, so destruction is deferred per frame-in-flight slot and applied
-/// when the slot comes around again.
-enum DeferredFree {
-    /// egui freed this id; the map entry is removed (and dropped) at drain.
-    Id(TextureId),
-    /// An entry already replaced in the map by a full update; dropped at
-    /// drain (returning its heap slot) once no frame can reference it.
-    Replaced(TextureEntry),
-}
-
 /// The egui texture store: egui-managed textures, registered user textures,
-/// the upload command pool, and the deferred-free ring.
+/// and the device's shared frame uploader.
 pub struct EguiTextures {
     textures: HashMap<TextureId, TextureEntry>,
     next_user_texture_id: u64,
-    /// Frame-scoped uploader staging this frame's texture deltas; flushed
-    /// once per frame by the caller (one submit).
-    uploader: FrameUploader,
-    free_ring: [Vec<DeferredFree>; MAX_FRAMES_IN_FLIGHT],
-    /// Held so `Drop` can idle the device before the textures are destroyed:
-    /// render-world resources drop in arbitrary order, and the last presented
-    /// frame may still be in flight (the `OffscreenTarget` /
-    /// `WindowSurfaceData` pattern).
-    device: RenderDevice,
+    /// The device's shared frame uploader, staging this frame's texture
+    /// deltas; the window frame loop flushes it once per frame.
+    uploader: Arc<Mutex<FrameUploader>>,
 }
 
 impl EguiTextures {
     /// Create the store on the shared render device.
     pub fn new(render_device: &RenderDevice) -> Result<Self, String> {
-        let device = render_device.device();
-        let uploader = FrameUploader::new(device, UPLOAD_ARENA_SIZE).map_err(|e| e.to_string())?;
         Ok(Self {
             textures: HashMap::new(),
             next_user_texture_id: 0,
-            uploader,
-            free_ring: std::array::from_fn(|_| Vec::new()),
-            device: render_device.clone(),
+            uploader: render_device.device().uploader(),
         })
-    }
-
-    /// Submit all texture uploads recorded this frame — one queue submit
-    /// per frame instead of one per texture delta. Idempotent: a frame with
-    /// no uploads submits nothing.
-    pub fn flush_uploads(&mut self) -> Result<(), String> {
-        self.uploader.end_frame().map_err(|e| e.to_string())
     }
 
     /// Create or update an egui-managed texture from an [`ImageDelta`]. A
     /// delta with `pos: None` (re)allocates the texture; a delta with a
     /// `pos` updates a sub-region of the existing one. A replaced texture
-    /// goes to `frame_slot`'s deferred-free ring: in-flight frames may still
-    /// sample its heap slot.
+    /// retires through the device's retirement ring: in-flight frames may
+    /// still sample its heap slot.
     pub fn update_texture(
         &mut self,
         device: &Device,
         pipeline: &mut EguiPipeline,
         id: TextureId,
         delta: &ImageDelta,
-        frame_slot: usize,
     ) -> Result<(), String> {
         let egui::epaint::ImageData::Color(image) = &delta.image;
         let width = image.width() as u32;
@@ -377,10 +346,11 @@ impl EguiTextures {
             let Some(TextureEntry::Managed(entry)) = self.textures.get_mut(&id) else {
                 unreachable!("managed texture was just matched");
             };
+            let mut uploader = self.uploader.lock().unwrap_or_else(|e| e.into_inner());
             entry
                 .texture
                 .upload(
-                    &mut self.uploader,
+                    &mut uploader,
                     &bytes,
                     Some((pos[0] as i32, pos[1] as i32)),
                     (width, height),
@@ -396,15 +366,18 @@ impl EguiTextures {
         }
 
         let sampler = pipeline.sampler_slot(delta.options)?;
-        let texture = Texture::bindless(
-            device,
-            &mut self.uploader,
-            width,
-            height,
-            Format::R8G8B8A8Unorm,
-            &bytes,
-        )
-        .map_err(|e| e.to_string())?;
+        let texture = {
+            let mut uploader = self.uploader.lock().unwrap_or_else(|e| e.into_inner());
+            Texture::bindless(
+                device,
+                &mut uploader,
+                width,
+                height,
+                Format::R8G8B8A8Unorm,
+                &bytes,
+            )
+            .map_err(|e| e.to_string())?
+        };
         let texture_handle = texture
             .handle()
             .expect("Texture::bindless always has a slot");
@@ -414,17 +387,16 @@ impl EguiTextures {
             sampler,
             options: delta.options,
         }));
-        if let Some(replaced) = self.textures.insert(id, entry) {
-            self.free_ring[frame_slot % MAX_FRAMES_IN_FLIGHT]
-                .push(DeferredFree::Replaced(replaced));
-        }
+        // A replaced entry drops now; its texture and heap slot retire
+        // through the device's retirement ring.
+        let _ = self.textures.insert(id, entry);
         Ok(())
     }
 
-    /// Free a texture. Managed textures are destroyed; user textures only
-    /// lose their registration (the image and its heap slots belong to the
-    /// caller). Prefer [`defer_free`](Self::defer_free) — this is the
-    /// immediate path the ring drains into.
+    /// Free a texture. Managed textures retire through the device's
+    /// retirement ring (in-flight frames may still sample them); user
+    /// textures only lose their registration (the image and its heap slots
+    /// belong to the caller).
     pub fn free_texture(&mut self, id: &TextureId) {
         self.textures.remove(id);
     }
@@ -434,23 +406,6 @@ impl EguiTextures {
         for id in ids {
             self.free_texture(id);
         }
-    }
-
-    /// Apply the frees deferred into `slot` when it last came around: their
-    /// frame-in-flight fence has passed, so the GPU no longer samples them.
-    pub fn deferred_free_slot(&mut self, slot: usize) {
-        for free in std::mem::take(&mut self.free_ring[slot % MAX_FRAMES_IN_FLIGHT]) {
-            match free {
-                DeferredFree::Id(id) => self.free_texture(&id),
-                DeferredFree::Replaced(entry) => drop(entry),
-            }
-        }
-    }
-
-    /// Defer freeing `ids` until `slot` comes around again
-    /// ([`MAX_FRAMES_IN_FLIGHT`] frames later).
-    pub fn defer_free(&mut self, slot: usize, ids: Vec<TextureId>) {
-        self.free_ring[slot % MAX_FRAMES_IN_FLIGHT].extend(ids.into_iter().map(DeferredFree::Id));
     }
 
     /// The heap handles bound when a mesh references `id`, for inspection
@@ -485,17 +440,6 @@ impl EguiTextures {
     ) -> Result<TextureId, String> {
         let sampler = pipeline.sampler_slot(options)?;
         Ok(self.register_native_texture(texture, sampler))
-    }
-}
-
-impl Drop for EguiTextures {
-    fn drop(&mut self) {
-        // SAFETY: best-effort wait so no texture or heap slot is destroyed
-        // while the GPU still uses it (render-world resources drop in
-        // arbitrary order, and the last presented frame may be in flight).
-        unsafe {
-            let _ = self.device.device().raw().device_wait_idle();
-        }
     }
 }
 
@@ -536,8 +480,9 @@ impl FrameResources {
 }
 
 /// The per-slot buffer ring. `frames_in_flight` must match the frame loop
-/// (the window surfaces' [`MAX_FRAMES_IN_FLIGHT`]); each slot is only written
-/// after its fence has passed (i.e. inside the frame, after acquire).
+/// (the window surfaces' [`moonfield_render_core::MAX_FRAMES_IN_FLIGHT`]);
+/// each slot is only written after its fence has passed (i.e. inside the
+/// frame, after acquire).
 pub struct EguiFrameResources {
     frames: Vec<FrameResources>,
 }

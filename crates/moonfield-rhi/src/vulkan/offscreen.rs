@@ -7,8 +7,9 @@
 //! sampleable with no explicit transitions. Sampling goes through the
 //! descriptor heap: the target owns one image slot and one sampler slot
 //! ([`texture_handle`](OffscreenTarget::texture_handle) /
-//! [`sampler_handle`](OffscreenTarget::sampler_handle)), stable across
-//! resizes — the image slot's descriptor is rewritten in place.
+//! [`sampler_handle`](OffscreenTarget::sampler_handle)); a resize allocates
+//! new slots and retires the old ones, so holders re-register when the
+//! handles change.
 //!
 //! [`OffscreenTarget::new_with_depth`] adds a `D32Sfloat` depth attachment for
 //! depth-tested scene rendering (reverse-Z: the depth clear value is 0.0).
@@ -16,6 +17,8 @@
 use crate::error::{Error, Result};
 use crate::types::{Filter, Format, SamplerDesc, WrapMode};
 use crate::vulkan::device::Device;
+use crate::vulkan::retire::{RetireAction, RetirementRing};
+use crate::vulkan::sync::Fence;
 use crate::{CommandBuffer, CommandPool, DescriptorHeap, SamplerHandle, TextureHandle};
 use ash::vk;
 use gpu_allocator::MemoryLocation;
@@ -23,16 +26,20 @@ use gpu_allocator::vulkan::{Allocation, AllocationCreateDesc, AllocationScheme};
 use std::sync::Arc;
 
 /// The target's descriptor-heap slots: the color view's image slot and the
-/// fixed linear/clamp sampler slot. The image slot is rewritten in place on
-/// resize, so both handles are stable for the target's lifetime.
+/// fixed linear/clamp sampler slot. A resize allocates a fresh pair and
+/// drops the old one into the retirement ring, so the handles identify one
+/// image for the pair's whole lifetime.
 struct HeapSlots {
     texture: TextureHandle,
     sampler: SamplerHandle,
     heap: Arc<DescriptorHeap>,
     /// The color view's create info, owned for its *lifetime*: the heap's
     /// descriptor write encoded a pointer to it (`ImageDescriptorInfoEXT.
-    /// p_view`), so it must outlive the slot. Rebuilt on resize.
+    /// p_view`), so it must outlive the slot. `Drop` moves it into the
+    /// retirement action, which frees the slot.
     view_create_info: vk::ImageViewCreateInfo<'static>,
+    /// Device-level retirement ring; `Drop` enqueues the teardown here.
+    ring: Arc<RetirementRing>,
 }
 
 impl HeapSlots {
@@ -54,45 +61,35 @@ impl HeapSlots {
             sampler,
             heap,
             view_create_info,
+            ring: device.retirement_ring(),
         })
-    }
-
-    /// Rewrite the image slot against a recreated view (resize). The device
-    /// is idle when the caller resizes, so the in-place write cannot race an
-    /// in-flight frame; the slot index itself is unchanged.
-    fn rewrite(&mut self, view_create_info: vk::ImageViewCreateInfo<'static>) -> Result<()> {
-        self.heap.write_resource_descriptors(&[(
-            self.texture,
-            crate::vulkan::descriptor_heap::TextureSlotDesc::new(
-                &view_create_info,
-                vk::ImageLayout::GENERAL,
-            ),
-        )])?;
-        self.view_create_info = view_create_info;
-        Ok(())
     }
 }
 
 impl Drop for HeapSlots {
     fn drop(&mut self) {
-        if let Err(e) = self.heap.free_image_slot(self.texture) {
-            moonfield_log::error!("failed to free offscreen texture slot: {e}");
-        }
-        if let Err(e) = self.heap.free_sampler_slot(self.sampler) {
-            moonfield_log::error!("failed to free offscreen sampler slot: {e}");
-        }
+        // Teardown is deferred: in-flight frames may still index these
+        // slots. The image slot's action carries the view create info (the
+        // heap's encoded descriptor references it by pointer).
+        self.ring.push(RetireAction::ImageSlot {
+            heap: self.heap.clone(),
+            handle: self.texture,
+            view_create_info: self.view_create_info,
+        });
+        self.ring.push(RetireAction::SamplerSlot {
+            heap: self.heap.clone(),
+            handle: self.sampler,
+        });
     }
 }
 
 /// A renderable and sampleable offscreen color target.
 ///
-/// Fields are ordered so that Rust drops them in the correct Vulkan
-/// dependency order: the heap slots first (a freed slot is never referenced
-/// again), then view, image and its allocation, then the device-owning
-/// handles. The optional depth image/view/allocation are destroyed explicitly
-/// in [`OffscreenTarget::destroy_image_resources`] alongside the color ones.
-/// There is no render pass or framebuffer — with dynamic rendering the caller
-/// builds attachments inline via [`RenderPassDesc`](crate::RenderPassDesc).
+/// Teardown is deferred through the device's retirement ring: `Drop`
+/// retires the color and depth images, and the heap slots retire through
+/// [`HeapSlots`]'s own `Drop`. There is no render pass or framebuffer —
+/// with dynamic rendering the caller builds attachments inline via
+/// [`RenderPassDesc`](crate::RenderPassDesc).
 pub struct OffscreenTarget {
     heap_slots: HeapSlots,
     image_view: vk::ImageView,
@@ -103,6 +100,8 @@ pub struct OffscreenTarget {
     depth_allocation: Option<Allocation>,
     device: ash::Device,
     allocator: std::sync::Arc<std::sync::Mutex<gpu_allocator::vulkan::Allocator>>,
+    /// Device-level retirement ring; `Drop` enqueues the image teardown here.
+    ring: Arc<RetirementRing>,
     format: Format,
     extent: vk::Extent2D,
     has_depth: bool,
@@ -169,7 +168,7 @@ impl OffscreenTarget {
         transition_to_shader_read(device, image)?;
 
         // Publish the color view and the fixed sampler to the descriptor
-        // heap; the slots stay stable for the target's lifetime.
+        // heap.
         let heap_slots = HeapSlots::new(device, view_create_info)?;
 
         Ok(Self {
@@ -182,16 +181,18 @@ impl OffscreenTarget {
             depth_allocation,
             device: device.raw().clone(),
             allocator,
+            ring: device.retirement_ring(),
             format,
             extent,
             has_depth: with_depth,
         })
     }
 
-    /// Resize the target, recreating the image and view.
-    ///
-    /// Waits for the device to go idle before destroying the old resources.
-    /// Zero dimensions are ignored (e.g. a minimized viewport panel).
+    /// Resize the target: allocate a new image, view, and heap slots; the
+    /// old ones retire through the ring when the fields are replaced, so
+    /// in-flight frames keep sampling valid memory. Holders re-register
+    /// when [`texture_handle`](Self::texture_handle) changes. Zero
+    /// dimensions are ignored (e.g. a minimized viewport panel).
     pub fn resize(&mut self, device: &Device, width: u32, height: u32) -> Result<()> {
         if width == 0 || height == 0 {
             return Ok(());
@@ -200,44 +201,39 @@ impl OffscreenTarget {
             return Ok(());
         }
 
-        // SAFETY: the device is valid; waiting for idle guarantees the old
-        // image is no longer sampled or rendered into.
-        unsafe {
-            self.device
-                .device_wait_idle()
-                .map_err(|e| Error::Backend(format!("failed to wait for device idle: {:?}", e)))?;
-        }
-        self.destroy_image_resources();
-
         let extent = vk::Extent2D { width, height };
         let format_vk = self.format.to_vk();
         let (image, allocation) = create_color_image(device, &self.allocator, extent, format_vk)?;
         let (image_view, view_create_info) =
             create_image_view(device, image, format_vk, vk::ImageAspectFlags::COLOR)?;
+        let heap_slots = HeapSlots::new(device, view_create_info)?;
+        let (depth_image, depth_allocation, depth_image_view) = if self.has_depth {
+            let (image, allocation) = create_depth_image(device, &self.allocator, extent)?;
+            let view = create_image_view(
+                device,
+                image,
+                vk::Format::D32_SFLOAT,
+                vk::ImageAspectFlags::DEPTH,
+            )?
+            .0;
+            (Some(image), Some(allocation), Some(view))
+        } else {
+            (None, None, None)
+        };
+
+        transition_to_shader_read(device, image)?;
+
+        // Swap in the new target; the old image, views, allocations, and
+        // heap slots retire through the ring.
+        self.retire_images();
+        self.heap_slots = heap_slots;
         self.image_view = image_view;
         self.image = image;
         self.allocation = Some(allocation);
+        self.depth_image_view = depth_image_view;
+        self.depth_image = depth_image;
+        self.depth_allocation = depth_allocation;
         self.extent = extent;
-        // The device is idle and the slot index is stable: rewrite the
-        // descriptor in place so existing handles keep working.
-        self.heap_slots.rewrite(view_create_info)?;
-        if self.has_depth {
-            let (depth_image, depth_allocation) =
-                create_depth_image(device, &self.allocator, extent)?;
-            self.depth_image_view = Some(
-                create_image_view(
-                    device,
-                    depth_image,
-                    vk::Format::D32_SFLOAT,
-                    vk::ImageAspectFlags::DEPTH,
-                )?
-                .0,
-            );
-            self.depth_image = Some(depth_image);
-            self.depth_allocation = Some(depth_allocation);
-        }
-
-        transition_to_shader_read(device, image)?;
         Ok(())
     }
 
@@ -269,13 +265,15 @@ impl OffscreenTarget {
     }
 
     /// The color view's descriptor-heap slot, for bindless sampling (e.g.
-    /// the editor's egui pass). Stable across resizes.
+    /// the editor's egui pass). Changed by a resize (a resize allocates new
+    /// slots); holders re-register when it changes.
     pub fn texture_handle(&self) -> TextureHandle {
         self.heap_slots.texture
     }
 
     /// The target's fixed sampler's descriptor-heap slot (linear filtering,
-    /// clamp-to-edge). Stable across resizes.
+    /// clamp-to-edge). Changed by a resize; holders re-register when it
+    /// changes.
     pub fn sampler_handle(&self) -> SamplerHandle {
         self.heap_slots.sampler
     }
@@ -389,45 +387,39 @@ impl OffscreenTarget {
         Ok(pixels)
     }
 
-    /// Destroy image, view and free the allocation (color and, when present,
-    /// depth). The caller must ensure the GPU is idle (see [`resize`] and
-    /// `Drop`).
-    fn destroy_image_resources(&mut self) {
-        // SAFETY: the GPU is idle by contract of the callers, so these
-        // handles are no longer in use.
-        unsafe {
-            self.device.destroy_image_view(self.image_view, None);
-            self.device.destroy_image(self.image, None);
-            if let Some(depth_view) = self.depth_image_view.take() {
-                self.device.destroy_image_view(depth_view, None);
-            }
-            if let Some(depth_image) = self.depth_image.take() {
-                self.device.destroy_image(depth_image, None);
-            }
-        }
-        if let Some(allocation) = self.allocation.take() {
-            let mut allocator = self.allocator.lock().unwrap_or_else(|e| e.into_inner());
-            if let Err(e) = allocator.free(allocation) {
-                log_free_error(&e);
-            }
-        }
-        if let Some(depth_allocation) = self.depth_allocation.take() {
-            let mut allocator = self.allocator.lock().unwrap_or_else(|e| e.into_inner());
-            if let Err(e) = allocator.free(depth_allocation) {
-                log_free_error(&e);
-            }
+    /// Enqueue teardown for the color and depth images (and their
+    /// allocations). The heap slots retire separately through `HeapSlots`'s
+    /// own `Drop`.
+    fn retire_images(&mut self) {
+        self.ring.push(RetireAction::Image {
+            device: self.device.clone(),
+            view: self.image_view,
+            image: self.image,
+            allocation: self.allocation.take(),
+            allocator: self.allocator.clone(),
+        });
+        if let (Some(view), Some(image), Some(allocation)) = (
+            self.depth_image_view.take(),
+            self.depth_image.take(),
+            self.depth_allocation.take(),
+        ) {
+            self.ring.push(RetireAction::Image {
+                device: self.device.clone(),
+                view,
+                image,
+                allocation: Some(allocation),
+                allocator: self.allocator.clone(),
+            });
         }
     }
 }
 
 impl Drop for OffscreenTarget {
     fn drop(&mut self) {
-        // SAFETY: best-effort wait so the image is not destroyed while in use
-        // (heap slot frees in `HeapSlots::drop` are plain bookkeeping).
-        unsafe {
-            let _ = self.device.device_wait_idle();
-        }
-        self.destroy_image_resources();
+        // Teardown is deferred: the ring drains RETIRE_RING frames later,
+        // or at device teardown. The heap slots retire through `HeapSlots`'s
+        // field drop after this body.
+        self.retire_images();
     }
 }
 
@@ -592,6 +584,9 @@ fn target_sampler_desc() -> SamplerDesc {
 
 /// Transition the image from UNDEFINED to SHADER_READ_ONLY_OPTIMAL via a
 /// one-shot command buffer, so sampling is valid before the first render.
+/// The submission waits on its own fence, not a queue wait: the transition
+/// depends on no prior work, and same-queue submission order already puts
+/// it ahead of the frame command buffers recorded afterwards.
 fn transition_to_shader_read(device: &Device, image: vk::Image) -> Result<()> {
     let queue_family_index = device.queue_family_indices().graphics;
     let command_pool = CommandPool::new(device, queue_family_index)?;
@@ -624,6 +619,7 @@ fn transition_to_shader_read(device: &Device, image: vk::Image) -> Result<()> {
     );
     command_buffer.end()?;
 
+    let fence = Fence::new(device, false)?;
     let command_buffers = [command_buffer.raw()];
     let submit_info = vk::SubmitInfo::default().command_buffers(&command_buffers);
     // SAFETY: the command buffer is fully recorded and the queue is valid.
@@ -633,19 +629,13 @@ fn transition_to_shader_read(device: &Device, image: vk::Image) -> Result<()> {
             .queue_submit(
                 device.graphics_queue(),
                 std::slice::from_ref(&submit_info),
-                vk::Fence::null(),
+                fence.raw(),
             )
             .map_err(|e| Error::Backend(format!("failed to submit layout transition: {:?}", e)))?;
         device
             .raw()
-            .queue_wait_idle(device.graphics_queue())
+            .wait_for_fences(std::slice::from_ref(&fence.raw()), true, u64::MAX)
             .map_err(|e| Error::Backend(format!("failed to wait for transition: {:?}", e)))?;
     }
     Ok(())
-}
-
-fn log_free_error(err: &gpu_allocator::AllocationError) {
-    // gpu-allocator reports double-frees and leaks here; destruction must not
-    // panic, so surface the error through the log crate instead.
-    moonfield_log::error!("failed to free offscreen image allocation: {err}");
 }

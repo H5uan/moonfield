@@ -21,15 +21,16 @@ in-flight frames could still read.
 ## Decision
 
 - `Device` owns a `RetirementRing`: one teardown queue per frame slot,
-  holding atomic `RetireAction`s (buffer destruction, heap-slot return)
-  that resource `Drop`s compose.
-- Covered resources — `Buffer`, `GpuAllocation`, and the bump arena's
-  blocks — enqueue their teardown into the current frame slot instead of
-  destroying themselves. `Device::begin_gpu_frame` drains the slot the
-  frame loop is about to record into: the in-flight timeline wait has
-  already guaranteed that slot's previous submission completed.
-  `Device::flush_retirements` drains every slot for tests and teardown,
-  which must call it only with the GPU idle.
+  holding atomic `RetireAction`s (buffer and image destruction, heap-slot
+  return) that resource `Drop`s compose.
+- Covered resources — `Buffer`, `GpuAllocation`, the bump arena's
+  blocks, `Texture`, and `OffscreenTarget` — enqueue their teardown into
+  the current frame slot instead of destroying themselves.
+  `Device::begin_gpu_frame` drains the slot the frame loop is about to
+  record into: the in-flight timeline wait has already guaranteed that
+  slot's previous submission completed. `Device::flush_retirements`
+  drains every slot for tests and teardown, which must call it only with
+  the GPU idle.
 - `Device::drop` idles the device, drops the lazy uploader and descriptor
   heap singletons so their backing allocations retire, then drains — all
   teardown now runs ahead of `vkDestroyDevice` instead of during field
@@ -48,14 +49,28 @@ in-flight frames could still read.
 
 ## Consequences
 
-- `Buffer`, `GpuAllocation`, and bump-arena block teardown runs
-  `RETIRE_RING` frames after drop; in-flight frames read intact memory by
-  construction, and the buffer-replacement paths need no caller
-  discipline.
+- `Buffer`, `GpuAllocation`, bump-arena block, `Texture`, and
+  `OffscreenTarget` teardown runs `RETIRE_RING` frames after drop;
+  in-flight frames read intact memory by construction, and the
+  buffer-replacement paths need no caller discipline.
 - The bump allocator carries a `RetirementRing` handle alongside its raw
   `ash::Device` (its block constructor is lifetime-free and cannot fetch
   one from `&Device`).
-- `Texture` and `OffscreenTarget` still destroy their resources directly
-  in `Drop`; adopting the ring is separate work.
+- The frame loop drives the ring: `acquire` drains the slot it is about
+  to record into (after the in-flight timeline wait), and
+  `submit_window_frames` flushes the shared uploader ahead of the frame
+  command buffers — same-queue submission order executes the uploads
+  first. `RenderPlugin` asserts `MAX_FRAMES_IN_FLIGHT == RETIRE_RING`.
+- Drains run outside the ring lock, and `drain_all` loops to quiescence:
+  teardown can cascade, because an action releasing the last
+  `Arc<DescriptorHeap>` retires the heap's backing allocations in turn.
+- `OffscreenTarget::resize` allocates new heap slots with the new image;
+  the old slots and image retire. Heap descriptors are written once at
+  creation and never rewritten, and the resize path no longer idles the
+  device. Holders re-register when `texture_handle` changes — the
+  editor's viewport binding refreshes on handle change.
+- The egui backend's per-slot deferred-free ring is deleted: texture
+  drops and frees retire through the ring, and its uploads ride the
+  shared uploader.
 - Device teardown order is fixed: idle, drop the lazy singletons, drain
   the ring, tear down the allocator, destroy the device.

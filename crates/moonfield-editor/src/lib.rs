@@ -40,7 +40,7 @@ use moonfield_render_core::{MAX_FRAMES_IN_FLIGHT, ViewTargets, WindowFrameDemand
 use moonfield_render_feature::core_3d::pass::RenderTargetSizes;
 use moonfield_rhi::{
     AttachmentLayout, ClearValue, LoadOp, Rect2d, RenderAttachment, RenderDevice, RenderPassDesc,
-    StoreOp,
+    SamplerHandle, StoreOp, TextureHandle,
 };
 use moonfield_window::WindowControl;
 use moonfield_winit::WinitWindow;
@@ -168,11 +168,13 @@ impl EditorFeedbackChannel {
 }
 
 /// Render-world binding of the viewport's offscreen target as an egui
-/// texture, registered once — the target's heap slots are stable across
-/// resizes, so the registration never needs rebinding.
+/// texture. A target resize allocates new heap slots, so the registration
+/// refreshes whenever the handles change.
 #[derive(Default)]
 struct ViewportTexture {
     id: Option<egui::TextureId>,
+    /// The heap handles `id` was registered from.
+    handles: Option<(TextureHandle, SamplerHandle)>,
 }
 
 /// Render-world resource: a tessellated, GPU-uploaded egui frame, produced by
@@ -497,52 +499,53 @@ fn prepare_egui_frame(world: &mut World) {
         let mut textures = world
             .get_resource_mut::<egui_vk::EguiTextures>()
             .expect("EguiTextures was just ensured");
-        // The fence for this frame slot just passed: textures egui freed when
-        // the slot last came around are no longer sampled.
-        textures.deferred_free_slot(frame_slot);
         // Draining marks deltas as applied (epaint 0.36 asserts a dropped
         // TexturesDelta is empty); several deltas per texture can arrive in
-        // one frame.
+        // one frame. Uploads record into the shared frame uploader, which
+        // the window frame loop flushes at submit.
         for (id, deltas) in frame.textures_delta.set.drain() {
             for delta in deltas {
-                if let Err(e) =
-                    textures.update_texture(&device, &mut pipeline, id, &delta, frame_slot)
-                {
+                if let Err(e) = textures.update_texture(&device, &mut pipeline, id, &delta) {
                     error!("failed to update egui texture {id:?}: {e}");
                 }
             }
         }
+        // Freed textures retire through the device's retirement ring.
         let freed: Vec<egui::TextureId> = frame.textures_delta.free.drain().collect();
-        textures.defer_free(frame_slot, freed);
-        // One submit carries all texture uploads recorded this frame.
-        if let Err(e) = textures.flush_uploads() {
-            error!("failed to flush egui texture uploads: {e}");
-        }
+        textures.free_textures(&freed);
     }
 
-    // Bind the viewport's offscreen target once. Its heap slots are stable
-    // across resizes (`OffscreenTarget` rewrites the descriptor in place),
-    // so no rebind is ever needed after registration.
+    // Bind the viewport's offscreen target as an egui texture. A resize
+    // allocates new heap slots for the target, so the registration
+    // refreshes whenever the handles change.
     let viewport_handles = world.get_resource::<ViewTargets>().and_then(|targets| {
         targets
             .get(RenderTarget::Viewport)
             .map(|target| (target.texture_handle(), target.sampler_handle()))
     });
     if let Some((texture, sampler)) = viewport_handles {
-        let needs_register = world
-            .get_resource::<ViewportTexture>()
-            .expect("ViewportTexture registered in render world")
-            .id
-            .is_none();
+        let (id, handles) = {
+            let viewport = world
+                .get_resource::<ViewportTexture>()
+                .expect("ViewportTexture registered in render world");
+            (viewport.id, viewport.handles)
+        };
+        let needs_register = id.is_none() || handles != Some((texture, sampler));
         if needs_register {
-            let mut textures = world
-                .get_resource_mut::<egui_vk::EguiTextures>()
-                .expect("EguiTextures was just ensured");
-            let id = textures.register_native_texture(texture, sampler);
-            world
+            let id = {
+                let mut textures = world
+                    .get_resource_mut::<egui_vk::EguiTextures>()
+                    .expect("EguiTextures was just ensured");
+                if let Some(old) = id {
+                    textures.free_texture(&old);
+                }
+                textures.register_native_texture(texture, sampler)
+            };
+            let mut viewport = world
                 .get_resource_mut::<ViewportTexture>()
-                .expect("ViewportTexture registered in render world")
-                .id = Some(id);
+                .expect("ViewportTexture registered in render world");
+            viewport.id = Some(id);
+            viewport.handles = Some((texture, sampler));
         }
     }
 

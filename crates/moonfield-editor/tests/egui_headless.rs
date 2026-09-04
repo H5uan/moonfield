@@ -4,8 +4,8 @@
 //! `ui.image` of a user-registered texture — into an offscreen target, reads
 //! the pixels back, and asserts the output is not blank and the user texture
 //! sampled through. The second frame exercises the editor's resize flow: the
-//! source image is resized, which rewrites its descriptor-heap slot in place
-//! while the registered texture id stays valid. Skips gracefully on machines
+//! source image is resized, which allocates new heap slots, and the
+//! registration refreshes with the new handles. Skips gracefully on machines
 //! without a Vulkan driver.
 
 use moonfield_editor::egui_vk::{
@@ -48,21 +48,25 @@ fn egui_headless_frame_is_not_blank() {
     let mut textures = EguiTextures::new(&render_device).expect("egui textures");
     let mut frames = EguiFrameResources::new(&device, 1).expect("egui frame resources");
 
-    let user_texture =
+    let mut user_texture =
         textures.register_native_texture(user_image.texture_handle(), user_image.sampler_handle());
 
     let ctx = egui::Context::default();
     let command_pool =
         CommandPool::new(&device, device.queue_family_indices().graphics).expect("command pool");
 
-    // Frame 1: fresh registration. Frame 2: the source image was resized,
-    // rewriting its heap slot in place — the registered id and handles stay
-    // valid (the editor's viewport-resize flow).
+    // Frame 1: fresh registration. Frame 2: the source image was resized —
+    // new heap slots — and the registration refreshes with the new handles
+    // (the editor's viewport-resize flow).
     for frame in 0..2 {
         if frame == 1 {
             user_image
                 .resize(&device, 16, 16)
                 .expect("resize user image");
+            let old = user_texture;
+            user_texture = textures
+                .register_native_texture(user_image.texture_handle(), user_image.sampler_handle());
+            textures.free_texture(&old);
         }
 
         let raw_input = egui::RawInput {
@@ -83,17 +87,25 @@ fn egui_headless_frame_is_not_blank() {
         } = full_output;
 
         // Draining marks the delta as applied; epaint 0.36 debug-asserts
-        // that a dropped `TexturesDelta` is empty. The test never defers
-        // frees (each frame is submitted synchronously), so `free` is
-        // discarded here.
+        // that a dropped `TexturesDelta` is empty. The two-frame test never
+        // frees a texture, so `free` is discarded here.
         for (id, deltas) in textures_delta.set.drain() {
             for delta in deltas {
                 textures
-                    .update_texture(&device, &mut pipeline, id, &delta, 0)
+                    .update_texture(&device, &mut pipeline, id, &delta)
                     .expect("texture upload");
             }
         }
         textures_delta.free.clear();
+        // The shared uploader flushes explicitly here (the editor's frame
+        // loop flushes it at submit); same-queue submission order runs the
+        // uploads ahead of the command buffer below.
+        device
+            .uploader()
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .end_frame()
+            .expect("flush uploads");
         let pixels_per_point = 1.0;
         let primitives = ctx.tessellate(shapes, pixels_per_point);
         assert!(!primitives.is_empty(), "egui produced no primitives");

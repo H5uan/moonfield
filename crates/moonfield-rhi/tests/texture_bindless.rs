@@ -2,7 +2,7 @@
 //! texture path: creation uploads RGBA8 pixels through a frame uploader and
 //! writes the view's descriptor into the shared descriptor heap in one step.
 //!
-//! Covers slot allocation order, slot reuse on drop (the bump contract), and
+//! Covers slot allocation order, slot reuse after the retirement drain, and
 //! the escape-hatch [`Texture::new`] path that must not touch the heap.
 
 mod common;
@@ -98,9 +98,13 @@ fn drop_releases_slot_for_reuse() {
         .expect("texture a");
     assert_eq!(a.handle(), Some(moonfield_rhi::TextureHandle(0)));
 
-    // Dropping the texture returns slot 0, so the next bindless texture gets
-    // it again (freelist reuse — the bump contract).
+    // Dropping the texture retires its slot; the drain returns it to the
+    // freelist. The upload must complete first (nothing in flight may
+    // reference the image), so the retirement drain is safe.
     drop(a);
+    uploader.end_frame().expect("end upload frame");
+    uploader.wait_idle().expect("wait for uploads");
+    device.flush_retirements();
     let b = Texture::bindless(&device, &mut uploader, 4, 4, Format::R8G8B8A8Unorm, &pixels)
         .expect("texture b");
     assert_eq!(

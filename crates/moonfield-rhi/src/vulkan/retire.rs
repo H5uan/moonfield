@@ -15,7 +15,8 @@ use gpu_allocator::vulkan::{Allocation, Allocator};
 use std::sync::{Arc, Mutex};
 
 /// Retirement queue depth, in frame slots. Equal to the frame loop's
-/// frames-in-flight (render-core's `MAX_FRAMES_IN_FLIGHT`).
+/// frames-in-flight (render-core's `MAX_FRAMES_IN_FLIGHT`); render-core
+/// asserts the two match.
 pub const RETIRE_RING: usize = 2;
 
 /// One atomic teardown step, executed at drain time. A resource's `Drop`
@@ -23,8 +24,6 @@ pub const RETIRE_RING: usize = 2;
 ///
 /// Crate-internal: constructed by the resource `Drop` implementations in
 /// `memory`, `buffer`, `texture`, and `offscreen`.
-// TODO(M4): remove once every variant has a constructor.
-#[allow(dead_code)]
 pub(crate) enum RetireAction {
     /// Return an image slot to the heap's freelist. Carries the view's
     /// create info — the heap encodes it by pointer (see `TextureSlotDesc`),
@@ -32,6 +31,10 @@ pub(crate) enum RetireAction {
     ImageSlot {
         heap: Arc<DescriptorHeap>,
         handle: TextureHandle,
+        /// Never read: the heap's encoded descriptor references the create
+        /// info bytes by pointer, so they must stay valid until the slot is
+        /// freed — they live as long as this action does.
+        #[allow(dead_code)]
         view_create_info: vk::ImageViewCreateInfo<'static>,
     },
     /// Return a sampler slot to the heap's freelist.
@@ -62,9 +65,9 @@ impl RetireAction {
     fn run(self) {
         match self {
             Self::ImageSlot { heap, handle, .. } => {
-                // The view create info drops with this binding, after the
-                // slot is returned: the pointer it lends stays valid for the
-                // descriptor's whole encoded lifetime.
+                // Freeing the slot ends the window in which the encoded
+                // descriptor (and the create info bytes it references) can
+                // be read; the action's copy drops when `run` returns.
                 if let Err(e) = heap.free_image_slot(handle) {
                     moonfield_log::error!("failed to free retired image slot: {e}");
                 }
@@ -141,25 +144,54 @@ impl RetirementRing {
         }
     }
 
+    /// Drain `slot`'s queue, then make it the push target.
+    ///
+    /// The caller has waited the in-flight timeline for the frame that last
+    /// used `slot` (the frame loop's acquire), so its retirements are safe
+    /// to execute. Teardown cascaded by the drain itself (an action
+    /// releasing the last handle to a container whose fields retire in
+    /// turn) lands in the current slot and drains on its next cycle.
     pub(crate) fn begin_frame(&self, slot: usize) {
-        let mut inner = self.inner.lock().unwrap_or_else(|e| e.into_inner());
-        let slot = slot % RETIRE_RING;
-        for action in std::mem::take(&mut inner.slots[slot]) {
+        let drained = {
+            let mut inner = self.inner.lock().unwrap_or_else(|e| e.into_inner());
+            let slot = slot % RETIRE_RING;
+            let drained = std::mem::take(&mut inner.slots[slot]);
+            inner.current = slot;
+            drained
+        };
+        // Run outside the lock: cascaded teardown pushes back into the ring.
+        for action in drained {
             action.run();
         }
-        inner.current = slot;
     }
 
+    /// Queue a teardown step into the current frame slot. It runs when that
+    /// slot is drained, `RETIRE_RING` frames later. Callable from any thread
+    /// (resource drops); the lock serializes.
     pub(crate) fn push(&self, action: RetireAction) {
         let mut inner = self.inner.lock().unwrap_or_else(|e| e.into_inner());
         let current = inner.current;
         inner.slots[current].push(action);
     }
 
+    /// Drain every slot, including teardown cascaded by the drain itself
+    /// (an action releasing the last handle to a container whose fields
+    /// retire in turn). The caller must know the GPU is idle — no in-flight
+    /// work may reference the retired resources.
     pub(crate) fn drain_all(&self) {
-        let mut inner = self.inner.lock().unwrap_or_else(|e| e.into_inner());
-        for slot in &mut inner.slots {
-            for action in std::mem::take(slot) {
+        loop {
+            let batch = {
+                let mut inner = self.inner.lock().unwrap_or_else(|e| e.into_inner());
+                let mut batch = Vec::new();
+                for slot in &mut inner.slots {
+                    batch.append(slot);
+                }
+                batch
+            };
+            if batch.is_empty() {
+                return;
+            }
+            for action in batch {
                 action.run();
             }
         }

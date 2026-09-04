@@ -11,6 +11,7 @@ use std::sync::Arc;
 use crate::error::{Error, Result};
 use crate::types::Format;
 use crate::vulkan::device::Device;
+use crate::vulkan::retire::{RetireAction, RetirementRing};
 use crate::{DescriptorHeap, FrameUploader, TextureHandle};
 use ash::vk;
 use gpu_allocator::MemoryLocation;
@@ -21,21 +22,24 @@ struct TextureSlot {
     heap: Arc<DescriptorHeap>,
     /// The view's create info, owned here for its *lifetime*: the heap's
     /// descriptor write encoded a pointer to it (`ImageDescriptorInfoEXT.
-    /// p_view`), so it must outlive the slot. Not read on the Rust side.
-    #[allow(dead_code)]
+    /// p_view`), so it must outlive the slot. `Drop` moves it into the
+    /// retirement action, which frees the slot and drops it.
     view_create_info: vk::ImageViewCreateInfo<'static>,
 }
 
 /// A sampled 2D texture with owned memory.
 ///
-/// Field order matters for drop safety: the view is destroyed before the
-/// image, and the allocation is freed after both.
+/// Teardown is deferred through the device's retirement ring; the
+/// view-before-image-before-allocation order lives in the retirement
+/// action.
 pub struct Texture {
     image_view: vk::ImageView,
     image: vk::Image,
     allocation: Option<Allocation>,
     device: ash::Device,
     allocator: std::sync::Arc<std::sync::Mutex<gpu_allocator::vulkan::Allocator>>,
+    /// Device-level retirement ring; `Drop` enqueues the teardown here.
+    ring: Arc<RetirementRing>,
     width: u32,
     height: u32,
     slot: Option<TextureSlot>,
@@ -135,6 +139,7 @@ impl Texture {
             allocation: Some(allocation),
             device: device.raw().clone(),
             allocator: device.allocator().clone(),
+            ring: device.retirement_ring(),
             width,
             height,
             slot: None,
@@ -174,6 +179,7 @@ impl Texture {
             allocation: Some(allocation),
             device: device.raw().clone(),
             allocator: device.allocator().clone(),
+            ring: device.retirement_ring(),
             width,
             height,
             slot: Some(TextureSlot {
@@ -222,28 +228,23 @@ impl Texture {
 
 impl Drop for Texture {
     fn drop(&mut self) {
-        // Return the bindless slot before tearing down the image: the heap
-        // keeps the slot's view create info alive until then (bump contract:
-        // a freed slot is never referenced again).
-        if let Some(slot) = self.slot.take()
-            && let Err(e) = slot.heap.free_image_slot(slot.handle)
-        {
-            moonfield_log::error!("failed to free texture slot: {e}");
+        // Teardown is deferred: in-flight frames may still sample the image
+        // through its heap slot. The slot action carries the view create
+        // info — the heap's encoded descriptor references it by pointer, so
+        // it must stay alive until the slot is freed.
+        if let Some(slot) = self.slot.take() {
+            self.ring.push(RetireAction::ImageSlot {
+                heap: slot.heap,
+                handle: slot.handle,
+                view_create_info: slot.view_create_info,
+            });
         }
-        // SAFETY: the caller defers destruction past the in-flight frames
-        // that sampled this texture.
-        unsafe {
-            self.device.destroy_image_view(self.image_view, None);
-            self.device.destroy_image(self.image, None);
-        }
-        if let Some(allocation) = self.allocation.take()
-            && let Err(e) = self
-                .allocator
-                .lock()
-                .unwrap_or_else(|e| e.into_inner())
-                .free(allocation)
-        {
-            moonfield_log::error!("failed to free texture allocation: {e}");
-        }
+        self.ring.push(RetireAction::Image {
+            device: self.device.clone(),
+            view: self.image_view,
+            image: self.image,
+            allocation: self.allocation.take(),
+            allocator: self.allocator.clone(),
+        });
     }
 }

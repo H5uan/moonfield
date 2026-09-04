@@ -10,10 +10,11 @@
 //! - [`create_window_surfaces`] (`RenderPrepare`): creates/recreates surfaces
 //!   and swapchains to match the extracted windows.
 //! - [`acquire_window_frames`] (`Render`, first): waits the in-flight timeline
-//!   counter, acquires the next swapchain image, and begins the frame's
-//!   command buffer.
-//! - [`submit_window_frames`] (`Render`, last): ends recording, submits to the
-//!   graphics queue, presents, and advances the frame slot.
+//!   counter, drains the frame slot's retirements, acquires the next
+//!   swapchain image, and begins the frame's command buffer.
+//! - [`submit_window_frames`] (`Render`, last): flushes the shared uploader,
+//!   ends recording, submits to the graphics queue, presents, and advances
+//!   the frame slot.
 //!
 //! Everything that records into a window frame fetches the in-progress
 //! command buffer from [`WindowSurfaces`] between acquire and submit. The
@@ -170,8 +171,9 @@ impl WindowSurfaceData {
     }
 
     /// Begin a frame: wait for the in-flight timeline counter
-    /// (`frame_submitted - MAX_FRAMES_IN_FLIGHT`), acquire the next swapchain
-    /// image, and begin recording the frame's command buffer.
+    /// (`frame_submitted - MAX_FRAMES_IN_FLIGHT`), drain the frame slot's
+    /// retirements, acquire the next swapchain image, and begin recording
+    /// the frame's command buffer.
     ///
     /// Returns `false` when the swapchain is out of date and no frame was
     /// started; the surface is flagged for recreation on the next
@@ -188,6 +190,10 @@ impl WindowSurfaceData {
                 .wait(self.frame_submitted - MAX_FRAMES_IN_FLIGHT as u64, u64::MAX)?;
         }
         let frame = ((self.frame_submitted - 1) % MAX_FRAMES_IN_FLIGHT as u64) as usize;
+        // The wait above guarantees this slot's previous submission
+        // completed, so its retirements are safe to run; the slot also
+        // becomes the ring's push target for this frame's drops.
+        self.device.begin_gpu_frame(frame);
         let (image_index, suboptimal) = match self
             .swapchain
             .acquire_next_image(u64::MAX, &self.image_available[frame])
@@ -469,6 +475,20 @@ pub fn acquire_window_frames(world: &mut World) {
 /// `Render` system (ordering anchor; pass systems run `.before()` it): end
 /// recording, submit, and present every window frame that was acquired.
 pub fn submit_window_frames(world: &mut World) {
+    // Flush uploads recorded during this frame's preparation (texture
+    // deltas, image transitions) ahead of the frame command buffers:
+    // same-queue submission order executes them first. Idempotent — a
+    // frame with no uploads submits nothing.
+    if let Some(render_device) = world.get_resource::<RenderDevice>()
+        && let Err(e) = render_device
+            .device()
+            .uploader()
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .end_frame()
+    {
+        error!("failed to flush frame uploads: {e}");
+    }
     let Some(mut surfaces) = world.get_resource_mut::<WindowSurfaces>() else {
         return;
     };
