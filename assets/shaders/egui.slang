@@ -1,15 +1,16 @@
 // egui's per-draw root data, pushed via vkCmdPushDataEXT (`push_data`) and
-// read through the PushConstant storage class. The texture/sampler fields
-// are the descriptor-heap slot indices the fragment stage indexes the
-// untyped `ResourceDescriptorHeap` / `SamplerDescriptorHeap` with. Layout
-// must match `EguiRoot` in egui_vk.rs.
+// read through the PushConstant storage class. The static fields (screen
+// size, option flags) are pushed once per pass; the varying tail (the
+// descriptor-heap slot indices the fragment stage indexes the untyped
+// `ResourceDescriptorHeap` / `SamplerDescriptorHeap` with) is pushed per
+// draw. Layout must match `EguiRoot` in egui_vk.rs.
 struct EguiRoot
 {
     float2 screen_size_in_points;
-    uint texture;
-    uint sampler;
     uint dithering;
     uint predictable_filtering;
+    uint texture;
+    uint sampler;
 };
 
 struct VsInput

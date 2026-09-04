@@ -154,10 +154,10 @@ impl Texture {
         format: Format,
         bytes: &[u8],
     ) -> Result<Self> {
-        if bytes.len() != width as usize * height as usize * 4 {
+        let expected = width as usize * height as usize * format.bytes_per_pixel();
+        if bytes.len() != expected {
             return Err(Error::Validation(format!(
-                "texture upload needs {} bytes, got {}",
-                width as usize * height as usize * 4,
+                "texture upload needs {expected} bytes, got {}",
                 bytes.len()
             )));
         }

@@ -24,6 +24,13 @@ impl Format {
             Self::D32Sfloat => ash::vk::Format::D32_SFLOAT,
         }
     }
+
+    /// Bytes per pixel of a tightly packed row.
+    pub(crate) fn bytes_per_pixel(self) -> usize {
+        match self {
+            Self::B8G8R8A8Unorm | Self::R8G8B8A8Unorm | Self::D32Sfloat => 4,
+        }
+    }
 }
 
 /// Buffer usage flags. Const-fn combinable, no external deps.

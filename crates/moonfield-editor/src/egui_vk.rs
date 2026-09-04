@@ -73,16 +73,18 @@ pub struct CallbackResources {
 }
 
 /// Per-draw root data, pushed via [`CommandBuffer::push_data`] and read by
-/// the shader through the PushConstant storage class. Layout must match
+/// the shader through the PushConstant storage class. The static fields
+/// (screen size, option flags) are pushed once per pass; the varying tail
+/// (texture/sampler heap slots) is pushed per draw. Layout must match
 /// `EguiRoot` in `egui.slang`.
 #[repr(C)]
 #[derive(Clone, Copy, bytemuck::Pod, bytemuck::Zeroable)]
 struct EguiRoot {
     screen_size_in_points: [f32; 2],
-    texture: u32,
-    sampler: u32,
     dithering: u32,
     predictable_filtering: u32,
+    texture: u32,
+    sampler: u32,
 }
 
 /// `egui::epaint::Vertex` laid out for upload: pos (f32×2), uv (f32×2),
@@ -113,9 +115,6 @@ struct MeshDraw {
 /// shader's gamma values verbatim.
 pub struct EguiPipeline {
     pipeline: GraphicsPipeline,
-    /// Reflection-built root blob template (`uniform EguiRoot` → the inline
-    /// struct); draws clone it, write the fields, and push it.
-    root: RootBinder,
     /// The shared descriptor heap every egui texture/sampler slot lives in
     /// (samplers through its description cache).
     heap: Arc<DescriptorHeap>,
@@ -168,9 +167,9 @@ impl EguiPipeline {
             .vertex_layout("vs_main")
             .map_err(|e| e.to_string())?;
         let root = RootBinder::new(&reflection, "vs_main").map_err(|e| e.to_string())?;
-        // Layout alignment guard: the Rust `EguiRoot` struct written into the
-        // root blob must be exactly as large as the shader's reflected
-        // `uniform EguiRoot`, so the two can never silently drift.
+        // Layout alignment guard: the Rust `EguiRoot` struct pushed as root
+        // data must be exactly as large as the shader's reflected `uniform
+        // EguiRoot`, so the two can never silently drift.
         if root.blob().len() != std::mem::size_of::<EguiRoot>() {
             return Err(format!(
                 "EguiRoot layout mismatch: Rust struct is {} bytes, egui.slang \
@@ -178,6 +177,16 @@ impl EguiPipeline {
                 std::mem::size_of::<EguiRoot>(),
                 root.blob().len()
             ));
+        }
+        // The varying fields (texture, sampler) must be the struct's tail:
+        // the pass pushes the static prefix once and every draw pushes only
+        // the tail.
+        if core::mem::offset_of!(EguiRoot, texture) + 8 != std::mem::size_of::<EguiRoot>() {
+            return Err(
+                "EguiRoot layout mismatch: the varying fields (texture, sampler) \
+                 must be the struct's tail"
+                    .to_string(),
+            );
         }
         drop(reflection);
         // Descriptor-heap pipeline: null layout, no set layouts, no push
@@ -196,7 +205,6 @@ impl EguiPipeline {
 
         Ok(Self {
             pipeline,
-            root,
             heap: device.descriptor_heap(),
             options,
             callback_resources: CallbackResources { _private: () },
@@ -555,9 +563,9 @@ impl EguiFrameResources {
 /// Record the draw commands for the primitives uploaded by
 /// [`EguiFrameResources::update`] into the caller's open render pass.
 /// `extent` is the render target's pixel extent; clip rects are in points
-/// and scaled by `pixels_per_point`. Each mesh's root data (screen size,
-/// option flags, texture/sampler heap handles) is pushed with
-/// [`CommandBuffer::push_data`] right before its draw.
+/// and scaled by `pixels_per_point`. The static root fields (screen size,
+/// option flags) are pushed once per pass; each mesh pushes only its
+/// texture/sampler heap handles right before its draw.
 #[allow(clippy::too_many_arguments)] // one parameter per resource the pass reads
 pub fn record_egui(
     command_buffer: &CommandBuffer,
@@ -594,6 +602,20 @@ pub fn record_egui(
         extent.0 as f32 / pixels_per_point,
         extent.1 as f32 / pixels_per_point,
     ];
+    // The static root prefix (screen size + option flags) is pushed once per
+    // pass; every draw pushes only the varying tail (texture + sampler
+    // slots) at its offset — bytes outside a written range keep their values
+    // (GPU-verified by `command_push_data`).
+    let static_prefix = EguiRoot {
+        screen_size_in_points,
+        dithering: options.dithering as u32,
+        predictable_filtering: options.predictable_texture_filtering as u32,
+        texture: 0,
+        sampler: 0,
+    };
+    let static_len = core::mem::offset_of!(EguiRoot, texture);
+    command_buffer.push_data(0, &bytemuck::bytes_of(&static_prefix)[..static_len]);
+    let varying_offset = core::mem::offset_of!(EguiRoot, texture) as u32;
     let mut draws = frame.mesh_draws.iter();
     for clipped in primitives {
         let Primitive::Mesh(mesh) = &clipped.primitive else {
@@ -610,22 +632,9 @@ pub fn record_egui(
             continue;
         };
         let (texture, sampler) = entry.handles();
-        let root = EguiRoot {
-            screen_size_in_points,
-            texture: texture.0,
-            sampler: sampler.0,
-            dithering: options.dithering as u32,
-            predictable_filtering: options.predictable_texture_filtering as u32,
-        };
-        // The root blob is built from reflection: clone the pipeline's
-        // template and write the whole `uniform EguiRoot` struct into it.
-        let mut root_blob = pipeline.root.clone();
-        if let Err(e) = root_blob.set_bytes("root", bytemuck::bytes_of(&root)) {
-            moonfield_log::error!("egui root binding failed: {e}");
-            continue;
-        }
         command_buffer.set_scissor(scissor);
-        command_buffer.push_data(0, root_blob.blob());
+        let varying = [texture.0, sampler.0];
+        command_buffer.push_data(varying_offset, bytemuck::bytes_of(&varying));
         command_buffer.draw_indexed(
             draw.index_count,
             1,

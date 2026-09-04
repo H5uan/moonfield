@@ -55,8 +55,8 @@ pub use pipeline::{BlendMode, ComputePipeline, GraphicsPipeline, ShaderStageDesc
 pub use plugin::RenderDevice;
 pub use retire::RETIRE_RING;
 pub use shader::{
-    CompiledShader, Compiler, RootBinder, RootParam, RootParamKind, ShaderCache, UserAttributeArg,
-    UserAttributeRef,
+    CompiledShader, Compiler, RootBinder, RootParam, RootParamKind, RootParamPlace, ShaderCache,
+    UserAttributeArg, UserAttributeRef,
 };
 pub use shader_module::ShaderModule;
 pub use swapchain::{Surface, Swapchain};

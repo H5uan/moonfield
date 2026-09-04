@@ -19,8 +19,8 @@ use moonfield_render_core::{ViewTargets, WindowSurfaces};
 use moonfield_rhi::{
     AttachmentLayout, ClearValue, CommandBuffer, CompareOp, Compiler, CullMode, CullState,
     DepthState, Format, FrontFace, GraphicsPipeline, LoadOp, OffscreenTarget, Rect2d,
-    RenderAttachment, RenderDevice, RenderPassDesc, Result, RootBinder, ShaderModule, StoreOp,
-    VertexBufferLayout, Viewport,
+    RenderAttachment, RenderDevice, RenderPassDesc, Result, RootBinder, RootParamPlace,
+    ShaderModule, StoreOp, VertexBufferLayout, Viewport,
 };
 use std::collections::HashMap;
 use std::path::PathBuf;
@@ -50,16 +50,21 @@ fn shader_path(name: &str) -> String {
 }
 
 /// Compile both stages of `core_3d.slang` and derive the vertex layout and
-/// root blob from the reflected entry points — the shader is the single
-/// source of truth for both.
+/// the `Ptr<DrawData>` root placement from the reflected entry points —
+/// the shader is the single source of truth for both.
 fn compile_core_3d(
     compiler: &Compiler,
     device: &moonfield_rhi::Device,
-) -> Result<(ShaderModule, ShaderModule, VertexBufferLayout, RootBinder)> {
+) -> Result<(
+    ShaderModule,
+    ShaderModule,
+    VertexBufferLayout,
+    RootParamPlace,
+)> {
     let reflection =
         compiler.compile_file_to_reflection(&shader_path("core_3d.slang"), "vs_main")?;
     let vertex_layout = reflection.vertex_layout("vs_main")?;
-    let root = RootBinder::new(&reflection, "vs_main")?;
+    let root = RootBinder::new(&reflection, "vs_main")?.pointer_param("root")?;
     drop(reflection);
 
     let vertex_shader = ShaderModule::from_compiled(
@@ -79,9 +84,10 @@ fn compile_core_3d(
 /// `init_gpu_resource`).
 pub struct Core3dPipeline {
     pipeline: GraphicsPipeline,
-    /// Reflection-built root blob template (`Ptr<DrawData>` → one GPU
-    /// address); draws clone it, set the pointer, and push it.
-    root: RootBinder,
+    /// The `Ptr<DrawData>` root's reflected placement. A draw encodes the
+    /// arena address on the stack and pushes it at the place's offset —
+    /// no per-draw allocation, no name lookup.
+    root: RootParamPlace,
 }
 
 impl Core3dPipeline {
@@ -108,10 +114,9 @@ impl Core3dPipeline {
         &self.pipeline
     }
 
-    /// A cloneable root-blob template; draws fill the `root` pointer and push
-    /// the blob before each draw.
-    pub fn root(&self) -> &RootBinder {
-        &self.root
+    /// The `Ptr<DrawData>` root placement for per-draw encoding.
+    pub fn root(&self) -> RootParamPlace {
+        self.root
     }
 }
 
@@ -145,19 +150,17 @@ pub fn prepare_view_targets(world: &mut World) {
     let Some(render_device) = world.get_resource::<RenderDevice>().map(|d| (*d).clone()) else {
         return;
     };
-    let sizes = world
-        .get_resource::<RenderTargetSizes>()
-        .map(|sizes| sizes.0.clone())
-        .unwrap_or_default();
     if !world.contains_resource::<ViewTargets>() {
         world.insert_resource(ViewTargets::default());
     }
+    let sizes = world.get_resource::<RenderTargetSizes>();
     let mut targets = world
         .get_resource_mut::<ViewTargets>()
         .expect("ViewTargets was just ensured");
     for target in requested {
         let (width, height) = sizes
-            .get(&target)
+            .as_deref()
+            .and_then(|sizes| sizes.0.get(&target))
             .copied()
             .unwrap_or((INITIAL_WIDTH, INITIAL_HEIGHT));
         targets.ensure(target, width, height, VIEW_TARGET_FORMAT, &render_device);
@@ -296,7 +299,7 @@ pub fn main_opaque_pass_3d(world: &mut World) {
     };
     let command_buffer: &CommandBuffer = command_buffer;
 
-    let Some(frame) = world.get_resource::<Core3dFrame>().map(|f| (*f).clone()) else {
+    let Some(frame) = world.get_resource::<Core3dFrame>() else {
         return;
     };
     let Some(draw_functions) = world.get_resource::<DrawFunctions<Opaque3d>>() else {

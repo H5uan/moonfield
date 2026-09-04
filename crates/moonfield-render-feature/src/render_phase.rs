@@ -136,16 +136,17 @@ impl DrawFunction<Opaque3d> for DrawMesh {
         command_buffer.bind_vertex_buffers(0, &[gpu.vertex()], &[0]);
         command_buffer.bind_index_buffer(gpu.index(), 0, IndexFormat::Uint32);
 
-        // The root blob is built from reflection: clone the pipeline's
-        // template, write the per-draw GPU address into the `Ptr<DrawData>`
-        // root, and push the blob. Offsets/sizes come from the shader, not a
-        // hand-synced struct.
-        let mut root_blob = pipeline.root().clone();
-        if let Err(e) = root_blob.set_pointer("root", root.gpu.as_raw()) {
-            moonfield_log::error!("root binding failed: {e}");
-            return;
-        }
-        command_buffer.push_data(0, root_blob.blob());
+        // The root is the reflected `Ptr<DrawData>` placement: encode the
+        // arena address on the stack and push it at the place's offset —
+        // offsets and sizes come from the shader, not a hand-synced struct.
+        let root_bytes = match pipeline.root().pointer_bytes(root.gpu.as_raw()) {
+            Ok(bytes) => bytes,
+            Err(e) => {
+                moonfield_log::error!("root encode failed: {e}");
+                return;
+            }
+        };
+        command_buffer.push_data(pipeline.root().offset as u32, &root_bytes);
         command_buffer.draw_indexed(gpu.index_count(), 1, 0, 0, 0);
     }
 }
@@ -191,17 +192,15 @@ pub fn queue_opaque_3d(world: &mut World) {
         return;
     }
 
-    let sizes = world
-        .get_resource::<RenderTargetSizes>()
-        .map(|sizes| sizes.0.clone())
-        .unwrap_or_default();
+    let sizes = world.get_resource::<RenderTargetSizes>();
     let Some(mut frame) = world.get_resource_mut::<Core3dFrame>() else {
         return;
     };
     for view in frame.views_mut() {
         let view_from_world = view_matrix(&view.view.world_from_view);
         let (width, height) = sizes
-            .get(&view.target.0)
+            .as_deref()
+            .and_then(|sizes| sizes.0.get(&view.target.0))
             .copied()
             .unwrap_or((INITIAL_WIDTH, INITIAL_HEIGHT));
         let view_proj = view

@@ -336,11 +336,13 @@ impl CommandBuffer {
         }
     }
 
-    /// Update push data — the extension's push-constant storage class,
-    /// available to all shader stages. This is the fast path for root data
-    /// that does not fit inline: store device addresses of per-draw structs,
-    /// like a larger push constant block. Push data aliases the push-constant
-    /// bank, and every pipeline is a descriptor-heap pipeline, so this is the
+    /// Update push data — the root-data interface of descriptor-heap
+    /// pipelines, delivered to shaders through the existing push-constant
+    /// storage class. Range updates are offset-addressed (4-byte aligned);
+    /// bytes outside the written range keep their previous values for
+    /// subsequent commands (GPU-verified by `command_push_data`). Push
+    /// constants rely on set layout state and are incompatible with
+    /// descriptor-heap pipelines, and every pipeline is one, so this is the
     /// only root-data path. The total written is bounded by
     /// `max_push_data_size` at record time (validation flags overruns).
     pub fn push_data(&self, offset: u32, data: &[u8]) {

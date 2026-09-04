@@ -831,6 +831,39 @@ pub struct RootParam {
     pub size: usize,
 }
 
+/// A root parameter's placement in the root blob, resolved once from a
+/// [`RootBinder`]. Per-draw work is a stack write and a
+/// [`CommandBuffer::push_data`](crate::CommandBuffer::push_data) at
+/// [`RootParamPlace::offset`] — no allocation, no name lookup.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct RootParamPlace {
+    /// The parameter's byte offset in the root blob — the push-data offset.
+    pub offset: usize,
+    /// The parameter's storage size in bytes.
+    pub size: usize,
+    kind: RootParamKind,
+}
+
+impl RootParamPlace {
+    /// A pointer parameter's 8 bytes, ready for `push_data` at this place's
+    /// offset.
+    pub fn pointer_bytes(&self, address: u64) -> RenderResult<[u8; 8]> {
+        if self.kind != RootParamKind::Pointer {
+            return Err(RenderError::Backend(format!(
+                "root parameter placement is {:?}, not a pointer",
+                self.kind
+            )));
+        }
+        if self.size != 8 {
+            return Err(RenderError::Backend(format!(
+                "pointer root parameter occupies {} bytes, expected 8",
+                self.size
+            )));
+        }
+        Ok(address.to_le_bytes())
+    }
+}
+
 /// A typed writer for a draw's root blob, driven by an entry point's
 /// reflected [`RootParam`]s.
 ///
@@ -897,6 +930,30 @@ impl RootBinder {
             )));
         }
         Ok((param.offset, param.size))
+    }
+
+    /// The placement of the named `Ptr<T>` root parameter. Resolve once at
+    /// pipeline build; per-draw encoding goes through
+    /// [`RootParamPlace::pointer_bytes`].
+    pub fn pointer_param(&self, name: &str) -> RenderResult<RootParamPlace> {
+        let (offset, size) = self.range(name, RootParamKind::Pointer, 8)?;
+        Ok(RootParamPlace {
+            offset,
+            size,
+            kind: RootParamKind::Pointer,
+        })
+    }
+
+    /// The placement of the named inline `uniform` root parameter. Resolve
+    /// once at pipeline build; per-pass bytes are pushed at
+    /// [`RootParamPlace::offset`].
+    pub fn uniform_param(&self, name: &str) -> RenderResult<RootParamPlace> {
+        let (offset, size) = self.range(name, RootParamKind::Uniform, 0)?;
+        Ok(RootParamPlace {
+            offset,
+            size,
+            kind: RootParamKind::Uniform,
+        })
     }
 }
 
