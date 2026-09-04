@@ -1486,4 +1486,63 @@ mod tests {
             }]
         );
     }
+
+    /// The ViewUniforms shape: a vertex entry with two pointer roots
+    /// (`root` + `view`), the fixed-function vertex input intact, and the
+    /// struct layout a `Ptr<T>` dereference actually uses — read from the
+    /// emitted SPIR-V's member offsets, the ground truth the Rust mirror
+    /// must match.
+    #[test]
+    fn two_pointer_roots_and_ptr_struct_layout() {
+        let compiler = Compiler::new().expect("compiler");
+        const SOURCE: &str = r#"
+            struct DrawData { column_major float4x4 model; float4 color; };
+            struct ViewUniforms
+            {
+                float3 view_pos;
+                float aspect;
+                column_major float4x4 view_proj;
+            };
+            struct VsInput { float3 position : POSITION; };
+            struct VsOutput { float4 position : SV_POSITION; float3 local_pos : TEXCOORD0; };
+            [shader("vertex")]
+            VsOutput main(VsInput input, Ptr<DrawData> root, Ptr<ViewUniforms> view)
+            {
+                VsOutput o;
+                o.position = mul(view[0].view_proj, mul(root[0].model, float4(input.position, 1.0)));
+                o.local_pos = input.position;
+                return o;
+            }
+        "#;
+        let reflection = compiler
+            .compile_source_to_reflection("view_uniforms", SOURCE, "main")
+            .expect("reflection");
+        // Two pointer roots, each an 8-byte address placement.
+        let binder = RootBinder::new(&reflection, "main").expect("binder");
+        assert_eq!(binder.pointer_param("root").expect("root place").size, 8);
+        assert_eq!(binder.pointer_param("view").expect("view place").size, 8);
+        // The varying input is untouched by the pointer roots.
+        let layout = reflection.vertex_layout("main").expect("vertex layout");
+        assert_eq!(layout.attributes.len(), 1);
+        assert_eq!(
+            layout.attributes[0].format,
+            crate::types::VertexFormat::Float32x3
+        );
+
+        // The emitted SPIR-V names the `Ptr` pointee types `..._natural`
+        // (Slang's C-like natural layout — offsets baked into the pointer
+        // arithmetic, no std140 padding games) and the entry-parameter
+        // block `EntryPointParams_std430`. The natural layout is what
+        // `struct_layout` (LayoutRules::Default) reports; the Rust mirror
+        // must match it field-for-field.
+        let view = reflection.struct_layout("ViewUniforms").expect("layout");
+        assert_eq!(view.size(), 80);
+        assert_eq!(view.field_offset("view_pos").expect("field"), 0);
+        assert_eq!(view.field_offset("aspect").expect("field"), 12);
+        assert_eq!(view.field_offset("view_proj").expect("field"), 16);
+        let draw = reflection.struct_layout("DrawData").expect("layout");
+        assert_eq!(draw.size(), 80);
+        assert_eq!(draw.field_offset("model").expect("field"), 0);
+        assert_eq!(draw.field_offset("color").expect("field"), 64);
+    }
 }

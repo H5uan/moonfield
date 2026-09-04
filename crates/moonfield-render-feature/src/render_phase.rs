@@ -16,7 +16,7 @@ use moonfield_render_core::{DrawFunction, DrawFunctionId, MainEntity, OrderedFlo
 use moonfield_rhi::{BumpAlloc, CommandBuffer, GpuBumpAllocator, IndexFormat};
 
 use crate::core_3d::Core3dFrame;
-use crate::core_3d::pass::{Core3dPipeline, INITIAL_HEIGHT, INITIAL_WIDTH, RenderTargetSizes};
+use crate::core_3d::pass::Core3dPipeline;
 use crate::mesh::{ExtractedMeshes, MeshRenderer, PreparedGpuMeshes};
 
 /// One opaque mesh draw queued for a view.
@@ -26,8 +26,9 @@ pub struct Opaque3d {
     pub main_entity: MainEntity,
     /// Prepared mesh lookup key.
     pub mesh: AssetId,
-    /// View-projection × object-to-world, computed at queue time.
-    pub mvp: Mat4,
+    /// Object-to-world, stored at queue time; the view-projection comes
+    /// from the pass's [`ViewUniforms`] record.
+    pub model: Mat4,
     /// Flat linear RGBA color used by the current mesh pipeline.
     pub color: [f32; 4],
     /// Positive camera-space depth used for front-to-back sorting.
@@ -48,12 +49,24 @@ impl PhaseItem for Opaque3d {
     }
 }
 
-/// Per-draw push constants: model-view-projection matrix + flat color.
+/// Per-draw push data: object-to-world matrix + flat color. The
+/// view-projection lives in the pass's [`ViewUniforms`] record.
 #[repr(C)]
 #[derive(Clone, Copy, bytemuck::Pod, bytemuck::Zeroable)]
 struct DrawData {
-    mvp: [f32; 16],
+    model: [f32; 16],
     color: [f32; 4],
+}
+
+/// Per-view constants, one arena record per pass. Layout must match
+/// `ViewUniforms` in `core_3d.slang` — the natural (C-like) layout Slang
+/// uses behind `Ptr`, verified by `two_pointer_roots_and_ptr_struct_layout`.
+#[repr(C)]
+#[derive(Clone, Copy, bytemuck::Pod, bytemuck::Zeroable)]
+pub(crate) struct ViewUniforms {
+    pub(crate) view_proj: [f32; 16],
+    pub(crate) view_pos: [f32; 3],
+    pub(crate) _pad0: f32,
 }
 
 /// The mesh pipeline's root pointer: one `GpuPtr` per draw, pushed as a
@@ -85,6 +98,13 @@ impl FrameDrawArena {
         let mut g = self.inner.lock().unwrap_or_else(|e| e.into_inner());
         g.arenas[slot].free_all();
         g.current = slot;
+    }
+
+    /// Allocate the pass's view-uniform record.
+    pub fn alloc_view_uniforms(&self) -> moonfield_rhi::Result<BumpAlloc> {
+        let mut g = self.inner.lock().unwrap_or_else(|e| e.into_inner());
+        let slot = g.current;
+        g.arenas[slot].alloc_typed::<ViewUniforms>(1)
     }
 
     pub fn alloc_draw_data(&self) -> moonfield_rhi::Result<BumpAlloc> {
@@ -126,7 +146,7 @@ impl DrawFunction<Opaque3d> for DrawMesh {
         };
         unsafe {
             *root.cpu.typed::<DrawData>() = DrawData {
-                mvp: item.mvp.to_cols_array(),
+                model: item.model.to_cols_array(),
                 color: item.color,
             };
         }
@@ -192,26 +212,17 @@ pub fn queue_opaque_3d(world: &mut World) {
         return;
     }
 
-    let sizes = world.get_resource::<RenderTargetSizes>();
     let Some(mut frame) = world.get_resource_mut::<Core3dFrame>() else {
         return;
     };
     for view in frame.views_mut() {
         let view_from_world = view_matrix(&view.view.world_from_view);
-        let (width, height) = sizes
-            .as_deref()
-            .and_then(|sizes| sizes.0.get(&view.target.0))
-            .copied()
-            .unwrap_or((INITIAL_WIDTH, INITIAL_HEIGHT));
-        let view_proj = view
-            .view
-            .clip_from_world(width as f32 / height.max(1) as f32);
         for (main_entity, mesh, world_position, model, color) in &drawables {
             let distance = -view_from_world.transform_point3((*world_position).into()).z;
             view.opaque.add(Opaque3d {
                 main_entity: *main_entity,
                 mesh: *mesh,
-                mvp: view_proj * *model,
+                model: *model,
                 color: *color,
                 distance,
                 draw_function: opaque.0,

@@ -1,9 +1,19 @@
 // The core 3D mesh pipeline: one shared `DrawData` struct, compiled once,
 // with both stages in a single file. The vertex and fragment entries are
 // linked against the same type, so the two sides can never drift apart.
+
+// Per-view constants, one record per pass: the view-projection and the view
+// position. Lights, time, and fog grow here.
+struct ViewUniforms
+{
+    column_major float4x4 view_proj;
+    float3 view_pos;
+    float _pad0;
+};
+
 struct DrawData
 {
-    column_major float4x4 mvp;
+    column_major float4x4 model;
     float4 color;
 };
 
@@ -19,10 +29,11 @@ struct VsOutput
 };
 
 [shader("vertex")]
-VsOutput vs_main(VsInput input, Ptr<DrawData> root)
+VsOutput vs_main(VsInput input, Ptr<DrawData> root, Ptr<ViewUniforms> view)
 {
     VsOutput output;
-    output.position = mul(root[0].mvp, float4(input.position, 1.0));
+    float4 world = mul(root[0].model, float4(input.position, 1.0));
+    output.position = mul(view[0].view_proj, world);
     output.local_pos = input.position;
     return output;
 }

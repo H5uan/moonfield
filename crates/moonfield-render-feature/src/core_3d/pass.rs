@@ -28,11 +28,10 @@ use std::path::PathBuf;
 use moonfield_render_core::{DrawFunctions, PhaseItem};
 
 use super::{Core3dFrame, Core3dView};
-use crate::render_phase::{FrameDrawArena, Opaque3d};
+use crate::render_phase::{FrameDrawArena, Opaque3d, ViewUniforms};
 
 /// Initial offscreen target size; consumers (e.g. the editor's viewport
-/// panel) report real sizes through [`RenderTargetSizes`]. Queue systems use
-/// the same fallback when computing view aspect ratios.
+/// panel) report real sizes through [`RenderTargetSizes`].
 pub(crate) const INITIAL_WIDTH: u32 = 1280;
 pub(crate) const INITIAL_HEIGHT: u32 = 720;
 
@@ -50,8 +49,9 @@ fn shader_path(name: &str) -> String {
 }
 
 /// Compile both stages of `core_3d.slang` and derive the vertex layout and
-/// the `Ptr<DrawData>` root placement from the reflected entry points —
-/// the shader is the single source of truth for both.
+/// the `Ptr<DrawData>` / `Ptr<ViewUniforms>` root placements from the
+/// reflected entry points — the shader is the single source of truth for
+/// all three.
 fn compile_core_3d(
     compiler: &Compiler,
     device: &moonfield_rhi::Device,
@@ -60,11 +60,14 @@ fn compile_core_3d(
     ShaderModule,
     VertexBufferLayout,
     RootParamPlace,
+    RootParamPlace,
 )> {
     let reflection =
         compiler.compile_file_to_reflection(&shader_path("core_3d.slang"), "vs_main")?;
     let vertex_layout = reflection.vertex_layout("vs_main")?;
-    let root = RootBinder::new(&reflection, "vs_main")?.pointer_param("root")?;
+    let binder = RootBinder::new(&reflection, "vs_main")?;
+    let root = binder.pointer_param("root")?;
+    let view = binder.pointer_param("view")?;
     drop(reflection);
 
     let vertex_shader = ShaderModule::from_compiled(
@@ -75,7 +78,7 @@ fn compile_core_3d(
         device,
         &compiler.compile_file_to_spirv(&shader_path("core_3d.slang"), "fs_main")?,
     )?;
-    Ok((vertex_shader, fragment_shader, vertex_layout, root))
+    Ok((vertex_shader, fragment_shader, vertex_layout, root, view))
 }
 
 /// The flat-lit mesh pipeline of the core 3D pass, as a render-world
@@ -88,6 +91,9 @@ pub struct Core3dPipeline {
     /// arena address on the stack and pushes it at the place's offset —
     /// no per-draw allocation, no name lookup.
     root: RootParamPlace,
+    /// The `Ptr<ViewUniforms>` root's reflected placement; the pass pushes
+    /// its address once per pass.
+    view: RootParamPlace,
 }
 
 impl Core3dPipeline {
@@ -95,7 +101,7 @@ impl Core3dPipeline {
     pub fn new(render_device: &RenderDevice) -> Result<Self> {
         let device = render_device.device();
         let compiler = Compiler::new()?;
-        let (vertex_shader, fragment_shader, vertex_layout, root) =
+        let (vertex_shader, fragment_shader, vertex_layout, root, view) =
             compile_core_3d(&compiler, device)?;
         // Descriptor-heap pipeline: per-draw root pointers go through `push_data`.
         let pipeline = GraphicsPipeline::new_with_options(
@@ -106,7 +112,11 @@ impl Core3dPipeline {
             &fragment_shader,
             &vertex_layout,
         )?;
-        Ok(Self { pipeline, root })
+        Ok(Self {
+            pipeline,
+            root,
+            view,
+        })
     }
 
     /// The graphics pipeline for per-draw binding.
@@ -117,6 +127,11 @@ impl Core3dPipeline {
     /// The `Ptr<DrawData>` root placement for per-draw encoding.
     pub fn root(&self) -> RootParamPlace {
         self.root
+    }
+
+    /// The `Ptr<ViewUniforms>` root placement for the per-pass push.
+    pub fn view(&self) -> RootParamPlace {
+        self.view
     }
 }
 
@@ -199,7 +214,7 @@ pub fn record_view_pass(
             );
             if let Some(phase) = phase {
                 for item in phase.items() {
-                    info!("  item mvp: {:?}", item.mvp.to_cols_array());
+                    info!("  item model: {:?}", item.model.to_cols_array());
                 }
             }
         });
@@ -247,6 +262,35 @@ pub fn record_view_pass(
             cull_mode: CullMode::None,
             front_face: FrontFace::Clockwise,
         });
+        // Per-pass view uniforms: one arena record, its address pushed
+        // once. The aspect comes from the target's real extent.
+        let view_data = view.expect("phase present implies view");
+        let translation = view_data.view.world_from_view.affine().translation;
+        let uniforms = ViewUniforms {
+            view_proj: view_data
+                .view
+                .clip_from_world(width as f32 / height.max(1) as f32)
+                .to_cols_array(),
+            view_pos: [translation.x, translation.y, translation.z],
+            _pad0: 0.0,
+        };
+        let recorded = (|| -> Option<()> {
+            let arena = world.get_resource::<FrameDrawArena>()?;
+            let pipeline = world.get_resource::<Core3dPipeline>()?;
+            let record = arena.alloc_view_uniforms().ok()?;
+            unsafe {
+                *record.cpu.typed::<ViewUniforms>() = uniforms;
+            }
+            let place = pipeline.view();
+            let bytes = place.pointer_bytes(record.gpu.as_raw()).ok()?;
+            command_buffer.push_data(place.offset as u32, &bytes);
+            Some(())
+        })();
+        if recorded.is_none() {
+            error!("failed to record view uniforms; skipping view items");
+            command_buffer.end_rendering();
+            return;
+        }
         for item in phase.items() {
             let Some(draw) = draw_functions.get(item.draw_function()) else {
                 continue;
