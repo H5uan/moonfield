@@ -22,6 +22,9 @@ moonfield-editor/   # The editor — the workspace's only binary (src/main.rs). 
                     # (egui + egui_dock + in-house Vulkan backend in src/egui_vk.rs): dock panels, offscreen viewport
 moonfield-log/      # Logging utilities
 moonfield-math/     # The workspace math single entry: glam re-export + domain types (Dir3/Ray3d, Transform)
+moonfield-ml/       # ML training runtime on the RHI (Trainer, Adam, dataset, checkpoint
+                    # scaffolding); Gaussian Splatting is the first method — Slang autodiff
+                    # kernels compiled to SPIR-V, no external ML framework
 moonfield-reflect/  # Mini reflection for the editor: named fields, dynamic read/write, nesting
 moonfield-reflect-derive/ # #[derive(Reflect)] proc-macro (the one sanctioned proc-macro crate)
 moonfield-rhi/   # Lunar Mare — Vulkan-only rendering RHI (ash); see crates/moonfield-rhi/AGENTS.md

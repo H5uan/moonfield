@@ -1,0 +1,8 @@
+[package]
+name = "moonfield-ml"
+version.workspace = true
+edition.workspace = true
+
+[dependencies]
+moonfield-render-feature = { workspace = true, features = ["splat"] }
+moonfield-rhi = { workspace = true }

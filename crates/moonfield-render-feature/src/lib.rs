@@ -7,8 +7,8 @@
 //! - `mesh` (default) — the triangle-mesh asset (`Mesh` / `MeshHandle` /
 //!   `MeshRenderer`) and its glTF import.
 //! - `splat` — 3D Gaussian splatting: scene representation,
-//!   `KHR_gaussian_splatting` glTF / COLMAP input, GPU rasterization and
-//!   per-scene training. Opt-in; depends on `mesh`.
+//!   `KHR_gaussian_splatting` glTF / COLMAP input, and GPU rasterization.
+//!   Opt-in; depends on `mesh`. Training lives in `moonfield-ml`.
 //!
 //! The renderer targets Vulkan through the `moonfield-rhi` RHI.
 //!

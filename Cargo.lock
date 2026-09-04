@@ -1200,6 +1200,14 @@ dependencies = [
 ]
 
 [[package]]
+name = "moonfield-ml"
+version = "0.1.0"
+dependencies = [
+ "moonfield-render-feature",
+ "moonfield-rhi",
+]
+
+[[package]]
 name = "moonfield-reflect"
 version = "0.1.0"
 dependencies = [

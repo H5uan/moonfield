@@ -31,6 +31,7 @@ moonfield-render-feature = { path = "crates/moonfield-render-feature", default-f
 moonfield-time = { path = "crates/moonfield-time" }
 moonfield-log = { path = "crates/moonfield-log" }
 moonfield-math = { path = "crates/moonfield-math" }
+moonfield-ml = { path = "crates/moonfield-ml" }
 moonfield-reflect = { path = "crates/moonfield-reflect" }
 moonfield-reflect-derive = { path = "crates/moonfield-reflect-derive" }
 moonfield-window = { path = "crates/moonfield-window" }
