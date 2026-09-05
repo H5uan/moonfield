@@ -38,8 +38,9 @@ suboptimal/recreate 标志生命周期、以及无 acquire 直接 submit 的 pan
 
 - `cargo test -p moonfield-render-core` 现在在任何机器上（有无 GPU 均可）都会执行
   帧循环序列逻辑（新增 7 个测试，共 11 个）。
-- 抽取过程中发现一个既有异常，保持原样未修：`queue_present` 硬错误（非
-  `SurfaceOutOfDate`）返回时，timeline 已被 signal 但 `frame_submitted` 不推进，
-  下一次 `submit` 会重复 signal 同一个 timeline 值——对 timeline 信号量这是非法的。
-  行为未变，记录在此供后续修复。
+- 抽取过程中发现一个既有异常，现已修复：`queue_present` 硬错误（非 `SurfaceOutOfDate`）
+  返回时，timeline 已被 signal 但 `frame_submitted` 不推进，下一次 `submit` 会重复
+  signal 同一个 timeline 值——对 timeline 信号量这是非法的。现在 `submit` 在队列提交
+  成功后立即调用 `finish_submit`；`presented_frames` 统计的是已提交的帧（present 本身
+  可能已失败）。
 - `FrameSequencer` 是 `window.rs` 私有类型；公开 API 无变化。

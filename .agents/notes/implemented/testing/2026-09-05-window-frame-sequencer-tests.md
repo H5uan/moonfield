@@ -48,9 +48,11 @@ contract.
 
 - `cargo test -p moonfield-render-core` now exercises the frame-loop
   sequencing on any machine, GPU or not (7 new tests, 11 total).
-- The extraction surfaced a pre-existing anomaly, left as-is: when
-  `queue_present` fails with a hard error (not `SurfaceOutOfDate`), the
-  timeline was already signaled but `frame_submitted` does not advance, so
-  the next `submit` would re-signal the same timeline value — invalid for
-  timeline semaphores. Behavior unchanged; recorded here for a future fix.
+- The extraction surfaced a pre-existing anomaly, since fixed: when
+  `queue_present` failed with a hard error (not `SurfaceOutOfDate`), the
+  timeline was already signaled but `frame_submitted` did not advance, so
+  the next `submit` would have re-signaled the same timeline value — invalid
+  for timeline semaphores. `submit` now calls `finish_submit` immediately
+  after the queue submission; `presented_frames` counts submitted frames
+  (present may still have failed).
 - `FrameSequencer` is private to `window.rs`; no public API changed.

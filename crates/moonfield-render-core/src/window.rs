@@ -97,7 +97,7 @@ struct FrameSequencer {
     current_image: Option<u32>,
     /// The swapchain reported itself out of date (or suboptimal).
     needs_recreate: bool,
-    /// Frames successfully submitted and presented.
+    /// Frames submitted to the queue (present itself may still have failed).
     presented_frames: u64,
 }
 
@@ -164,7 +164,9 @@ impl FrameSequencer {
         (image_index, self.current_slot(), self.frame_submitted)
     }
 
-    /// The frame was submitted and presented: advance the counters.
+    /// The frame's timeline was signaled: advance the counters. Runs right
+    /// after the queue submission — present may still fail afterwards, but
+    /// the timeline value is spent and must not be re-signaled.
     fn finish_submit(&mut self) {
         self.frame_submitted += 1;
         self.presented_frames = self.presented_frames.saturating_add(1);
@@ -325,6 +327,11 @@ impl WindowSurfaceData {
             &self.timeline,
             signal,
         )?;
+        // The timeline is now signaled, so the frame is submitted no matter
+        // how present turns out: advance the counters here, or the next
+        // submit would re-signal the same timeline value (illegal for
+        // timeline semaphores).
+        self.sequencer.finish_submit();
 
         let render_finished = [&self.render_finished[frame]];
         match self
@@ -341,8 +348,6 @@ impl WindowSurfaceData {
             }
             Err(e) => return Err(e),
         }
-
-        self.sequencer.finish_submit();
         Ok(())
     }
 
@@ -383,7 +388,8 @@ impl WindowSurfaceData {
         self.sequencer.current_slot()
     }
 
-    /// Frames successfully presented on this surface.
+    /// Frames submitted for presentation on this surface (present itself may
+    /// still have failed).
     pub fn presented_frames(&self) -> u64 {
         self.sequencer.presented_frames()
     }
