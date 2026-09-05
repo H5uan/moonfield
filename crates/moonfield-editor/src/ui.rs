@@ -494,28 +494,24 @@ fn gizmo(ui: &egui::Ui, context: &mut TabContext, rect: egui::Rect, response: &e
 
     // An active drag applies to the world until the button is released.
     if let Some(active) = drag {
-        if response.dragged_by(egui::PointerButton::Primary) {
-            if let (Some(pointer), Some(center)) =
+        if response.dragged_by(egui::PointerButton::Primary)
+            && let (Some(pointer), Some(center)) =
                 (pointer.or(response.interact_pointer_pos()), center)
-            {
-                let ray = screen_to_ray(pointer, rect, view_proj);
-                if let Some(trs) = active.apply(ray, pointer, center) {
-                    let parent =
+        {
+            let ray = screen_to_ray(pointer, rect, view_proj);
+            if let Some(trs) = active.apply(ray, pointer, center) {
+                let parent = context
+                    .world
+                    .get_component::<ChildOf>(entity)
+                    .and_then(|child_of| {
                         context
                             .world
-                            .get_component::<ChildOf>(entity)
-                            .and_then(|child_of| {
-                                context
-                                    .world
-                                    .get_component::<GlobalTransform>(child_of.parent())
-                                    .map(|g| g.affine())
-                            });
-                    let local = world_trs_to_local(trs, parent);
-                    if let Some(mut transform) =
-                        context.world.get_component_mut::<Transform>(entity)
-                    {
-                        *transform = local;
-                    }
+                            .get_component::<GlobalTransform>(child_of.parent())
+                            .map(|g| g.affine())
+                    });
+                let local = world_trs_to_local(trs, parent);
+                if let Some(mut transform) = context.world.get_component_mut::<Transform>(entity) {
+                    *transform = local;
                 }
             }
         } else {

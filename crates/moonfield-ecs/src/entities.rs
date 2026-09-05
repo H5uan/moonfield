@@ -294,11 +294,11 @@ impl Entities {
                 );
             }
         }
-        if let Some(max) = freelist.iter().map(|e: &Entity| e.id()).max() {
-            // If some id is bigger than the lenth of meta, We will resize the meta list
-            if max as usize >= self.meta.len() {
-                self.meta.resize(max as usize + 1, EntityMeta::EMPTY);
-            }
+        // If some id is bigger than the lenth of meta, We will resize the meta list
+        if let Some(max) = freelist.iter().map(|e: &Entity| e.id()).max()
+            && max as usize >= self.meta.len()
+        {
+            self.meta.resize(max as usize + 1, EntityMeta::EMPTY);
         }
         // Reconstruct pending list
         self.pending.clear();

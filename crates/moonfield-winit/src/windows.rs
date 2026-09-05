@@ -102,10 +102,13 @@ pub fn diff_window(title: &str, cursor_mode: CursorMode, cache: &mut CachedWindo
 /// Runs once per frame after the app update.
 pub fn sync_windows(world: &mut World) {
     // Snapshot the entity → window pairs first: resources borrow the world
-    // immutably, and the component pass below needs `&mut World`.
-    let pairs: Vec<(Entity, Arc<WinitWindowHandle>)> = match world.get_resource::<WinitWindows>() {
-        Some(windows) => windows.iter().map(|(e, w)| (e, w.clone())).collect(),
-        None => return,
+    // immutably, and the component pass below needs `&mut World`. The block
+    // scopes the resource guard so its drop releases the borrow.
+    let pairs: Vec<(Entity, Arc<WinitWindowHandle>)> = {
+        let Some(windows) = world.get_resource::<WinitWindows>() else {
+            return;
+        };
+        windows.iter().map(|(e, w)| (e, w.clone())).collect()
     };
 
     for (entity, winit_window) in pairs {

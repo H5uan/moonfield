@@ -388,9 +388,11 @@ impl WindowSurfaces {
 /// No-ops when no [`RenderDevice`] exists (headless machines without a
 /// Vulkan driver).
 pub fn create_window_surfaces(world: &mut World) {
-    let render_device = match world.get_resource::<RenderDevice>() {
-        Some(device) => device.clone(),
-        None => return,
+    let Some(render_device) = world
+        .get_resource::<RenderDevice>()
+        .map(|device| (*device).clone())
+    else {
+        return;
     };
 
     let windows: Vec<ExtractedWindow> = world

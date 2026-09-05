@@ -288,12 +288,10 @@ fn extract_editor_frame(main_world: &World, render_world: &mut World) {
 fn editor_prepare(world: &mut World) {
     let needs_init = world
         .get_resource::<EditorMainStateSlot>()
-        .map(|slot| slot.0.is_none())
-        .unwrap_or(true);
+        .is_none_or(|slot| slot.0.is_none());
     if needs_init {
-        let state = match EditorMainState::new(world) {
-            Ok(s) => s,
-            Err(_) => return,
+        let Ok(state) = EditorMainState::new(world) else {
+            return;
         };
         let mut slot = world
             .get_resource_mut::<EditorMainStateSlot>()
