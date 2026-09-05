@@ -25,6 +25,8 @@ impl Instance {
     /// `required_extensions` should contain platform surface extensions such as
     /// `VK_KHR_surface` and the platform-specific `VK_KHR_win32_surface`, etc.
     pub fn new(required_extensions: &[&CStr]) -> Result<Self> {
+        // SAFETY: loading the Vulkan loader at runtime is always sound; a
+        // missing driver is reported as an error, not UB.
         let entry = unsafe { ash::Entry::load() }
             .map_err(|e| Error::Backend(format!("failed to load Vulkan: {e}")))?;
 
@@ -53,6 +55,9 @@ impl Instance {
             .enabled_extension_names(&extensions)
             .enabled_layer_names(&layers);
 
+        // SAFETY: the entry is valid and the create info references
+        // NUL-terminated extension/layer names and an application info that
+        // all outlive the call.
         let instance = unsafe { entry.create_instance(&create_info, None) }
             .map_err(|e| Error::Backend(format!("failed to create Vulkan instance: {:?}", e)))?;
 
@@ -90,6 +95,8 @@ impl Instance {
 
     /// Enumerate available physical devices.
     pub(crate) fn enumerate_physical_devices(&self) -> Result<Vec<vk::PhysicalDevice>> {
+        // SAFETY: the instance is valid; enumeration returns handles owned by
+        // the instance.
         unsafe {
             self.instance.enumerate_physical_devices().map_err(|e| {
                 Error::Backend(format!("failed to enumerate physical devices: {:?}", e))
@@ -107,6 +114,8 @@ impl Instance {
         device: vk::PhysicalDevice,
         out: &mut vk::PhysicalDeviceProperties2,
     ) {
+        // SAFETY: the instance and physical device are valid, and `out` (with
+        // its caller-chained sType list) is a writable struct the driver fills.
         unsafe { self.instance.get_physical_device_properties2(device, out) }
     }
 
@@ -117,11 +126,15 @@ impl Instance {
         &self,
         device: vk::PhysicalDevice,
     ) -> Vec<vk::QueueFamilyProperties2<'_>> {
+        // SAFETY: the instance and physical device are valid; the query only
+        // returns a count.
         let count = unsafe {
             self.instance
                 .get_physical_device_queue_family_properties2_len(device)
         };
         let mut out = vec![vk::QueueFamilyProperties2::default(); count];
+        // SAFETY: `out` holds exactly `count` default-initialized entries
+        // (valid sTypes) for the driver to fill, matching the `_len` query.
         unsafe {
             self.instance
                 .get_physical_device_queue_family_properties2(device, &mut out);
@@ -136,6 +149,8 @@ impl Instance {
         queue_family_index: u32,
         surface: vk::SurfaceKHR,
     ) -> bool {
+        // SAFETY: the device and surface handles belong to this instance and
+        // are live for the call (the surface is caller-owned).
         unsafe {
             self.surface_instance
                 .get_physical_device_surface_support(device, queue_family_index, surface)
@@ -170,6 +185,8 @@ impl Drop for Instance {
             );
             return;
         }
+        // SAFETY: no live logical devices remain (guarded above), so
+        // destroying the instance is valid; it happens exactly once, here.
         unsafe {
             self.instance.destroy_instance(None);
         }

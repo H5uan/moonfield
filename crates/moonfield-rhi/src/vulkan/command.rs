@@ -55,6 +55,8 @@ impl CommandPool {
             .queue_family_index(queue_family_index)
             .flags(vk::CommandPoolCreateFlags::RESET_COMMAND_BUFFER);
 
+        // SAFETY: the device is valid and the create info names an existing
+        // queue family.
         let pool = unsafe {
             device
                 .raw()
@@ -76,6 +78,8 @@ impl CommandPool {
             .level(vk::CommandBufferLevel::PRIMARY)
             .command_buffer_count(1);
 
+        // SAFETY: the pool is valid and the allocate info requests primary
+        // buffers from it.
         let buffers = unsafe {
             self.device
                 .allocate_command_buffers(&allocate_info)
@@ -96,6 +100,8 @@ impl CommandPool {
 
 impl Drop for CommandPool {
     fn drop(&mut self) {
+        // SAFETY: the pool was created by this device and is destroyed exactly
+        // once, here.
         unsafe {
             self.device.destroy_command_pool(self.pool, None);
         }
@@ -139,6 +145,10 @@ impl CommandBuffer {
     /// Begin recording this command buffer.
     pub fn begin(&mut self, usage: CommandBufferUsage) -> Result<()> {
         let begin_info = vk::CommandBufferBeginInfo::default().flags(usage.to_vk());
+        // SAFETY: the command buffer is allocated and not pending execution —
+        // owners re-record only after the buffer's frame slot is reacquired
+        // (the uploader waits on its slot timeline), and the pool was created
+        // with RESET_COMMAND_BUFFER.
         unsafe {
             self.device
                 .begin_command_buffer(self.buffer, &begin_info)
@@ -150,6 +160,8 @@ impl CommandBuffer {
 
     /// End recording this command buffer.
     pub fn end(&mut self) -> Result<()> {
+        // SAFETY: the command buffer is in the recording state — callers pair
+        // `end` with a successful `begin`.
         unsafe {
             self.device
                 .end_command_buffer(self.buffer)
@@ -211,6 +223,9 @@ impl CommandBuffer {
             .height(render_area.extent.height as f32)
             .min_depth(0.0)
             .max_depth(1.0);
+        // SAFETY: the command buffer is recording, the attachment views are
+        // live and in the layouts declared by `desc`, and pipelines used in
+        // the pass declare these dynamic states (see `pipeline.rs`).
         unsafe {
             self.device
                 .cmd_begin_rendering(self.buffer, &rendering_info);
@@ -242,6 +257,8 @@ impl CommandBuffer {
 
     /// End the current render pass.
     pub fn end_rendering(&self) {
+        // SAFETY: the command buffer is inside a render pass begun by
+        // `begin_rendering`.
         unsafe { self.device.cmd_end_rendering(self.buffer) }
     }
 
@@ -250,6 +267,8 @@ impl CommandBuffer {
     /// origin — see [`Viewport::y_flipped`]). `begin_rendering` resets the
     /// viewport to the render area, so call this after it.
     pub fn set_viewport(&self, viewport: Viewport) {
+        // SAFETY: the command buffer is recording and pipelines declare
+        // dynamic viewport state.
         unsafe {
             self.device
                 .cmd_set_viewport(self.buffer, 0, std::slice::from_ref(&viewport.to_vk()));
@@ -260,6 +279,8 @@ impl CommandBuffer {
     /// in a UI pass). `begin_rendering` resets the scissor to the render
     /// area, so call this after it.
     pub fn set_scissor(&self, scissor: Rect2d) {
+        // SAFETY: the command buffer is recording and pipelines declare
+        // dynamic scissor state.
         unsafe {
             self.device
                 .cmd_set_scissor(self.buffer, 0, std::slice::from_ref(&scissor.to_vk()));
@@ -356,6 +377,8 @@ impl CommandBuffer {
 
     /// Bind a graphics pipeline.
     pub fn bind_graphics_pipeline(&self, pipeline: &GraphicsPipeline) {
+        // SAFETY: the command buffer is recording and the pipeline is a live
+        // graphics pipeline.
         unsafe {
             self.device.cmd_bind_pipeline(
                 self.buffer,
@@ -367,6 +390,8 @@ impl CommandBuffer {
 
     /// Bind a compute pipeline.
     pub fn bind_compute_pipeline(&self, pipeline: &ComputePipeline) {
+        // SAFETY: the command buffer is recording and the pipeline is a live
+        // compute pipeline.
         unsafe {
             self.device.cmd_bind_pipeline(
                 self.buffer,
@@ -395,11 +420,17 @@ impl CommandBuffer {
     /// Requires a bound compute pipeline and (for bindless kernels) a root
     /// pointer set via [`set_bindless_root`] ahead of the call.
     pub fn dispatch(&self, x: u32, y: u32, z: u32) {
+        // SAFETY: the command buffer is recording with a compute pipeline
+        // bound and its root data pushed (caller contract; see the method
+        // docs).
         unsafe { self.device.cmd_dispatch(self.buffer, x, y, z) };
     }
 
     /// Launch a compute kernel whose workgroup counts are read from GPU memory.
     pub fn dispatch_indirect(&self, args: &GpuAllocation) {
+        // SAFETY: the command buffer is recording with a compute pipeline
+        // bound, and `args` is a live buffer with INDIRECT_BUFFER usage
+        // holding a dispatch record.
         unsafe {
             self.device
                 .cmd_dispatch_indirect(self.buffer, args.buffer(), 0);
@@ -415,6 +446,9 @@ impl CommandBuffer {
             .src_buffer(src.buffer())
             .dst_buffer(dst.buffer())
             .regions(std::slice::from_ref(&region));
+        // SAFETY: the command buffer is recording and both allocations are
+        // live, transfer-capable buffers whose `size` range fits (caller
+        // contract).
         unsafe {
             self.device.cmd_copy_buffer2(self.buffer, &copy_info);
         }
@@ -445,6 +479,8 @@ impl CommandBuffer {
             .dst_access_mask(dst_access);
         let dependency_info =
             vk::DependencyInfo::default().memory_barriers(std::slice::from_ref(&memory_barrier));
+        // SAFETY: the command buffer is recording; a global memory barrier
+        // names no resources, so no object lifetimes are involved.
         unsafe {
             self.device
                 .cmd_pipeline_barrier2(self.buffer, &dependency_info);
@@ -457,6 +493,8 @@ impl CommandBuffer {
     /// `stride` is the byte stride between consecutive `DrawIndirectArgs`
     /// records and must be a multiple of 4.
     pub fn draw_indirect(&self, args: &GpuAllocation, offset: u64, draw_count: u32, stride: u32) {
+        // SAFETY: the command buffer is inside a render pass with a graphics
+        // pipeline bound, and `args` is a live indirect-argument buffer.
         unsafe {
             self.device
                 .cmd_draw_indirect(self.buffer, args.buffer(), offset, draw_count, stride);
@@ -477,6 +515,9 @@ impl CommandBuffer {
         max_draw_count: u32,
         stride: u32,
     ) {
+        // SAFETY: the command buffer is inside a render pass with a graphics
+        // pipeline bound, and both allocations are live indirect-argument and
+        // count buffers.
         unsafe {
             self.device.cmd_draw_indirect_count(
                 self.buffer,
@@ -498,6 +539,8 @@ impl CommandBuffer {
         first_vertex: u32,
         first_instance: u32,
     ) {
+        // SAFETY: the command buffer is inside a render pass with a graphics
+        // pipeline bound.
         unsafe {
             self.device.cmd_draw(
                 self.buffer,
@@ -522,6 +565,9 @@ impl CommandBuffer {
         buffer_memory_barriers: &[vk::BufferMemoryBarrier],
         image_memory_barriers: &[vk::ImageMemoryBarrier],
     ) {
+        // SAFETY: the command buffer is recording and the barrier structs
+        // reference live images and buffers (upload/offscreen layout
+        // transitions).
         unsafe {
             self.device.cmd_pipeline_barrier(
                 self.buffer,
@@ -538,6 +584,9 @@ impl CommandBuffer {
 
 impl Drop for CommandBuffer {
     fn drop(&mut self) {
+        // SAFETY: the buffer was allocated from `pool` and is freed exactly
+        // once here; owners keep the pool alive past their buffers (see
+        // `FrameUploader`'s field drop order).
         unsafe {
             self.device
                 .free_command_buffers(self.pool, std::slice::from_ref(&self.buffer));

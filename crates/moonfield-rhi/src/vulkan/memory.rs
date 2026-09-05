@@ -234,6 +234,8 @@ impl GpuAllocation {
         if descriptor_heap {
             usage |= vk::BufferUsageFlags::DESCRIPTOR_HEAP_EXT;
         }
+        // SAFETY: the device is valid and the create info describes a legal
+        // buffer.
         let buffer = unsafe {
             device
                 .create_buffer(
@@ -250,6 +252,7 @@ impl GpuAllocation {
         // the allocator places the block on an `align` boundary, keeping the
         // CPU/GPU base-pointer delta a multiple of `align` (see
         // `GpuBumpAllocator::check_co_align`).
+        // SAFETY: the buffer was just created and is valid.
         let mut requirements = unsafe { device.get_buffer_memory_requirements(buffer) };
         requirements.alignment = requirements.alignment.max(align.max(16));
 
@@ -268,12 +271,16 @@ impl GpuAllocation {
             .map_err(|e| Error::Backend(format!("failed to allocate bindless memory: {e}")))?;
 
         // Attach the backing memory to the buffer at the chunk's offset.
+        // SAFETY: the allocation satisfies the buffer's memory requirements
+        // (queried above) and the buffer has no bound memory yet.
         unsafe {
             device
                 .bind_buffer_memory(buffer, allocation.memory(), allocation.offset())
                 .map_err(|e| Error::Backend(format!("failed to bind bindless memory: {:?}", e)))?;
         }
         let address_info = vk::BufferDeviceAddressInfo::default().buffer(buffer);
+        // SAFETY: the buffer was created with SHADER_DEVICE_ADDRESS usage and
+        // has memory bound, so its device address is well-defined.
         let gpu_ptr = unsafe { GpuPtr::from_raw(device.get_buffer_device_address(&address_info)) };
         let host = allocation
             .mapped_ptr()

@@ -206,6 +206,13 @@ backend is data, not an object: `EguiPipeline`, `EguiTextures`, and
 presented-frame count) returns through the `EditorFeedbackChannel` cloned into
 both worlds.
 
+One deliberate exception to backend abstraction: the **editor binds winit
+directly** — it holds an `Arc<winit::window::Window>`, feeds
+`winit::event::WindowEvent`s into `egui_winit::State`, and reads the raw-event
+message channel. The `moonfield-window`/`moonfield-winit` split keeps the
+*render* path backend-agnostic (render-core only sees `RawHandleWrapper`), not
+the editor; swapping windowing backends means rewriting the editor's egui glue.
+
 `moonfield-camera` owns the scene-facing `Camera`, `PrimaryCamera`,
 `CameraTarget`, `RenderTarget`, projection, and view math without depending on
 the Vulkan RHI. Camera extraction in `moonfield-render-core` produces `ExtractedView`

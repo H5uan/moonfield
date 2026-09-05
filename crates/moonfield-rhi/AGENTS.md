@@ -27,6 +27,9 @@ lives in `moonfield-render-core` (Selene), never here.
 
 - All Vulkan objects live on the main thread; nothing is `Send` across threads
   yet. Raw `Vk*`/`ash` handles never leave the crate (see Boundary discipline).
+- Every `unsafe` block carries a `// SAFETY:` comment arguing why it is sound
+  (handle validity/lifetime, exclusivity, pointer bounds). A comment that
+  cannot be written means the block needs a guard, not a waiver.
 - Devices, descriptor heaps, pipelines, and swapchains are owned by the
   renderer and destroyed in reverse creation order; keep drop order explicit.
 

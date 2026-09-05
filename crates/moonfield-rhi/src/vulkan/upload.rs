@@ -91,6 +91,10 @@ impl FrameUploader {
             ));
         }
         let mem = self.arenas[slot].alloc(bytes.len(), 16)?;
+        // SAFETY: `mem.cpu` points into a persistently-mapped arena block with
+        // at least `bytes.len()` bytes free, disjoint from the host source
+        // slice; the command buffer is recording and the copy fits `dst`
+        // (size-checked above).
         unsafe {
             std::ptr::copy_nonoverlapping(bytes.as_ptr(), mem.cpu.as_ptr(), bytes.len());
             let copy = vk::BufferCopy::default()
@@ -118,6 +122,9 @@ impl FrameUploader {
         self.begin_frame()?;
         let slot = ((self.next_frame - 1) % UPLOAD_FRAME_RING as u64) as usize;
         let mem = self.arenas[slot].alloc(bytes.len(), 16)?;
+        // SAFETY: `mem.cpu` points into a persistently-mapped arena block with
+        // at least `bytes.len()` bytes free, disjoint from the host source
+        // slice.
         unsafe {
             std::ptr::copy_nonoverlapping(bytes.as_ptr(), mem.cpu.as_ptr(), bytes.len());
         }
@@ -176,6 +183,9 @@ impl FrameUploader {
                 height: region.1,
                 depth: 1,
             });
+        // SAFETY: the command buffer is recording, the image was transitioned
+        // to GENERAL by the barrier above, and the region fits the image and
+        // the staged arena bytes.
         unsafe {
             self.device.cmd_copy_buffer_to_image(
                 self.cb[slot].raw(),
@@ -224,6 +234,9 @@ impl FrameUploader {
         let submit_info = vk::SubmitInfo2::default()
             .command_buffer_infos(&command_infos)
             .signal_semaphore_infos(&signal_infos);
+        // SAFETY: the command buffer is fully recorded (`end` above), the
+        // queue and timeline semaphore are live, and the submission signals
+        // the current frame's timeline value.
         unsafe {
             self.device
                 .queue_submit2(

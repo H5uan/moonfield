@@ -14,6 +14,8 @@ impl Semaphore {
     /// Create a new binary semaphore.
     pub fn new(device: &Device) -> Result<Self> {
         let create_info = vk::SemaphoreCreateInfo::default();
+        // SAFETY: the device is valid and the default create info describes a
+        // legal binary semaphore.
         let semaphore = unsafe {
             device
                 .raw()
@@ -37,6 +39,8 @@ impl Semaphore {
             .semaphore_type(vk::SemaphoreType::TIMELINE)
             .initial_value(initial_value);
         let create_info = vk::SemaphoreCreateInfo::default().push(&mut type_info);
+        // SAFETY: the device is valid and the type-chained create info
+        // describes a legal timeline semaphore; `type_info` outlives the call.
         let semaphore = unsafe {
             device
                 .raw()
@@ -56,6 +60,8 @@ impl Semaphore {
         let wait_info = vk::SemaphoreWaitInfo::default()
             .semaphores(std::slice::from_ref(&self.semaphore))
             .values(std::slice::from_ref(&value));
+        // SAFETY: the semaphore is a live timeline semaphore owned by `self`,
+        // and the wait info's semaphore and value slices have matching lengths.
         unsafe {
             self.device
                 .wait_semaphores(&wait_info, timeout_ns)
@@ -69,6 +75,8 @@ impl Semaphore {
 
 impl Drop for Semaphore {
     fn drop(&mut self) {
+        // SAFETY: the semaphore was created by this device and is destroyed
+        // exactly once, here.
         unsafe {
             self.device.destroy_semaphore(self.semaphore, None);
         }
@@ -90,6 +98,8 @@ impl Fence {
             vk::FenceCreateFlags::empty()
         };
         let create_info = vk::FenceCreateInfo::default().flags(flags);
+        // SAFETY: the device is valid and the create info describes a legal
+        // fence.
         let fence = unsafe {
             device
                 .raw()
@@ -110,6 +120,8 @@ impl Fence {
 
     /// Wait for the fence to be signaled.
     pub fn wait(&self, timeout_ns: u64) -> Result<()> {
+        // SAFETY: the fence is live and owned by `self`; waiting is valid in
+        // any fence state.
         unsafe {
             self.device
                 .wait_for_fences(std::slice::from_ref(&self.fence), true, timeout_ns)
@@ -120,6 +132,8 @@ impl Fence {
 
     /// Reset the fence to unsignaled.
     pub fn reset(&self) -> Result<()> {
+        // SAFETY: the fence is live and owned by `self`; callers reset only an
+        // unsignaled fence with no pending submissions, as Vulkan requires.
         unsafe {
             self.device
                 .reset_fences(std::slice::from_ref(&self.fence))
@@ -131,6 +145,8 @@ impl Fence {
 
 impl Drop for Fence {
     fn drop(&mut self) {
+        // SAFETY: the fence was created by this device and is destroyed exactly
+        // once, here.
         unsafe {
             self.device.destroy_fence(self.fence, None);
         }

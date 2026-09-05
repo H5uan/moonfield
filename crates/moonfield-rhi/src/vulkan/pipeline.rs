@@ -249,6 +249,9 @@ impl GraphicsPipeline {
             .push(&mut rendering_info)
             .push(&mut flags2_info);
 
+        // SAFETY: the device and pipeline cache are valid, and every structure
+        // chained into the create info (stages, entry names, rendering info,
+        // flags2) outlives the call; the shader modules are live.
         let pipelines = unsafe {
             device
                 .raw()
@@ -278,6 +281,8 @@ impl GraphicsPipeline {
 
 impl Drop for GraphicsPipeline {
     fn drop(&mut self) {
+        // SAFETY: the pipeline was created by this device and is destroyed
+        // exactly once, here.
         unsafe {
             self.device.destroy_pipeline(self.pipeline, None);
         }
@@ -333,6 +338,8 @@ impl ComputePipeline {
             .stage(stage)
             .layout(layout)
             .push(&mut flags2_info);
+        // SAFETY: the device and pipeline cache are valid; the stage's module
+        // and entry name outlive the call, as does the chained flags2 struct.
         let pipelines = unsafe {
             device.raw().create_compute_pipelines(
                 device.pipeline_cache(),
@@ -357,6 +364,8 @@ impl ComputePipeline {
 
 impl Drop for ComputePipeline {
     fn drop(&mut self) {
+        // SAFETY: the pipeline was created by this device and is destroyed
+        // exactly once, here.
         unsafe {
             self.device.destroy_pipeline(self.pipeline, None);
         }
