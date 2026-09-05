@@ -276,7 +276,12 @@ impl<'w, Q: WorldQuery, F: QueryFilter> Query<'w, Q, F> {
 
     /// Iterate all matching entities with mutable access.
     pub fn iter_mut(&mut self) -> Q::Iter<'_> {
-        Q::fetch_mut_cell_with(self.world, &archetype_matches::<F>)
+        // SAFETY: the returned iterator and the items it yields borrow this
+        // `Query` mutably, so no second mutable iterator can be created from
+        // it while they are alive; the running system holds the world's only
+        // access. Conflicting columns across *different* params are still
+        // caught by the archetype borrow flags.
+        unsafe { Q::fetch_mut_cell_with(self.world, &archetype_matches::<F>) }
     }
 
     /// Fetch the item for a single entity, if it matches the query *and* the

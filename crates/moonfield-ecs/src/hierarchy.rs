@@ -282,6 +282,33 @@ mod tests {
     }
 
     #[test]
+    fn test_spawn_at_overwrite_unlinks_childof() {
+        let mut world = hierarchy_world();
+        let parent = world.spawn(());
+        let child = world.spawn((ChildOf(parent),));
+
+        // Overwriting the child drops its `ChildOf`: the parent's `Children`
+        // must not be left pointing at a component that no longer exists.
+        world.spawn_at(child, ());
+        assert!(world.contains(child));
+        assert!(world.get_component::<ChildOf>(child).is_none());
+        assert!(world.get_component::<Children>(parent).is_none());
+    }
+
+    #[test]
+    fn test_spawn_at_overwrite_parent_despawns_children() {
+        let mut world = hierarchy_world();
+        let root = world.spawn(());
+        let child = world.spawn((ChildOf(root),));
+
+        // Overwriting a live parent runs the despawn hook sequence, so
+        // linked-spawn semantics (children die with the parent) apply.
+        world.spawn_at(root, ());
+        assert!(world.contains(root));
+        assert!(!world.contains(child));
+    }
+
+    #[test]
     fn test_manual_children_removal_unlinks_but_keeps_children_alive() {
         let mut world = hierarchy_world();
         let parent = world.spawn(());

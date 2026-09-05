@@ -26,6 +26,9 @@
 //! - **despawn**: `on_despawn` first (every component still in place — this is
 //!   where linked-spawn cleanup runs), then `on_discard`, then `on_remove`,
 //!   per component.
+//! - **`spawn_at` overwriting a live entity**: the old components go through
+//!   the despawn sequence (`on_despawn` → `on_discard` → `on_remove`), then
+//!   the new components fire `on_add` → `on_insert`.
 //!
 //! `on_despawn`/`on_discard` run *before* the structural change and
 //! `on_add`/`on_insert`/`on_remove` run *after* it, so hooks always execute
@@ -40,7 +43,8 @@
 //! - While a hook is running it is temporarily taken out of the registry, so
 //!   the same hook never fires recursively (a hook for `T` inserting `T` on
 //!   another entity does not re-enter itself). Hooks on *other* components
-//!   fire normally, so nested hook chains work.
+//!   fire normally, so nested hook chains work. A panicking hook is restored
+//!   before the panic resumes, so it is never lost from the registry.
 //! - `spawn_batch` and `World::clear` do **not** fire hooks (cold bulk paths).
 //! - Bevy's `RelationshipHookMode` (skip/run-if-not-linked) is not ported; the
 //!   despawn-before-discard firing order covers the linked-spawn case it
@@ -157,7 +161,9 @@ impl World {
     }
 
     /// Run one hook, if registered. The hook is taken out of the registry
-    /// while it runs so it cannot fire recursively, then restored.
+    /// while it runs so it cannot fire recursively, then restored — even if
+    /// the hook panics, so a panicking hook never permanently unregisters
+    /// itself.
     pub(crate) fn fire_hook(&mut self, kind: HookKind, component: TypeId, entity: Entity) {
         let Some(mut hook) = self
             .component_hooks
@@ -166,9 +172,12 @@ impl World {
         else {
             return;
         };
-        hook(self, entity);
+        let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| hook(self, entity)));
         if let Some(hooks) = self.component_hooks.get_mut(&component) {
             hooks.restore(kind, hook);
+        }
+        if let Err(payload) = result {
+            std::panic::resume_unwind(payload);
         }
     }
 
@@ -384,5 +393,70 @@ mod tests {
             assert!(add < insert);
         }
         assert_eq!(log.len(), 4);
+    }
+
+    #[test]
+    fn test_spawn_at_on_reserved_id_fires_add_insert_only() {
+        let mut world = World::new();
+        world.insert_resource(Log::default());
+        register_all::<A>(&mut world, "A");
+
+        let e = world.reserve_entity();
+        world.spawn_at(e, (A(1),));
+        assert_eq!(take_log(&mut world), [("A", "add"), ("A", "insert")]);
+    }
+
+    #[test]
+    fn test_spawn_at_overwrite_fires_despawn_sequence_for_old_components() {
+        let mut world = World::new();
+        world.insert_resource(Log::default());
+        register_all::<A>(&mut world, "A");
+        register_all::<B>(&mut world, "B");
+
+        let e = world.spawn((A(1),));
+        take_log(&mut world);
+
+        world.spawn_at(e, (B(2),));
+        assert_eq!(
+            take_log(&mut world),
+            [
+                ("A", "discard"),
+                ("A", "remove"),
+                ("B", "add"),
+                ("B", "insert")
+            ]
+        );
+        assert_eq!(world.get_component::<A>(e), None);
+        assert_eq!(world.get_component::<B>(e), Some(&B(2)));
+    }
+
+    #[test]
+    fn test_panicking_hook_is_restored() {
+        use std::panic::{AssertUnwindSafe, catch_unwind};
+        use std::sync::{
+            Arc,
+            atomic::{AtomicUsize, Ordering},
+        };
+
+        let mut world = World::new();
+        let calls = Arc::new(AtomicUsize::new(0));
+        let hook_calls = calls.clone();
+        world
+            .register_component_hooks::<A>()
+            .on_insert(move |_, _| {
+                if hook_calls.fetch_add(1, Ordering::SeqCst) == 0 {
+                    panic!("boom");
+                }
+            });
+
+        let e = world.spawn(());
+        let result = catch_unwind(AssertUnwindSafe(|| world.insert_component(e, A(1))));
+        assert!(result.is_err());
+
+        // The hook survived its own panic: the next insert fires it again
+        // instead of the hook having been lost from the registry.
+        world.insert_component(e, A(2));
+        assert_eq!(calls.load(Ordering::SeqCst), 2);
+        assert_eq!(world.get_component::<A>(e), Some(&A(2)));
     }
 }

@@ -43,7 +43,10 @@ pub trait WorldQuery {
     where
         Self: 'w,
     {
-        Self::fetch_mut_cell(world)
+        // SAFETY: the returned iterator and every item it yields borrow
+        // `world` through `'w`, so no conflicting access to the fetched
+        // columns can be created while they are alive.
+        unsafe { Self::fetch_mut_cell(world) }
     }
 
     /// `fetch_mut` with an archetype filter.
@@ -51,27 +54,41 @@ pub trait WorldQuery {
     where
         Self: 'w,
     {
-        Self::fetch_mut_cell_with(world, filter)
+        // SAFETY: same argument as `fetch_mut`.
+        unsafe { Self::fetch_mut_cell_with(world, filter) }
     }
 
     /// Build the mutable iterator from a *shared* world reference.
     ///
     /// Used by the [`Query`](crate::Query) system param, which is fetched from
     /// a shared borrow so it can coexist with the system's other params.
-    /// Sound because systems run with exclusive world access and every column
-    /// is arbitrated by the archetype's runtime borrow flags: conflicting
-    /// accesses panic at iterator construction instead of aliasing.
+    ///
+    /// # Safety
+    ///
+    /// The returned iterator takes the archetype borrow flags at construction
+    /// but releases them when the *iterator* drops, while the items it yields
+    /// (e.g. `Mut<'w, T>`) stay valid for `'w`. The caller must guarantee that
+    /// no conflicting access to the fetched columns happens while the iterator
+    /// **or any item produced by it** is still alive — in practice, that the
+    /// items' lifetimes are tied to an exclusive borrow that also gates every
+    /// other access to the same columns (as `&mut World` and
+    /// `Query::iter_mut`'s `&mut self` do).
     #[doc(hidden)]
-    fn fetch_mut_cell<'w>(world: &'w World) -> Self::Iter<'w>
+    unsafe fn fetch_mut_cell<'w>(world: &'w World) -> Self::Iter<'w>
     where
         Self: 'w,
     {
-        Self::fetch_mut_cell_with(world, &|_| true)
+        // SAFETY: forwarded from the caller.
+        unsafe { Self::fetch_mut_cell_with(world, &|_| true) }
     }
 
     /// `fetch_mut_cell` with an archetype filter.
+    ///
+    /// # Safety
+    ///
+    /// Same contract as [`fetch_mut_cell`](Self::fetch_mut_cell).
     #[doc(hidden)]
-    fn fetch_mut_cell_with<'w>(world: &'w World, filter: ArchetypeFilter) -> Self::Iter<'w>
+    unsafe fn fetch_mut_cell_with<'w>(world: &'w World, filter: ArchetypeFilter) -> Self::Iter<'w>
     where
         Self: 'w;
 
@@ -289,7 +306,7 @@ impl<T: Component> WorldQuery for &T {
         ArchIter::new(world, filter)
     }
 
-    fn fetch_mut_cell_with<'w>(world: &'w World, filter: ArchetypeFilter) -> Self::Iter<'w>
+    unsafe fn fetch_mut_cell_with<'w>(world: &'w World, filter: ArchetypeFilter) -> Self::Iter<'w>
     where
         Self: 'w,
     {
@@ -412,7 +429,7 @@ impl<T: Component> WorldQuery for &mut T {
         unreachable!("`&mut T` query requires a mutable world (`query_mut`)")
     }
 
-    fn fetch_mut_cell_with<'w>(world: &'w World, filter: ArchetypeFilter) -> Self::Iter<'w>
+    unsafe fn fetch_mut_cell_with<'w>(world: &'w World, filter: ArchetypeFilter) -> Self::Iter<'w>
     where
         Self: 'w,
     {
@@ -522,7 +539,7 @@ impl<A: Component, B: Component> WorldQuery for (&A, &B) {
         PairIter::new_shared(world, filter)
     }
 
-    fn fetch_mut_cell_with<'w>(world: &'w World, filter: ArchetypeFilter) -> Self::Iter<'w>
+    unsafe fn fetch_mut_cell_with<'w>(world: &'w World, filter: ArchetypeFilter) -> Self::Iter<'w>
     where
         Self: 'w,
     {
@@ -648,7 +665,7 @@ impl<A: Component, B: Component> WorldQuery for (&mut A, &B) {
         unreachable!("`(&mut A, &B)` requires `query_mut`")
     }
 
-    fn fetch_mut_cell_with<'w>(world: &'w World, filter: ArchetypeFilter) -> Self::Iter<'w>
+    unsafe fn fetch_mut_cell_with<'w>(world: &'w World, filter: ArchetypeFilter) -> Self::Iter<'w>
     where
         Self: 'w,
     {
@@ -782,7 +799,7 @@ impl<A: Component, B: Component> WorldQuery for (&mut A, &mut B) {
         unreachable!("`(&mut A, &mut B)` requires `query_mut`")
     }
 
-    fn fetch_mut_cell_with<'w>(world: &'w World, filter: ArchetypeFilter) -> Self::Iter<'w>
+    unsafe fn fetch_mut_cell_with<'w>(world: &'w World, filter: ArchetypeFilter) -> Self::Iter<'w>
     where
         Self: 'w,
     {
@@ -900,7 +917,7 @@ impl<T: Component> WorldQuery for Option<&T> {
         OptionIter::new(world, filter)
     }
 
-    fn fetch_mut_cell_with<'w>(world: &'w World, filter: ArchetypeFilter) -> Self::Iter<'w>
+    unsafe fn fetch_mut_cell_with<'w>(world: &'w World, filter: ArchetypeFilter) -> Self::Iter<'w>
     where
         Self: 'w,
     {

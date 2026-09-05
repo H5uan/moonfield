@@ -288,21 +288,57 @@ impl World {
         entity
     }
 
+    /// Place `entity` with `components`, allocating the id if it is free.
+    ///
+    /// If `entity` is currently alive, its previous components are dropped
+    /// with the despawn hook sequence (`on_despawn` → `on_discard` →
+    /// `on_remove`) so structural invariants (e.g. hierarchy links) stay
+    /// intact; the new components then fire `on_add` → `on_insert` as usual.
+    /// A hook that despawns the entity aborts the spawn gracefully.
     pub fn spawn_at(&mut self, entity: Entity, components: impl DynamicBundle) {
         self.flush();
 
-        let loc = self.entities.alloc_at(entity);
-        if let Some(loc) = loc
-            && let Some(moved) = unsafe {
-                // It is possible that entity already exists in this location.
-                // If so, we need to move it to the new location.
-                // Otherwise, we can just insert it.
+        // Fire the despawn/discard hooks while the entity's location is still
+        // valid (`alloc_at` invalidates it until `spawn_inner` re-places the
+        // row, which would make the hooks' world access to the entity fail).
+        let had_components = if let Ok(loc) = self.entities.get(entity) {
+            let ids: Vec<TypeId> = self.archetypes.archetypes[loc.archetype as usize]
+                .type_ids()
+                .to_vec();
+            for &id in &ids {
+                self.fire_hook(HookKind::Despawn, id, entity);
+            }
+            for &id in &ids {
+                self.fire_hook(HookKind::Discard, id, entity);
+            }
+            // A hook may have despawned the entity; in that case the pending
+            // spawn aborts (the hook owns the outcome).
+            if self.entities.get(entity).is_err() {
+                return;
+            }
+            Some(ids)
+        } else {
+            None
+        };
+
+        // It is possible that entity already exists in this location.
+        // If so, we need to remove it from the old location (dropping its
+        // components — the hooks above already ran). Otherwise, we can just
+        // insert it.
+        if let Some(loc) = self.entities.alloc_at(entity) {
+            if let Some(moved) = unsafe {
                 self.archetypes
                     .get_mut(loc.archetype)
                     .remove(loc.index, true)
+            } {
+                self.entities.meta[moved as usize].location.index = loc.index;
             }
-        {
-            self.entities.meta[moved as usize].location.index = loc.index;
+            // on_remove fires after the values are gone, mirroring despawn.
+            if let Some(ids) = had_components {
+                for id in ids {
+                    self.fire_hook(HookKind::Remove, id, entity);
+                }
+            }
         }
 
         self.spawn_inner(entity, components);
