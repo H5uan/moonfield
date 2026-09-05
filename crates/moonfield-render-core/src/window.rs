@@ -83,6 +83,115 @@ pub fn extract_windows(world: &World, render_world: &mut World) {
     }
 }
 
+/// Pure frame-sequencing state for one window surface: which frame slot to
+/// record into, which timeline value to wait on before reusing a slot, and
+/// whether the swapchain flagged itself for recreation.
+///
+/// Extracted from [`WindowSurfaceData`] so the arithmetic is unit-testable
+/// without a GPU; [`WindowSurfaceData`] interleaves the Vulkan calls between
+/// these state transitions.
+struct FrameSequencer {
+    /// Number of the next frame to submit; the first frame is 1.
+    frame_submitted: u64,
+    /// The acquired swapchain image of the in-progress frame, if any.
+    current_image: Option<u32>,
+    /// The swapchain reported itself out of date (or suboptimal).
+    needs_recreate: bool,
+    /// Frames successfully submitted and presented.
+    presented_frames: u64,
+}
+
+/// What [`FrameSequencer::plan_acquire`] computed for the next frame.
+struct FramePlan {
+    /// Timeline value to wait on before the slot may be reused, if the slot
+    /// still has a previous submission in flight.
+    wait: Option<u64>,
+    /// The frame slot (0..[`MAX_FRAMES_IN_FLIGHT`]) to record into.
+    slot: usize,
+}
+
+impl FrameSequencer {
+    fn new() -> Self {
+        Self {
+            frame_submitted: 1,
+            current_image: None,
+            needs_recreate: false,
+            presented_frames: 0,
+        }
+    }
+
+    /// Plan the next frame: the slot to record into and the timeline value
+    /// to wait on before reusing it. Returns `None` while a frame is in
+    /// progress (double acquire).
+    fn plan_acquire(&self) -> Option<FramePlan> {
+        if self.current_image.is_some() {
+            return None;
+        }
+        let wait = (self.frame_submitted > MAX_FRAMES_IN_FLIGHT as u64)
+            .then(|| self.frame_submitted - MAX_FRAMES_IN_FLIGHT as u64);
+        Some(FramePlan {
+            wait,
+            slot: self.current_slot(),
+        })
+    }
+
+    /// The acquire succeeded; the frame is now in progress. A suboptimal
+    /// swapchain flags itself for recreation.
+    fn note_acquired(&mut self, image_index: u32, suboptimal: bool) {
+        self.current_image = Some(image_index);
+        self.needs_recreate |= suboptimal;
+    }
+
+    /// The swapchain reported itself out of date.
+    fn note_out_of_date(&mut self) {
+        self.needs_recreate = true;
+    }
+
+    /// The swapchain was recreated; the flag clears.
+    fn note_recreated(&mut self) {
+        self.needs_recreate = false;
+    }
+
+    /// Take the in-progress frame for submission: its image, its slot, and
+    /// the timeline value to signal (the frame number).
+    ///
+    /// Panics when no frame is in progress.
+    fn take_for_submit(&mut self) -> (u32, usize, u64) {
+        let image_index = self
+            .current_image
+            .take()
+            .expect("no frame in progress; acquire must run first");
+        (image_index, self.current_slot(), self.frame_submitted)
+    }
+
+    /// The frame was submitted and presented: advance the counters.
+    fn finish_submit(&mut self) {
+        self.frame_submitted += 1;
+        self.presented_frames = self.presented_frames.saturating_add(1);
+    }
+
+    /// The slot the next (or in-progress) frame records into.
+    fn current_slot(&self) -> usize {
+        ((self.frame_submitted - 1) % MAX_FRAMES_IN_FLIGHT as u64) as usize
+    }
+
+    fn current_image(&self) -> Option<u32> {
+        self.current_image
+    }
+
+    fn frame_in_progress(&self) -> bool {
+        self.current_image.is_some()
+    }
+
+    fn needs_recreate(&self) -> bool {
+        self.needs_recreate
+    }
+
+    fn presented_frames(&self) -> u64 {
+        self.presented_frames
+    }
+}
+
 /// Persistent GPU state for one window: surface, swapchain, per-frame-in-flight
 /// synchronization, and command buffers.
 ///
@@ -104,12 +213,9 @@ pub struct WindowSurfaceData {
     surface: Surface,
     device: Arc<Device>,
     instance: Arc<Instance>,
-    frame_submitted: u64,
-    current_image: Option<u32>,
-    needs_recreate: bool,
-    /// Frames successfully presented; consumers (e.g. the editor's feedback
-    /// channel) read this to count rendered frames.
-    presented_frames: u64,
+    /// Frame sequencing state (slot, timeline values, recreate flag); plain
+    /// data, no drop-order relevance.
+    sequencer: FrameSequencer,
 }
 
 impl WindowSurfaceData {
@@ -163,10 +269,7 @@ impl WindowSurfaceData {
             surface,
             device,
             instance,
-            frame_submitted: 1,
-            current_image: None,
-            needs_recreate: false,
-            presented_frames: 0,
+            sequencer: FrameSequencer::new(),
         })
     }
 
@@ -179,39 +282,33 @@ impl WindowSurfaceData {
     /// started; the surface is flagged for recreation on the next
     /// [`create_window_surfaces`] run.
     fn acquire(&mut self) -> Result<bool> {
-        if self.current_image.is_some() {
+        let Some(plan) = self.sequencer.plan_acquire() else {
             return Err(Error::Validation(
                 "acquire called while a frame is in progress".to_string(),
             ));
-        }
+        };
 
-        if self.frame_submitted > MAX_FRAMES_IN_FLIGHT as u64 {
-            self.timeline
-                .wait(self.frame_submitted - MAX_FRAMES_IN_FLIGHT as u64, u64::MAX)?;
+        if let Some(wait) = plan.wait {
+            self.timeline.wait(wait, u64::MAX)?;
         }
-        let frame = ((self.frame_submitted - 1) % MAX_FRAMES_IN_FLIGHT as u64) as usize;
         // The wait above guarantees this slot's previous submission
         // completed, so its retirements are safe to run; the slot also
         // becomes the ring's push target for this frame's drops.
-        self.device.begin_gpu_frame(frame);
+        self.device.begin_gpu_frame(plan.slot);
         let (image_index, suboptimal) = match self
             .swapchain
-            .acquire_next_image(u64::MAX, &self.image_available[frame])
+            .acquire_next_image(u64::MAX, &self.image_available[plan.slot])
         {
             Ok(result) => result,
             Err(Error::SurfaceOutOfDate) => {
-                self.needs_recreate = true;
+                self.sequencer.note_out_of_date();
                 return Ok(false);
             }
             Err(e) => return Err(e),
         };
-        if suboptimal {
-            self.needs_recreate = true;
-        }
+        self.sequencer.note_acquired(image_index, suboptimal);
 
-        self.current_image = Some(image_index);
-
-        let command_buffer = &mut self.command_buffers[frame];
+        let command_buffer = &mut self.command_buffers[plan.slot];
         command_buffer.begin(CommandBufferUsage::ONE_TIME_SUBMIT)?;
         // Bind the descriptor heaps once per frame command buffer (heap
         // binding is command-buffer scoped): every heap-indexed shader
@@ -224,18 +321,14 @@ impl WindowSurfaceData {
     /// End the frame: finish recording, submit to the graphics queue, and
     /// present the acquired image.
     fn submit(&mut self) -> Result<()> {
-        let image_index = self
-            .current_image
-            .take()
-            .expect("no frame in progress; acquire must run first");
-        let frame = ((self.frame_submitted - 1) % MAX_FRAMES_IN_FLIGHT as u64) as usize;
+        let (image_index, frame, signal) = self.sequencer.take_for_submit();
         self.command_buffers[frame].end()?;
         self.device.submit_frame_timeline(
             &self.command_buffers[frame],
             &self.image_available[frame],
             &self.render_finished[frame],
             &self.timeline,
-            self.frame_submitted, // signal 值 = 本帧号
+            signal,
         )?;
 
         let render_finished = [&self.render_finished[frame]];
@@ -245,17 +338,16 @@ impl WindowSurfaceData {
         {
             Ok(suboptimal) => {
                 if suboptimal {
-                    self.needs_recreate = true;
+                    self.sequencer.note_out_of_date();
                 }
             }
             Err(Error::SurfaceOutOfDate) => {
-                self.needs_recreate = true;
+                self.sequencer.note_out_of_date();
             }
             Err(e) => return Err(e),
         }
 
-        self.frame_submitted += 1;
-        self.presented_frames = self.presented_frames.saturating_add(1);
+        self.sequencer.finish_submit();
         Ok(())
     }
 
@@ -282,7 +374,7 @@ impl WindowSurfaceData {
             [width, height],
             Some(old_swapchain),
         )?;
-        self.needs_recreate = false;
+        self.sequencer.note_recreated();
         Ok(())
     }
 
@@ -305,26 +397,25 @@ impl WindowSurfaceData {
     /// The current frame slot (0..[`MAX_FRAMES_IN_FLIGHT`]). Per-slot GPU
     /// resources key off this so writers don't race a frame still on the GPU.
     pub fn frame_index(&self) -> usize {
-        ((self.frame_submitted - 1) % MAX_FRAMES_IN_FLIGHT as u64) as usize
+        self.sequencer.current_slot()
     }
 
     /// Frames successfully presented on this surface.
     pub fn presented_frames(&self) -> u64 {
-        self.presented_frames
+        self.sequencer.presented_frames()
     }
 
     /// Whether a frame has been acquired and is open for recording.
     pub fn frame_in_progress(&self) -> bool {
-        self.current_image.is_some()
+        self.sequencer.frame_in_progress()
     }
 
     /// The command buffer recording the current frame, if a frame is in
     /// progress (between [`acquire_window_frames`] and
     /// [`submit_window_frames`]).
     pub fn current_command_buffer(&mut self) -> Option<&mut CommandBuffer> {
-        self.current_image?;
-        let frame = ((self.frame_submitted - 1) % MAX_FRAMES_IN_FLIGHT as u64) as usize;
-        Some(&mut self.command_buffers[frame])
+        self.sequencer.current_image()?;
+        Some(&mut self.command_buffers[self.sequencer.current_slot()])
     }
 
     /// The image view of the currently acquired swapchain image, for use as
@@ -332,7 +423,7 @@ impl WindowSurfaceData {
     /// frame is in progress. The returned view borrows the swapchain's; it
     /// must not outlive the surface data.
     pub fn current_image_view(&self) -> Option<TextureView> {
-        let image_index = self.current_image?;
+        let image_index = self.sequencer.current_image()?;
         Some(TextureView::borrow_raw(
             self.swapchain.image_views()[image_index as usize],
             self.device.raw().clone(),
@@ -431,7 +522,7 @@ pub fn create_window_surfaces(world: &mut World) {
             std::collections::hash_map::Entry::Occupied(mut entry) => {
                 let data = entry.get_mut();
                 let extent = data.extent();
-                if (data.needs_recreate
+                if (data.sequencer.needs_recreate()
                     || (extent.width != window.physical_width
                         || extent.height != window.physical_height))
                     && let Err(e) = data.recreate(window.physical_width, window.physical_height)
@@ -506,5 +597,110 @@ pub fn submit_window_frames(world: &mut World) {
         if let Err(e) = data.submit() {
             error!("failed to submit window frame: {e}");
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Drive one full acquire → submit cycle at the sequencer level,
+    /// returning (slot, wait, signal) as observed by the Vulkan layer.
+    fn run_frame(seq: &mut FrameSequencer, image: u32) -> (usize, Option<u64>, u64) {
+        let plan = seq.plan_acquire().expect("no frame in progress");
+        seq.note_acquired(image, false);
+        let (got_image, slot, signal) = seq.take_for_submit();
+        assert_eq!(got_image, image);
+        seq.finish_submit();
+        (slot, plan.wait, signal)
+    }
+
+    #[test]
+    fn test_first_frames_fill_the_ring_without_waiting() {
+        let mut seq = FrameSequencer::new();
+        for (expected_slot, expected_signal) in [(0, 1), (1, 2)] {
+            let (slot, wait, signal) = run_frame(&mut seq, 0);
+            assert_eq!((slot, wait, signal), (expected_slot, None, expected_signal));
+        }
+    }
+
+    #[test]
+    fn test_wait_catches_up_with_the_ring_depth() {
+        let mut seq = FrameSequencer::new();
+        run_frame(&mut seq, 0);
+        run_frame(&mut seq, 1);
+        // Frame 3 reuses slot 0: wait for frame 1's timeline value.
+        let (slot, wait, signal) = run_frame(&mut seq, 2);
+        assert_eq!((slot, wait, signal), (0, Some(1), 3));
+        // Frame 4 reuses slot 1: wait for frame 2.
+        let (slot, wait, signal) = run_frame(&mut seq, 3);
+        assert_eq!((slot, wait, signal), (1, Some(2), 4));
+        // And the ring keeps cycling.
+        let (slot, wait, _) = run_frame(&mut seq, 0);
+        assert_eq!((slot, wait), (0, Some(3)));
+    }
+
+    #[test]
+    fn test_double_acquire_is_rejected() {
+        let mut seq = FrameSequencer::new();
+        assert!(seq.plan_acquire().is_some());
+        seq.note_acquired(0, false);
+        assert!(seq.plan_acquire().is_none());
+        assert!(seq.frame_in_progress());
+    }
+
+    #[test]
+    fn test_out_of_date_acquire_aborts_without_advancing() {
+        let mut seq = FrameSequencer::new();
+        run_frame(&mut seq, 0);
+
+        // The next acquire reports out-of-date: the frame is abandoned before
+        // any image is acquired, so nothing advances.
+        let plan = seq.plan_acquire().unwrap();
+        seq.note_out_of_date();
+        assert!(seq.needs_recreate());
+        assert!(!seq.frame_in_progress());
+        assert_eq!(seq.presented_frames(), 1);
+
+        // Retrying plans the same slot, wait, and frame number.
+        let retry = seq.plan_acquire().unwrap();
+        assert_eq!(retry.slot, plan.slot);
+        assert_eq!(retry.wait, plan.wait);
+    }
+
+    #[test]
+    fn test_suboptimal_flags_recreate_and_recreate_clears() {
+        let mut seq = FrameSequencer::new();
+        assert!(!seq.needs_recreate());
+        seq.note_acquired(0, true);
+        assert!(seq.needs_recreate());
+        seq.note_recreated();
+        assert!(!seq.needs_recreate());
+    }
+
+    #[test]
+    #[should_panic(expected = "no frame in progress")]
+    fn test_submit_without_acquire_panics() {
+        let mut seq = FrameSequencer::new();
+        seq.take_for_submit();
+    }
+
+    #[test]
+    fn test_slot_and_progress_track_the_cycle() {
+        let mut seq = FrameSequencer::new();
+        assert_eq!(seq.current_slot(), 0);
+        assert!(!seq.frame_in_progress());
+
+        seq.note_acquired(7, false);
+        assert!(seq.frame_in_progress());
+        assert_eq!(seq.current_image(), Some(7));
+
+        let (image, slot, signal) = seq.take_for_submit();
+        assert_eq!((image, slot, signal), (7, 0, 1));
+        assert!(!seq.frame_in_progress());
+
+        seq.finish_submit();
+        assert_eq!(seq.current_slot(), 1);
+        assert_eq!(seq.presented_frames(), 1);
     }
 }
