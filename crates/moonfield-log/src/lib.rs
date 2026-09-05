@@ -8,7 +8,11 @@
 //! logs to `stderr`. Log level can be controlled via the `RUST_LOG` environment
 //! variable or programmatically through [`LogPlugin`] configuration.
 
-mod once;
+/// Implementation detail backing the `once!`/`*_once!` macros
+/// (`$crate::once::OnceFlag`); public so the macros can expand in downstream
+/// crates, but not part of the API surface.
+#[doc(hidden)]
+pub mod once;
 
 /// The log prelude.
 ///
