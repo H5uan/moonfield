@@ -48,7 +48,7 @@ pub use descriptor_heap::{
 pub use device::{DescriptorHeapProperties, Device, QueueFamilyIndices};
 pub use instance::Instance;
 pub use memory::{GpuAllocation, GpuPtr, HostPtr, Memory};
-pub use offscreen::OffscreenTarget;
+pub use offscreen::{DepthBuffer, OffscreenTarget};
 pub use pipeline::{BlendMode, ComputePipeline, GraphicsPipeline, ShaderStageDesc};
 pub use plugin::RenderDevice;
 pub use retire::RETIRE_RING;

@@ -258,7 +258,16 @@ fn extract_editor_frame(main_world: &World, render_world: &mut World) {
     let frame = main_world
         .get_resource_mut::<PendingEditorFrame>()
         .and_then(|mut pending| pending.0.take());
-    render_world.insert_resource(WindowFrameDemand(frame.is_some()));
+    // Demand is OR-accumulated in extract-registration order: `RenderPlugin`'s
+    // `extract_cameras` may already have demanded frames for a window-targeted
+    // camera (the game path has no editor frame at all).
+    let has_frame = frame.is_some();
+    let demanded = has_frame
+        || render_world
+            .get_resource::<WindowFrameDemand>()
+            .map(|demand| demand.0)
+            .unwrap_or(false);
+    render_world.insert_resource(WindowFrameDemand(demanded));
     let Some(frame) = frame else {
         return;
     };

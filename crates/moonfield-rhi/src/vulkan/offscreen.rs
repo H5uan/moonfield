@@ -414,6 +414,91 @@ impl Drop for OffscreenTarget {
     }
 }
 
+/// A standalone `D32Sfloat` depth attachment, sized to match a color target
+/// it accompanies (e.g. a window's swapchain extent).
+///
+/// Unlike [`OffscreenTarget`] the depth buffer is never sampled, so it owns
+/// no descriptor-heap slots. Teardown is deferred through the device's
+/// retirement ring, same as `OffscreenTarget`'s images.
+pub struct DepthBuffer {
+    image: vk::Image,
+    image_view: vk::ImageView,
+    allocation: Option<Allocation>,
+    device: ash::Device,
+    allocator: std::sync::Arc<std::sync::Mutex<gpu_allocator::vulkan::Allocator>>,
+    /// Device-level retirement ring; `Drop` enqueues the teardown here.
+    ring: Arc<RetirementRing>,
+    extent: vk::Extent2D,
+}
+
+impl DepthBuffer {
+    /// Create a depth buffer of `width`×`height` (reverse-Z: the pass clears
+    /// depth to 0.0, near → 1).
+    pub fn new(device: &Device, width: u32, height: u32) -> Result<Self> {
+        if width == 0 || height == 0 {
+            return Err(Error::Validation(format!(
+                "depth buffer dimensions must be non-zero, got {width}x{height}"
+            )));
+        }
+        let extent = vk::Extent2D { width, height };
+        let allocator = device.allocator().clone();
+        let (image, allocation) = create_depth_image(device, &allocator, extent)?;
+        let (image_view, _) = create_image_view(
+            device,
+            image,
+            vk::Format::D32_SFLOAT,
+            vk::ImageAspectFlags::DEPTH,
+        )?;
+        Ok(Self {
+            image,
+            image_view,
+            allocation: Some(allocation),
+            device: device.raw().clone(),
+            allocator,
+            ring: device.retirement_ring(),
+            extent,
+        })
+    }
+
+    /// Resize to a new extent; the old image retires through the ring, so
+    /// in-flight frames keep referencing valid memory.
+    pub fn resize(&mut self, device: &Device, width: u32, height: u32) -> Result<()> {
+        if width == 0 || height == 0 {
+            return Ok(());
+        }
+        if self.extent.width == width && self.extent.height == height {
+            return Ok(());
+        }
+        *self = Self::new(device, width, height)?;
+        Ok(())
+    }
+
+    /// Borrow the depth image view (for the depth attachment of a
+    /// [`RenderPassDesc`](crate::RenderPassDesc)). The view borrows this
+    /// buffer's; it must not outlive the buffer.
+    pub fn view(&self) -> crate::vulkan::view::TextureView {
+        crate::vulkan::view::TextureView::borrow_raw(self.image_view, self.device.clone())
+    }
+
+    /// The `(width, height)` of the buffer.
+    pub fn extent(&self) -> (u32, u32) {
+        (self.extent.width, self.extent.height)
+    }
+}
+
+impl Drop for DepthBuffer {
+    fn drop(&mut self) {
+        // Deferred teardown, same contract as `OffscreenTarget::retire_images`.
+        self.ring.push(RetireAction::Image {
+            device: self.device.clone(),
+            view: self.image_view,
+            image: self.image,
+            allocation: self.allocation.take(),
+            allocator: self.allocator.clone(),
+        });
+    }
+}
+
 fn create_color_image(
     device: &Device,
     allocator: &std::sync::Arc<std::sync::Mutex<gpu_allocator::vulkan::Allocator>>,

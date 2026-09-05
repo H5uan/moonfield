@@ -8,7 +8,8 @@
 //! by the entities spawned here — they are rebuilt every frame.
 
 use crate::scene::{ExtractedView, ViewTarget};
-use moonfield_camera::{Camera, CameraTarget, PrimaryCamera};
+use crate::window::WindowFrameDemand;
+use moonfield_camera::{Camera, CameraTarget, PrimaryCamera, RenderTarget};
 use moonfield_ecs::{Component, World};
 use moonfield_math::GlobalTransform;
 
@@ -21,13 +22,19 @@ pub struct MainEntity(pub moonfield_ecs::Entity);
 
 /// Copies every camera — `Camera` + `GlobalTransform`, plus the
 /// `PrimaryCamera` marker when present — into the render world.
+///
+/// Also writes the base [`WindowFrameDemand`]: a camera targeting the primary
+/// window demands window frames. Later extract systems with their own content
+/// (the editor's UI) OR their demand in.
 pub fn extract_cameras(world: &World, render_world: &mut World) {
+    let mut window_demand = false;
     for (entity, (camera, global)) in world.query::<(&Camera, &GlobalTransform)>() {
         let (camera, global) = (*camera, *global);
         let target = world
             .get_component::<CameraTarget>(entity)
             .copied()
             .unwrap_or_default();
+        window_demand |= matches!(target.0, RenderTarget::PrimaryWindow);
         let extracted_view = ExtractedView {
             main_entity: MainEntity(entity),
             camera,
@@ -46,6 +53,7 @@ pub fn extract_cameras(world: &World, render_world: &mut World) {
             render_world.spawn((camera, global, MainEntity(entity), extracted_view));
         }
     }
+    render_world.insert_resource(WindowFrameDemand(window_demand));
 }
 
 /// Copies every entity with component `T` + `GlobalTransform` into the
@@ -146,6 +154,46 @@ mod tests {
     #[derive(Debug, Clone, Copy, PartialEq)]
     struct SpinningCube {
         speed: f32,
+    }
+
+    #[test]
+    fn window_targeted_camera_demands_window_frames() {
+        use crate::window::WindowFrameDemand;
+        use moonfield_camera::RenderTarget;
+
+        let mut app = App::new();
+        app.add_extract_system(extract_cameras);
+        app.world_mut().spawn((
+            Camera::default(),
+            GlobalTransform::IDENTITY,
+            PrimaryCamera,
+            CameraTarget(RenderTarget::PrimaryWindow),
+        ));
+        app.render();
+        assert_eq!(
+            app.render_world()
+                .get_resource::<WindowFrameDemand>()
+                .map(|demand| demand.0),
+            Some(true)
+        );
+    }
+
+    #[test]
+    fn viewport_camera_demands_no_window_frames() {
+        use crate::window::WindowFrameDemand;
+
+        let mut app = App::new();
+        app.add_extract_system(extract_cameras);
+        // No CameraTarget: the default target is the offscreen viewport.
+        app.world_mut()
+            .spawn((Camera::default(), GlobalTransform::IDENTITY));
+        app.render();
+        assert_eq!(
+            app.render_world()
+                .get_resource::<WindowFrameDemand>()
+                .map(|demand| demand.0),
+            Some(false)
+        );
     }
 
     #[test]

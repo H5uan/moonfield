@@ -24,8 +24,8 @@ use crate::MainEntity;
 use moonfield_app::prelude::World;
 use moonfield_log::error;
 use moonfield_rhi::{
-    CommandBuffer, CommandBufferUsage, CommandPool, Device, Error, Extent2d, Format, Instance,
-    RenderDevice, Result, Semaphore, Surface, Swapchain, TextureView,
+    CommandBuffer, CommandBufferUsage, CommandPool, DepthBuffer, Device, Error, Extent2d, Format,
+    Instance, RenderDevice, Result, Semaphore, Surface, Swapchain, TextureView,
 };
 use moonfield_window::{RawHandleWrapper, Window};
 use raw_window_handle::{
@@ -212,6 +212,9 @@ pub struct WindowSurfaceData {
     #[allow(dead_code)]
     command_pool: CommandPool,
     swapchain: Swapchain,
+    /// Per-window reverse-Z depth attachment, sized to the swapchain and
+    /// resized with it (the window-targeted 3D pass draws depth-tested).
+    depth: Option<DepthBuffer>,
     surface: Surface,
     device: Arc<Device>,
     instance: Arc<Instance>,
@@ -243,6 +246,9 @@ impl WindowSurfaceData {
             &surface,
             [window.physical_width, window.physical_height],
         )?;
+        // The window-targeted 3D pass draws depth-tested; the depth buffer
+        // tracks the swapchain extent (resized in `recreate`).
+        let depth = DepthBuffer::new(&device, window.physical_width, window.physical_height)?;
 
         let queue_families = device.queue_family_indices();
         let command_pool = CommandPool::new(&device, queue_families.graphics)?;
@@ -263,6 +269,7 @@ impl WindowSurfaceData {
             command_buffers,
             command_pool,
             swapchain,
+            depth: Some(depth),
             surface,
             device,
             instance,
@@ -366,6 +373,9 @@ impl WindowSurfaceData {
         // `oldSwapchain` so the driver recycles the surface's images.
         self.swapchain
             .recreate(&self.instance, &self.device, &self.surface, [width, height])?;
+        if let Some(depth) = &mut self.depth {
+            depth.resize(&self.device, width, height)?;
+        }
         self.sequencer.note_recreated();
         Ok(())
     }
@@ -414,6 +424,13 @@ impl WindowSurfaceData {
     pub fn current_image_view(&self) -> Option<TextureView> {
         let image_index = self.sequencer.current_image()?;
         Some(self.swapchain.image_view(image_index))
+    }
+
+    /// Borrow the window's depth attachment view, for the depth attachment of
+    /// a [`moonfield_rhi::RenderPassDesc`]. The view borrows the depth
+    /// buffer's; it must not outlive the surface data.
+    pub fn depth_view(&self) -> Option<TextureView> {
+        self.depth.as_ref().map(|depth| depth.view())
     }
 }
 

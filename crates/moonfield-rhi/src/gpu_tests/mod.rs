@@ -13,6 +13,7 @@ mod bindless_memcpy_dispatch_indirect;
 mod bump_allocator;
 mod command_push_data;
 mod common;
+mod depth_buffer;
 mod depth_occlusion;
 mod descriptor_heap;
 mod descriptor_heap_properties;

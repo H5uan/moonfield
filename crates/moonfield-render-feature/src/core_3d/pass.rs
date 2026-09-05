@@ -7,20 +7,24 @@
 //! [`WindowSurfaces`](moonfield_render_core::WindowSurfaces) between
 //! `acquire_window_frames` and `submit_window_frames`.
 //! [`main_opaque_pass_3d`] reads the [`Core3dFrame`] built in `RenderQueue`
-//! and records one render pass per view whose target has an attachment.
+//! and records one render pass per view whose target has an attachment —
+//! offscreen targets (the editor viewport) end in `ShaderRead`, and a primary
+//! view targeting the primary window draws straight into each in-progress
+//! surface's swapchain image (ending in `Present`), depth-tested against the
+//! surface's own depth buffer.
 //!
 //! With no primary camera targeting a view target, the target is cleared to
 //! a dim background color.
 
 use moonfield_app::prelude::World;
 use moonfield_camera::RenderTarget;
-use moonfield_log::{error, info};
+use moonfield_log::{error, error_once, info};
 use moonfield_render_core::{ViewTargets, WindowSurfaces};
 use moonfield_rhi::{
     AttachmentLayout, ClearValue, CommandBuffer, CompareOp, CullMode, CullState, DepthState,
-    Format, FrontFace, GraphicsPipeline, LoadOp, OffscreenTarget, Rect2d, RenderAttachment,
-    RenderDevice, RenderPassDesc, Result, RootBinder, RootParamPlace, ShaderCache, ShaderModule,
-    StoreOp, Viewport,
+    Format, FrontFace, GraphicsPipeline, LoadOp, Rect2d, RenderAttachment, RenderDevice,
+    RenderPassDesc, Result, RootBinder, RootParamPlace, ShaderCache, ShaderModule, StoreOp,
+    TextureView, Viewport,
 };
 use std::collections::HashMap;
 use std::path::PathBuf;
@@ -141,8 +145,9 @@ pub fn prepare_view_targets(world: &mut World) {
             .views()
             .iter()
             .map(|view| view.target.0)
-            // Only offscreen targets are attachments here; window-targeted
-            // views resolve against the swapchain, which is not drawn into yet.
+            // Only offscreen targets need attachments here; window-targeted
+            // views resolve against the surface's swapchain image and depth
+            // buffer at record time.
             .filter(|target| matches!(target, RenderTarget::Viewport))
             .collect()
     };
@@ -169,6 +174,20 @@ pub fn prepare_view_targets(world: &mut World) {
     }
 }
 
+/// A resolved draw target for one pass: the color/depth attachment views, the
+/// extent, and the layout the color attachment is left in. Offscreen targets
+/// end in `ShaderRead` (sampled by the UI); window surfaces end in `Present`.
+pub struct PassTarget {
+    /// The color attachment view (offscreen target or swapchain image).
+    pub color: TextureView,
+    /// The depth attachment view, when the pass is depth-tested.
+    pub depth: Option<TextureView>,
+    /// The target's `(width, height)`.
+    pub extent: (u32, u32),
+    /// The layout the color attachment is transitioned to.
+    pub final_color_layout: AttachmentLayout,
+}
+
 /// Record one view's opaque pass into `command_buffer`: clear color and
 /// depth, then dispatch every queued [`Opaque3d`] item to its registered
 /// draw function. `view: None` clears the target to a dim background color
@@ -176,12 +195,12 @@ pub fn prepare_view_targets(world: &mut World) {
 pub fn record_view_pass(
     world: &World,
     view: Option<&Core3dView>,
-    target: &OffscreenTarget,
+    target: PassTarget,
     draw_functions: &DrawFunctions<Opaque3d>,
     command_buffer: &CommandBuffer,
 ) {
     let phase = view.map(|view| &view.opaque);
-    let (width, height) = target.extent();
+    let (width, height) = target.extent;
     let clear_color = match view {
         Some(view) => view.view.camera.clear_color,
         None => [0.05, 0.0, 0.08, 1.0],
@@ -208,14 +227,14 @@ pub fn record_view_pass(
     }
 
     let color_attachment = RenderAttachment {
-        view: target.view(),
-        layout: AttachmentLayout::ShaderRead,
+        view: target.color,
+        layout: target.final_color_layout,
         load: LoadOp::Clear,
         store: StoreOp::Store,
         clear: ClearValue::Color(clear_color),
     };
     // Reverse-Z: the depth clear value is 0.0 (near → 1).
-    let depth_attachment = target.depth_view().map(|view| RenderAttachment {
+    let depth_attachment = target.depth.map(|view| RenderAttachment {
         view,
         layout: AttachmentLayout::DepthStencil,
         load: LoadOp::Clear,
@@ -354,7 +373,57 @@ pub fn main_opaque_pass_3d(world: &mut World) {
             .views()
             .iter()
             .find(|view| view.is_primary && view.target.0 == *target_key);
+        let target = PassTarget {
+            color: target.view(),
+            depth: target.depth_view(),
+            extent: target.extent(),
+            final_color_layout: AttachmentLayout::ShaderRead,
+        };
         record_view_pass(&*world, view, target, &draw_functions, command_buffer);
+    }
+
+    // Window-targeted views (the game path) draw straight into each
+    // in-progress surface's swapchain image, ending in `Present`.
+    let window_view = frame
+        .views()
+        .iter()
+        .find(|view| view.is_primary && view.target.0 == RenderTarget::PrimaryWindow);
+    if let Some(view) = window_view {
+        for data in surfaces.values_mut() {
+            if !data.frame_in_progress() {
+                continue;
+            }
+            // The pipeline is baked for the view-target format; a swapchain
+            // with a different (e.g. sRGB) format cannot be drawn into yet.
+            match data.format() {
+                Ok((VIEW_TARGET_FORMAT, _)) => {}
+                Ok((other, _)) => {
+                    error_once!(
+                        "window swapchain format {other:?} is not {VIEW_TARGET_FORMAT:?}; \
+                         skipping the window pass"
+                    );
+                    continue;
+                }
+                Err(e) => {
+                    error_once!("failed to read window surface format: {e}");
+                    continue;
+                }
+            }
+            let (Some(color), Some(depth)) = (data.current_image_view(), data.depth_view()) else {
+                continue;
+            };
+            let extent = data.extent();
+            let target = PassTarget {
+                color,
+                depth: Some(depth),
+                extent: (extent.width, extent.height),
+                final_color_layout: AttachmentLayout::Present,
+            };
+            let Some(command_buffer) = data.current_command_buffer() else {
+                continue;
+            };
+            record_view_pass(&*world, Some(view), target, &draw_functions, command_buffer);
+        }
     }
 }
 
@@ -367,7 +436,7 @@ mod tests {
     use moonfield_camera::{Camera, PrimaryCamera};
     use moonfield_math::{GlobalTransform, Transform, Vec3};
     use moonfield_render_core::ViewTarget;
-    use moonfield_rhi::{CommandBufferUsage, CommandPool};
+    use moonfield_rhi::{CommandBufferUsage, CommandPool, OffscreenTarget};
 
     const TEST_QUAD_VERTICES: &[[f32; 3]] = &[
         [-0.5, -0.5, 0.0],
@@ -474,7 +543,13 @@ mod tests {
         command_buffer
             .begin(CommandBufferUsage::ONE_TIME_SUBMIT)
             .expect("begin");
-        record_view_pass(world, view, &target, &draw_functions, &command_buffer);
+        let pass_target = PassTarget {
+            color: target.view(),
+            depth: target.depth_view(),
+            extent: target.extent(),
+            final_color_layout: AttachmentLayout::ShaderRead,
+        };
+        record_view_pass(world, view, pass_target, &draw_functions, &command_buffer);
 
         // The trailing UI-pass pattern: another pass in the same buffer.
         let ui_target =

@@ -229,7 +229,14 @@ registered draw functions.
 The `main_opaque_pass_3d` system consumes the primary view targeting the editor
 viewport and records it into the persistent `OffscreenTarget` held by the
 `ViewTargets` resource (final layout `SHADER_READ_ONLY_OPTIMAL`) sampled by
-egui. Referenced mesh assets are copied
+egui. A primary view targeting the **primary window** instead records into
+each in-progress surface's swapchain image (final layout `PRESENT`),
+depth-tested against the surface's own `DepthBuffer` (render-core sizes it to
+the swapchain and resizes it on recreation); camera extraction sets the base
+`WindowFrameDemand` for such views, and the editor ORs its UI demand in later.
+The pass is format-locked to `VIEW_TARGET_FORMAT` — a swapchain negotiated to
+another format (e.g. sRGB) is skipped with an error until the pipeline becomes
+format-keyed. Referenced mesh assets are copied
 into `ExtractedMeshes`; GPU buffers in the render-world `PreparedGpuMeshes`
 resource are reused only when their `AssetRevision` matches. The pass
 only consumes prepared buffers while recording. Per-draw data (mvp + flat
