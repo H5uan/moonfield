@@ -5,9 +5,9 @@
 //! expected CPU visibility, and that dropping defers teardown to the
 //! retirement drain.
 
-use moonfield_rhi::{Device, GpuAllocation, Instance, Memory};
+use super::common;
+use crate::{Device, GpuAllocation, Instance, Memory};
 use std::sync::Mutex;
-mod common;
 
 /// Serializes the tests in this binary. Each test creates its own Vulkan
 /// instance, device, and allocator; doing so concurrently on one GPU

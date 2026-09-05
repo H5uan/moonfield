@@ -6,11 +6,11 @@
 //! kernel drives the loss down — no CPU-side math in the loop. The test skips
 //! on machines without `VK_EXT_descriptor_heap` (see `common`).
 
-use moonfield_rhi::{
+use super::common;
+use crate::{
     BarrierHazard, CommandBuffer, CommandBufferUsage, CommandPool, Compiler, ComputePipeline,
     Device, GpuAllocation, GpuPtr, Instance, Memory, ShaderModule, Stage,
 };
-mod common;
 
 /// Number of Gaussians in the mixture.
 const N: usize = 64;

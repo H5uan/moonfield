@@ -6,10 +6,10 @@
 //! the upload tests (`upload_ring.rs`); here only the carve surface is
 //! verified.
 
-mod common;
+use super::common;
 
+use crate::{Device, Error, GpuBumpAllocator, Instance};
 use moonfield_math::gpu::align_up;
-use moonfield_rhi::{Device, Error, GpuBumpAllocator, Instance};
 
 /// Create a headless instance + device, skipping on machines without one
 /// (mirrors `headless_triangle.rs`).

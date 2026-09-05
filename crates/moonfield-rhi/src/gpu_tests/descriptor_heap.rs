@@ -8,9 +8,9 @@
 //! the end-to-end sampling tests (`texture_bindless.rs`,
 //! `descriptor_heap_sampling.rs`).
 
-mod common;
+use super::common;
 
-use moonfield_rhi::{
+use crate::{
     BufferRange, DescriptorHeap, Device, Filter, GpuAllocation, Instance, Memory, SamplerDesc,
     TextureHandle,
 };

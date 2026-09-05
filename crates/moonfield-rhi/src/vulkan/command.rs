@@ -69,11 +69,6 @@ impl CommandPool {
         })
     }
 
-    /// Access the raw `vk::CommandPool` handle.
-    pub fn raw(&self) -> vk::CommandPool {
-        self.pool
-    }
-
     /// Allocate a single primary command buffer from this pool.
     pub fn allocate_command_buffer(&self) -> Result<CommandBuffer> {
         let allocate_info = vk::CommandBufferAllocateInfo::default()
@@ -137,7 +132,7 @@ pub struct CommandBuffer {
 
 impl CommandBuffer {
     /// Access the raw `vk::CommandBuffer` handle.
-    pub fn raw(&self) -> vk::CommandBuffer {
+    pub(crate) fn raw(&self) -> vk::CommandBuffer {
         self.buffer
     }
 

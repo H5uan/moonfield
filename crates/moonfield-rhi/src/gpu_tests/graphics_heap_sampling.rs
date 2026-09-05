@@ -7,9 +7,9 @@
 //! `ResourceDescriptorHeap` path (no bindings, no mappings). Deliberately
 //! independent of the editor/egui machinery.
 
-mod common;
+use super::common;
 
-use moonfield_rhi::{
+use crate::{
     AttachmentLayout, BufferRange, ClearValue, CommandBufferUsage, CommandPool, Compiler, Device,
     Format, FrameUploader, GpuAllocation, GraphicsPipeline, Instance, LoadOp, Memory,
     OffscreenTarget, Rect2d, RenderAttachment, RenderPassDesc, ShaderModule, StoreOp, Texture,
@@ -69,7 +69,7 @@ fn graphics_heap_sampling_roundtrip() {
     let mut uploader = FrameUploader::new(&device, UPLOAD_ARENA_SIZE).expect("uploader");
     let texture = Texture::bindless(&device, &mut uploader, 4, 4, Format::R8G8B8A8Unorm, &pixels)
         .expect("bindless texture");
-    assert_eq!(texture.handle(), Some(moonfield_rhi::TextureHandle(0)));
+    assert_eq!(texture.handle(), Some(crate::TextureHandle(0)));
     uploader.end_frame().expect("submit uploads");
 
     let compiler = Compiler::new().expect("compiler");

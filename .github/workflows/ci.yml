@@ -116,9 +116,18 @@ jobs:
       - name: Verify Agent Notes
         run: python3 scripts/verify_agents.py
 
+  rhi-boundary:
+    name: RHI boundary gate
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+
+      - name: Verify no backend types in the rhi public API
+        run: python3 scripts/verify_rhi_boundary.py
+
   ci-result:
     name: CI result
-    needs: [rust-analyzer, fmt, clippy, test, agent-docs]
+    needs: [rust-analyzer, fmt, clippy, test, agent-docs, rhi-boundary]
     if: always()
     runs-on: ubuntu-latest
     steps:

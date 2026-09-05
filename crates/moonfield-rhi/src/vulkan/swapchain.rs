@@ -1,7 +1,7 @@
 //! Vulkan surface and swapchain abstraction.
 
 use crate::error::{Error, Result};
-use crate::types::Format;
+use crate::types::{Extent2d, Format};
 use crate::vulkan::device::Device;
 use crate::vulkan::instance::Instance;
 use crate::vulkan::sync::Semaphore;
@@ -22,11 +22,11 @@ impl Surface {
     ///
     /// The handles must be valid for the lifetime of the returned `Surface`.
     pub unsafe fn from_handles(
-        entry: &ash::Entry,
         instance: &Instance,
         window_handle: WindowHandle,
         display_handle: DisplayHandle,
     ) -> Result<Self> {
+        let entry = instance.entry();
         let ash_instance = instance.raw();
         let surface_factory =
             ash_window::SurfaceFactory::new(entry, ash_instance, display_handle.as_raw()).map_err(
@@ -45,9 +45,8 @@ impl Surface {
     /// Create a surface from a type that implements [`HasWindowHandle`] and
     /// [`HasDisplayHandle`] (e.g. `winit::window::Window`).
     ///
-    /// This is a safe wrapper around [`from_handles`].
+    /// This is a safe wrapper around [`from_handles`](Self::from_handles).
     pub fn from_window(
-        entry: &ash::Entry,
         instance: &Instance,
         window: &(impl HasWindowHandle + HasDisplayHandle),
     ) -> Result<Self> {
@@ -60,17 +59,17 @@ impl Surface {
 
         // SAFETY: the handles are valid for the lifetime of the window, which
         // is guaranteed by the caller for the returned Surface.
-        unsafe { Self::from_handles(entry, instance, window_handle, display_handle) }
+        unsafe { Self::from_handles(instance, window_handle, display_handle) }
     }
 
     /// Access the raw surface handle.
-    pub fn raw(&self) -> vk::SurfaceKHR {
+    pub(crate) fn raw(&self) -> vk::SurfaceKHR {
         self.surface
     }
 
     /// Query surface capabilities for the given physical device (Vulkan
     /// 1.1+ "2" query; extended structures can be attached through pNext).
-    pub fn capabilities(
+    pub(crate) fn capabilities(
         &self,
         physical_device: vk::PhysicalDevice,
     ) -> Result<vk::SurfaceCapabilities2KHR<'_>> {
@@ -92,7 +91,7 @@ impl Surface {
 
     /// Query supported surface formats (Vulkan "2" query); each entry's base
     /// data is in the `.surface_format` field.
-    pub fn formats(
+    pub(crate) fn formats(
         &self,
         physical_device: vk::PhysicalDevice,
     ) -> Result<Vec<vk::SurfaceFormat2KHR<'_>>> {
@@ -112,7 +111,7 @@ impl Surface {
     }
 
     /// Query supported present modes.
-    pub fn present_modes(
+    pub(crate) fn present_modes(
         &self,
         physical_device: vk::PhysicalDevice,
     ) -> Result<Vec<vk::PresentModeKHR>> {
@@ -135,7 +134,6 @@ impl Drop for Surface {
 /// Vulkan swapchain and its image views.
 pub struct Swapchain {
     swapchain: vk::SwapchainKHR,
-    images: Vec<vk::Image>,
     image_views: Vec<vk::ImageView>,
     format: vk::SurfaceFormatKHR,
     extent: vk::Extent2D,
@@ -146,11 +144,22 @@ pub struct Swapchain {
 impl Swapchain {
     /// Create a swapchain for the given surface and window size.
     ///
-    /// `old_swapchain` is the swapchain currently in use by the surface, if
-    /// any (i.e. when recreating on resize/suboptimal). It is passed as
-    /// `oldSwapchain` so the driver can recycle the surface's images — the
-    /// replacement must name the swapchain currently bound to the surface.
+    /// For recreation on resize/suboptimal, use [`recreate`](Self::recreate),
+    /// which passes the current swapchain as `oldSwapchain` so the driver can
+    /// recycle the surface's images.
     pub fn new(
+        instance: &Instance,
+        device: &Device,
+        surface: &Surface,
+        window_size: [u32; 2],
+    ) -> Result<Self> {
+        Self::create(instance, device, surface, window_size, None)
+    }
+
+    /// `new` with an `oldSwapchain` handle for the driver to recycle.
+    /// Crate-internal: callers go through [`new`](Self::new) or
+    /// [`recreate`](Self::recreate).
+    pub(crate) fn create(
         instance: &Instance,
         device: &Device,
         surface: &Surface,
@@ -262,7 +271,6 @@ impl Swapchain {
 
         Ok(Self {
             swapchain,
-            images,
             image_views,
             format: surface_format,
             extent,
@@ -271,29 +279,40 @@ impl Swapchain {
         })
     }
 
-    /// Access the raw swapchain handle.
-    pub fn raw(&self) -> vk::SwapchainKHR {
-        self.swapchain
+    /// Recreate the swapchain for a new window size.
+    ///
+    /// The current swapchain is passed to the driver as `oldSwapchain` so it
+    /// can recycle the surface's images; the old swapchain is dropped after
+    /// the new one is created. The caller must ensure the device is idle.
+    pub fn recreate(
+        &mut self,
+        instance: &Instance,
+        device: &Device,
+        surface: &Surface,
+        window_size: [u32; 2],
+    ) -> Result<()> {
+        let old_swapchain = self.swapchain;
+        // The replacement is built before `self` is overwritten, so the old
+        // swapchain is dropped (destroyed) only after the new one exists.
+        *self = Self::create(instance, device, surface, window_size, Some(old_swapchain))?;
+        Ok(())
     }
 
-    /// Access the swapchain images.
-    pub fn images(&self) -> &[vk::Image] {
-        &self.images
+    /// Borrow the image view of swapchain image `index` (valid only between
+    /// acquire and present of that image).
+    pub fn image_view(&self, index: u32) -> crate::vulkan::view::TextureView {
+        crate::vulkan::view::TextureView::borrow_raw(
+            self.image_views[index as usize],
+            self.device.clone(),
+        )
     }
 
-    /// Access the swapchain image views.
-    pub fn image_views(&self) -> &[vk::ImageView] {
-        &self.image_views
-    }
-
-    /// Access the selected surface format.
-    pub fn format(&self) -> vk::SurfaceFormatKHR {
-        self.format
-    }
-
-    /// Access the swapchain extent.
-    pub fn extent(&self) -> vk::Extent2D {
-        self.extent
+    /// Access the swapchain extent, in the crate's vocabulary.
+    pub fn extent(&self) -> Extent2d {
+        Extent2d {
+            width: self.extent.width,
+            height: self.extent.height,
+        }
     }
 
     /// Acquire the next available swapchain image.
@@ -318,7 +337,7 @@ impl Swapchain {
         }
         .map_err(|result| match result {
             vk::Result::ERROR_OUT_OF_DATE_KHR => Error::SurfaceOutOfDate,
-            other => other.into(),
+            other => Error::from_vk(other),
         })
     }
 
@@ -347,7 +366,7 @@ impl Swapchain {
         }
         .map_err(|result| match result {
             vk::Result::ERROR_OUT_OF_DATE_KHR => Error::SurfaceOutOfDate,
-            other => other.into(),
+            other => Error::from_vk(other),
         })
     }
 

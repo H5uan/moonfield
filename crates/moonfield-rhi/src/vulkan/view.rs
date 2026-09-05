@@ -20,7 +20,7 @@ pub struct TextureView {
 impl TextureView {
     /// Wrap an image view this wrapper owns; `Drop` destroys it.
     #[allow(dead_code)] // owned views are constructed by future owners
-    pub fn from_raw(view: vk::ImageView, device: ash::Device) -> Self {
+    pub(crate) fn from_raw(view: vk::ImageView, device: ash::Device) -> Self {
         Self {
             view,
             device,
@@ -29,7 +29,7 @@ impl TextureView {
     }
 
     /// Borrow an image view owned elsewhere; `Drop` does not destroy it.
-    pub fn borrow_raw(view: vk::ImageView, device: ash::Device) -> Self {
+    pub(crate) fn borrow_raw(view: vk::ImageView, device: ash::Device) -> Self {
         Self {
             view,
             device,
@@ -38,7 +38,7 @@ impl TextureView {
     }
 
     /// Raw Vulkan handle, for interop with libraries taking raw handles.
-    pub fn raw_vk(&self) -> vk::ImageView {
+    pub(crate) fn raw_vk(&self) -> vk::ImageView {
         self.view
     }
 }

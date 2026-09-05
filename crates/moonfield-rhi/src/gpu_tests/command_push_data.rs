@@ -6,9 +6,9 @@
 //! root pointers delivered through `vkCmdPushDataEXT` (instead of
 //! `vkCmdPushConstants`) must land in the shader's push-constant block.
 
-mod common;
+use super::common;
 
-use moonfield_rhi::{
+use crate::{
     CommandBufferUsage, CommandPool, Compiler, ComputePipeline, Device, GpuAllocation, Instance,
     Memory, RootBinder, ShaderModule,
 };

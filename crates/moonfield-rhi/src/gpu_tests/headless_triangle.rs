@@ -5,12 +5,12 @@
 //! a command buffer can be recorded with a pipeline bind, a pushed vertex-array
 //! pointer, and a draw command.
 
-use moonfield_rhi::{
+use crate::{
     CommandBufferUsage, CommandPool, Compiler, Device, Format, GpuAllocation, GraphicsPipeline,
     Instance, Memory, RootBinder, ShaderModule,
 };
 
-mod common;
+use super::common;
 #[repr(C)]
 #[derive(Clone, Copy)]
 struct Vertex {

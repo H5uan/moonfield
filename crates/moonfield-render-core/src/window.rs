@@ -229,13 +229,8 @@ impl WindowSurfaceData {
         let instance = render_device.instance().clone();
         let device = render_device.device().clone();
 
-        let surface = Surface::from_window(instance.entry(), &instance, window)?;
-        let queue_families = device.queue_family_indices();
-        if !instance.get_physical_device_surface_support(
-            device.physical_device(),
-            queue_families.graphics,
-            surface.raw(),
-        ) {
+        let surface = Surface::from_window(&instance, window)?;
+        if !instance.supports_present(&device, &surface) {
             return Err(Error::Backend(
                 "the shared render device cannot present to this window's surface".to_string(),
             ));
@@ -245,9 +240,9 @@ impl WindowSurfaceData {
             &device,
             &surface,
             [window.physical_width, window.physical_height],
-            None,
         )?;
 
+        let queue_families = device.queue_family_indices();
         let command_pool = CommandPool::new(&device, queue_families.graphics)?;
         let mut command_buffers = Vec::with_capacity(MAX_FRAMES_IN_FLIGHT);
         let mut image_available = Vec::with_capacity(MAX_FRAMES_IN_FLIGHT);
@@ -362,29 +357,17 @@ impl WindowSurfaceData {
 
         self.device.wait_idle()?;
 
-        // Pass the current swapchain as `oldSwapchain` so the driver recycles
-        // the surface's images and the replacement names the swapchain
-        // currently in use by the surface. The old swapchain is dropped after
-        // the new one is created and the device is idle.
-        let old_swapchain = self.swapchain.raw();
-        self.swapchain = Swapchain::new(
-            &self.instance,
-            &self.device,
-            &self.surface,
-            [width, height],
-            Some(old_swapchain),
-        )?;
+        // The device is idle; the swapchain passes its own current handle as
+        // `oldSwapchain` so the driver recycles the surface's images.
+        self.swapchain
+            .recreate(&self.instance, &self.device, &self.surface, [width, height])?;
         self.sequencer.note_recreated();
         Ok(())
     }
 
     /// The current swapchain extent.
     pub fn extent(&self) -> Extent2d {
-        let extent = self.swapchain.extent();
-        Extent2d {
-            width: extent.width,
-            height: extent.height,
-        }
+        self.swapchain.extent()
     }
 
     /// The swapchain color format in the crate's vocabulary, plus whether the
@@ -424,10 +407,7 @@ impl WindowSurfaceData {
     /// must not outlive the surface data.
     pub fn current_image_view(&self) -> Option<TextureView> {
         let image_index = self.sequencer.current_image()?;
-        Some(TextureView::borrow_raw(
-            self.swapchain.image_views()[image_index as usize],
-            self.device.raw().clone(),
-        ))
+        Some(self.swapchain.image_view(image_index))
     }
 }
 

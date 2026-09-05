@@ -3,12 +3,10 @@
 //! Verifies that many uploads in one frame complete with a single submit,
 //! and that arena reuse across frames never clobbers in-flight copies.
 
-mod common;
+use super::common;
 
-use moonfield_rhi::Memory;
-use moonfield_rhi::{
-    CommandBufferUsage, CommandPool, Device, FrameUploader, GpuAllocation, Instance,
-};
+use crate::Memory;
+use crate::{CommandBufferUsage, CommandPool, Device, FrameUploader, GpuAllocation, Instance};
 
 /// Create a headless instance + device, skipping on machines without one
 /// (mirrors `headless_triangle.rs`).

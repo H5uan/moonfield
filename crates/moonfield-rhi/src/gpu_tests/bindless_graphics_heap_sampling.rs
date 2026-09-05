@@ -6,9 +6,9 @@
 //! real driver: heap write → `cmd_bind` → fragment-stage untyped heap access
 //! → sampled color readback.
 
-mod common;
+use super::common;
 
-use moonfield_rhi::{
+use crate::{
     AttachmentLayout, ClearValue, CommandBufferUsage, CommandPool, Compiler, Device, Format,
     GpuAllocation, GraphicsPipeline, Instance, LoadOp, Memory, OffscreenTarget, Rect2d,
     RenderAttachment, RenderPassDesc, RootBinder, SamplerDesc, ShaderModule, StoreOp, Texture,
@@ -101,11 +101,11 @@ fn fragment_heap_sampling_roundtrip() {
     for _ in 0..4 * 4 {
         pixels.extend_from_slice(&[255, 0, 0, 255]);
     }
-    let mut uploader = moonfield_rhi::FrameUploader::new(&device, moonfield_rhi::UPLOAD_ARENA_SIZE)
-        .expect("uploader");
+    let mut uploader =
+        crate::FrameUploader::new(&device, crate::UPLOAD_ARENA_SIZE).expect("uploader");
     let texture = Texture::bindless(&device, &mut uploader, 4, 4, Format::R8G8B8A8Unorm, &pixels)
         .expect("bindless texture");
-    assert_eq!(texture.handle(), Some(moonfield_rhi::TextureHandle(0)));
+    assert_eq!(texture.handle(), Some(crate::TextureHandle(0)));
     // Submit the queued upload before drawing, so the pixels are actually in
     // GPU memory (FrameUploader submits on `end_frame`).
     uploader.end_frame().expect("submit uploads");

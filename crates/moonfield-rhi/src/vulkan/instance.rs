@@ -1,6 +1,8 @@
 //! Vulkan instance abstraction.
 
 use crate::error::{Error, Result};
+use crate::vulkan::device::Device;
+use crate::vulkan::swapchain::Surface;
 use ash::vk;
 use std::ffi::{CStr, c_char};
 
@@ -23,7 +25,8 @@ impl Instance {
     /// `required_extensions` should contain platform surface extensions such as
     /// `VK_KHR_surface` and the platform-specific `VK_KHR_win32_surface`, etc.
     pub fn new(required_extensions: &[&CStr]) -> Result<Self> {
-        let entry = unsafe { ash::Entry::load() }?;
+        let entry = unsafe { ash::Entry::load() }
+            .map_err(|e| Error::Backend(format!("failed to load Vulkan: {e}")))?;
 
         let app_name = std::ffi::CString::new("moonfield").unwrap();
         let engine_name = std::ffi::CString::new("Lunar Mare").unwrap();
@@ -76,22 +79,17 @@ impl Instance {
     }
 
     /// Access the `ash::Entry` (needed e.g. for surface creation).
-    pub fn entry(&self) -> &ash::Entry {
+    pub(crate) fn entry(&self) -> &ash::Entry {
         &self.entry
     }
 
     /// Access the raw `ash::Instance`.
-    pub fn raw(&self) -> &ash::Instance {
+    pub(crate) fn raw(&self) -> &ash::Instance {
         &self.instance
     }
 
-    /// Access the `khr::surface` instance extension loader.
-    pub fn surface_instance(&self) -> &ash::khr::surface::Instance {
-        &self.surface_instance
-    }
-
     /// Enumerate available physical devices.
-    pub fn enumerate_physical_devices(&self) -> Result<Vec<vk::PhysicalDevice>> {
+    pub(crate) fn enumerate_physical_devices(&self) -> Result<Vec<vk::PhysicalDevice>> {
         unsafe {
             self.instance.enumerate_physical_devices().map_err(|e| {
                 Error::Backend(format!("failed to enumerate physical devices: {:?}", e))
@@ -104,7 +102,7 @@ impl Instance {
     /// The caller provides the output struct and may chain extended property
     /// structures (e.g. `PhysicalDeviceVulkan13Properties`) through its pNext
     /// pointer; the driver fills everything connected to the chain.
-    pub fn physical_device_properties2(
+    pub(crate) fn physical_device_properties2(
         &self,
         device: vk::PhysicalDevice,
         out: &mut vk::PhysicalDeviceProperties2,
@@ -115,7 +113,7 @@ impl Instance {
     /// Get queue family properties for a physical device (Vulkan 1.1+ "2"
     /// query); each entry's base data is in the `.queue_family_properties`
     /// field and extended structures can be attached through pNext.
-    pub fn queue_family_properties2(
+    pub(crate) fn queue_family_properties2(
         &self,
         device: vk::PhysicalDevice,
     ) -> Vec<vk::QueueFamilyProperties2<'_>> {
@@ -132,7 +130,7 @@ impl Instance {
     }
 
     /// Check whether a queue family supports presentation to the given surface.
-    pub fn get_physical_device_surface_support(
+    pub(crate) fn get_physical_device_surface_support(
         &self,
         device: vk::PhysicalDevice,
         queue_family_index: u32,
@@ -143,6 +141,18 @@ impl Instance {
                 .get_physical_device_surface_support(device, queue_family_index, surface)
                 .unwrap_or(false)
         }
+    }
+
+    /// Whether the device's graphics queue family can present to `surface`.
+    ///
+    /// The shared device is created without a surface, so presentation
+    /// support is validated per window surface at surface-creation time.
+    pub fn supports_present(&self, device: &Device, surface: &Surface) -> bool {
+        self.get_physical_device_surface_support(
+            device.physical_device(),
+            device.queue_family_indices().graphics,
+            surface.raw(),
+        )
     }
 }
 

@@ -5,13 +5,13 @@
 //! and a multi-record draw — without panicking. Mirrors
 //! `headless_triangle.rs`'s GPU-less skip behavior.
 
-use ash::vk;
-use moonfield_rhi::{
+use crate::{
     CommandBufferUsage, CommandPool, Compiler, Device, DrawIndirectArgs, Format, GpuAllocation,
     GraphicsPipeline, Instance, Memory, RootBinder, ShaderModule,
 };
+use ash::vk;
 
-mod common;
+use super::common;
 #[repr(C)]
 #[derive(Clone, Copy)]
 struct Vertex {

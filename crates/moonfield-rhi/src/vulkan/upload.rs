@@ -108,7 +108,7 @@ impl FrameUploader {
     /// uploads a fresh (`UNDEFINED`) image; `Some((x, y))` updates a
     /// sub-region of a shader-readable one — layout transitions mirror
     /// `Texture::upload`'s contract.
-    pub fn upload_image(
+    pub(crate) fn upload_image(
         &mut self,
         image: vk::Image,
         bytes: &[u8],
@@ -225,11 +225,13 @@ impl FrameUploader {
             .command_buffer_infos(&command_infos)
             .signal_semaphore_infos(&signal_infos);
         unsafe {
-            self.device.queue_submit2(
-                self.queue,
-                std::slice::from_ref(&submit_info),
-                vk::Fence::null(),
-            )?;
+            self.device
+                .queue_submit2(
+                    self.queue,
+                    std::slice::from_ref(&submit_info),
+                    vk::Fence::null(),
+                )
+                .map_err(Error::from_vk)?;
         }
         self.next_frame += 1;
         self.recording = false;

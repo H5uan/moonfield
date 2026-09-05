@@ -1,7 +1,7 @@
 //! Shared helpers for the Lunar Mare GPU integration tests.
 
+use crate::Instance;
 use ash::vk;
-use moonfield_rhi::Instance;
 
 /// `VK_EXT_descriptor_heap` is required unconditionally by the engine
 /// (`crates/moonfield-render/src/vulkan/device.rs`); only recent NVIDIA

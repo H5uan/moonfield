@@ -7,9 +7,9 @@
 //! directly off the device. Prints the values so machine-specific data can be
 //! recorded.
 
-mod common;
+use super::common;
 
-use moonfield_rhi::{DescriptorHeapProperties, Device, Instance};
+use crate::{DescriptorHeapProperties, Device, Instance};
 
 /// Create a headless instance + device, skipping on machines without one
 /// (mirrors `bump_allocator.rs`).

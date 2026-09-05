@@ -11,6 +11,9 @@ pub mod types;
 
 pub mod vulkan;
 
+#[cfg(test)]
+mod gpu_tests;
+
 pub use error::{Error, Result};
 pub use indirect::{DispatchIndirectArgs, DrawIndirectArgs};
 pub use types::{

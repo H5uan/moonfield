@@ -43,14 +43,10 @@ impl fmt::Display for Error {
 
 impl std::error::Error for Error {}
 
-impl From<ash::vk::Result> for Error {
-    fn from(result: ash::vk::Result) -> Self {
+impl Error {
+    /// Convert an ash result code. Crate-internal: keeps `ash` types out of
+    /// the public API.
+    pub(crate) fn from_vk(result: ash::vk::Result) -> Self {
         Error::Backend(format!("{:?}", result))
-    }
-}
-
-impl From<ash::LoadingError> for Error {
-    fn from(err: ash::LoadingError) -> Self {
-        Error::Backend(format!("failed to load Vulkan: {}", err))
     }
 }

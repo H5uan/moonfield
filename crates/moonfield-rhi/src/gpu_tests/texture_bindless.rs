@@ -5,9 +5,9 @@
 //! Covers slot allocation order, slot reuse after the retirement drain, and
 //! the escape-hatch [`Texture::new`] path that must not touch the heap.
 
-mod common;
+use super::common;
 
-use moonfield_rhi::{Device, Format, FrameUploader, Instance, Texture, UPLOAD_ARENA_SIZE};
+use crate::{Device, Format, FrameUploader, Instance, Texture, UPLOAD_ARENA_SIZE};
 use std::sync::Mutex;
 
 /// Serializes the tests in this binary. Each test creates its own Vulkan
@@ -70,16 +70,8 @@ fn bindless_allocates_slots_in_order() {
         .expect("texture a");
     let b = Texture::bindless(&device, &mut uploader, 4, 4, Format::R8G8B8A8Unorm, &pixels)
         .expect("texture b");
-    assert_eq!(
-        a.handle(),
-        Some(moonfield_rhi::TextureHandle(0)),
-        "first slot"
-    );
-    assert_eq!(
-        b.handle(),
-        Some(moonfield_rhi::TextureHandle(1)),
-        "second slot"
-    );
+    assert_eq!(a.handle(), Some(crate::TextureHandle(0)), "first slot");
+    assert_eq!(b.handle(), Some(crate::TextureHandle(1)), "second slot");
 
     // The upload path must submit cleanly: both uploads were queued on the
     // shared uploader; end the frame and wait for it to be executed.
@@ -96,7 +88,7 @@ fn drop_releases_slot_for_reuse() {
     let pixels = checkerboard();
     let a = Texture::bindless(&device, &mut uploader, 4, 4, Format::R8G8B8A8Unorm, &pixels)
         .expect("texture a");
-    assert_eq!(a.handle(), Some(moonfield_rhi::TextureHandle(0)));
+    assert_eq!(a.handle(), Some(crate::TextureHandle(0)));
 
     // Dropping the texture retires its slot; the drain returns it to the
     // freelist. The upload must complete first (nothing in flight may
@@ -107,11 +99,7 @@ fn drop_releases_slot_for_reuse() {
     device.flush_retirements();
     let b = Texture::bindless(&device, &mut uploader, 4, 4, Format::R8G8B8A8Unorm, &pixels)
         .expect("texture b");
-    assert_eq!(
-        b.handle(),
-        Some(moonfield_rhi::TextureHandle(0)),
-        "slot reused"
-    );
+    assert_eq!(b.handle(), Some(crate::TextureHandle(0)), "slot reused");
 
     uploader.end_frame().expect("end upload frame");
     uploader.wait_idle().expect("wait for uploads");

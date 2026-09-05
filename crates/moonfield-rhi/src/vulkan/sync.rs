@@ -28,7 +28,7 @@ impl Semaphore {
     }
 
     /// Access the raw `vk::Semaphore` handle.
-    pub fn raw(&self) -> vk::Semaphore {
+    pub(crate) fn raw(&self) -> vk::Semaphore {
         self.semaphore
     }
 
@@ -104,7 +104,7 @@ impl Fence {
     }
 
     /// Access the raw `vk::Fence` handle.
-    pub fn raw(&self) -> vk::Fence {
+    pub(crate) fn raw(&self) -> vk::Fence {
         self.fence
     }
 

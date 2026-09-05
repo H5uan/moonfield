@@ -7,11 +7,11 @@
 //! with it, the payload propagates. Both the plain memory hazard and the
 //! descriptor-heap hazard (the blog's barrier flags) are exercised.
 
-use moonfield_rhi::{
+use super::common;
+use crate::{
     BarrierHazard, CommandBufferUsage, CommandPool, Compiler, ComputePipeline, Device,
     GpuAllocation, Instance, Memory, ShaderModule, Stage,
 };
-mod common;
 
 /// Dispatch A: write all ones into `payload`.
 const WRITE_KERNEL: &str = r#"

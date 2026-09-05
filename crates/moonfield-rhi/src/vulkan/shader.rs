@@ -18,12 +18,12 @@ use ash::vk;
 #[derive(Debug, Clone)]
 pub struct CompiledShader {
     /// SPIR-V bytecode, ready for `vkCreateShaderModule`.
-    pub spirv: Vec<u8>,
+    pub(crate) spirv: Vec<u8>,
     /// The Vulkan stage of the compiled entry point.
-    pub stage: vk::ShaderStageFlags,
+    pub(crate) stage: vk::ShaderStageFlags,
     /// The entry point name as it appears in the emitted SPIR-V (Slang may
     /// rename it, e.g. to `main`); the pipeline must name this exact string.
-    pub entry: String,
+    pub(crate) entry: String,
 }
 
 /// Extract the name of the (single) `OpEntryPoint` from SPIR-V bytecode.

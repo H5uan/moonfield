@@ -5,11 +5,11 @@
 //! through a buffer device address root pointer, writes output through a
 //! second root pointer, and the CPU reads the result back.
 
-use moonfield_rhi::{
+use super::common;
+use crate::{
     CommandBufferUsage, CommandPool, Compiler, ComputePipeline, Device, GpuAllocation, Instance,
     Memory, ShaderModule,
 };
-mod common;
 
 /// `+1` kernel: out[tid] = in[tid] + 1. Root data is two 64-bit addresses
 /// (input @ offset 0, output @ offset 8) pushed as one push-constant struct.

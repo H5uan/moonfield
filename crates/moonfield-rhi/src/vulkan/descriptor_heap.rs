@@ -314,7 +314,9 @@ impl DescriptorHeap {
         // SAFETY: every range points into the heap's host mapping and stays
         // alive for the call; the descriptor data encodes valid views.
         unsafe {
-            self.ext.write_resource_descriptors(&resources, &ranges)?;
+            self.ext
+                .write_resource_descriptors(&resources, &ranges)
+                .map_err(Error::from_vk)?;
         }
         Ok(())
     }
@@ -364,7 +366,9 @@ impl DescriptorHeap {
         // SAFETY: every range points into the heap's host mapping and stays
         // alive for the call; the address ranges reference live buffers.
         unsafe {
-            self.ext.write_resource_descriptors(&resources, &ranges)?;
+            self.ext
+                .write_resource_descriptors(&resources, &ranges)
+                .map_err(Error::from_vk)?;
         }
         Ok(())
     }
@@ -397,7 +401,9 @@ impl DescriptorHeap {
         // SAFETY: sampler create infos are plain data the driver encodes into
         // the heap mapping.
         unsafe {
-            self.ext.write_sampler_descriptors(&create_infos, &ranges)?;
+            self.ext
+                .write_sampler_descriptors(&create_infos, &ranges)
+                .map_err(Error::from_vk)?;
         }
         Ok(())
     }

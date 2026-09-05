@@ -6,13 +6,13 @@
 //! 2. `dispatch_indirect` launches a compute kernel whose workgroup counts
 //!    are read from a GPU-memory `DispatchIndirectArgs` struct.
 
-use moonfield_rhi::indirect::DispatchIndirectArgs;
-use moonfield_rhi::{
+use super::common;
+use crate::indirect::DispatchIndirectArgs;
+use crate::{
     BarrierHazard, CommandBufferUsage, CommandPool, Compiler, ComputePipeline, Device,
     GpuAllocation, Instance, Memory, ShaderModule, Stage,
 };
 use std::sync::Mutex;
-mod common;
 
 /// Serializes the tests in this binary. Each test creates its own Vulkan
 /// instance, device, and allocator; doing so concurrently on one GPU

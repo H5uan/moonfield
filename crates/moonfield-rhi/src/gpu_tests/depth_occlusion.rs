@@ -8,15 +8,15 @@
 //! `GREATER_OR_EQUAL`) the near quad must win. Skips gracefully on machines
 //! without a Vulkan driver.
 
-use ash::vk;
-use moonfield_rhi::{
+use crate::{
     AttachmentLayout, ClearValue, CommandBufferUsage, CommandPool, CompareOp, Compiler, CullMode,
     CullState, DepthState, Device, Format, FrontFace, GpuAllocation, GraphicsPipeline, Instance,
     LoadOp, Memory, OffscreenTarget, Rect2d, RenderAttachment, RenderPassDesc, RootBinder,
     ShaderModule, StoreOp,
 };
+use ash::vk;
 
-mod common;
+use super::common;
 const SIZE: u32 = 64;
 
 #[repr(C)]

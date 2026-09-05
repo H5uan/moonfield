@@ -4,6 +4,7 @@ use crate::error::{Error, Result};
 use crate::retire::RetirementRing;
 use crate::vulkan::instance::Instance;
 use crate::vulkan::shader::ShaderCache;
+use crate::vulkan::swapchain::Surface;
 use crate::vulkan::sync::Semaphore;
 use crate::{DESCRIPTOR_HEAP_IMAGE_CAPACITY, DESCRIPTOR_HEAP_SAMPLER_CAPACITY, DescriptorHeap};
 use crate::{FrameUploader, UPLOAD_ARENA_SIZE};
@@ -90,7 +91,7 @@ impl QueueFamilyIndices {
     ///
     /// If `surface` is `None`, presentation support is not checked and
     /// `present` is set to the graphics index.
-    pub fn find(
+    pub(crate) fn find(
         instance: &Instance,
         physical_device: vk::PhysicalDevice,
         surface: Option<vk::SurfaceKHR>,
@@ -151,7 +152,6 @@ pub struct Device {
     /// Logical device handle. only have core command.
     device: ash::Device,
     graphics_queue: vk::Queue,
-    compute_queue: vk::Queue,
     present_queue: vk::Queue,
     queue_family_indices: QueueFamilyIndices,
     /// `VK_EXT_descriptor_heap` limits (its CPU-visible heap semantics). The
@@ -201,7 +201,7 @@ impl Device {
     /// Create a logical device for the first suitable physical device.
     ///
     /// If `surface` is provided, presentation support is required.
-    pub fn new(instance: &Instance, surface: Option<vk::SurfaceKHR>) -> Result<Self> {
+    pub fn new(instance: &Instance, surface: Option<&Surface>) -> Result<Self> {
         let physical_devices = instance.enumerate_physical_devices()?;
         if physical_devices.is_empty() {
             return Err(Error::Backend(
@@ -224,11 +224,11 @@ impl Device {
             })
             .ok_or_else(|| Error::Unsupported("no suitable physical device".to_string()))?;
 
-        Self::from_physical_device(instance, physical_device, surface)
+        Self::from_physical_device(instance, physical_device, surface.map(Surface::raw))
     }
 
     /// Create a logical device from a specific physical device.
-    pub fn from_physical_device(
+    pub(crate) fn from_physical_device(
         instance: &Instance,
         physical_device: vk::PhysicalDevice,
         surface: Option<vk::SurfaceKHR>,
@@ -458,7 +458,6 @@ impl Device {
         .map_err(|e| Error::Backend(format!("failed to create logical device: {:?}", e)))?;
 
         let graphics_queue = unsafe { device.get_device_queue(queue_family_indices.graphics, 0) };
-        let compute_queue = unsafe { device.get_device_queue(queue_family_indices.compute, 0) };
         let present_queue = unsafe { device.get_device_queue(queue_family_indices.present, 0) };
 
         let extension_fns = Arc::new(crate::vulkan::DeviceExtensionFunctions {
@@ -493,7 +492,6 @@ impl Device {
             physical_device,
             device,
             graphics_queue,
-            compute_queue,
             present_queue,
             queue_family_indices,
             descriptor_heap_properties,
@@ -510,7 +508,7 @@ impl Device {
     }
 
     /// Access the raw `ash::Device`.
-    pub fn raw(&self) -> &ash::Device {
+    pub(crate) fn raw(&self) -> &ash::Device {
         &self.device
     }
 
@@ -530,12 +528,12 @@ impl Device {
     }
 
     /// Access the underlying physical device handle.
-    pub fn physical_device(&self) -> vk::PhysicalDevice {
+    pub(crate) fn physical_device(&self) -> vk::PhysicalDevice {
         self.physical_device
     }
 
     /// Access the graphics queue.
-    pub fn graphics_queue(&self) -> vk::Queue {
+    pub(crate) fn graphics_queue(&self) -> vk::Queue {
         self.graphics_queue
     }
 
@@ -612,13 +610,8 @@ impl Device {
         }
     }
 
-    /// Access the compute queue.
-    pub fn compute_queue(&self) -> vk::Queue {
-        self.compute_queue
-    }
-
     /// Access the presentation queue.
-    pub fn present_queue(&self) -> vk::Queue {
+    pub(crate) fn present_queue(&self) -> vk::Queue {
         self.present_queue
     }
 
@@ -718,9 +711,8 @@ impl Device {
     }
 
     /// Shared GPU memory allocator for buffers and images. Resources allocate
-    /// through this and free their allocations on drop. Exposed so downstream
-    /// code (e.g. the editor's egui backend) can share the same allocator.
-    pub fn allocator(&self) -> &Arc<Mutex<Allocator>> {
+    /// through this and free their allocations on drop. Crate-internal.
+    pub(crate) fn allocator(&self) -> &Arc<Mutex<Allocator>> {
         self.allocator
             .as_ref()
             .expect("allocator taken only during device drop")

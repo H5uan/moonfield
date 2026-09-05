@@ -64,13 +64,13 @@ impl ShaderModule {
     }
 
     /// Access the raw `vk::ShaderModule` handle.
-    pub fn raw(&self) -> vk::ShaderModule {
+    pub(crate) fn raw(&self) -> vk::ShaderModule {
         self.module
     }
 
     /// The Vulkan stage of the shader, when known (i.e. the module was built
     /// from a [`CompiledShader`]).
-    pub fn stage(&self) -> Option<vk::ShaderStageFlags> {
+    pub(crate) fn stage(&self) -> Option<vk::ShaderStageFlags> {
         self.stage
     }
 

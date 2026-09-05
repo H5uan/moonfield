@@ -54,8 +54,9 @@ together**. The egui→Vulkan backend is in-house
 | `cargo test` | Run all unit and integration tests across the workspace. |
 | `cargo clippy` | Lint the codebase with Clippy. |
 | `cargo fmt` | Format all Rust source files. |
-| `cargo check -p moonfield-rhi --test headless_triangle` | Vulkan headless smoke test. |
+| `cargo test -p moonfield-rhi gpu_tests::headless_triangle` | Vulkan headless smoke test. |
 | `python3 scripts/verify_agents.py` | Verify Agent Notes format, classification, and bilingual pairs. |
+| `python3 scripts/verify_rhi_boundary.py` | Verify the rhi public API exposes no backend (ash/vk) types. |
 
 ## Continuous integration
 
@@ -75,6 +76,8 @@ Windows and Linux):
   platforms.
 - `test` — `cargo test --workspace` on both platforms.
 - `agent-docs` — `python3 scripts/verify_agents.py` (Agent Notes gate).
+- `rhi-boundary` — `python3 scripts/verify_rhi_boundary.py` (no backend types
+  in the rhi public API).
 
 `.github/actions/setup-slang` downloads a pinned Slang release and exports
 `SLANG_DIR` plus the runtime library path.
