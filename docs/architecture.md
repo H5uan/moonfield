@@ -9,10 +9,13 @@ made.
 ## Frame loop
 
 The frame loop is **redraw-driven**: `about_to_wait` only
-decides `ControlFlow` and requests redraws; the frame
-(`moonfield_time::update_time` → `App::update` → `sync_windows` →
-`App::render` → frame-state clearing → exit check) runs inside
-`WindowEvent::RedrawRequested`. Update pacing is governed by the `WinitSettings`
+decides `ControlFlow` and requests redraws; `WindowEvent::RedrawRequested`
+runs one full tick via `App::update`. A tick is `First` (message buffer swap,
+clock advance) → the fixed-timestep loop → `Update` → the render pipeline
+(`PreRender` in the main world → extraction → the render-world
+`RenderPrepare`/`RenderQueue`/`Render` schedules) → `Last` (window diff
+application, input clearing) — frame-end bookkeeping is systems, not runner
+glue. Update pacing is governed by the `WinitSettings`
 resource (`focused_mode`/`unfocused_mode`: `UpdateMode::Continuous` or
 `Reactive { wait, react_to_* }`; presets `game()` default / `desktop_app()` /
 `continuous()`), re-read every frame decision so systems can change it at
@@ -35,9 +38,10 @@ executor). `Commands` queue into a world-global buffer that
 `World::apply_commands` drains after **every** system run, so a system's
 commands are visible to later systems in the same run; the world's change tick
 advances once per schedule run. `App` owns separate main-world and render-world
-schedule maps. Main-world execution includes
-`Startup`/`First`/`Update`/`PreRender`/`Shutdown`; the render-world `Render`
-schedule runs after extraction. `First` starts every update phase and owns the
+schedule maps. One tick runs `First`, the fixed loop, `Update`, the render
+pipeline (`PreRender` in the main world, then `RenderPrepare`/`RenderQueue`/
+`Render` in the render world after extraction), and `Last`; `Startup` and
+`Shutdown` run once each. `First` starts every update phase and owns the
 message buffer swap. Exit is signaled by inserting the `AppExit` resource (e.g.
 via `Commands::insert_resource`), not by a system return value. The low-level
 archetype query trait is `WorldQuery`, distinct from the `Query<Q>` system
@@ -100,6 +104,20 @@ render loop) hold a `MessageCursor` directly. The windowing backend's
 lifecycle events (`WindowEventKind`) and raw winit events travel on this
 channel; `InputState` stays latched state with its own frame-scoped clearing.
 
+## Change detection
+
+Every component records the tick at which it was added and the tick at which
+it was last mutably dereferenced, and the world advances a global change tick
+once per schedule run. `&mut T` query items mark the component's changed tick
+on the first mutable dereference; imperative access goes through
+`World::get_component_ref` / `get_component_mut`, which return the tick-aware
+wrappers `Ref<T>` / `Mut<T>` — they deref to the component and answer
+`is_added()` / `is_changed()` relative to the world's last two ticks. Ticks
+are wrapping `u32`s; comparisons clamp relative ages at `MAX_CHANGE_AGE`, so
+wraparound never reports a recent change as unchanged. There are no
+`Changed<T>`/`Added<T>` query filters. Resource and component aliasing is
+enforced at runtime by borrow counters — conflicting access panics.
+
 ## Time
 
 `moonfield-time` provides the `Time<Real>` / `Time<Virtual>` / `Time<Fixed>` /
@@ -107,14 +125,22 @@ generic `Time` clock resources: delta and elapsed as `Duration` plus f32/f64
 seconds, wrapped elapsed, and on the virtual clock pause, relative speed, and
 a `max_delta` clamp. `TimePlugin` (in `moonfield-app`, next to
 `HierarchyPlugin` — the app crate depends on the time crate so `App::update`
-can drive the fixed loop) inserts the resources; the winit backend advances
-them via `moonfield_time::update_time` once per frame at frame start, before
-`App::update`, lazily inserting missing clocks so the editor path works
-without the plugin. `Timer`/`Stopwatch` are not ported.
+can drive the fixed loop) inserts the clock resources and registers
+`time_update_system` in `First`, so every `App::update` advances real →
+virtual → generic once, before the fixed loop and `Update`. The
+`TimeUpdateStrategy` resource selects the source: `Automatic` (the system
+clock, the default) or the deterministic `ManualInstant` / `ManualDuration` /
+`FixedTimesteps` variants for tests and replay. The windowing backend never
+touches time. Without `TimePlugin` nothing advances the clocks and the fixed
+loop is a no-op — the editor binary's plugin stack does not add it;
+`update_time` / `update_time_with_*` remain directly callable (lazily
+inserting missing clocks) for tests that drive time by hand.
+`Timer`/`Stopwatch` are not ported.
 
 ## Fixed update
 
-`App::update` runs `First`, then the fixed-timestep loop, then `Update`. The
+`App::update` runs `First`, then the fixed-timestep loop, then `Update`, then
+the render pipeline and `Last`. The
 loop (`moonfield_time::run_fixed_main_schedule`) accumulates the virtual delta
 into `Time<Fixed>`'s overstep and, once per full `timestep()` (default 64
 Hz), runs `FixedFirst` → `FixedPreUpdate` → `FixedUpdate` → `FixedPostUpdate`
@@ -132,8 +158,8 @@ pre-spawned `Window` entity if user code created one at startup) and
 attaches `Window` + `PrimaryWindow` + `RawHandleWrapper` + `CachedWindow`
 components. winit→ECS direction (resize/DPI/focus) writes back into the `Window`
 component immediately in `window_event`; ECS→winit direction (title/cursor_mode
-mutations by gameplay/editor code) is applied once per frame after `App::update`
-by `sync_windows`, which diffs the live component against the `CachedWindow`
+mutations by gameplay/editor code) is applied once per frame in the `Last`
+schedule by `sync_windows`, which diffs the live component against the `CachedWindow`
 cache (a per-field cached-window diff, without change detection). `WinitWindows`
 (resource) holds the `Entity ↔ WindowId` mapping. There is no `WindowRequests`
 channel — mutate the component.
@@ -151,7 +177,8 @@ mirrors the `auto_accept_quit` convention:
 ## Input flow
 
 `moonfield-winit` translates winit events into the `InputState` world resource
-(frame-latched; cleared each frame after the update) for ECS systems to read
+(frame-latched; cleared each frame by the `Last`-schedule `input_end_frame`
+system) for ECS systems to read
 during the update. Keys/buttons are strongly typed (`KeyCode`/`MouseButton`
 mirror enums in `moonfield-window`, converted 1:1 in
 `moonfield-winit::converters`); auto-repeat presses arrive flagged `repeat` and
@@ -248,8 +275,8 @@ compare op is `GREATER_OR_EQUAL`), so overlapping meshes occlude.
 Slang packs matrices row-major by default while glam's `to_cols_array()` is
 column-major, so the matrix ships column-major inside `DrawData` and the
 shader declares `column_major float4x4 mvp;`.
-The Hierarchy dock panel lists the entity tree (from `ChildOf`/`Children`,
-labeled by `Name`) and selects an entity; the Inspector panel renders
+The Outliner dock panel lists the entity tree (from `ChildOf`/`Children`,
+labeled by `Name`) and selects an entity; the Details panel renders
 auto-generated editing UI for the selected entity's registered components.
 Setting `MOONFIELD_EDITOR_AUTO_CLOSE=<frames>` signals exit via the shared
 `WindowControl` after N rendered frames, which allows automated smoke tests of
@@ -318,22 +345,22 @@ imports as one flat-colored mesh. Splat import reads the Khronos
 quantized int variants are rejected), kernel `"ellipse"` only, no SPZ
 compression sub-extensions. The loader converts the glTF render-space values
 into the training-space conventions `GaussianScene` keeps: scale → ln,
-opacity → logit, quaternion xyzw → wxyz, degree-0 SH verbatim into `f_dc`
+opacity → logit, quaternion xyzw → wxyz, degree-0 SH verbatim into `sh_dc`
 (the `0.282·c + 0.5` bias is a shading-time op, never stored), and
 higher-degree SH — one RGB VEC3 per coefficient — transposed into the
-channel-blocked `f_rest` layout (coefficient `c = l*l − 1 + n` of channel
-`ch` lands at `f_rest[ch * 15 + c]`), zero-filling missing degrees. Because
+channel-blocked `sh_rest` layout (coefficient `c = l*l − 1 + n` of channel
+`ch` lands at `sh_rest[ch * 15 + c]`), zero-filling missing degrees. Because
 gltf-json maps the unknown extension semantics to `Checked::Invalid`, the
 splat loader parses without validation and reads the attribute map from the
 raw JSON, while mesh loading uses validated `gltf::import`. The PLY loader is
 removed; training-side interop will be served by a
 `KHR_gaussian_splatting` exporter.
 
-The editor's `GltfLoader` dispatches on content: it sniffs the file bytes for
-The editor's `GltfLoader` produces `Mesh` assets by default. With the
-`splat` Cargo feature, it also dispatches `KHR_gaussian_splatting` files to
-`SplatCloud` assets. The Hierarchy panel loads assets through a path field +
-Load button routed through the `AssetServer` (loading the same file twice
+The editor's `GltfLoader` dispatches on file content: it produces `Mesh`
+assets by default and, with the `splat` Cargo feature, routes
+`KHR_gaussian_splatting` files to `SplatCloud` assets. The Content Browser
+panel loads assets through a path field + Load button routed through the
+`AssetServer` (loading the same file twice
 reuses the asset slot), and the loaded entity appears in the tree named
 after the file — mesh entities carry `MeshRenderer` in `DEFAULT_MESH_COLOR`.
 Training/optimizer state stays outside the `World`.
@@ -387,8 +414,26 @@ transform/camera/hierarchy, `Name` on `node.name`, and `mesh_renderer` /
 `splat_cloud` as path-string custom entries — save writes the asset's source
 path, load rebuilds the component through the `AssetServer` cache, and a
 scene-loaded `MeshRenderer` gets `DEFAULT_MESH_COLOR`) as world resources,
-and the Hierarchy panel carries a Scene path field with Save/Load buttons
-(`SceneIoState`).
+and the Content Browser panel carries a Scene path field with Save/Load
+buttons (`SceneIoState`).
+
+## ML training
+
+`moonfield-ml` is the training runtime, deliberately outside the app/ECS
+framework: it depends on `moonfield-rhi` and `moonfield-render-feature` only,
+and the trainer owns its RHI `Device`/`CommandBuffer` directly rather than
+plugging into the render world's frame lifecycle. Slang `[Differentiable]`
+kernels compile to SPIR-V at runtime through the RHI `Compiler`; the
+optimizer loop is handwritten (GPU Adam), with no external ML framework. The
+crate map is `Trainer` (host-side loop driving a `TrainingMethod`), `Adam`,
+`dataset` (training-view sources), `checkpoint` (parameter save/restore), and
+`gs` (the Gaussian Splatting method — domain types live in
+`moonfield-render-feature::splat`; the ml crate owns training state only).
+Training data bootstraps from COLMAP reconstructions via the text-format
+parsers in `moonfield-render-feature::splat::io::colmap` (`cameras.txt`,
+`images.txt`, `points3D.txt`; the binary `.bin` model is unsupported).
+`Trainer::run` and `Adam::record_step` are `todo!()` stubs; the exercised
+autodiff path is the RHI's `gpu_tests::gaussian_fit` test.
 
 ## Threading model
 
