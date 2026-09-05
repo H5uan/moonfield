@@ -138,6 +138,6 @@ PsOutput main(PsInput input)
 
     command_buffer.end()?;
 
-    moonfield_log::info!("Headless triangle frame recorded successfully");
+    tracing::info!("Headless triangle frame recorded successfully");
     Ok(())
 }

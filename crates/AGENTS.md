@@ -22,6 +22,15 @@ runtime mechanisms.
 - No runtime overhead beyond what the pattern already costs; prefer plain types
   and explicit flow over clever abstractions.
 
+## Dependency layering
+
+- `moonfield-log` is framework-layer (it depends on `moonfield-app` for
+  `LogPlugin`). Crates that must stay below the framework — `moonfield-rhi`,
+  `moonfield-math`, `moonfield-base` and other leaves — depend on `tracing`
+  directly and never on `moonfield-log`. The log format is unaffected: the
+  macros are `tracing` re-exports and rendering belongs to the global
+  subscriber `LogPlugin` installs.
+
 ## Testing
 
 - Tests are written alongside source using Rust's built-in `#[cfg(test)]` module

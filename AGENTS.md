@@ -20,7 +20,8 @@ moonfield-camera/   # Scene-facing camera components, targets, and projection/vi
 moonfield-ecs/      # ECS world implementation (archetype storage, system params, schedules, hooks, relationships)
 moonfield-editor/   # The editor — the workspace's only binary (src/main.rs). EditorPlugin
                     # (egui + egui_dock + in-house Vulkan backend in src/egui_vk.rs): dock panels, offscreen viewport
-moonfield-log/      # Logging utilities
+moonfield-log/      # Logging utilities (framework layer: LogPlugin needs moonfield-app;
+                    # leaf crates use tracing directly — see crates/AGENTS.md)
 moonfield-math/     # The workspace math single entry: glam re-export + domain types (Dir3/Ray3d, Transform)
 moonfield-ml/       # ML training runtime on the RHI (Trainer, Adam, dataset, checkpoint
                     # scaffolding); Gaussian Splatting is the first method — Slang autodiff

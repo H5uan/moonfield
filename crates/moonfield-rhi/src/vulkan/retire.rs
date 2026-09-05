@@ -64,7 +64,7 @@ impl RetireAction {
                 // descriptor (and the create info bytes it references) can
                 // be read; the action's copy drops when `run` returns.
                 if let Err(e) = heap.free_image_slot(handle) {
-                    moonfield_log::error!("failed to free retired image slot: {e}");
+                    tracing::error!("failed to free retired image slot: {e}");
                 }
             }
             Self::Image {
@@ -87,7 +87,7 @@ impl RetireAction {
                         .unwrap_or_else(|e| e.into_inner())
                         .free(allocation)
                 {
-                    moonfield_log::error!("failed to free retired image allocation: {e}");
+                    tracing::error!("failed to free retired image allocation: {e}");
                 }
             }
             Self::Buffer {
@@ -106,7 +106,7 @@ impl RetireAction {
                         .unwrap_or_else(|e| e.into_inner())
                         .free(allocation)
                 {
-                    moonfield_log::error!("failed to free retired buffer allocation: {e}");
+                    tracing::error!("failed to free retired buffer allocation: {e}");
                 }
             }
         }

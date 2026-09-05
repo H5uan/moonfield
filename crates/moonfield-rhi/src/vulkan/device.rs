@@ -318,9 +318,7 @@ impl Device {
             if supported.contains(name) {
                 optional_enabled.push(name);
             } else {
-                moonfield_log::warn!(
-                    "device extension {name:?} not supported; its feature is disabled"
-                );
+                tracing::warn!("device extension {name:?} not supported; its feature is disabled");
             }
         }
 
@@ -688,7 +686,7 @@ impl Device {
             match unsafe { self.device.create_pipeline_cache(&create_info, None) } {
                 Ok(cache) => cache,
                 Err(e) => {
-                    moonfield_log::warn!("pipeline cache data rejected ({e:?}); starting cold");
+                    tracing::warn!("pipeline cache data rejected ({e:?}); starting cold");
                     unsafe {
                         self.device
                             .create_pipeline_cache(&vk::PipelineCacheCreateInfo::default(), None)
@@ -746,11 +744,11 @@ impl Drop for Device {
                         let _ = std::fs::create_dir_all(dir);
                     }
                     if let Err(e) = std::fs::write(&path, &data) {
-                        moonfield_log::warn!("failed to write the pipeline cache: {e}");
+                        tracing::warn!("failed to write the pipeline cache: {e}");
                     }
                 }
                 Err(e) => {
-                    moonfield_log::warn!("failed to read the pipeline cache data: {e:?}")
+                    tracing::warn!("failed to read the pipeline cache data: {e:?}")
                 }
             }
             unsafe {
@@ -782,7 +780,7 @@ impl Drop for Device {
         {
             drop(allocator);
         } else if self.allocator.is_some() {
-            moonfield_log::error!(
+            tracing::error!(
                 "device dropped while GPU resources are still alive; \
                  leaking the device and its allocator"
             );

@@ -8,9 +8,9 @@
 
 use crate::{Device, Instance};
 use ash::vk;
-use moonfield_log::{info, warn};
 use std::ffi::CStr;
 use std::sync::Arc;
+use tracing::{info, warn};
 
 /// The shared device-level Vulkan singletons: one [`Instance`] and one
 /// logical [`Device`] for the whole app. The engine layer's `RenderPlugin`

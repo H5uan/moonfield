@@ -154,7 +154,7 @@ impl Drop for Instance {
             // `Device::drop`'s guard against out-of-order teardown keeps
             // its count registered). `ash::Instance`'s own drop is a plain
             // handle release; `vkDestroyInstance` is only ever this call.
-            moonfield_log::error!(
+            tracing::error!(
                 "instance dropped while logical devices are still alive; \
                  leaking the instance"
             );

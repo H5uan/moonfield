@@ -1264,10 +1264,10 @@ dependencies = [
  "ash-window",
  "bytemuck",
  "gpu-allocator",
- "moonfield-log",
  "moonfield-math",
  "raw-window-handle",
  "shader-slang-rs",
+ "tracing",
 ]
 
 [[package]]
