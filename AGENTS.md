@@ -15,7 +15,6 @@ moonfield-app/      # Plugin-based App/Plugin framework (Plugin, PluginGroup, Ap
                     # HierarchyPlugin + TimePlugin, schedules incl. the fixed-timestep loop
 moonfield-asset/    # Sync-only Assets<T> store + Handle<T> (index+generation) + AssetServer
                     # (extension dispatch, path cache); no deps, no async
-moonfield-base/     # Shared base types and utilities
 moonfield-camera/   # Scene-facing camera components, targets, and projection/view math
 moonfield-ecs/      # ECS world implementation (archetype storage, system params, schedules, hooks, relationships)
 moonfield-editor/   # The editor — the workspace's only binary (src/main.rs). EditorPlugin
@@ -34,7 +33,7 @@ moonfield-render-feature/ # Lunaris — high-level render features (mesh/splat/r
                     # Mesh + SplatCloud assets, glTF import (incl. KHR_gaussian_splatting)
 moonfield-scene/    # BSN-miniature scene save/load: ResolvedScene + SceneRegistry, glTF 2.0 JSON carrier
 moonfield-time/     # Time<Real>/Time<Virtual>/Time<Fixed>/Time clocks + run_fixed_main_schedule;
-                    # the backend advances them per frame; TimePlugin lives in moonfield-app
+                    # TimePlugin (moonfield-app) advances them via a First-schedule system
 moonfield-window/   # Abstract windowing types (Window components, KeyCode/MouseButton mirrors, InputState)
 moonfield-winit/    # Windowing backend (winit): bridges winit Window to moonfield-window components
 ```

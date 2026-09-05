@@ -23,7 +23,7 @@ ECS 框架独立构建、测试或复用。
 - `moonfield-log → moonfield-app` 保留：`LogPlugin` 是框架层设施，它唯一的消费者
   （`moonfield-editor` 的 `main.rs`）本就依赖 `moonfield-app`。
 - 边界规则记录在 `crates/AGENTS.md`：必须留在框架之下的 crate（`moonfield-rhi`、
-  `moonfield-math`、`moonfield-base` 及未来的叶子 crate）直接使用 `tracing`，
+  `moonfield-math` 及未来的叶子 crate）直接使用 `tracing`，
   永远不依赖 `moonfield-log`。`*_once!` 宏在 `moonfield-log` 中；若某个叶子 crate
   真的需要它们，那是重新审视分层的信号，而不是添加依赖的理由。
 

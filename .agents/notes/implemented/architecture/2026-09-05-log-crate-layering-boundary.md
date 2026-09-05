@@ -26,8 +26,8 @@ Adopt the reference implementation's own structure (`bevy_log` depends on
   equipment, and its only consumer (`moonfield-editor`'s `main.rs`) already
   depends on `moonfield-app`.
 - The boundary rule is recorded in `crates/AGENTS.md`: crates that must stay
-  below the framework (`moonfield-rhi`, `moonfield-math`, `moonfield-base`,
-  and future leaves) use `tracing` directly and never depend on
+  below the framework (`moonfield-rhi`, `moonfield-math`, and future leaves)
+  use `tracing` directly and never depend on
   `moonfield-log`. The `*_once!` macros live in `moonfield-log`; a leaf crate
   that ever needs them is the signal to reconsider, not to add the dependency.
 

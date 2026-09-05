@@ -378,7 +378,6 @@ impl App {
 
     /// Run the [`Startup`] schedule once.
     pub fn startup(&mut self) {
-        moonfield_base::initialize();
         self.initialized = true;
         self.run_schedule(Startup);
     }
@@ -391,9 +390,10 @@ impl App {
     ///
     /// This is the per-frame counterpart of [`run_updates`]; it runs startup
     /// once on the first call. Rendering is part of the tick (Bevy's model),
-    /// so a runner only needs to call this one method. The clocks are advanced
-    /// by the windowing backend at the frame boundary (runner responsibility),
-    /// so tests can drive deterministic time manually.
+    /// so a runner only needs to call this one method. The clocks advance in
+    /// [`First`] via `moonfield_time::time_update_system` (registered by
+    /// `TimePlugin`, driven by the `TimeUpdateStrategy` resource); tests drive
+    /// deterministic time through that strategy.
     pub fn update(&mut self) -> bool {
         if !self.initialized {
             self.startup();
@@ -475,7 +475,6 @@ impl App {
             return;
         }
         self.run_schedule(Shutdown);
-        moonfield_base::shutdown();
         self.initialized = false;
     }
 

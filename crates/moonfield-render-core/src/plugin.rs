@@ -16,8 +16,7 @@
 
 use crate::extract::extract_cameras;
 use crate::window::{
-    MAX_FRAMES_IN_FLIGHT, acquire_window_frames, create_window_surfaces, extract_windows,
-    submit_window_frames,
+    acquire_window_frames, create_window_surfaces, extract_windows, submit_window_frames,
 };
 use moonfield_app::{App, Plugin, Render, RenderPrepare};
 use moonfield_log::error;
@@ -33,10 +32,6 @@ impl Plugin for RenderPlugin {
     }
 
     fn build(&self, app: &mut App) {
-        // The retirement ring's depth must match this frame loop's
-        // frames-in-flight; a mismatch would drain a slot before its
-        // submission completed.
-        assert_eq!(MAX_FRAMES_IN_FLIGHT, moonfield_rhi::RETIRE_RING);
         app.add_extract_system(extract_cameras);
         app.add_extract_system(extract_windows);
         app.add_render_systems(RenderPrepare, create_window_surfaces);

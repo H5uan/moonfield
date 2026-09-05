@@ -36,7 +36,10 @@ use std::sync::Arc;
 
 /// Number of frames that may be in flight concurrently. Per-slot GPU
 /// resources (buffers, deferred frees) key off the frame slot index.
-pub const MAX_FRAMES_IN_FLIGHT: usize = 2;
+///
+/// Alias of [`moonfield_rhi::RETIRE_RING`]: the RHI owns the value so the
+/// retirement ring depth and the frame loop cannot drift apart.
+pub const MAX_FRAMES_IN_FLIGHT: usize = moonfield_rhi::RETIRE_RING;
 
 /// Per-frame snapshot of a main-world window, extracted into the render world.
 ///

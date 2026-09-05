@@ -1117,7 +1117,6 @@ dependencies = [
 name = "moonfield-app"
 version = "0.1.0"
 dependencies = [
- "moonfield-base",
  "moonfield-ecs",
  "moonfield-math",
  "moonfield-time",
@@ -1132,10 +1131,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "moonfield-base"
-version = "0.1.0"
-
-[[package]]
 name = "moonfield-camera"
 version = "0.1.0"
 dependencies = [
@@ -1148,9 +1143,7 @@ name = "moonfield-ecs"
 version = "0.1.0"
 dependencies = [
  "foldhash",
- "moonfield-base",
  "moonfield-math",
- "serde",
  "thiserror 2.0.20",
 ]
 
@@ -1307,7 +1300,6 @@ dependencies = [
  "moonfield-app",
  "moonfield-ecs",
  "moonfield-log",
- "moonfield-time",
  "moonfield-window",
  "raw-window-handle",
  "winit",

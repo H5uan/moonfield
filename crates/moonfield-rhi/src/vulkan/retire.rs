@@ -14,9 +14,9 @@ use ash::vk;
 use gpu_allocator::vulkan::{Allocation, Allocator};
 use std::sync::{Arc, Mutex};
 
-/// Retirement queue depth, in frame slots. Equal to the frame loop's
-/// frames-in-flight (render-core's `MAX_FRAMES_IN_FLIGHT`); render-core
-/// asserts the two match.
+/// Retirement queue depth, in frame slots. Also the frame loop's
+/// frames-in-flight: render-core's `MAX_FRAMES_IN_FLIGHT` aliases this
+/// constant, so the two can never drift.
 pub const RETIRE_RING: usize = 2;
 
 /// One atomic teardown step, executed at drain time. A resource's `Drop`

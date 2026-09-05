@@ -1,4 +1,0 @@
-[package]
-name = "moonfield-base"
-version.workspace = true
-edition.workspace = true

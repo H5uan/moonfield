@@ -4,7 +4,6 @@ version.workspace = true
 edition.workspace = true
 
 [dependencies]
-moonfield-base = { workspace = true }
 moonfield-ecs = { workspace = true }
 moonfield-time = { workspace = true }
 thiserror = { workspace = true }
