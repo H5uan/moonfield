@@ -25,6 +25,8 @@
 
 use egui::epaint::{ClippedPrimitive, ImageDelta, Primitive, TextureId};
 use egui::{TextureFilter, TextureOptions, TextureWrapMode};
+use moonfield_asset::{AssetRevision, Handle};
+use moonfield_render_feature::shader::{PipelineShader, PreparedShader, ShaderEntry};
 use moonfield_rhi::Memory;
 use moonfield_rhi::types::WrapMode;
 use moonfield_rhi::{
@@ -33,8 +35,8 @@ use moonfield_rhi::{
     Rect2d, RenderDevice, RootBinder, SamplerDesc, SamplerHandle, ShaderModule, Texture,
     TextureHandle,
 };
+use moonfield_shader::Shader;
 use std::collections::HashMap;
-use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
 
 /// Initial vertex buffer capacity, in vertices (egui-wgpu parity).
@@ -110,6 +112,37 @@ struct MeshDraw {
     index_count: u32,
 }
 
+/// The name keying the egui pipeline's shader in `PipelineShaders` /
+/// `PreparedShaders`.
+pub const EGUI_SHADER: &str = "egui";
+
+/// The egui pipeline's shader request: `egui.slang`, one vertex entry and
+/// both fragment entries (gamma vs. sRGB target), root binding reflected
+/// from `vs_main`. The fragment entries compile with the descriptor-heap
+/// capability (`ResourceDescriptorHeap[]` in the shader). The caller (the
+/// editor, at startup) supplies the loaded asset handle.
+pub fn egui_shader(shader: Handle<Shader>) -> PipelineShader {
+    PipelineShader {
+        pipeline: EGUI_SHADER,
+        shader,
+        reflect_entry: "vs_main",
+        entries: &[
+            ShaderEntry {
+                name: "vs_main",
+                capabilities: &[],
+            },
+            ShaderEntry {
+                name: "fs_gamma",
+                capabilities: &["spvDescriptorHeapEXT"],
+            },
+            ShaderEntry {
+                name: "fs_linear",
+                capabilities: &["spvDescriptorHeapEXT"],
+            },
+        ],
+    }
+}
+
 /// The egui graphics pipeline: a descriptor-heap pipeline (null layout, no
 /// set layouts, no push constant ranges) plus the shared heap and the sampler
 /// slot cache its textures draw from. `color_format` is the format of the
@@ -124,47 +157,42 @@ pub struct EguiPipeline {
     /// (samplers through its description cache).
     heap: Arc<DescriptorHeap>,
     options: EguiOptions,
+    /// The shader asset the pipeline was built from.
+    shader: Handle<Shader>,
+    /// The prepared-shader revision the pipeline was built from.
+    shader_revision: AssetRevision,
     /// Reserved for future paint callbacks; see [`CallbackResources`].
     pub callback_resources: CallbackResources,
 }
 
 impl EguiPipeline {
-    /// Compile the egui shaders and build the pipeline for `color_format`.
-    /// Compilation goes through the device's shared shader cache, so
-    /// repeated pipeline builds reuse the memoized artifacts.
+    /// Build the pipeline for `color_format` from a prepared shader
+    /// (compiled from the extracted asset by `prepare_shaders`).
     pub fn new(
         device: &Device,
+        shader: Handle<Shader>,
+        prepared: &PreparedShader,
         color_format: Format,
         srgb_framebuffer: bool,
         options: EguiOptions,
     ) -> Result<Self, String> {
-        let cache = device.shader_cache();
         let fragment_entry = if srgb_framebuffer {
             "fs_linear"
         } else {
             "fs_gamma"
         };
-        let vertex_compiled = cache
-            .compile_file(&egui_shader_path(), "vs_main", &[], &[])
-            .map_err(|e| e.to_string())?;
+        let entry = |name: &str| {
+            prepared
+                .entry(name)
+                .ok_or_else(|| format!("prepared egui shader is missing '{name}'"))
+        };
         let vertex_shader =
-            ShaderModule::from_compiled(device, &vertex_compiled).map_err(|e| e.to_string())?;
-        let fragment_compiled = cache
-            .compile_file(
-                &egui_shader_path(),
-                fragment_entry,
-                &["spvDescriptorHeapEXT"],
-                &[],
-            )
+            ShaderModule::from_compiled(device, entry("vs_main")?).map_err(|e| e.to_string())?;
+        let fragment_shader = ShaderModule::from_compiled(device, entry(fragment_entry)?)
             .map_err(|e| e.to_string())?;
-        let fragment_shader =
-            ShaderModule::from_compiled(device, &fragment_compiled).map_err(|e| e.to_string())?;
 
         // Reflect the entry point for the root blob and the layout guards.
-        let reflection = cache
-            .compile_file_reflection(&egui_shader_path(), "vs_main")
-            .map_err(|e| e.to_string())?;
-        let root = RootBinder::new(&reflection, "vs_main").map_err(|e| e.to_string())?;
+        let root = RootBinder::new(prepared.reflection(), "vs_main").map_err(|e| e.to_string())?;
         // Layout alignment guard: the Rust `EguiRoot` struct pushed as root
         // data must be exactly as large as the shader's reflected `uniform
         // EguiRoot`, so the two can never silently drift.
@@ -186,7 +214,6 @@ impl EguiPipeline {
                     .to_string(),
             );
         }
-        drop(reflection);
         // Descriptor-heap pipeline: null layout, no set layouts, no push
         // constant ranges, no bindings. The fragment shader reads the texture
         // and sampler straight from the untyped descriptor heaps at the slot
@@ -204,6 +231,8 @@ impl EguiPipeline {
             pipeline,
             heap: device.descriptor_heap(),
             options,
+            shader,
+            shader_revision: prepared.revision(),
             callback_resources: CallbackResources { _private: () },
         })
     }
@@ -212,6 +241,16 @@ impl EguiPipeline {
     /// mirrors them every draw).
     pub fn options(&self) -> &EguiOptions {
         &self.options
+    }
+
+    /// The shader asset the pipeline was built from.
+    pub fn shader(&self) -> Handle<Shader> {
+        self.shader
+    }
+
+    /// The prepared-shader revision the pipeline was built from.
+    pub fn shader_revision(&self) -> AssetRevision {
+        self.shader_revision
     }
 
     /// The descriptor-heap slot of the sampler for the given egui options
@@ -684,19 +723,4 @@ fn clip_rect_to_scissor(
             height: height as u32,
         },
     })
-}
-
-/// The egui shader file (`<repo root>/assets/shaders/egui.slang`), ported
-/// from egui-wgpu's `egui.wgsl` (0.36): one Slang module with one vertex
-/// entry and two fragment entries (gamma vs. sRGB target), all resources
-/// sourced from the descriptor heaps and push data.
-///
-/// `CARGO_MANIFEST_DIR` is a compile-time absolute path, so the file resolves
-/// whichever directory the process runs from.
-fn egui_shader_path() -> String {
-    PathBuf::from(env!("CARGO_MANIFEST_DIR"))
-        .join("../../assets/shaders")
-        .join("egui.slang")
-        .to_string_lossy()
-        .into_owned()
 }

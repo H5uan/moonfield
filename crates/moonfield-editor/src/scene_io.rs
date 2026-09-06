@@ -5,9 +5,11 @@
 //! - **Asset loading.** [`GltfLoader`] is the `.gltf`/`.glb` [`AssetLoader`].
 //!   It produces [`Mesh`] assets by default and also dispatches
 //!   `KHR_gaussian_splatting` files when the `splat` feature is enabled.
-//!   [`editor_asset_server`] bundles it into the `AssetServer` resource.
-//!   [`load_asset`] routes a path through that server (path-deduped) and
-//!   spawns an entity holding the right handle component
+//!   [`editor_asset_server`] bundles it with the `SlangLoader` (`.slang` →
+//!   `Shader` assets) into the `AssetServer` resource;
+//!   [`load_pipeline_shaders`] eagerly loads the built-in pipelines' shaders
+//!   through it at startup. [`load_asset`] routes a path through that server
+//!   (path-deduped) and spawns an entity holding the right handle component
 //!   (`SplatCloudHandle` or [`MeshRenderer`]).
 //! - **Scene save/load.** [`editor_scene_registry`] builds the
 //!   `SceneRegistry` resource the hierarchy panel's Save/Load buttons run
@@ -21,10 +23,15 @@ use std::path::{Path, PathBuf};
 use moonfield_asset::{AssetError, AssetLoader, AssetServer, Assets, Handle};
 use moonfield_ecs::{Entity, Name, Template, TemplateContext, TemplateError, World};
 use moonfield_math::Transform;
+use moonfield_render_feature::core_3d::pass::core_3d_shader;
 use moonfield_render_feature::mesh::{Mesh, MeshHandle, MeshRenderer};
+use moonfield_render_feature::shader::{PipelineShader, PipelineShaders};
 #[cfg(feature = "splat")]
 use moonfield_render_feature::splat::cloud::{SplatCloud, SplatCloudHandle};
 use moonfield_scene::{HandleTemplate, NAME, SceneError, SceneRegistry, SceneTemplate};
+use moonfield_shader::{Shader, SlangLoader};
+
+use crate::egui_vk::egui_shader;
 
 /// The color a mesh entity gets when it is created from a file: fresh
 /// `load_asset` spawns and scene-file loads (the path-string entry does not
@@ -77,11 +84,55 @@ impl AssetLoader for GltfLoader {
     }
 }
 
-/// The editor's asset server for glTF mesh assets and optional splat assets.
+/// The editor's asset server for glTF mesh assets, optional splat assets,
+/// and `.slang` shader assets.
 pub fn editor_asset_server() -> AssetServer {
     let mut server = AssetServer::default();
     server.register_loader(GltfLoader);
+    server.register_loader(SlangLoader);
     server
+}
+
+/// Eagerly load the built-in pipelines' shaders (`core_3d.slang`,
+/// `egui.slang`) through the asset server and register their pipeline
+/// requests, so the passes find prepared shaders from the first frame —
+/// matching the previous compile-at-pipeline-creation behavior. Loading is
+/// synchronous; failures are logged and the affected pass skips until its
+/// shader prepares.
+///
+/// The shader directory resolves through `CARGO_MANIFEST_DIR`, the same
+/// convention as the editor's default-scene mesh (`main.rs`'s
+/// `default_mesh_path`): path selection belongs to the app wiring, not to
+/// the pipelines.
+pub fn load_pipeline_shaders(world: &mut World) {
+    if !world.contains_resource::<AssetServer>() {
+        world.insert_resource(editor_asset_server());
+    }
+    if !world.contains_resource::<Assets<Shader>>() {
+        world.insert_resource(Assets::<Shader>::default());
+    }
+    if !world.contains_resource::<PipelineShaders>() {
+        world.insert_resource(PipelineShaders::default());
+    }
+    let shader_dir = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../assets/shaders");
+    load_pipeline_shader(world, &shader_dir.join("core_3d.slang"), core_3d_shader);
+    load_pipeline_shader(world, &shader_dir.join("egui.slang"), egui_shader);
+}
+
+/// Load one pipeline shader through the asset server and register its
+/// request.
+fn load_pipeline_shader(
+    world: &mut World,
+    path: &Path,
+    request: fn(Handle<Shader>) -> PipelineShader,
+) {
+    match load_with_server::<Shader>(world, path) {
+        Ok(handle) => world
+            .get_resource_mut::<PipelineShaders>()
+            .expect("PipelineShaders was just ensured")
+            .push(request(handle)),
+        Err(e) => moonfield_log::error!("failed to load shader {}: {e}", path.display()),
+    }
 }
 
 fn name_save(world: &World, entity: Entity) -> Option<serde_json::Value> {

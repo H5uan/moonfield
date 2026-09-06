@@ -8,13 +8,17 @@
 //! registration refreshes with the new handles. Skips gracefully on machines
 //! without a Vulkan driver.
 
+use moonfield_asset::Assets;
 use moonfield_editor::egui_vk::{
-    EguiFrameResources, EguiOptions, EguiPipeline, EguiTextures, record_egui,
+    EGUI_SHADER, EguiFrameResources, EguiOptions, EguiPipeline, EguiTextures, egui_shader,
+    record_egui,
 };
+use moonfield_render_feature::shader::{ExtractedShader, PreparedShaders};
 use moonfield_rhi::{
     AttachmentLayout, ClearValue, CommandBufferUsage, CommandPool, Format, LoadOp, OffscreenTarget,
     Rect2d, RenderAttachment, RenderDevice, RenderPassDesc, StoreOp,
 };
+use moonfield_shader::Shader;
 
 const WIDTH: u32 = 256;
 const HEIGHT: u32 = 256;
@@ -38,8 +42,35 @@ fn egui_headless_frame_is_not_blank() {
     let mut user_image =
         OffscreenTarget::new(&device, 8, 8, Format::B8G8R8A8Unorm).expect("user image");
 
+    // Compile the repository's `egui.slang` through the prepared-shader
+    // path (Slang compilation needs no device) — the same asset the editor
+    // loads through its asset server at startup.
+    let mut shaders = Assets::<Shader>::default();
+    let shader_path = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+        .join("../../assets/shaders/egui.slang");
+    let shader = shaders.add(Shader::new(
+        std::fs::read_to_string(&shader_path).expect("egui.slang"),
+        shader_path.display().to_string(),
+    ));
+    let revision = shaders.revision(&shader).expect("shader revision");
+    let mut prepared = PreparedShaders::default();
+    prepared.compile(
+        &egui_shader(shader),
+        &ExtractedShader {
+            revision,
+            shader: shaders.get(&shader).expect("shader").clone(),
+        },
+    );
+    let prepared_shader = prepared.get(EGUI_SHADER).unwrap_or_else(|| {
+        panic!(
+            "egui shader failed to compile: {}",
+            prepared.error(EGUI_SHADER).unwrap_or("no record")
+        )
+    });
     let pipeline = EguiPipeline::new(
         &device,
+        shader,
+        prepared_shader,
         Format::B8G8R8A8Unorm,
         false,
         EguiOptions::default(),

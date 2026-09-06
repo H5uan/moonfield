@@ -6,12 +6,14 @@ use moonfield_render_core::{DrawFunctions, extract_with_transform};
 
 use crate::mesh::{Mesh, MeshRenderer, PreparedGpuMeshes, extract_mesh_assets, prepare_meshes};
 use crate::render_phase::{DrawMesh, Opaque3d, Opaque3dDrawFunction, queue_opaque_3d};
+use crate::shader::{PipelineShaders, PreparedShaders, extract_shader_assets, prepare_shaders};
 #[cfg(feature = "splat")]
 use crate::splat::cloud::SplatCloud;
 
 /// Registers the renderer's ECS surface: the `Assets` stores entities
-/// reference through `MeshRenderer` / `SplatCloudHandle`, and the per-frame
-/// extraction of those components into the render world.
+/// reference through `MeshRenderer` / `SplatCloudHandle`, the shader-asset
+/// pipeline (`PipelineShaders` requests → extraction → `PreparedShaders`),
+/// and the per-frame extraction of those components into the render world.
 pub struct RenderFeaturePlugin;
 
 impl Plugin for RenderFeaturePlugin {
@@ -23,19 +25,24 @@ impl Plugin for RenderFeaturePlugin {
         app.insert_resource(moonfield_asset::Assets::<Mesh>::default());
         #[cfg(feature = "splat")]
         app.insert_resource(moonfield_asset::Assets::<SplatCloud>::default());
+        app.insert_resource(moonfield_asset::Assets::<moonfield_shader::Shader>::default());
+        app.insert_resource(PipelineShaders::default());
 
         app.add_extract_system(extract_mesh_assets);
+        app.add_extract_system(extract_shader_assets);
         app.add_extract_system(extract_with_transform::<MeshRenderer>);
         app.render_world_mut()
             .insert_resource(crate::core_3d::Core3dFrame::default());
         app.render_world_mut()
             .insert_resource(PreparedGpuMeshes::default());
+        app.render_world_mut()
+            .insert_resource(PreparedShaders::default());
         let mut draw_functions = DrawFunctions::<Opaque3d>::default();
         let opaque_draw = draw_functions.register(DrawMesh);
         app.render_world_mut().insert_resource(draw_functions);
         app.render_world_mut()
             .insert_resource(Opaque3dDrawFunction(opaque_draw));
-        app.add_render_systems(RenderPrepare, prepare_meshes);
+        app.add_render_systems(RenderPrepare, (prepare_meshes, prepare_shaders));
         app.add_render_systems(RenderQueue, crate::core_3d::prepare_core_3d_frame);
         app.add_render_systems(
             RenderQueue,
@@ -67,7 +74,19 @@ mod tests {
             app.world()
                 .contains_resource::<moonfield_asset::Assets<Mesh>>()
         );
+        assert!(
+            app.world()
+                .contains_resource::<moonfield_asset::Assets<moonfield_shader::Shader>>()
+        );
+        assert!(
+            app.world()
+                .contains_resource::<crate::shader::PipelineShaders>()
+        );
         assert!(app.render_world().contains_resource::<PreparedGpuMeshes>());
+        assert!(
+            app.render_world()
+                .contains_resource::<crate::shader::PreparedShaders>()
+        );
         #[cfg(feature = "splat")]
         assert!(
             app.world()

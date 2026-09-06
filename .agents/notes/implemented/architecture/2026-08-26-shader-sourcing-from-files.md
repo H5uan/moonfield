@@ -20,18 +20,15 @@ asset layout, and force every minor shader tweak through a Rust recompile.
 Production shaders now live as Slang files under the repository's asset
 directory, `<repo root>/assets/shaders/`:
 
-- `core_3d_vs.slang` / `core_3d_fs.slang` — the core 3D pass (entry `main`).
+- `core_3d.slang` — the core 3D pass, one module with `vs_main` / `fs_main`.
 - `egui.slang` — the egui backend, one module with `vs_main` and the
   `fs_gamma` / `fs_linear` fragment entries.
 
-`Core3dPipeline::new` and `EguiPipeline::new` compile with
-`Compiler::compile_file_to_spirv` instead of the inline-string path. File paths
-resolve through `env!("CARGO_MANIFEST_DIR")` joined with `../../assets/shaders`
-(a small local `shader_path` helper in each crate), matching the editor's
-existing `teapot.glb` convention — the process's working directory no longer
-matters, so `cargo run` from the workspace root and `cargo test` from a crate
-directory both work. The old compiler module names (`core_3d_vs`, `core_3d_fs`,
-`egui_vk`) now come from the file paths.
+The pipelines no longer locate or compile the files themselves: both shaders
+are `Shader` assets loaded through the asset layer and compiled into
+revision-matched prepared artifacts in the render world — see
+[Shaders as assets with render-world prepared compilation](2026-09-06-shader-as-asset.md).
+The compiler's module names come from the file paths.
 
 `compile_source_to_spirv` stays in the RHI: the headless/offscreen triangle
 tests, the bindless compute tests, and the `headless_triangle` example keep
@@ -53,8 +50,9 @@ their shaders inline so each test stays self-contained.
 
 - Shader edits are plain file edits: no Rust rebuild, and the diff shows the
   shader itself rather than a string-constant wrapper.
-- The editor and render-feature crates now depend at a compile-baked path on
-  the repository layout `<repo root>/assets/shaders/`; moving that directory
-  requires touching both `shader_path` helpers.
+- The editor's startup shader load resolves the repository layout
+  `<repo root>/assets/shaders/` through a compile-baked path (the same
+  convention as the default-scene mesh); the pipelines themselves are
+  path-free.
 - Test and example shaders (RHI tests, `headless_triangle`) remain inline by
   design, so `Contract`-style self-containment of each GPU test is preserved.

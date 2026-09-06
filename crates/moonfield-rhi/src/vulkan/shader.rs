@@ -229,14 +229,42 @@ impl ShaderCache {
             capabilities: Vec::new(),
             defines: Vec::new(),
         };
+        self.get_or_reflect(key, |compiler, key| {
+            compiler.compile_file_to_reflection(&key.module_name, &key.entry_point)
+        })
+    }
+
+    /// Compile in-memory source and return its reflection, memoized by the
+    /// source text and entry point — the source-text counterpart of
+    /// [`compile_file_reflection`](Self::compile_file_reflection).
+    pub fn compile_source_reflection(
+        &self,
+        module_name: &str,
+        source: &str,
+        entry_point: &str,
+    ) -> RenderResult<std::sync::Arc<Reflection>> {
+        let key = ShaderCacheKey {
+            module_name: module_name.to_string(),
+            source: source.to_string(),
+            entry_point: entry_point.to_string(),
+            capabilities: Vec::new(),
+            defines: Vec::new(),
+        };
+        self.get_or_reflect(key, |compiler, key| {
+            compiler.compile_source_to_reflection(&key.module_name, &key.source, &key.entry_point)
+        })
+    }
+
+    fn get_or_reflect(
+        &self,
+        key: ShaderCacheKey,
+        reflect: impl FnOnce(&Compiler, &ShaderCacheKey) -> RenderResult<Reflection>,
+    ) -> RenderResult<std::sync::Arc<Reflection>> {
         let mut reflections = self.reflections.lock().unwrap_or_else(|e| e.into_inner());
         if let Some(reflection) = reflections.get(&key) {
             return Ok(std::sync::Arc::clone(reflection));
         }
-        let reflection = std::sync::Arc::new(
-            self.compiler
-                .compile_file_to_reflection(&key.module_name, &key.entry_point)?,
-        );
+        let reflection = std::sync::Arc::new(reflect(&self.compiler, &key)?);
         reflections.insert(key, std::sync::Arc::clone(&reflection));
         Ok(reflection)
     }

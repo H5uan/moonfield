@@ -1,0 +1,7 @@
+[package]
+name = "moonfield-shader"
+version.workspace = true
+edition.workspace = true
+
+[dependencies]
+moonfield-asset = { workspace = true }

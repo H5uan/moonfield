@@ -32,6 +32,8 @@ moonfield-render-core/ # Selene — the render engine layer (extraction, view ta
 moonfield-render-feature/ # Lunaris — high-level render features (mesh/splat/rt/gi) and Core3d phases;
                     # Mesh + SplatCloud assets, glTF import (incl. KHR_gaussian_splatting)
 moonfield-scene/    # BSN-miniature scene save/load: ResolvedScene + SceneRegistry, glTF 2.0 JSON carrier
+moonfield-shader/   # The Shader asset (Slang source text + path) and its .slang AssetLoader;
+                    # compilation/reflection stay in the rhi
 moonfield-time/     # Time<Real>/Time<Virtual>/Time<Fixed>/Time clocks + run_fixed_main_schedule;
                     # TimePlugin (moonfield-app) advances them via a First-schedule system
 moonfield-window/   # Abstract windowing types (Window components, KeyCode/MouseButton mirrors, InputState)

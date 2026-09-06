@@ -256,8 +256,9 @@ the editor; swapping windowing backends means rewriting the editor's egui glue.
 the Vulkan RHI. Camera extraction in `moonfield-render-core` produces `ExtractedView`
 from `Camera` + `GlobalTransform` + `MainEntity`; an optional `CameraTarget`
 selects the primary window or editor viewport without changing serialized
-camera fields. `RenderFeaturePlugin` prepares revision-matched GPU meshes in
-`RenderPrepare` and rebuilds `Core3dFrame` in `RenderQueue` every render tick.
+camera fields. `RenderFeaturePlugin` prepares revision-matched GPU meshes and compiles
+pipeline shaders in `RenderPrepare` and rebuilds `Core3dFrame` in
+`RenderQueue` every render tick.
 Each `Core3dView`
 owns a front-to-back `RenderPhase<Opaque3d>`; the mesh feature's
 `queue_opaque_3d` fills it with live-mesh items and registers `DrawMesh` in the
@@ -375,6 +376,25 @@ panel loads assets through a path field + Load button routed through the
 reuses the asset slot), and the loaded entity appears in the tree named
 after the file — mesh entities carry `MeshRenderer` in `DEFAULT_MESH_COLOR`.
 Training/optimizer state stays outside the `World`.
+
+Shaders are assets too. `moonfield-shader`'s `Shader` carries a Slang
+module's source text plus the path it was loaded from, and its `SlangLoader`
+serves `.slang` files through the `AssetServer`; the asset never touches
+compilation — entry points are discovered by Slang reflection at compile
+time. A pipeline declares its shader needs as a `PipelineShader` request
+(the asset handle, the entry points with their capabilities, and the entry
+whose reflection drives root binding) in the main-world `PipelineShaders`
+resource, populated by whoever loads the shader assets — the editor loads
+`core_3d.slang` and `egui.slang` at startup. `extract_shader_assets` copies
+the requested shaders (revision-matched, into `ExtractedShaders`) and the
+requests into the render world; `prepare_shaders` (`RenderPrepare`) compiles
+each request whose asset revision advanced, from the extracted source
+through the render-world `PreparedShaders` resource (which owns the shared
+`ShaderCache`). A failed compile is recorded for the new revision — broken
+source is not retried every frame — and the pass keeps running the pipeline
+it already built. Passes (re)build their pipeline when their prepared
+shader's revision advances, and skip with a one-shot log while it isn't
+ready.
 
 ## Scenes and templates
 

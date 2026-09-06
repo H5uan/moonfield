@@ -19,5 +19,6 @@ moonfield-math = { workspace = true }
 moonfield-reflect = { workspace = true }
 moonfield-rhi = { workspace = true }
 moonfield-render-core = { workspace = true }
+moonfield-shader = { workspace = true }
 serde_json = { workspace = true }
 thiserror = { workspace = true }

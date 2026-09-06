@@ -35,11 +35,12 @@ use moonfield_app::prelude::{IntoSystemConfigs, PreRender, Render, World};
 use moonfield_app::{App, Plugin};
 use moonfield_camera::{PrimaryCamera, RenderTarget};
 use moonfield_ecs::{MessageCursor, Messages, ensure_global_transforms};
-use moonfield_log::error;
+use moonfield_log::{error, error_once};
 use moonfield_render_core::{
     FrameContext, MAX_FRAMES_IN_FLIGHT, ViewTargets, WindowFrameDemand, WindowSurfaces,
 };
 use moonfield_render_feature::core_3d::pass::RenderTargetSizes;
+use moonfield_render_feature::shader::{PipelineShaders, PreparedShaders};
 use moonfield_rhi::{
     AttachmentLayout, ClearValue, LoadOp, Rect2d, RenderAttachment, RenderDevice, RenderPassDesc,
     SamplerHandle, StoreOp, TextureHandle,
@@ -81,6 +82,9 @@ impl Plugin for EditorPlugin {
         // backs the hierarchy panel's Save/Load buttons.
         app.insert_resource(scene_io::editor_asset_server());
         app.insert_resource(scene_io::editor_scene_registry());
+        // The built-in pipelines' shaders load eagerly so the passes find
+        // prepared shaders from the first frame.
+        scene_io::load_pipeline_shaders(app.world_mut());
         app.add_extract_system(extract_editor_frame);
         app.add_systems(PreRender, editor_prepare.before(&ensure_global_transforms));
         app.add_render_systems(
@@ -468,16 +472,64 @@ fn prepare_egui_frame(world: &mut World) {
         return;
     };
 
-    if !world.contains_resource::<egui_vk::EguiPipeline>() {
-        match egui_vk::EguiPipeline::new(
-            &device,
-            color_format,
-            srgb_framebuffer,
-            egui_vk::EguiOptions::default(),
-        ) {
-            Ok(pipeline) => world.insert_resource(pipeline),
-            Err(e) => {
-                error!("failed to create egui pipeline: {e}");
+    // (Re)build the egui pipeline when its prepared shader advanced past the
+    // one the pipeline was built from. While the shader is not ready (never
+    // compiled, or the latest compile failed) the pass keeps the pipeline it
+    // has, or skips with a one-shot log.
+    let egui_built = {
+        let Some(requests) = world.get_resource::<PipelineShaders>() else {
+            error_once!("no pipeline shaders registered; skipping the egui pass");
+            return;
+        };
+        let Some(request) = requests.get(egui_vk::EGUI_SHADER).copied() else {
+            error_once!("the egui shader is not registered; skipping the egui pass");
+            return;
+        };
+        let Some(prepared) = world.get_resource::<PreparedShaders>() else {
+            return;
+        };
+        match prepared.get(egui_vk::EGUI_SHADER) {
+            Some(shader) => {
+                let stale = world
+                    .get_resource::<egui_vk::EguiPipeline>()
+                    .is_none_or(|pipeline| {
+                        pipeline.shader() != request.shader
+                            || pipeline.shader_revision() != shader.revision()
+                    });
+                if stale {
+                    Some(egui_vk::EguiPipeline::new(
+                        &device,
+                        request.shader,
+                        shader,
+                        color_format,
+                        srgb_framebuffer,
+                        egui_vk::EguiOptions::default(),
+                    ))
+                } else {
+                    None
+                }
+            }
+            None => {
+                if !world.contains_resource::<egui_vk::EguiPipeline>() {
+                    error_once!("the egui shader is not ready; skipping the egui pass");
+                    return;
+                }
+                None
+            }
+        }
+    };
+    match egui_built {
+        Some(Ok(pipeline)) => {
+            world.insert_resource(pipeline);
+        }
+        Some(Err(e)) => {
+            error!("failed to create egui pipeline: {e}");
+            if !world.contains_resource::<egui_vk::EguiPipeline>() {
+                return;
+            }
+        }
+        None => {
+            if !world.contains_resource::<egui_vk::EguiPipeline>() {
                 return;
             }
         }
@@ -762,6 +814,30 @@ mod tests {
         let feedback = channel.take().expect("feedback published");
         assert_eq!(feedback.frames_rendered, 3);
         assert!(channel.take().is_none());
+    }
+
+    /// EditorPlugin eagerly loads the built-in pipelines' shaders and
+    /// registers their requests (synchronous file reads, no GPU).
+    #[test]
+    fn test_editor_plugin_loads_pipeline_shaders() {
+        let mut app = App::new();
+        app.add_plugin(EditorPlugin);
+
+        let shaders = app
+            .world()
+            .get_resource::<moonfield_asset::Assets<moonfield_shader::Shader>>()
+            .expect("Assets<Shader>");
+        assert_eq!(shaders.len(), 2);
+        let requests = app
+            .world()
+            .get_resource::<moonfield_render_feature::shader::PipelineShaders>()
+            .expect("PipelineShaders");
+        assert!(
+            requests
+                .get(moonfield_render_feature::core_3d::pass::CORE_3D_SHADER)
+                .is_some()
+        );
+        assert!(requests.get(crate::egui_vk::EGUI_SHADER).is_some());
     }
 
     /// Without a window (no `WinitWindow`) or a render device, extraction and

@@ -20,6 +20,7 @@ moonfield-rhi = { workspace = true }
 moonfield-render-core = { workspace = true }
 moonfield-render-feature = { workspace = true, features = ["mesh"] }
 moonfield-scene = { workspace = true }
+moonfield-shader = { workspace = true }
 moonfield-window = { workspace = true }
 moonfield-winit = { workspace = true }
 bytemuck = { workspace = true }

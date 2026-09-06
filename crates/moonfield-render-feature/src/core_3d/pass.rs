@@ -18,67 +18,61 @@
 //! a dim background color.
 
 use moonfield_app::prelude::World;
+use moonfield_asset::{AssetRevision, Handle};
 use moonfield_camera::RenderTarget;
 use moonfield_log::{error, error_once, info};
 use moonfield_render_core::{FrameContext, ViewTargets, WindowSurfaces};
 use moonfield_rhi::{
     AttachmentLayout, ClearValue, CommandBuffer, CompareOp, CullMode, CullState, DepthState,
     Format, FrontFace, GraphicsPipeline, LoadOp, Rect2d, RenderAttachment, RenderDevice,
-    RenderPassDesc, Result, RootBinder, RootParamPlace, ShaderCache, ShaderModule, StoreOp,
-    TextureView, Viewport,
+    RenderPassDesc, Result, RootBinder, RootParamPlace, ShaderModule, StoreOp, TextureView,
+    Viewport,
 };
+use moonfield_shader::Shader;
 use std::collections::HashMap;
-use std::path::PathBuf;
 
 use moonfield_render_core::{DrawFunctions, PhaseItem};
 
 use super::{Core3dFrame, Core3dView};
 use crate::render_phase::{FrameDrawArena, Opaque3d, ViewUniforms};
+use crate::shader::{
+    PipelineShader, PipelineShaders, PreparedShader, PreparedShaders, ShaderEntry,
+};
 
 /// Initial offscreen target size; consumers (e.g. the editor's viewport
 /// panel) report real sizes through [`RenderTargetSizes`].
 pub(crate) const INITIAL_WIDTH: u32 = 1280;
 pub(crate) const INITIAL_HEIGHT: u32 = 720;
 
-/// Resolve a repository shader file under `<repo root>/assets/shaders/`.
-///
-/// `CARGO_MANIFEST_DIR` is a compile-time absolute path, so the file resolves
-/// whichever directory the process runs from (`cargo run` from the workspace
-/// root, `cargo test` from a crate directory).
-fn shader_path(name: &str) -> String {
-    PathBuf::from(env!("CARGO_MANIFEST_DIR"))
-        .join("../../assets/shaders")
-        .join(name)
-        .to_string_lossy()
-        .into_owned()
-}
+/// The name keying the core 3D pipeline's shader in [`PipelineShaders`] and
+/// [`PreparedShaders`].
+pub const CORE_3D_SHADER: &str = "core_3d";
 
-/// Compile both stages of `core_3d.slang` and resolve the
-/// `Ptr<DrawData>` / `Ptr<ViewUniforms>` root placements from the reflected
-/// entry points — the shader is the single source of truth for both.
-/// Compilation goes through the device's shared shader cache, so repeated
-/// pipeline builds reuse the memoized artifacts.
-fn compile_core_3d(
-    cache: &ShaderCache,
-    device: &moonfield_rhi::Device,
-) -> Result<(ShaderModule, ShaderModule, RootParamPlace, RootParamPlace)> {
-    let path = shader_path("core_3d.slang");
-    let reflection = cache.compile_file_reflection(&path, "vs_main")?;
-    let binder = RootBinder::new(&reflection, "vs_main")?;
-    let root = binder.pointer_param("root")?;
-    let view = binder.pointer_param("view")?;
-
-    let vertex_compiled = cache.compile_file(&path, "vs_main", &[], &[])?;
-    let vertex_shader = ShaderModule::from_compiled(device, &vertex_compiled)?;
-    let fragment_compiled = cache.compile_file(&path, "fs_main", &[], &[])?;
-    let fragment_shader = ShaderModule::from_compiled(device, &fragment_compiled)?;
-    Ok((vertex_shader, fragment_shader, root, view))
+/// The core 3D pipeline's shader request: `core_3d.slang`, a vertex and a
+/// fragment entry, root binding reflected from `vs_main`. The caller (the
+/// editor, at startup) supplies the loaded asset handle.
+pub fn core_3d_shader(shader: Handle<Shader>) -> PipelineShader {
+    PipelineShader {
+        pipeline: CORE_3D_SHADER,
+        shader,
+        reflect_entry: "vs_main",
+        entries: &[
+            ShaderEntry {
+                name: "vs_main",
+                capabilities: &[],
+            },
+            ShaderEntry {
+                name: "fs_main",
+                capabilities: &[],
+            },
+        ],
+    }
 }
 
 /// The flat-lit mesh pipeline of the core 3D pass, as a render-world
-/// resource (lazily created by [`main_opaque_pass_3d`] from the
-/// [`RenderDevice`], the plain-data counterpart of Bevy's
-/// `init_gpu_resource`).
+/// resource. [`main_opaque_pass_3d`] (re)builds it from [`PreparedShaders`]
+/// whenever the prepared shader's revision advances past the one the
+/// pipeline was built from.
 pub struct Core3dPipeline {
     pipeline: GraphicsPipeline,
     /// The `Ptr<DrawData>` root's reflected placement. A draw encodes the
@@ -88,14 +82,33 @@ pub struct Core3dPipeline {
     /// The `Ptr<ViewUniforms>` root's reflected placement; the pass pushes
     /// its address once per pass.
     view: RootParamPlace,
+    /// The shader asset the pipeline was built from.
+    shader: Handle<Shader>,
+    /// The prepared-shader revision the pipeline was built from.
+    shader_revision: AssetRevision,
 }
 
 impl Core3dPipeline {
-    /// Compile the shaders and build the pipeline for the view-target format.
-    pub fn new(render_device: &RenderDevice) -> Result<Self> {
+    /// Build the pipeline for the view-target format from a prepared shader
+    /// (compiled from the extracted asset by `prepare_shaders`).
+    pub fn new(
+        render_device: &RenderDevice,
+        shader: Handle<Shader>,
+        prepared: &PreparedShader,
+    ) -> Result<Self> {
         let device = render_device.device();
-        let cache = device.shader_cache();
-        let (vertex_shader, fragment_shader, root, view) = compile_core_3d(&cache, device)?;
+        let binder = RootBinder::new(prepared.reflection(), "vs_main")?;
+        let root = binder.pointer_param("root")?;
+        let view = binder.pointer_param("view")?;
+        let entry = |name: &str| {
+            prepared.entry(name).ok_or_else(|| {
+                moonfield_rhi::Error::Backend(format!(
+                    "prepared core 3d shader is missing '{name}'"
+                ))
+            })
+        };
+        let vertex_shader = ShaderModule::from_compiled(device, entry("vs_main")?)?;
+        let fragment_shader = ShaderModule::from_compiled(device, entry("fs_main")?)?;
         // Descriptor-heap pipeline: per-draw root pointers go through `push_data`.
         let pipeline = GraphicsPipeline::new_with_options(
             device,
@@ -108,6 +121,8 @@ impl Core3dPipeline {
             pipeline,
             root,
             view,
+            shader,
+            shader_revision: prepared.revision(),
         })
     }
 
@@ -324,14 +339,60 @@ pub fn main_opaque_pass_3d(world: &mut World) {
             Err(e) => error!("failed to create frame draw arena: {e}"),
         }
     }
-    if !world.contains_resource::<Core3dPipeline>() {
-        let Some(render_device) = world.get_resource::<RenderDevice>().map(|d| (*d).clone()) else {
-            return;
-        };
-        match Core3dPipeline::new(&render_device) {
-            Ok(pipeline) => world.insert_resource(pipeline),
-            Err(e) => {
-                error!("failed to create core 3d pipeline: {e}");
+
+    // (Re)build the pipeline when its prepared shader advanced past the one
+    // the pipeline was built from. While the shader is not ready (never
+    // compiled, or the latest compile failed) the pass keeps the pipeline it
+    // has, or skips with a one-shot log.
+    let request = world
+        .get_resource::<PipelineShaders>()
+        .and_then(|requests| requests.get(CORE_3D_SHADER).copied());
+    let Some(request) = request else {
+        error_once!("no '{CORE_3D_SHADER}' shader registered; skipping the core 3d pass");
+        return;
+    };
+    let built = {
+        let prepared = world
+            .get_resource::<PreparedShaders>()
+            .expect("PreparedShaders registered by RenderFeaturePlugin");
+        match prepared.get(CORE_3D_SHADER) {
+            Some(shader) => {
+                let stale = world
+                    .get_resource::<Core3dPipeline>()
+                    .is_none_or(|pipeline| {
+                        pipeline.shader != request.shader
+                            || pipeline.shader_revision != shader.revision()
+                    });
+                if !stale {
+                    None
+                } else {
+                    let render_device = world.get_resource::<RenderDevice>().map(|d| (*d).clone());
+                    render_device.map(|render_device| {
+                        Core3dPipeline::new(&render_device, request.shader, shader)
+                    })
+                }
+            }
+            None => {
+                if !world.contains_resource::<Core3dPipeline>() {
+                    error_once!("the core 3d shader is not ready; skipping the core 3d pass");
+                    return;
+                }
+                None
+            }
+        }
+    };
+    match built {
+        Some(Ok(pipeline)) => {
+            world.insert_resource(pipeline);
+        }
+        Some(Err(e)) => {
+            error!("failed to build core 3d pipeline: {e}");
+            if !world.contains_resource::<Core3dPipeline>() {
+                return;
+            }
+        }
+        None => {
+            if !world.contains_resource::<Core3dPipeline>() {
                 return;
             }
         }
@@ -432,6 +493,7 @@ pub fn main_opaque_pass_3d(world: &mut World) {
 mod tests {
     use super::*;
     use crate::mesh::{Mesh, MeshHandle, MeshRenderer};
+    use crate::shader::PipelineShaders;
     use moonfield_app::App;
     use moonfield_asset::Assets;
     use moonfield_camera::{Camera, PrimaryCamera};
@@ -446,6 +508,14 @@ mod tests {
         [-0.5, 0.5, 0.0],
     ];
     const TEST_QUAD_INDICES: &[u32] = &[0, 3, 2, 2, 1, 0];
+
+    /// The repository's `core_3d.slang` source — the same file the editor
+    /// loads through the asset server at startup.
+    fn core_3d_source() -> String {
+        let path = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .join("../../assets/shaders/core_3d.slang");
+        std::fs::read_to_string(path).expect("core_3d.slang")
+    }
 
     /// A headless Vulkan device, or `None` (test skips) when no driver is
     /// available. GPU tests hold `GPU_LOCK` for their whole body.
@@ -468,10 +538,18 @@ mod tests {
         app.render_world_mut()
             .insert_resource(render_device.clone());
         app.add_plugin(crate::RenderFeaturePlugin);
-        // The draw function reads the pipeline from the render world; insert
-        // after `RenderDevice` so LIFO teardown destroys it first.
-        app.render_world_mut()
-            .insert_resource(Core3dPipeline::new(render_device).expect("pipeline"));
+        // The pass builds the pipeline during `render()` from the prepared
+        // shader: register the shader asset and the pipeline's request in
+        // the main world, like the editor's startup load does.
+        let shader = app
+            .world()
+            .get_resource_mut::<Assets<Shader>>()
+            .expect("Assets<Shader> registered by RenderFeaturePlugin")
+            .add(Shader::new(core_3d_source(), "core_3d.slang".into()));
+        app.world()
+            .get_resource_mut::<PipelineShaders>()
+            .expect("PipelineShaders registered by RenderFeaturePlugin")
+            .push(core_3d_shader(shader));
         // The draw function allocates per-draw root data from this arena; the
         // test drives slot 0 manually (no window frame loop in headless mode).
         app.render_world_mut()

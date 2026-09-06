@@ -9,6 +9,8 @@
 //! - `splat` — 3D Gaussian splatting: scene representation,
 //!   `KHR_gaussian_splatting` glTF / COLMAP input, and GPU rasterization.
 //!   Opt-in; depends on `mesh`. Training lives in `moonfield-ml`.
+//! - `shader` — the `Shader` asset's render-world extraction and the
+//!   revision-matched `PreparedShaders` compile cache pipelines build from.
 //!
 //! The renderer targets Vulkan through the `moonfield-rhi` RHI.
 //!
@@ -24,6 +26,7 @@ pub mod mesh;
 pub mod plugin;
 #[cfg(feature = "mesh")]
 pub mod render_phase;
+pub mod shader;
 #[cfg(feature = "splat")]
 pub mod splat;
 
