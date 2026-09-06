@@ -35,8 +35,11 @@ lives in `moonfield-render-core` (Selene), never here.
 
 ## Shaders
 
-- Runtime Slang→SPIR-V compilation is provided by `vulkan/shader.rs`;
-  `ShaderModule::from_spirv` loads SPIR-V bytecode directly.
+- Runtime Slang→SPIR-V compilation is provided by the `vulkan/shader/` module
+  (`compile.rs` — `Compiler`/`CompiledShader`/`ShaderCache`, `reflection.rs` —
+  the self-referential `Reflection` wrapper and `Layout`, `root_binder.rs` —
+  `RootParam*`/`RootBinder`); `ShaderModule::from_spirv` loads SPIR-V bytecode
+  directly.
 - One offline Slang compile (`slangc -target spirv`) can also produce embedded
   shader bytes with `include_bytes!`.
 - Native deps: **Slang** (`shader-slang-sys` links it dynamically — set
