@@ -13,19 +13,26 @@ pacing and slot reuse want a monotonic counter.
 
 ## Decision
 
-`WindowSurfaceData` replaces the in-flight fence pool with one timeline
-semaphore (`Semaphore::new_timeline(&device, 0)`) and a `frame_submitted`
+`FrameContext`, the frame-level render-world resource, replaces the
+in-flight fence pool with one timeline semaphore
+(`Semaphore::new_timeline(&device, 0)`) and a `frame_submitted`
 counter starting at 1 — the reference project's (`no_gfx_api`) `frame_sem`
 shape:
 
 - Frame `n` uses slot `(n-1) % MAX_FRAMES_IN_FLIGHT`; before acquire (and
   before `acquire_next_image` re-signals that slot's binary `image_available`)
   the loop waits `frame_submitted - MAX_FRAMES_IN_FLIGHT` on the timeline.
+- The loop is frame-level, not per-window: `FrameContext` owns the timeline
+  and counters, and each acquired window contributes its binary semaphores
+  to the one submit — windows are acquire/present targets, not the frame's
+  owner (see
+  [FrameContext owns the frame command buffer](2026-09-06-frame-context-owns-frame-command-buffer.md)).
 - The submit path is `Device::submit_frame_timeline` using
-  `vkQueueSubmit2` (`SubmitInfo2`): waits the binary acquire signal at the
-  color-attachment stage, signals the binary present semaphore and the
-  timeline with value = the current frame number, fence-free. Timeline values
-  are strictly increasing, so no reset exists anywhere in the cycle.
+  `vkQueueSubmit2` (`SubmitInfo2`): waits every acquired window's binary
+  acquire signal at the color-attachment stage, signals every acquired
+  window's binary present semaphore plus the timeline with value = the
+  current frame number, fence-free. Timeline values are strictly increasing,
+  so no reset exists anywhere in the cycle.
 - `image_available` / `render_finished` stay binary: `vkAcquireNextImageKHR`
   and `vkQueuePresentKHR` both require binary semaphores, so the present flow
   is untouched.

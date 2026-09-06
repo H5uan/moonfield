@@ -4,14 +4,15 @@
 //! render-world resources — [`Core3dPipeline`] (the flat-lit mesh pipeline)
 //! and [`ViewTargets`] (one offscreen target per logical
 //! [`RenderTarget`]) — and the frame's command buffer comes from
-//! [`WindowSurfaces`](moonfield_render_core::WindowSurfaces) between
+//! [`FrameContext`](moonfield_render_core::FrameContext) between
 //! `acquire_window_frames` and `submit_window_frames`.
 //! [`main_opaque_pass_3d`] reads the [`Core3dFrame`] built in `RenderQueue`
 //! and records one render pass per view whose target has an attachment —
-//! offscreen targets (the editor viewport) end in `ShaderRead`, and a primary
-//! view targeting the primary window draws straight into each in-progress
-//! surface's swapchain image (ending in `Present`), depth-tested against the
-//! surface's own depth buffer.
+//! offscreen targets (the editor viewport) end in `ShaderRead` and record
+//! whether or not any window frame exists, and a primary view targeting the
+//! primary window draws straight into each in-progress surface's swapchain
+//! image (ending in `Present`), depth-tested against the surface's own
+//! depth buffer.
 //!
 //! With no primary camera targeting a view target, the target is cleared to
 //! a dim background color.
@@ -19,7 +20,7 @@
 use moonfield_app::prelude::World;
 use moonfield_camera::RenderTarget;
 use moonfield_log::{error, error_once, info};
-use moonfield_render_core::{ViewTargets, WindowSurfaces};
+use moonfield_render_core::{FrameContext, ViewTargets, WindowSurfaces};
 use moonfield_rhi::{
     AttachmentLayout, ClearValue, CommandBuffer, CompareOp, CullMode, CullState, DepthState,
     Format, FrontFace, GraphicsPipeline, LoadOp, Rect2d, RenderAttachment, RenderDevice,
@@ -308,8 +309,9 @@ pub fn record_view_pass(
 }
 
 /// `Render` system: record the opaque pass of every view whose target has an
-/// offscreen attachment, into the window frame's command buffer. No-ops when
-/// no window frame is in progress (headless runs, minimized windows).
+/// attachment, into the frame's command buffer. Offscreen targets record
+/// unconditionally; window-targeted views record per in-progress surface.
+/// No-ops when no frame is in progress (no device, or the begin failed).
 ///
 /// Ordering: registered `.after(acquire_window_frames)` and
 /// `.before(submit_window_frames)` by [`RenderFeaturePlugin`].
@@ -335,16 +337,16 @@ pub fn main_opaque_pass_3d(world: &mut World) {
         }
     }
 
-    let Some(mut surfaces) = world.get_resource_mut::<WindowSurfaces>() else {
+    let Some(frame_context) = world.get_resource::<FrameContext>() else {
         return;
     };
-    // The frame slot must be captured before the command-buffer borrow below:
-    // `CommandBuffer` keeps `surfaces` mutably borrowed until recording ends.
-    let frame_slot = surfaces.values_mut().next().map(|data| data.frame_index());
-    let Some(command_buffer) = surfaces
-        .values_mut()
-        .find_map(|data| data.current_command_buffer())
-    else {
+    if !frame_context.frame_in_progress() {
+        return;
+    }
+    // The frame slot is the single slot authority; the command buffer borrow
+    // keeps `frame_context` alive until recording ends.
+    let frame_slot = frame_context.current_slot();
+    let Some(command_buffer) = frame_context.current_command_buffer() else {
         return;
     };
     let command_buffer: &CommandBuffer = command_buffer;
@@ -360,10 +362,8 @@ pub fn main_opaque_pass_3d(world: &mut World) {
         return;
     };
 
-    if let Some(slot) = frame_slot
-        && let Some(arena) = world.get_resource::<FrameDrawArena>()
-    {
-        arena.begin_frame(slot);
+    if let Some(arena) = world.get_resource::<FrameDrawArena>() {
+        arena.begin_frame(frame_slot);
     }
 
     // Record every offscreen target: views draw into their target; targets
@@ -383,12 +383,16 @@ pub fn main_opaque_pass_3d(world: &mut World) {
     }
 
     // Window-targeted views (the game path) draw straight into each
-    // in-progress surface's swapchain image, ending in `Present`.
+    // in-progress surface's swapchain image, ending in `Present` — same
+    // frame command buffer as the offscreen passes.
     let window_view = frame
         .views()
         .iter()
         .find(|view| view.is_primary && view.target.0 == RenderTarget::PrimaryWindow);
     if let Some(view) = window_view {
+        let Some(mut surfaces) = world.get_resource_mut::<WindowSurfaces>() else {
+            return;
+        };
         for data in surfaces.values_mut() {
             if !data.frame_in_progress() {
                 continue;
@@ -418,9 +422,6 @@ pub fn main_opaque_pass_3d(world: &mut World) {
                 depth: Some(depth),
                 extent: (extent.width, extent.height),
                 final_color_layout: AttachmentLayout::Present,
-            };
-            let Some(command_buffer) = data.current_command_buffer() else {
-                continue;
             };
             record_view_pass(&*world, Some(view), target, &draw_functions, command_buffer);
         }

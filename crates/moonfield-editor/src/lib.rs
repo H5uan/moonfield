@@ -36,7 +36,9 @@ use moonfield_app::{App, Plugin};
 use moonfield_camera::{PrimaryCamera, RenderTarget};
 use moonfield_ecs::{MessageCursor, Messages, ensure_global_transforms};
 use moonfield_log::error;
-use moonfield_render_core::{MAX_FRAMES_IN_FLIGHT, ViewTargets, WindowFrameDemand, WindowSurfaces};
+use moonfield_render_core::{
+    FrameContext, MAX_FRAMES_IN_FLIGHT, ViewTargets, WindowFrameDemand, WindowSurfaces,
+};
 use moonfield_render_feature::core_3d::pass::RenderTargetSizes;
 use moonfield_rhi::{
     AttachmentLayout, ClearValue, LoadOp, Rect2d, RenderAttachment, RenderDevice, RenderPassDesc,
@@ -425,10 +427,10 @@ fn apply_orbit_camera(world: &mut World, camera: &interaction::OrbitCamera) {
 /// egui texture, tessellates, and uploads the frame slot's buffers. Produces
 /// the [`EguiPreparedFrame`] resource [`egui_pass`] consumes.
 ///
-/// When the device, a window surface, or an acquired frame is unavailable yet
-/// the frame is left in place — extraction merges the next frame into it, so
-/// no texture delta is lost. (The acquired-frame requirement is also what
-/// makes the slot's buffer writes fence-safe.)
+/// When the device, an in-progress frame, or a window surface is unavailable
+/// yet the frame is left in place — extraction merges the next frame into it,
+/// so no texture delta is lost. (The in-progress-frame requirement is also
+/// what makes the slot's buffer writes fence-safe.)
 fn prepare_egui_frame(world: &mut World) {
     if !world.contains_resource::<PreparedEditorFrame>() {
         return;
@@ -442,20 +444,24 @@ fn prepare_egui_frame(world: &mut World) {
     let device = render_device.device().clone();
 
     let surface_info = {
+        let Some(frame) = world.get_resource::<FrameContext>() else {
+            return;
+        };
+        // Only prepare against an in-progress frame: its slot's timeline was
+        // waited in `acquire_window_frames`, so writing the slot's buffers
+        // and deferred-free ring cannot race the GPU.
+        if !frame.frame_in_progress() {
+            return;
+        }
+        let frame_slot = frame.current_slot();
         let Some(mut surfaces) = world.get_resource_mut::<WindowSurfaces>() else {
             return;
         };
         surfaces.values_mut().next().and_then(|surface| {
-            // Only prepare against an acquired frame: its slot's fence was
-            // waited in `acquire_window_frames`, so writing the slot's buffers
-            // and deferred-free ring cannot race the GPU.
-            if !surface.frame_in_progress() {
-                return None;
-            }
             surface
                 .format()
                 .ok()
-                .map(|(format, srgb)| (format, srgb, surface.frame_index(), surface.extent()))
+                .map(|(format, srgb)| (format, srgb, frame_slot, surface.extent()))
         })
     };
     let Some((color_format, srgb_framebuffer, frame_slot, _extent)) = surface_info else {
@@ -576,9 +582,9 @@ fn prepare_egui_frame(world: &mut World) {
     });
 }
 
-/// `Render` system: record the egui pass into the acquired swapchain image of
-/// every window with a frame in progress, after the scene pass. Consumes the
-/// [`EguiPreparedFrame`] resource.
+/// `Render` system: record the egui pass into the frame's command buffer for
+/// every window that acquired an image this frame, after the scene pass.
+/// Consumes the [`EguiPreparedFrame`] resource.
 fn egui_pass(world: &mut World) {
     let Some(prepared) = world.remove_resource::<EguiPreparedFrame>() else {
         return;
@@ -590,6 +596,12 @@ fn egui_pass(world: &mut World) {
     ) else {
         return;
     };
+    let Some(frame) = world.get_resource::<FrameContext>() else {
+        return;
+    };
+    let Some(command_buffer) = frame.current_command_buffer() else {
+        return;
+    };
     let Some(mut surfaces) = world.get_resource_mut::<WindowSurfaces>() else {
         return;
     };
@@ -598,10 +610,7 @@ fn egui_pass(world: &mut World) {
             continue;
         }
         let extent = surface.extent();
-        let (Some(image_view), Some(command_buffer)) = (
-            surface.current_image_view(),
-            surface.current_command_buffer(),
-        ) else {
+        let Some(image_view) = surface.current_image_view() else {
             continue;
         };
         let color_attachment = RenderAttachment {
@@ -635,13 +644,8 @@ fn egui_pass(world: &mut World) {
 /// main world and honor the `MOONFIELD_EDITOR_DUMP_VIEWPORT=N` debug seam.
 fn editor_frame_done(world: &mut World) {
     let presented_frames = world
-        .get_resource_mut::<WindowSurfaces>()
-        .and_then(|mut surfaces| {
-            surfaces
-                .values_mut()
-                .next()
-                .map(|surface| surface.presented_frames())
-        })
+        .get_resource::<FrameContext>()
+        .map(|frame| frame.presented_frames())
         .unwrap_or(0);
     let viewport_texture = world
         .get_resource::<ViewportTexture>()

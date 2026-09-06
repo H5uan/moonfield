@@ -19,6 +19,7 @@ pub use render_phase::{
 };
 pub use scene::{ExtractedView, ViewTarget, ViewTargets};
 pub use window::{
-    ExtractedWindow, MAX_FRAMES_IN_FLIGHT, WindowFrameDemand, WindowSurfaceData, WindowSurfaces,
-    acquire_window_frames, create_window_surfaces, extract_windows, submit_window_frames,
+    ExtractedWindow, FrameContext, MAX_FRAMES_IN_FLIGHT, WindowFrameDemand, WindowSurfaceData,
+    WindowSurfaces, acquire_window_frames, create_window_surfaces, extract_windows,
+    submit_window_frames,
 };

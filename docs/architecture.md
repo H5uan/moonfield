@@ -210,13 +210,24 @@ camera extraction receives the updated global pose without a frame of latency.
 and logical device at build time and inserts the `RenderDevice` resource
 (Lunar Mare, `moonfield-rhi`) only in the render world. It is
 `Arc`-cloneable and headless-tolerant: without a driver the plugin logs an error
-and inserts nothing. Per-window GPU state (surface, swapchain, command buffers,
-frame synchronization) lives in the render-world `WindowSurfaces` resource
-keyed by `MainEntity`; `RenderPlugin` also registers the window frame-loop
+and inserts nothing. The frame itself is a render-world `FrameContext`
+resource — the command pool, the per-slot command buffer ring, the timeline
+semaphore, and the slot sequencing — created lazily once a device exists;
+per-window GPU state (surface, swapchain, present synchronization, the
+acquired image) lives in the `WindowSurfaces` resource keyed by `MainEntity`.
+`RenderPlugin` also registers the frame-loop
 systems — `create_window_surfaces` (`RenderPrepare`), `acquire_window_frames`
 and `submit_window_frames` (`Render`, the ordering anchors pass systems chain
-against). Acquire is gated by the `WindowFrameDemand` resource that extraction
-writes, so a window frame only exists when a consumer has content to present.
+against). The frame begins every `Render` tick a device exists: acquire waits
+the in-flight timeline, drains the frame slot's retirements once, and begins
+the frame's command buffer, then acquires a swapchain image for each window
+the `WindowFrameDemand` resource (written by extraction) marks as having
+content to present; submit ends recording and submits the command buffer
+once — waiting on every acquired window's `image_available`, signaling every
+`render_finished` plus the timeline with the frame number — then presents
+each acquired window. Windows are acquire/present targets of the frame, not
+its owner, so offscreen passes record whether or not any window frame exists;
+a frame with no acquired window submits timeline-only.
 
 The editor is a library crate providing `EditorPlugin`, a regular plugin
 composing the engine crates. `EditorPlugin` does **not** own the event

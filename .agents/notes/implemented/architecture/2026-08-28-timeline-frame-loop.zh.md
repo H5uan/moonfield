@@ -10,10 +10,11 @@ Status: implemented
 
 ## Decision
 
-`WindowSurfaceData` 用一根 timeline 信号量（`Semaphore::new_timeline(&device, 0)`）+ 从 1 起的 `frame_submitted` 计数器取代 in-flight fence 池——即参考项目（`no_gfx_api`）`frame_sem` 的形状：
+帧级渲染世界资源 `FrameContext` 用一根 timeline 信号量（`Semaphore::new_timeline(&device, 0)`）+ 从 1 起的 `frame_submitted` 计数器取代 in-flight fence 池——即参考项目（`no_gfx_api`）`frame_sem` 的形状：
 
 - 帧 `n` 使用槽 `(n-1) % MAX_FRAMES_IN_FLIGHT`；在 acquire（以及在 `acquire_next_image` 重新 signal 该槽的二元 `image_available` 之前）先对 timeline 执行 `wait(frame_submitted - MAX_FRAMES_IN_FLIGHT)`。
-- 提交路径是 `Device::submit_frame_timeline`，用 `vkQueueSubmit2`（`SubmitInfo2`）：在 color-attachment 阶段等待二元 acquire 信号量，signal 二元 present 信号量和值为当前帧号的 timeline，全程无 fence。timeline 值严格递增，因此整个循环中不存在 reset。
+- 循环是帧级的，而非逐窗口：`FrameContext` 持有 timeline 与计数器，每个已获取图像的窗口把自己的二元信号量贡献给那一次提交——窗口是帧的 acquire/present 目标，而不是帧的持有者（见 [FrameContext 持有帧命令缓冲](2026-09-06-frame-context-owns-frame-command-buffer.zh.md)）。
+- 提交路径是 `Device::submit_frame_timeline`，用 `vkQueueSubmit2`（`SubmitInfo2`）：在 color-attachment 阶段等待每个已获取窗口的二元 acquire 信号量，signal 每个已获取窗口的二元 present 信号量和值为当前帧号的 timeline，全程无 fence。timeline 值严格递增，因此整个循环中不存在 reset。
 - `image_available` / `render_finished` 保持二元：`vkAcquireNextImageKHR` 与 `vkQueuePresentKHR` 都要求二元信号量，present 流程不动。
 
 `Fence` 仍保留在 RHI 中（其它路径还在用），但帧循环不再使用。

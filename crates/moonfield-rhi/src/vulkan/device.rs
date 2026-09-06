@@ -560,34 +560,52 @@ impl Device {
         Ok(())
     }
 
+    /// Submit the frame's command buffer to the graphics queue: wait on
+    /// `wait_semaphores` (binary acquire signals, at the color-attachment
+    /// stage), signal `signal_semaphores` (binary present signals) plus
+    /// `timeline` with `signal_value`. An offscreen-only frame passes empty
+    /// semaphore slices.
     pub fn submit_frame_timeline(
         &self,
         command_buffer: &crate::CommandBuffer,
-        wait_semaphore: &Semaphore,
-        signal_semaphore: &Semaphore,
+        wait_semaphores: &[&Semaphore],
+        signal_semaphores: &[&Semaphore],
         timeline: &Semaphore,
         signal_value: u64,
     ) -> Result<()> {
-        let wait_infos = [vk::SemaphoreSubmitInfo::default()
-            .semaphore(wait_semaphore.raw())
-            .stage_mask(vk::PipelineStageFlags2::COLOR_ATTACHMENT_OUTPUT)];
-        // binary 的 value 字段被忽略，占位 0；timeline 的 value 就是 signal 值。
-        let signal_infos = [
-            vk::SemaphoreSubmitInfo::default()
-                .semaphore(signal_semaphore.raw())
-                .stage_mask(vk::PipelineStageFlags2::ALL_COMMANDS)
-                .value(0),
+        let wait_infos: Vec<vk::SemaphoreSubmitInfo> = wait_semaphores
+            .iter()
+            .map(|semaphore| {
+                vk::SemaphoreSubmitInfo::default()
+                    .semaphore(semaphore.raw())
+                    .stage_mask(vk::PipelineStageFlags2::COLOR_ATTACHMENT_OUTPUT)
+            })
+            .collect();
+        // Binary semaphores ignore the value field (placeholder 0); the
+        // timeline's value is the signal value.
+        let mut signal_infos: Vec<vk::SemaphoreSubmitInfo> = signal_semaphores
+            .iter()
+            .map(|semaphore| {
+                vk::SemaphoreSubmitInfo::default()
+                    .semaphore(semaphore.raw())
+                    .stage_mask(vk::PipelineStageFlags2::ALL_COMMANDS)
+                    .value(0)
+            })
+            .collect();
+        signal_infos.push(
             vk::SemaphoreSubmitInfo::default()
                 .semaphore(timeline.raw())
                 .stage_mask(vk::PipelineStageFlags2::ALL_COMMANDS)
                 .value(signal_value),
-        ];
+        );
         let command_infos =
             [vk::CommandBufferSubmitInfo::default().command_buffer(command_buffer.raw())];
         let submit_info = vk::SubmitInfo2::default()
             .wait_semaphore_infos(&wait_infos)
             .command_buffer_infos(&command_infos)
             .signal_semaphore_infos(&signal_infos);
+        // SAFETY: the queue, command buffer, and semaphores are valid handles;
+        // the info arrays outlive the submit call.
         unsafe {
             self.device
                 .queue_submit2(
