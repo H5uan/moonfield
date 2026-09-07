@@ -18,6 +18,7 @@ mod depth_occlusion;
 mod descriptor_heap;
 mod descriptor_heap_properties;
 mod descriptor_heap_sampling;
+mod float_atomics;
 mod gaussian_fit;
 mod graphics_heap_sampling;
 mod headless_triangle;

@@ -58,6 +58,11 @@ const OPTIONAL_DEVICE_EXTENSIONS: &[&CStr] = &[
     ash::khr::pipeline_library::NAME,
     ash::khr::deferred_host_operations::NAME,
     ash::ext::ray_tracing_invocation_reorder::NAME,
+    // Float32 atomic adds into storage buffers (`OpAtomicFAddEXT`) for the
+    // ml gradient path. Enabled only when the driver also supports the
+    // `shaderBufferFloat32AtomicAdd` feature bit — see the probe in
+    // [`Device::from_physical_device`].
+    ash::ext::shader_atomic_float::NAME,
 ];
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -257,7 +262,7 @@ impl Device {
                 .enumerate_device_extension_properties(physical_device)
         }
         .map_err(|e| Error::Backend(format!("failed to enumerate device extensions: {e:?}")))?;
-        let supported: Vec<&CStr> = supported_extensions
+        let mut supported: Vec<&CStr> = supported_extensions
             .iter()
             .map(|props| unsafe { CStr::from_ptr(props.extension_name.as_ptr()) })
             .collect();
@@ -312,6 +317,25 @@ impl Device {
                         .to_string(),
                 ));
             };
+
+        // `VK_EXT_shader_atomic_float` is dropped from the optional candidates
+        // when the driver lacks the buffer float32 atomic-add feature bit: the
+        // extension alone does not imply the bit (llvmpipe exposes the
+        // extension with every add bit false), and requesting an unsupported
+        // feature would fail device creation. The generic optional loop below
+        // then skips it with its standard warning.
+        if supported.contains(&ash::ext::shader_atomic_float::NAME) {
+            let features2 = vk::PhysicalDeviceFeatures2::default();
+            let mut atomic_float = vk::PhysicalDeviceShaderAtomicFloatFeaturesEXT::default();
+            // `TaggedStructure::push` consumes `self` and returns the chained
+            // struct — the return value is the one that carries the pNext
+            // link, so it must be rebound, not discarded.
+            let mut features2 = features2.push(&mut atomic_float);
+            instance.physical_device_features2(physical_device, &mut features2);
+            if atomic_float.shader_buffer_float32_atomic_add != vk::TRUE {
+                supported.retain(|name| name != &ash::ext::shader_atomic_float::NAME);
+            }
+        }
 
         let mut optional_enabled: Vec<&'static CStr> = Vec::new();
         for name in OPTIONAL_DEVICE_EXTENSIONS {
@@ -401,6 +425,12 @@ impl Device {
             vk::PhysicalDeviceDeviceGeneratedCommandsFeaturesEXT::default()
                 .device_generated_commands(true);
 
+        // Float32 atomic adds into storage buffers. Only the buffer add bit
+        // is requested — the RHI uses no other operation from the extension.
+        let mut shader_atomic_float_features =
+            vk::PhysicalDeviceShaderAtomicFloatFeaturesEXT::default()
+                .shader_buffer_float32_atomic_add(true);
+
         let mut features2 =
             vk::PhysicalDeviceFeatures2::default().features(vk::PhysicalDeviceFeatures::default());
         // Feature structures of optional extensions are requested only when the
@@ -422,6 +452,9 @@ impl Device {
         }
         if optional_enabled.contains(&ash::ext::ray_tracing_invocation_reorder::NAME) {
             features2 = features2.push(&mut invocation_reorder_features);
+        }
+        if optional_enabled.contains(&ash::ext::shader_atomic_float::NAME) {
+            features2 = features2.push(&mut shader_atomic_float_features);
         }
         // `TaggedStructure::push` consumes `self` and returns the chained struct —
         // the return value is the one that carries the pNext link, so the
@@ -518,6 +551,15 @@ impl Device {
     /// feature instead of failing.
     pub fn optional_extension_enabled(&self, name: &CStr) -> bool {
         self.optional_extensions.contains(&name)
+    }
+
+    /// Whether shaders can perform float32 atomic adds into storage buffers
+    /// (`OpAtomicFAddEXT` behind `VK_EXT_shader_atomic_float`; in Slang the
+    /// `__atomic_add` intrinsic). The ml gradient-accumulation path requires
+    /// it; `gpu_tests::float_atomics` probes it end to end.
+    pub fn buffer_float32_atomic_add(&self) -> bool {
+        self.optional_extensions
+            .contains(&ash::ext::shader_atomic_float::NAME)
     }
 
     /// The shared aggregated device-extension loaders (see

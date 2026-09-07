@@ -119,6 +119,21 @@ impl Instance {
         unsafe { self.instance.get_physical_device_properties2(device, out) }
     }
 
+    /// Get features for a physical device (Vulkan 1.1+ "2" query).
+    ///
+    /// The caller provides the output struct and may chain extended feature
+    /// structures through its pNext pointer; the driver fills everything
+    /// connected to the chain.
+    pub(crate) fn physical_device_features2(
+        &self,
+        device: vk::PhysicalDevice,
+        out: &mut vk::PhysicalDeviceFeatures2,
+    ) {
+        // SAFETY: the instance and physical device are valid, and `out` (with
+        // its caller-chained sType list) is a writable struct the driver fills.
+        unsafe { self.instance.get_physical_device_features2(device, out) }
+    }
+
     /// Get queue family properties for a physical device (Vulkan 1.1+ "2"
     /// query); each entry's base data is in the `.queue_family_properties`
     /// field and extended structures can be attached through pNext.
