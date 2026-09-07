@@ -5,4 +5,10 @@ edition.workspace = true
 
 [dependencies]
 moonfield-render-feature = { workspace = true, features = ["splat"] }
+moonfield-shader = { workspace = true }
 moonfield-rhi = { workspace = true }
+tracing = "0.1.44"
+
+
+[dev-dependencies]
+moonfield-asset = { workspace = true }
