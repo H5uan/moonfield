@@ -6,7 +6,7 @@ Status: implemented
 
 ## Problem
 
-The Gaussian Splatting roadmap's M2 makes `assets/shaders/gs/gaussian.slang` a shared library — training kernels and rendering shaders import its covariance/projection math — and no shader in the workspace used `import` before. The RHI's source-string compilation passed Slang a fake filename hint (`{module_name}.slang`), so an asset-compiled source had no directory context and its imports could not resolve.
+The Gaussian Splatting roadmap makes `assets/shaders/gs/gaussian.slang` a shared library — training kernels and rendering shaders import its covariance/projection math — and no shader in the workspace used `import` before. The RHI's source-string compilation passed Slang a fake filename hint (`{module_name}.slang`), so an asset-compiled source had no directory context and its imports could not resolve.
 
 ## Decision
 

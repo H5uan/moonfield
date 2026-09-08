@@ -1,4 +1,4 @@
-//! M1 acceptance: the ml training loop on the public RHI API.
+//! Acceptance for the ml training loop on the public RHI API.
 //!
 //! The rhi `gaussian_fit` spike's problem — 64 2D Gaussians fitted to a
 //! 128×128 procedural target — driven through `Trainer` and
@@ -223,7 +223,7 @@ fn push_roots(cmd: &CommandBuffer, ptrs: &[GpuPtr]) {
     cmd.push_data(0, &bytes);
 }
 
-/// The minimal M1 method: the spike's 2D fit problem as a
+/// The minimal method: the spike's 2D fit problem as a
 /// [`TrainingMethod`], with the atomic-accumulation backward and the
 /// asset-loaded Adam kernel.
 struct GaussianFit {
@@ -294,8 +294,7 @@ impl TrainingMethod for GaussianFit {
     fn record_step(&mut self, cmd: &CommandBuffer, step: u32) {
         // The backward accumulates atomically, so the gradient buffer starts
         // at zero every step. The synchronous loop leaves the GPU idle while
-        // recording; the production method (M4) clears kernel-side per the
-        // roadmap.
+        // recording; the production method clears kernel-side per the roadmap.
         // SAFETY: the grads allocation is host-visible, persistently mapped,
         // and sized SCALARS floats.
         unsafe {

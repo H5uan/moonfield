@@ -6,7 +6,7 @@ Status: implemented
 
 ## Problem
 
-Gaussian Splatting 路线图的 M2 要把 `assets/shaders/gs/gaussian.slang` 做成共享库——训练内核与渲染 shader 共同 import 它的协方差/投影数学——而 workspace 此前没有任何 shader 用过 `import`。RHI 的源字符串编译传给 Slang 的是假文件名 hint（`{module_name}.slang`），资产编译的源没有目录上下文，import 无法解析。
+Gaussian Splatting 路线图要把 `assets/shaders/gs/gaussian.slang` 做成共享库——训练内核与渲染 shader 共同 import 它的协方差/投影数学——而 workspace 此前没有任何 shader 用过 `import`。RHI 的源字符串编译传给 Slang 的是假文件名 hint（`{module_name}.slang`），资产编译的源没有目录上下文，import 无法解析。
 
 ## Decision
 
