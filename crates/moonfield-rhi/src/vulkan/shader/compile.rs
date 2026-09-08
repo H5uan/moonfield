@@ -343,8 +343,11 @@ impl Compiler {
 
     /// Compile Slang source code for the given entry point.
     ///
-    /// `module_name` is used for diagnostics and as the module's logical name;
-    /// it does not need to correspond to a file on disk.
+    /// `module_name` is the module's logical name and the path hint Slang
+    /// resolves `import` statements against: a real file path lets the
+    /// source import sibling modules from that file's directory (the asset
+    /// layer passes the asset's path); a plain name leaves imports
+    /// resolving against the process working directory.
     pub fn compile_source_to_spirv(
         &self,
         module_name: &str,
@@ -439,7 +442,7 @@ impl Compiler {
     ) -> RenderResult<CompiledShader> {
         let session = self.create_session(capabilities, defines)?;
         let module = session
-            .load_module_from_source_string(module_name, &format!("{module_name}.slang"), source)
+            .load_module_from_source_string(module_name, module_name, source)
             .map_err(map_slang_error)?;
         self.finish_compile(&session, module, entry_point)
     }
@@ -616,7 +619,7 @@ impl Compiler {
             .ok_or_else(|| RenderError::Backend("failed to create Slang session".to_string()))?;
 
         let module = session
-            .load_module_from_source_string(module_name, &format!("{module_name}.slang"), source)
+            .load_module_from_source_string(module_name, module_name, source)
             .map_err(map_slang_error)?;
 
         let entry = module
@@ -764,5 +767,54 @@ mod tests {
             "SPIR-V emits `main` for the compute entry regardless of source name"
         );
         assert_eq!(vs.stage, vk::ShaderStageFlags::VERTEX);
+    }
+
+    /// A source-string module compiled under a real-path module name resolves
+    /// same-directory `import`s: the probe's (virtual) file lives in
+    /// `assets/shaders/gs/` and imports the shared Gaussian math.
+    #[test]
+    fn source_import_resolves_through_module_name_path() {
+        let compiler = Compiler::new().expect("compiler");
+        let module_path = concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/../../assets/shaders/gs/__import_probe.slang"
+        );
+        const PROBE: &str = r#"
+            import gaussian;
+
+            [shader("compute")]
+            [numthreads(64, 1, 1)]
+            void probe(uint3 tid : SV_DispatchThreadID,
+                       Ptr<float, Access.ReadWrite> out_buf)
+            {
+                SplatView view;
+                view.w = float3x3(1.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 1.0);
+                view.cam_pos = float3(0.0, 0.0, -2.0);
+                view.fx = 500.0;
+                view.fy = 500.0;
+                view.pp = float2(64.0, 64.0);
+
+                Gaussian3D g;
+                g.mean = float3(0.1, -0.2, 1.0);
+                g.log_scale = float3(-2.0, -1.5, -1.0);
+                g.rotation = float4(0.923, 0.2, 0.3, 0.1);
+                g.logit_opacity = 0.0;
+                g.sh_dc = float3(0.5, 0.6, 0.7);
+
+                float3x3 cov = cov3d(g);
+                ProjectedSplat p = project(g, view);
+                float3 color = eval_color(float3(0.0, 0.0, 1.0), g);
+
+                out_buf[0] = cov[0][0];
+                out_buf[1] = p.screen.x;
+                out_buf[2] = p.conic.x;
+                out_buf[3] = p.depth;
+                out_buf[4] = color.x;
+            }
+        "#;
+        let shader = compiler
+            .compile_source_to_spirv(module_path, PROBE, "probe")
+            .expect("import resolves through the module-name path hint");
+        assert!(!shader.spirv.is_empty());
     }
 }
