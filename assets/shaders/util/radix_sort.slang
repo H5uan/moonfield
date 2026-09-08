@@ -7,6 +7,11 @@
 // histogram), and scatter (one group per tile). The wave size is queried at
 // runtime, so wave64 hardware works unchanged; barriers between the
 // dispatches of one pass (and between passes) are the caller's.
+//
+// Each entry point takes its parameters as a single `uniform` struct, so
+// the host pushes one root blob per dispatch: pointer fields are 8-byte
+// GPU addresses, scalar fields are inline u32s. The host mirrors each
+// struct with a `#[repr(C)]` bytemuck POD type in the same field order.
 
 groupshared uint g_bins[256];
 groupshared uint g_chunk[256];
@@ -16,30 +21,60 @@ groupshared uint g_warp_bins[8][256];
 // Lane bin broadcast, sized for 64 lanes so both wave widths fit.
 groupshared uint g_lane_bins[8][64];
 
+/// Root parameters for the histogram entry: input keys, the bin-major
+/// histogram, and the per-pass digit configuration.
+struct HistogramParams
+{
+    Ptr<uint32_t, Access.Read> keys;
+    Ptr<uint32_t, Access.ReadWrite> hist;
+    uint32_t count;
+    uint32_t groups;
+    uint32_t shift;
+};
+
+/// Root parameters for the scan entry: the histogram plus its exclusive
+/// scan output.
+struct ScanParams
+{
+    Ptr<uint32_t, Access.Read> hist;
+    Ptr<uint32_t, Access.ReadWrite> offsets;
+    uint32_t total;
+};
+
+/// Root parameters for the scatter entry: the ping-pong key/value pair,
+/// the scanned offsets, and the per-pass digit configuration.
+struct ScatterParams
+{
+    Ptr<uint32_t, Access.Read> keys_in;
+    Ptr<uint32_t, Access.Read> values_in;
+    Ptr<uint32_t, Access.ReadWrite> keys_out;
+    Ptr<uint32_t, Access.ReadWrite> values_out;
+    Ptr<uint32_t, Access.Read> offsets;
+    uint32_t count;
+    uint32_t groups;
+    uint32_t shift;
+};
+
 /// One group per 256-item tile: groupshared bin counts for the current
 /// digit, published to the global histogram.
 [shader("compute")]
 [numthreads(256, 1, 1)]
 void histogram(uint3 tid: SV_GroupThreadID, uint3 gid: SV_GroupID,
-               Ptr<uint32_t, Access.Read> keys,
-               Ptr<uint32_t, Access.ReadWrite> hist,
-               uniform uint32_t count,
-               uniform uint32_t groups,
-               uniform uint32_t shift)
+               uniform HistogramParams params)
 {
     g_bins[tid.x] = 0u;
     GroupMemoryBarrierWithGroupSync();
     uint i = gid.x * 256 + tid.x;
-    if (i < count)
+    if (i < params.count)
     {
         // The current 8-bit digit selects the bin.
-        uint bin = (keys[i] >> shift) & 0xFFu;
+        uint bin = (params.keys[i] >> params.shift) & 0xFFu;
         InterlockedAdd(g_bins[bin], 1u);  // counting: order-independent
     }
     GroupMemoryBarrierWithGroupSync();
     // Publish bin-major (bin × group): the flat scan must order bins first
     // so every bin's cross-group base is contiguous. Thread t owns bin t.
-    hist[tid.x * groups + gid.x] = g_bins[tid.x];
+    params.hist[tid.x * params.groups + gid.x] = g_bins[tid.x];
 }
 
 /// Exclusive scan over the flattened bin-major (bins×groups) histogram in
@@ -48,15 +83,13 @@ void histogram(uint3 tid: SV_GroupThreadID, uint3 gid: SV_GroupID,
 [shader("compute")]
 [numthreads(256, 1, 1)]
 void scan(uint3 tid: SV_GroupThreadID,
-          Ptr<uint32_t, Access.Read> hist,
-          Ptr<uint32_t, Access.ReadWrite> offsets,
-          uniform uint32_t total) // groups * 256, a multiple of 256
+          uniform ScanParams params) // groups * 256, a multiple of 256
 {
     uint carry = 0u;
-    for (uint base = 0u; base < total; base += 256u)
+    for (uint base = 0u; base < params.total; base += 256u)
     {
         uint idx = base + tid.x;
-        uint count = hist[idx];
+        uint count = params.hist[idx];
         g_chunk[tid.x] = count;
         GroupMemoryBarrierWithGroupSync();
 
@@ -73,7 +106,7 @@ void scan(uint3 tid: SV_GroupThreadID,
         uint inclusive = g_chunk[tid.x];
         // Exclusive = inclusive minus the own count; carry holds every
         // earlier chunk's total.
-        offsets[idx] = inclusive - count + carry;
+        params.offsets[idx] = inclusive - count + carry;
         carry += g_chunk[255];
         GroupMemoryBarrierWithGroupSync();
     }
@@ -84,14 +117,7 @@ void scan(uint3 tid: SV_GroupThreadID,
 [shader("compute")]
 [numthreads(256, 1, 1)]
 void scatter(uint3 tid: SV_GroupThreadID, uint3 gid: SV_GroupID,
-             Ptr<uint32_t, Access.Read> keys_in,
-             Ptr<uint32_t, Access.Read> values_in,
-             Ptr<uint32_t, Access.ReadWrite> keys_out,
-             Ptr<uint32_t, Access.ReadWrite> values_out,
-             Ptr<uint32_t, Access.Read> offsets,
-             uniform uint32_t count,
-             uniform uint32_t groups,
-             uniform uint32_t shift)
+             uniform ScatterParams params)
 {
     uint t = tid.x;
     uint warp_size = WaveGetLaneCount();
@@ -106,10 +132,10 @@ void scatter(uint3 tid: SV_GroupThreadID, uint3 gid: SV_GroupID,
 
     uint i = gid.x * 256u + t;
     uint bin = 0u;
-    bool active = i < count;
+    bool active = i < params.count;
     if (active)
     {
-        bin = (keys_in[i] >> shift) & 0xFFu;
+        bin = (params.keys_in[i] >> params.shift) & 0xFFu;
         InterlockedAdd(g_warp_bins[warp][bin], 1u);
     }
     GroupMemoryBarrierWithGroupSync();
@@ -137,8 +163,8 @@ void scatter(uint3 tid: SV_GroupThreadID, uint3 gid: SV_GroupID,
                 prefix++;
         uint rank = g_warp_bins[warp][bin] + prefix;
         // Bin-major offsets (bin × group), matching the histogram layout.
-        uint dest = offsets[bin * groups + gid.x] + rank;
-        keys_out[dest] = keys_in[i];
-        values_out[dest] = values_in[i];
+        uint dest = params.offsets[bin * params.groups + gid.x] + rank;
+        params.keys_out[dest] = params.keys_in[i];
+        params.values_out[dest] = params.values_in[i];
     }
 }
