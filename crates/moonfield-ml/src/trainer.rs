@@ -24,11 +24,13 @@ pub trait TrainingMethod {
 /// Drives a [`TrainingMethod`] for a fixed number of steps on one device.
 pub struct Trainer<'a> {
     device: &'a Device,
-    /// Held for drop order only: the pool must outlive its command buffers.
+    report_every: u32,
+    /// Drops before the pool: Rust drops fields in declaration order, and
+    /// the buffer frees itself through the pool handle in `Drop`.
+    cmd: CommandBuffer,
+    /// Held for drop order only: the pool must outlive its command buffer.
     #[allow(dead_code)]
     pool: CommandPool,
-    report_every: u32,
-    cmd: CommandBuffer,
 }
 
 impl<'a> Trainer<'a> {
