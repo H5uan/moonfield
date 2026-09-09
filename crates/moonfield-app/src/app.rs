@@ -1,7 +1,7 @@
 use crate::{Plugin, PluginGroup};
-use moonfield_ecs::{IntoSystemConfigs, Schedule, ScheduleLabel, World};
+use moonfield_ecs::{IntoSystemConfigs, Schedule, ScheduleLabel, Schedules, World};
 use std::any::TypeId;
-use std::collections::{HashMap, HashSet};
+use std::collections::HashSet;
 use std::process::ExitCode;
 
 /// Schedule label for systems that run once at app startup.
@@ -135,8 +135,6 @@ pub struct App {
     world: World,
     render_world: World,
     extract_systems: Vec<ExtractFn>,
-    schedules: HashMap<TypeId, Schedule>,
-    render_schedules: HashMap<TypeId, Schedule>,
     runner: Option<Runner>,
     initialized: bool,
 }
@@ -163,8 +161,6 @@ impl App {
             world: World::new(),
             render_world: World::new(),
             extract_systems: Vec::new(),
-            schedules: HashMap::new(),
-            render_schedules: HashMap::new(),
             runner: None,
             initialized: false,
         }
@@ -299,10 +295,7 @@ impl App {
         _label: L,
         systems: impl IntoSystemConfigs<M>,
     ) -> &mut Self {
-        self.schedules
-            .entry(TypeId::of::<L>())
-            .or_default()
-            .add_systems(systems);
+        self.world.add_systems(_label, systems);
         self
     }
 
@@ -317,33 +310,31 @@ impl App {
         _label: L,
         systems: impl IntoSystemConfigs<M>,
     ) -> &mut Self {
-        self.render_schedules
-            .entry(TypeId::of::<L>())
-            .or_default()
-            .add_systems(systems);
+        self.render_world.add_systems(_label, systems);
         self
     }
 
     /// Run the schedule identified by `label` once, if it exists.
     pub fn run_schedule<L: ScheduleLabel>(&mut self, _label: L) {
-        if let Some(schedule) = self.schedules.get_mut(&TypeId::of::<L>()) {
-            schedule.run(&mut self.world);
-        }
+        self.world.run_schedule(_label);
     }
 
     /// Run a schedule against the render world once, if it exists.
     pub fn run_render_schedule<L: ScheduleLabel>(&mut self, _label: L) {
-        if let Some(schedule) = self.render_schedules.get_mut(&TypeId::of::<L>()) {
-            schedule.run(&mut self.render_world);
-        }
+        self.render_world.run_schedule(_label);
     }
 
     /// Whether the schedule identified by `L` has no systems (or does not
     /// exist).
     fn schedule_is_empty<L: ScheduleLabel>(&self) -> bool {
-        self.schedules
-            .get(&TypeId::of::<L>())
-            .is_none_or(Schedule::is_empty)
+        self.world
+            .get_resource::<Schedules>()
+            .map(|schedules| {
+                schedules
+                    .get(&TypeId::of::<L>())
+                    .is_none_or(Schedule::is_empty)
+            })
+            .unwrap_or(true)
     }
 
     /// Set a custom runner function that replaces the default runner
@@ -411,23 +402,15 @@ impl App {
     /// [`moonfield_time::run_fixed_main_schedule`]). No-op without the time
     /// resources (`TimePlugin`).
     fn run_fixed_main_loop(&mut self) {
-        let world = &mut self.world;
-        let schedules = &mut self.schedules;
-        moonfield_time::run_fixed_main_schedule(world, |world| {
-            for label in [
-                TypeId::of::<FixedFirst>(),
-                TypeId::of::<FixedPreUpdate>(),
-                TypeId::of::<FixedUpdate>(),
-                TypeId::of::<FixedPostUpdate>(),
-                TypeId::of::<FixedLast>(),
-                // Systems registered directly under the umbrella label run
-                // last in every iteration.
-                TypeId::of::<FixedMain>(),
-            ] {
-                if let Some(schedule) = schedules.get_mut(&label) {
-                    schedule.run(world);
-                }
-            }
+        moonfield_time::run_fixed_main_schedule(&mut self.world, |world| {
+            world.run_schedule(FixedFirst);
+            world.run_schedule(FixedPreUpdate);
+            world.run_schedule(FixedUpdate);
+            world.run_schedule(FixedPostUpdate);
+            world.run_schedule(FixedLast);
+            // Systems registered directly under the umbrella label run
+            // last in every iteration.
+            world.run_schedule(FixedMain);
         });
     }
 

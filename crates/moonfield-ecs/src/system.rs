@@ -89,6 +89,35 @@ pub trait SystemParam: Sized {
 /// Shorthand for the per-run value of a [`SystemParam`].
 pub type SystemParamItem<'w, 's, P> = <P as SystemParam>::Item<'w, 's>;
 
+/// A reusable container for a [`SystemParam`]'s persistent state, decoupled
+/// from any one system: [`SystemState::new`] initializes the state once and
+/// [`SystemState::get`] fetches the param for one run. Code that is not a
+/// function system — an exclusive system's helper, a render command — uses it
+/// to hold param state across calls the way a function system does internally.
+pub struct SystemState<P: SystemParam> {
+    state: P::State,
+}
+
+impl<P: SystemParam> SystemState<P> {
+    /// Initialize the state for `P` (`Local` defaults and the like).
+    pub fn new() -> Self {
+        Self {
+            state: P::init_state(),
+        }
+    }
+
+    /// Fetch the param value for one run against `world`.
+    pub fn get<'w, 's>(&'s mut self, world: &'w World) -> SystemParamItem<'w, 's, P> {
+        P::fetch(world, &mut self.state)
+    }
+}
+
+impl<P: SystemParam> Default for SystemState<P> {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 macro_rules! impl_system_param_tuple {
     ($($param:ident),*) => {
         #[allow(non_snake_case)]
@@ -559,5 +588,19 @@ mod tests {
         });
         system.run(&mut world);
         assert_eq!(world.query::<&Position>().count(), 1);
+    }
+
+    #[test]
+    fn test_system_state_caches_local_across_gets() {
+        let mut world = World::new();
+        world.insert_resource(Log::default());
+        let mut state = SystemState::<(Local<u32>, ResMut<Log>)>::new();
+        for expected in ["1", "2"] {
+            let (mut n, mut log) = state.get(&world);
+            *n += 1;
+            log.0.push(n.to_string());
+            assert_eq!(n.to_string(), expected);
+        }
+        assert_eq!(world.get_resource::<Log>().unwrap().0, ["1", "2"]);
     }
 }

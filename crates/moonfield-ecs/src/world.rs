@@ -10,6 +10,7 @@ use crate::change_detection::{Mut, Ref, Tick};
 use crate::commands::Command;
 use crate::entities::{AllocManyState, Entities, Location, NoSuchEntity, ReserveEntitiesIterator};
 use crate::hooks::{ComponentHooks, HookKind};
+use crate::schedule::{IntoSystemConfigs, ScheduleLabel, Schedules};
 use crate::{Component, Entity, Resources, WorldQuery};
 use std::cell::RefCell;
 use std::mem;
@@ -518,6 +519,48 @@ impl World {
     /// Remove a resource from the world, returning it if it existed.
     pub fn remove_resource<R: crate::Resource>(&mut self) -> Option<R> {
         self.resources.remove::<R>()
+    }
+
+    // ------------------------------------------------------------------
+    // Schedules
+    // ------------------------------------------------------------------
+
+    /// Register systems into the schedule identified by `label`, creating the
+    /// [`Schedules`] resource and the schedule as needed.
+    pub fn add_systems<L: ScheduleLabel, M>(
+        &mut self,
+        _label: L,
+        systems: impl IntoSystemConfigs<M>,
+    ) {
+        if !self.contains_resource::<Schedules>() {
+            self.insert_resource(Schedules::default());
+        }
+        self.get_resource_mut::<Schedules>()
+            .expect("the Schedules resource was just ensured")
+            .entry(TypeId::of::<L>())
+            .add_systems(systems);
+    }
+
+    /// Run the schedule identified by `label` once, if it exists.
+    ///
+    /// Only this schedule's entry is taken out of the [`Schedules`] resource
+    /// for the run; the resource itself stays in the world, so a system inside
+    /// the schedule can run *other* schedules. A rerun of the same label from
+    /// inside its own run finds the entry gone and is a no-op.
+    pub fn run_schedule<L: ScheduleLabel>(&mut self, _label: L) {
+        let label = TypeId::of::<L>();
+        let Some(mut schedule) = self
+            .get_resource_mut::<Schedules>()
+            .and_then(|mut schedules| schedules.remove(&label))
+        else {
+            return;
+        };
+        schedule.run(self);
+        self.get_resource_mut::<Schedules>()
+            .expect(
+                "the Schedules resource cannot be removed while one of its schedules is running",
+            )
+            .insert(label, schedule);
     }
 
     // ------------------------------------------------------------------

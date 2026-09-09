@@ -73,10 +73,12 @@ pub use name::Name;
 pub use query::{EntityMut, EntityRef, WorldQuery};
 pub use relationship::{Relationship, RelationshipTarget};
 pub use resource::Resource;
-pub use schedule::{IntoSystemConfigs, Schedule, ScheduleLabel, SystemConfig, SystemConfigs};
+pub use schedule::{
+    IntoSystemConfigs, Schedule, ScheduleLabel, Schedules, SystemConfig, SystemConfigs,
+};
 pub use system::{
     IntoSystem, Local, Query, Res, ResMut, System, SystemParam, SystemParamFunction,
-    SystemParamItem,
+    SystemParamItem, SystemState,
 };
 pub use template::{Template, TemplateContext, TemplateError};
 pub use world::World;

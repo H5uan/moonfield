@@ -16,7 +16,7 @@
 //! world's change tick advances once, giving change detection its per-run
 //! window.
 
-use std::any::type_name;
+use std::any::{TypeId, type_name};
 use std::collections::HashMap;
 use std::marker::PhantomData;
 
@@ -281,6 +281,35 @@ impl Schedule {
     }
 }
 
+/// The world's schedule storage, held as a resource so schedules are world
+/// data: [`World::add_systems`](crate::World::add_systems) registers into it
+/// and [`World::run_schedule`](crate::World::run_schedule) is the single run
+/// primitive — a system running inside a schedule can run other schedules.
+#[derive(Default)]
+pub struct Schedules(HashMap<TypeId, Schedule>);
+
+impl Schedules {
+    /// The schedule registered under `label`, if any.
+    pub fn get(&self, label: &TypeId) -> Option<&Schedule> {
+        self.0.get(label)
+    }
+
+    /// The schedule registered under `label`, inserting an empty one on a miss.
+    pub(crate) fn entry(&mut self, label: TypeId) -> &mut Schedule {
+        self.0.entry(label).or_default()
+    }
+
+    /// Remove the schedule registered under `label`, if any.
+    pub(crate) fn remove(&mut self, label: &TypeId) -> Option<Schedule> {
+        self.0.remove(label)
+    }
+
+    /// Put `schedule` back under `label`.
+    pub(crate) fn insert(&mut self, label: TypeId, schedule: Schedule) {
+        self.0.insert(label, schedule);
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -432,5 +461,63 @@ mod tests {
         let before = world.change_tick();
         schedule.run(&mut world);
         assert_eq!(world.change_tick().get(), before.get() + 1);
+    }
+
+    struct A;
+    struct B;
+    impl ScheduleLabel for A {}
+    impl ScheduleLabel for B {}
+
+    #[test]
+    fn test_world_stored_schedule_runs() {
+        let mut world = World::new();
+        world.insert_resource(Log::default());
+        world.add_systems(A, (first, second));
+        world.run_schedule(A);
+        assert_eq!(world.get_resource::<Log>().unwrap().0, ["first", "second"]);
+    }
+
+    #[test]
+    fn test_run_missing_schedule_is_noop() {
+        let mut world = World::new();
+        // Neither the resource nor the schedule exists.
+        world.run_schedule(A);
+        assert!(!world.contains_resource::<Schedules>());
+    }
+
+    #[test]
+    fn test_nested_run_schedule_from_exclusive_system() {
+        fn driver(world: &mut World) {
+            world.run_schedule(B);
+        }
+
+        let mut world = World::new();
+        world.insert_resource(Log::default());
+        world.add_systems(A, (first, driver));
+        world.add_systems(B, second);
+        world.run_schedule(A);
+        assert_eq!(world.get_resource::<Log>().unwrap().0, ["first", "second"]);
+        // B was reinserted and runs again on a direct call.
+        world.run_schedule(B);
+        assert_eq!(
+            world.get_resource::<Log>().unwrap().0,
+            ["first", "second", "second"]
+        );
+    }
+
+    #[test]
+    fn test_same_label_rerun_inside_its_own_schedule_is_noop() {
+        fn recursive(world: &mut World) {
+            // The entry is out for the current run; this must not recurse.
+            world.run_schedule(A);
+            world.run_schedule(B);
+        }
+
+        let mut world = World::new();
+        world.insert_resource(Log::default());
+        world.add_systems(A, recursive);
+        world.add_systems(B, second);
+        world.run_schedule(A);
+        assert_eq!(world.get_resource::<Log>().unwrap().0, ["second"]);
     }
 }
