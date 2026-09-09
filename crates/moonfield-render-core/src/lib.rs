@@ -12,7 +12,7 @@ pub mod render_phase;
 pub mod scene;
 pub mod window;
 
-pub use extract::{MainEntity, extract_cameras, extract_with_transform};
+pub use extract::{Extract, MainEntity, extract_cameras, extract_with_transform};
 pub use plugin::RenderPlugin;
 pub use render_phase::{
     DrawFunction, DrawFunctionId, DrawFunctions, OrderedFloat, PhaseItem, RenderPhase,

@@ -18,7 +18,7 @@ use crate::extract::extract_cameras;
 use crate::window::{
     acquire_window_frames, create_window_surfaces, extract_windows, submit_window_frames,
 };
-use moonfield_app::{App, Plugin, Render, RenderPrepare};
+use moonfield_app::{App, ExtractSchedule, Plugin, Render, RenderPrepare};
 use moonfield_log::error;
 use moonfield_rhi::RenderDevice;
 
@@ -32,8 +32,7 @@ impl Plugin for RenderPlugin {
     }
 
     fn build(&self, app: &mut App) {
-        app.add_extract_system(extract_cameras);
-        app.add_extract_system(extract_windows);
+        app.add_render_systems(ExtractSchedule, (extract_cameras, extract_windows));
         app.add_render_systems(RenderPrepare, create_window_surfaces);
         app.add_render_systems(Render, (acquire_window_frames, submit_window_frames));
         match RenderDevice::new() {

@@ -1,7 +1,7 @@
 //! The renderer's runtime plugin: asset stores and extraction systems.
 
 use moonfield_app::prelude::IntoSystemConfigs;
-use moonfield_app::{App, Plugin, Render, RenderPrepare, RenderQueue};
+use moonfield_app::{App, ExtractSchedule, Plugin, Render, RenderPrepare, RenderQueue};
 use moonfield_render_core::{DrawFunctions, extract_with_transform};
 
 use crate::mesh::{Mesh, MeshRenderer, PreparedGpuMeshes, extract_mesh_assets, prepare_meshes};
@@ -28,9 +28,14 @@ impl Plugin for RenderFeaturePlugin {
         app.insert_resource(moonfield_asset::Assets::<moonfield_shader::Shader>::default());
         app.insert_resource(PipelineShaders::default());
 
-        app.add_extract_system(extract_mesh_assets);
-        app.add_extract_system(extract_shader_assets);
-        app.add_extract_system(extract_with_transform::<MeshRenderer>);
+        app.add_render_systems(
+            ExtractSchedule,
+            (
+                extract_mesh_assets,
+                extract_shader_assets,
+                extract_with_transform::<MeshRenderer>,
+            ),
+        );
         app.render_world_mut()
             .insert_resource(crate::core_3d::Core3dFrame::default());
         app.render_world_mut()

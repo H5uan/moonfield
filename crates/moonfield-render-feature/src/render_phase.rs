@@ -247,7 +247,7 @@ pub fn queue_opaque_3d(world: &mut World) {
 mod tests {
     use super::*;
     use crate::{RenderFeaturePlugin, mesh::Mesh};
-    use moonfield_app::App;
+    use moonfield_app::{App, ExtractSchedule};
     use moonfield_asset::Assets;
     use moonfield_camera::{Camera, PrimaryCamera};
     use moonfield_math::Transform;
@@ -257,7 +257,7 @@ mod tests {
     fn test_queue_opaque_3d_skips_missing_meshes_and_sorts_front_to_back() {
         let mut app = App::new();
         app.add_plugin(RenderFeaturePlugin);
-        app.add_extract_system(extract_cameras);
+        app.add_render_systems(ExtractSchedule, extract_cameras);
         let (near_mesh, far_mesh, removed_mesh) = {
             let mut meshes = app.world().get_resource_mut::<Assets<Mesh>>().unwrap();
             let near = meshes.add(Mesh::new(vec![[0.0; 3]], vec![0], None));

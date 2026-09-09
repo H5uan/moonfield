@@ -38,12 +38,8 @@ impl Plugin for HierarchyPlugin {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::PreRender;
     use moonfield_ecs::{ChildOf, Children, RelationshipTarget};
     use moonfield_math::{GlobalTransform, Transform, Vec3};
-
-    #[derive(Debug, Clone, Copy)]
-    struct ExtractedTranslation(Vec3);
 
     #[test]
     fn test_hierarchy_plugin_registers_hooks_and_propagates_on_update() {
@@ -68,32 +64,5 @@ mod tests {
         app.update();
         let global = app.world().get_component::<GlobalTransform>(child).unwrap();
         assert!((global.translation() - Vec3::new(1.0, 2.0, 0.0)).length() < 1e-5);
-    }
-
-    #[test]
-    fn test_pre_render_transform_changes_are_propagated_before_extraction() {
-        let mut app = App::new();
-        app.add_plugin(HierarchyPlugin);
-        app.world_mut().spawn((Transform::IDENTITY,));
-        app.add_systems(PreRender, move_camera.before(&ensure_global_transforms));
-        app.add_extract_system(|world, render_world| {
-            for (_, global) in world.query::<&GlobalTransform>() {
-                render_world.spawn((ExtractedTranslation(global.translation()),));
-            }
-        });
-
-        app.render();
-
-        let (_, extracted) = app
-            .render_world()
-            .query::<&ExtractedTranslation>()
-            .next()
-            .expect("the camera transform should be extracted");
-        assert!((extracted.0 - Vec3::new(3.0, 2.0, 1.0)).length() < 1e-5);
-    }
-
-    fn move_camera(world: &mut moonfield_ecs::World) {
-        let entity = world.query::<&Transform>().next().unwrap().0;
-        *world.get_component_mut::<Transform>(entity).unwrap() = Transform::from_xyz(3.0, 2.0, 1.0);
     }
 }

@@ -26,7 +26,9 @@
 //! resource.
 
 use crate::MainEntity;
+use crate::extract::Extract;
 use moonfield_app::prelude::World;
+use moonfield_ecs::{Commands, Query};
 use moonfield_log::error;
 use moonfield_rhi::{
     CommandBuffer, CommandBufferUsage, CommandPool, DepthBuffer, Device, Error, Extent2d, Format,
@@ -80,9 +82,9 @@ impl HasDisplayHandle for ExtractedWindow {
 
 /// Copy every main-world window (`Window` + `RawHandleWrapper`) into the
 /// render world as an [`ExtractedWindow`] component.
-pub fn extract_windows(world: &World, render_world: &mut World) {
-    for (entity, (window, handle)) in world.query::<(&Window, &RawHandleWrapper)>() {
-        render_world.spawn((ExtractedWindow {
+pub fn extract_windows(windows: Extract<Query<(&Window, &RawHandleWrapper)>>, commands: Commands) {
+    for (entity, (window, handle)) in windows.iter() {
+        commands.spawn((ExtractedWindow {
             main_entity: MainEntity(entity),
             handle: handle.clone(),
             physical_width: window.resolution.physical_width(),

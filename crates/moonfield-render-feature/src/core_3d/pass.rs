@@ -494,7 +494,7 @@ mod tests {
     use super::*;
     use crate::mesh::{Mesh, MeshHandle, MeshRenderer};
     use crate::shader::PipelineShaders;
-    use moonfield_app::App;
+    use moonfield_app::{App, ExtractSchedule};
     use moonfield_asset::Assets;
     use moonfield_camera::{Camera, PrimaryCamera};
     use moonfield_math::{GlobalTransform, Transform, Vec3};
@@ -554,7 +554,7 @@ mod tests {
         // test drives slot 0 manually (no window frame loop in headless mode).
         app.render_world_mut()
             .insert_resource(FrameDrawArena::new(render_device.device()).expect("arena"));
-        app.add_extract_system(moonfield_render_core::extract_cameras);
+        app.add_render_systems(ExtractSchedule, moonfield_render_core::extract_cameras);
         app.world_mut().spawn((
             Camera::default(),
             PrimaryCamera,

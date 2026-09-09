@@ -265,9 +265,7 @@ impl ApplicationHandler<WinitUserEvent> for WinitHandler<'_> {
         // Adopt a pre-spawned window entity (Bevy-style: user code may spawn
         // a `Window` component at startup), or spawn the primary window
         // entity from the plugin config.
-        let existing = <&Window as moonfield_ecs::WorldQuery>::fetch(self.app.world())
-            .next()
-            .map(|(e, _)| e);
+        let existing = self.app.world().query::<&Window>().next().map(|(e, _)| e);
         let entity = match existing {
             Some(e) => e,
             None => {

@@ -10,6 +10,7 @@ use crate::change_detection::{Mut, Ref, Tick};
 use crate::commands::Command;
 use crate::entities::{AllocManyState, Entities, Location, NoSuchEntity, ReserveEntitiesIterator};
 use crate::hooks::{ComponentHooks, HookKind};
+use crate::query::QueryIter;
 use crate::schedule::{IntoSystemConfigs, ScheduleLabel, Schedules};
 use crate::{Component, Entity, Resources, WorldQuery};
 use std::cell::RefCell;
@@ -522,6 +523,22 @@ impl World {
     }
 
     // ------------------------------------------------------------------
+    // Main-world parking (extract schedules)
+    // ------------------------------------------------------------------
+
+    /// Park `main` as this world's [`MainWorld`] resource for the duration
+    /// of an extract schedule, so extract systems can read it through the
+    /// `Extract` system parameter (moonfield-render-core).
+    pub fn park_main_world(&mut self, main: &World) {
+        self.insert_resource(MainWorld::park(main));
+    }
+
+    /// Remove the parked [`MainWorld`], returning whether one was parked.
+    pub fn unpark_main_world(&mut self) -> bool {
+        self.remove_resource::<MainWorld>().is_some()
+    }
+
+    // ------------------------------------------------------------------
     // Schedules
     // ------------------------------------------------------------------
 
@@ -567,29 +584,35 @@ impl World {
     // Queries
     // ------------------------------------------------------------------
 
-    /// Query the world for a combination of components.
+    /// Query the world for a read-only combination of components.
     ///
     /// Yields `(Entity, item)` pairs where each item borrows from the world.
-    pub fn query<'a, Q: WorldQuery>(&'a self) -> Q::Iter<'a> {
-        Q::fetch(self)
+    /// Panics when the query contains mutable access; use [`Self::query_mut`]
+    /// for those.
+    pub fn query<'a, Q: WorldQuery>(&'a self) -> QueryIter<'a, Q> {
+        QueryIter::new_shared(self, &|_| true)
     }
 
     /// Query the world for a mutable combination of components.
-    pub fn query_mut<'a, Q: WorldQuery>(&'a mut self) -> Q::Iter<'a> {
-        Q::fetch_mut(self)
+    pub fn query_mut<'a, Q: WorldQuery>(&'a mut self) -> QueryIter<'a, Q> {
+        // SAFETY: `&mut self` excludes every other access to the fetched
+        // columns for the iterator's (and its items') lifetime.
+        unsafe { QueryIter::new(self, &|_| true) }
     }
 
     /// Query with an archetype filter
     /// ([`With`](crate::With)/[`Without`](crate::Without)/[`Or`](crate::Or)).
-    pub fn query_filtered<'a, Q: WorldQuery, F: crate::QueryFilter>(&'a self) -> Q::Iter<'a> {
-        Q::fetch_with(self, &crate::system::archetype_matches::<F>)
+    pub fn query_filtered<'a, Q: WorldQuery, F: crate::QueryFilter>(&'a self) -> QueryIter<'a, Q> {
+        QueryIter::new_shared(self, &crate::system::archetype_matches::<F>)
     }
 
     /// Mutable query with an archetype filter.
     pub fn query_filtered_mut<'a, Q: WorldQuery, F: crate::QueryFilter>(
         &'a mut self,
-    ) -> Q::Iter<'a> {
-        Q::fetch_mut_with(self, &crate::system::archetype_matches::<F>)
+    ) -> QueryIter<'a, Q> {
+        // SAFETY: `&mut self` excludes every other access to the fetched
+        // columns for the iterator's (and its items') lifetime.
+        unsafe { QueryIter::new(self, &crate::system::archetype_matches::<F>) }
     }
 
     // ------------------------------------------------------------------
@@ -1016,6 +1039,41 @@ impl World {
 
         self.fire_hook(HookKind::Remove, TypeId::of::<T>(), entity);
         Some(value)
+    }
+}
+
+/// The main world, parked in another (render) world while an extract
+/// schedule runs so extract systems can read it through the `Extract`
+/// system parameter (moonfield-render-core).
+///
+/// Worlds are neither `Send` nor `Sync` (deferred command queues carry
+/// unrestricted closures; archetype columns carry borrow flags), so the
+/// parked world travels as a raw pointer in `Send + Sync` clothing. The
+/// pointer's validity is a contract, not a type property: the parker
+/// ([`World::park_main_world`]'s caller) keeps the world alive and only
+/// reads it until [`World::unpark_main_world`] removes the resource.
+pub struct MainWorld(*const World);
+
+// SAFETY: the struct is a bare pointer; every dereference goes through
+// `world`, whose contract the parker upholds.
+unsafe impl Send for MainWorld {}
+unsafe impl Sync for MainWorld {}
+
+impl MainWorld {
+    /// Park `world`.
+    pub(crate) fn park(world: &World) -> Self {
+        Self(world as *const World)
+    }
+
+    /// The parked world.
+    ///
+    /// # Safety
+    ///
+    /// The caller must uphold the parking contract: the parker keeps the
+    /// world alive and hands out only `&World`-compatible access until the
+    /// resource is removed.
+    pub unsafe fn world<'w>(&self) -> &'w World {
+        unsafe { &*self.0 }
     }
 }
 

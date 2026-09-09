@@ -38,8 +38,13 @@ pub struct Update;
 /// Schedule label for main-world systems that prepare a frame before
 /// extraction into the render world.
 pub struct PreRender;
+/// Schedule label for render-world systems that copy data out of the main
+/// world. [`App::render`] parks the main world in the render world's
+/// [`MainWorld`](moonfield_ecs::MainWorld) resource while this schedule
+/// runs; systems read it through `moonfield_render_core::Extract`.
+pub struct ExtractSchedule;
 /// Schedule label for render-world systems, run by [`App::render`] after
-/// [`PreRender`] and extraction.
+/// [`ExtractSchedule`].
 pub struct Render;
 /// Schedule label for render-world systems that prepare persistent GPU data
 /// from the extracted snapshot.
@@ -61,6 +66,7 @@ impl ScheduleLabel for FixedLast {}
 impl ScheduleLabel for Last {}
 impl ScheduleLabel for Update {}
 impl ScheduleLabel for PreRender {}
+impl ScheduleLabel for ExtractSchedule {}
 impl ScheduleLabel for RenderPrepare {}
 impl ScheduleLabel for RenderQueue {}
 impl ScheduleLabel for Render {}
@@ -120,8 +126,10 @@ pub enum AppError {
 ///
 /// Systems live in labeled [`Schedule`]s. The app drives [`Startup`] once,
 /// [`Update`] every update, [`PreRender`] in the main world followed by
-/// [`RenderPrepare`], [`RenderQueue`], and [`Render`] in the render world every
-/// render tick, and [`Shutdown`] once.
+/// [`ExtractSchedule`] (the main world parked as a
+/// [`MainWorld`](moonfield_ecs::MainWorld) resource) and then
+/// [`RenderPrepare`], [`RenderQueue`], and [`Render`] in the render world
+/// every render tick, and [`Shutdown`] once.
 ///
 /// # Runner
 ///
@@ -134,17 +142,9 @@ pub struct App {
     plugin_names: HashSet<String>,
     world: World,
     render_world: World,
-    extract_systems: Vec<ExtractFn>,
     runner: Option<Runner>,
     initialized: bool,
 }
-
-/// A handwritten extraction function: copies data out of the main world
-/// (immutable) into the render world. Runs at the start of every
-/// [`App::render`] call, right after the render world's entities have been
-/// cleared — extraction is a full rebuild, so render-world entities are
-/// never stable across frames.
-type ExtractFn = Box<dyn FnMut(&World, &mut World) + Send + Sync>;
 
 impl Default for App {
     fn default() -> Self {
@@ -160,7 +160,6 @@ impl App {
             plugin_names: HashSet::new(),
             world: World::new(),
             render_world: World::new(),
-            extract_systems: Vec::new(),
             runner: None,
             initialized: false,
         }
@@ -263,20 +262,6 @@ impl App {
     /// Access the underlying render world mutably.
     pub fn render_world_mut(&mut self) -> &mut World {
         &mut self.render_world
-    }
-
-    /// Registers a handwritten extraction function, run every frame at the
-    /// start of [`App::render`] — after the render world's entities are
-    /// cleared, before the [`Render`] schedule runs. The function copies
-    /// data out of the main world (immutable) into the render world; it
-    /// must not key cross-frame state by render-world [`moonfield_ecs::Entity`],
-    /// which is rebuilt every frame.
-    pub fn add_extract_system(
-        &mut self,
-        f: impl FnMut(&World, &mut World) + Send + Sync + 'static,
-    ) -> &mut Self {
-        self.extract_systems.push(Box::new(f));
-        self
     }
 
     /// Register one or more systems into the schedule identified by `label`.
@@ -414,19 +399,28 @@ impl App {
         });
     }
 
-    /// Run one render tick: [`PreRender`] in the main world, extraction, then
-    /// [`RenderPrepare`], [`RenderQueue`], and [`Render`] in the render world.
-    /// Startup runs lazily on the first call so a backend that drives `render`
-    /// without `update` still initializes.
+    /// Run one render tick: [`PreRender`] in the main world, then
+    /// [`ExtractSchedule`] in the render world with the main world parked as
+    /// a [`MainWorld`](moonfield_ecs::MainWorld) resource, then
+    /// [`RenderPrepare`], [`RenderQueue`], and [`Render`]. Startup runs
+    /// lazily on the first call so a backend that drives `render` without
+    /// `update` still initializes.
     pub fn render(&mut self) {
         if !self.initialized {
             self.startup();
         }
         self.run_schedule(PreRender);
+        // Park the main world where extract systems read it, rebuild the
+        // render world's entities, run extraction, then take the world back.
+        let main_world = std::mem::take(&mut self.world);
+        self.render_world.park_main_world(&main_world);
         self.render_world.clear();
-        for extract in &mut self.extract_systems {
-            extract(&self.world, &mut self.render_world);
-        }
+        self.run_render_schedule(ExtractSchedule);
+        assert!(
+            self.render_world.unpark_main_world(),
+            "App::render re-takes the parked main world after ExtractSchedule"
+        );
+        self.world = main_world;
         self.run_render_schedule(RenderPrepare);
         self.run_render_schedule(RenderQueue);
         self.run_render_schedule(Render);

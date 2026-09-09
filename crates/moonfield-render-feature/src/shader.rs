@@ -14,8 +14,9 @@
 use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 
-use moonfield_app::prelude::World;
+use moonfield_app::prelude::{Commands, Res, World};
 use moonfield_asset::{AssetId, AssetRevision, Assets, Handle};
+use moonfield_render_core::Extract;
 use moonfield_rhi::{CompiledShader, Reflection, ShaderCache};
 use moonfield_shader::Shader;
 
@@ -247,31 +248,31 @@ impl PreparedShaders {
 /// Incrementally copy the requested shader assets (revision-matched, like
 /// `extract_mesh_assets`) and the pipelines' shader requests into the render
 /// world.
-pub fn extract_shader_assets(world: &World, render_world: &mut World) {
-    let requests = world
-        .get_resource::<PipelineShaders>()
-        .map(|requests| (*requests).clone())
-        .unwrap_or_default();
+pub fn extract_shader_assets(
+    requests: Extract<Option<Res<PipelineShaders>>>,
+    assets: Extract<Option<Res<Assets<Shader>>>>,
+    extracted: Option<Res<ExtractedShaders>>,
+    commands: Commands,
+) {
+    let requests = requests.as_deref().cloned().unwrap_or_default();
 
-    let mut extracted = render_world
-        .remove_resource::<ExtractedShaders>()
-        .unwrap_or_default();
-    if let Some(assets) = world.get_resource::<Assets<Shader>>() {
+    // An absent asset store clears the extracted set (retain-by-nothing).
+    let mut referenced_ids: HashSet<AssetId> = HashSet::new();
+    let mut updates = Vec::new();
+    if let Some(assets) = assets.as_deref() {
         let referenced: Vec<Handle<Shader>> = requests
             .iter()
             .map(|request| request.shader)
             .filter(|handle| assets.contains(handle))
             .collect();
-        let referenced_ids: HashSet<AssetId> =
-            referenced.iter().map(|handle| handle.id()).collect();
-        extracted.0.retain(|id, _| referenced_ids.contains(id));
+        referenced_ids = referenced.iter().map(|handle| handle.id()).collect();
         for handle in referenced {
             let Some(revision) = assets.revision(&handle) else {
                 continue;
             };
             if extracted
-                .0
-                .get(&handle.id())
+                .as_deref()
+                .and_then(|current| current.0.get(&handle.id()))
                 .is_some_and(|shader| shader.revision == revision)
             {
                 continue;
@@ -279,19 +280,26 @@ pub fn extract_shader_assets(world: &World, render_world: &mut World) {
             let Some(shader) = assets.get(&handle) else {
                 continue;
             };
-            extracted.0.insert(
+            updates.push((
                 handle.id(),
                 ExtractedShader {
                     revision,
                     shader: shader.clone(),
                 },
-            );
+            ));
         }
-    } else {
-        extracted.0.clear();
     }
-    render_world.insert_resource(extracted);
-    render_world.insert_resource(requests);
+    commands.insert_resource(requests);
+    commands.queue(move |render_world| {
+        let mut extracted = render_world
+            .remove_resource::<ExtractedShaders>()
+            .unwrap_or_default();
+        extracted.0.retain(|id, _| referenced_ids.contains(id));
+        for (id, shader) in updates {
+            extracted.0.insert(id, shader);
+        }
+        render_world.insert_resource(extracted);
+    });
 }
 
 /// `RenderPrepare` system: compile every requested shader whose asset
@@ -332,7 +340,7 @@ pub fn prepare_shaders(world: &mut World) {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use moonfield_app::{App, RenderPrepare};
+    use moonfield_app::{App, ExtractSchedule, RenderPrepare};
 
     const TEST_ENTRIES: &[ShaderEntry] = &[ShaderEntry {
         name: "main",
@@ -397,7 +405,7 @@ mod tests {
             .get_resource_mut::<Assets<Shader>>()
             .expect("Assets<Shader>")
             .add(Shader::new(TEST_SHADER.to_string(), "other.slang".into()));
-        app.add_extract_system(extract_shader_assets);
+        app.add_render_systems(ExtractSchedule, extract_shader_assets);
         app.render();
 
         let render_world = app.render_world();
@@ -468,7 +476,7 @@ mod tests {
     fn test_prepare_shaders_compiles_and_records_failures() {
         let _gpu = crate::test_util::GPU_LOCK.lock().unwrap();
         let (mut app, handles) = shader_world(&[("test", TEST_SHADER)]);
-        app.add_extract_system(extract_shader_assets);
+        app.add_render_systems(ExtractSchedule, extract_shader_assets);
         app.add_render_systems(RenderPrepare, prepare_shaders);
 
         app.render();

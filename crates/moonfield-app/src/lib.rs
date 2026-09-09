@@ -14,9 +14,9 @@ mod plugin_group;
 mod time;
 
 pub use app::{
-    App, AppError, AppExit, First, FixedFirst, FixedLast, FixedMain, FixedPostUpdate,
-    FixedPreUpdate, FixedUpdate, Last, Plugins, PreRender, Render, RenderPrepare, RenderQueue,
-    Runner, Shutdown, Startup, Update, run_once,
+    App, AppError, AppExit, ExtractSchedule, First, FixedFirst, FixedLast, FixedMain,
+    FixedPostUpdate, FixedPreUpdate, FixedUpdate, Last, Plugins, PreRender, Render, RenderPrepare,
+    RenderQueue, Runner, Shutdown, Startup, Update, run_once,
 };
 pub use hierarchy::HierarchyPlugin;
 pub use moonfield_ecs::Resource;
@@ -296,13 +296,16 @@ mod tests {
                 .unwrap()
                 .push("pre_render".to_string());
         });
-        app.add_extract_system(|main_world, render_world| {
-            let events = main_world
-                .get_resource::<Arc<Mutex<Vec<String>>>>()
+        app.add_render_systems(ExtractSchedule, |world: &mut World| {
+            // The main world is parked while the extract schedule runs;
+            // reading it is the `Extract` parameter's job (render-core).
+            assert!(world.get_resource::<moonfield_ecs::MainWorld>().is_some());
+            world
+                .get_resource_mut::<Arc<Mutex<Vec<String>>>>()
                 .unwrap()
-                .clone();
-            events.lock().unwrap().push("extract".to_string());
-            assert!(render_world.contains_resource::<Arc<Mutex<Vec<String>>>>());
+                .lock()
+                .unwrap()
+                .push("extract".to_string());
         });
         app.add_render_systems(RenderPrepare, |world: &mut World| {
             world

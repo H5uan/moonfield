@@ -32,12 +32,12 @@ mod ui;
 pub use scene_io::{editor_asset_server, load_asset};
 
 use moonfield_app::prelude::{IntoSystemConfigs, PreRender, Render, World};
-use moonfield_app::{App, Plugin};
+use moonfield_app::{App, ExtractSchedule, Plugin};
 use moonfield_camera::{PrimaryCamera, RenderTarget};
-use moonfield_ecs::{MessageCursor, Messages, ensure_global_transforms};
+use moonfield_ecs::{Commands, MessageCursor, Messages, ResMut, ensure_global_transforms};
 use moonfield_log::{error, error_once};
 use moonfield_render_core::{
-    FrameContext, MAX_FRAMES_IN_FLIGHT, ViewTargets, WindowFrameDemand, WindowSurfaces,
+    Extract, FrameContext, MAX_FRAMES_IN_FLIGHT, ViewTargets, WindowFrameDemand, WindowSurfaces,
 };
 use moonfield_render_feature::core_3d::pass::RenderTargetSizes;
 use moonfield_render_feature::shader::{PipelineShaders, PreparedShaders};
@@ -85,7 +85,7 @@ impl Plugin for EditorPlugin {
         // The built-in pipelines' shaders load eagerly so the passes find
         // prepared shaders from the first frame.
         scene_io::load_pipeline_shaders(app.world_mut());
-        app.add_extract_system(extract_editor_frame);
+        app.add_render_systems(ExtractSchedule, extract_editor_frame);
         app.add_systems(PreRender, editor_prepare.before(&ensure_global_transforms));
         app.add_render_systems(
             Render,
@@ -260,42 +260,46 @@ impl EditorMainState {
 /// viewport panel's physical size to [`RenderTargetSizes`], and set
 /// [`WindowFrameDemand`] so window frames are only acquired when there is UI
 /// content to present.
-fn extract_editor_frame(main_world: &World, render_world: &mut World) {
-    let frame = main_world
-        .get_resource_mut::<PendingEditorFrame>()
-        .and_then(|mut pending| pending.0.take());
-    // Demand is OR-accumulated in extract-registration order: `RenderPlugin`'s
-    // `extract_cameras` may already have demanded frames for a window-targeted
-    // camera (the game path has no editor frame at all).
-    let has_frame = frame.is_some();
-    let demanded = has_frame
-        || render_world
-            .get_resource::<WindowFrameDemand>()
-            .map(|demand| demand.0)
-            .unwrap_or(false);
-    render_world.insert_resource(WindowFrameDemand(demanded));
-    let Some(frame) = frame else {
-        return;
-    };
+fn extract_editor_frame(
+    mut pending: Extract<Option<ResMut<PendingEditorFrame>>>,
+    commands: Commands,
+) {
+    let frame = pending.as_deref_mut().and_then(|pending| pending.0.take());
+    commands.queue(move |render_world| {
+        // Demand is OR-accumulated in extract-registration order:
+        // `RenderPlugin`'s `extract_cameras` may already have demanded
+        // frames for a window-targeted camera (the game path has no editor
+        // frame at all).
+        let has_frame = frame.is_some();
+        let demanded = has_frame
+            || render_world
+                .get_resource::<WindowFrameDemand>()
+                .map(|demand| demand.0)
+                .unwrap_or(false);
+        render_world.insert_resource(WindowFrameDemand(demanded));
+        let Some(frame) = frame else {
+            return;
+        };
 
-    if let Some(panel_size) = frame.viewport_panel_points {
-        let width = (panel_size.x * frame.pixels_per_point).round().max(1.0) as u32;
-        let height = (panel_size.y * frame.pixels_per_point).round().max(1.0) as u32;
-        if !render_world.contains_resource::<RenderTargetSizes>() {
-            render_world.insert_resource(RenderTargetSizes::default());
+        if let Some(panel_size) = frame.viewport_panel_points {
+            let width = (panel_size.x * frame.pixels_per_point).round().max(1.0) as u32;
+            let height = (panel_size.y * frame.pixels_per_point).round().max(1.0) as u32;
+            if !render_world.contains_resource::<RenderTargetSizes>() {
+                render_world.insert_resource(RenderTargetSizes::default());
+            }
+            render_world
+                .get_resource_mut::<RenderTargetSizes>()
+                .expect("RenderTargetSizes was just ensured")
+                .0
+                .insert(RenderTarget::Viewport, (width, height));
         }
-        render_world
-            .get_resource_mut::<RenderTargetSizes>()
-            .expect("RenderTargetSizes was just ensured")
-            .0
-            .insert(RenderTarget::Viewport, (width, height));
-    }
 
-    let frame = match render_world.remove_resource::<PreparedEditorFrame>() {
-        Some(stale) => merge_prepared_frames(stale, frame),
-        None => frame,
-    };
-    render_world.insert_resource(frame);
+        let frame = match render_world.remove_resource::<PreparedEditorFrame>() {
+            Some(stale) => merge_prepared_frames(stale, frame),
+            None => frame,
+        };
+        render_world.insert_resource(frame);
+    });
 }
 
 /// Main-world `PreRender` system: handles input, builds the UI, and stages

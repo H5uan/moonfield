@@ -77,7 +77,7 @@ pub fn prepare_core_3d_frame(world: &mut World) {
 mod tests {
     use super::*;
     use crate::{RenderFeaturePlugin, mesh::Mesh, mesh::MeshHandle, mesh::MeshRenderer};
-    use moonfield_app::App;
+    use moonfield_app::{App, ExtractSchedule};
     use moonfield_asset::Assets;
     use moonfield_camera::{Camera, CameraTarget, RenderTarget};
     use moonfield_math::{GlobalTransform, Transform};
@@ -87,7 +87,7 @@ mod tests {
     fn test_core_3d_builds_isolated_phases_for_each_camera() {
         let mut app = App::new();
         app.add_plugin(RenderFeaturePlugin);
-        app.add_extract_system(extract_cameras);
+        app.add_render_systems(ExtractSchedule, extract_cameras);
         let mesh = {
             app.world()
                 .get_resource_mut::<Assets<Mesh>>()

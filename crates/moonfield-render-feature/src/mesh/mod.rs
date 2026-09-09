@@ -10,8 +10,9 @@ pub mod gltf;
 use std::path::Path;
 use std::{collections::HashMap, collections::HashSet};
 
-use moonfield_app::prelude::World;
+use moonfield_app::prelude::{Commands, Query, Res, World};
 use moonfield_asset::{AssetId, AssetRevision, Assets, Handle};
+use moonfield_render_core::Extract;
 use moonfield_rhi::{GpuAllocation, GpuPtr, Memory, RenderDevice};
 
 use crate::mesh::gltf::{MeshGltfError, import_gltf_mesh, parse_gltf_mesh};
@@ -230,30 +231,33 @@ impl<T> PreparedMeshes<T> {
 
 /// Incrementally copy mesh assets referenced by [`MeshRenderer`] entities
 /// into the render world.
-pub fn extract_mesh_assets(world: &World, render_world: &mut World) {
-    let Some(assets) = world.get_resource::<Assets<Mesh>>() else {
-        render_world.insert_resource(ExtractedMeshes::default());
+pub fn extract_mesh_assets(
+    renderers: Extract<Query<&MeshRenderer>>,
+    assets: Extract<Option<Res<Assets<Mesh>>>>,
+    extracted: Option<Res<ExtractedMeshes>>,
+    commands: Commands,
+) {
+    let Some(assets) = assets.as_deref() else {
+        commands.insert_resource(ExtractedMeshes::default());
         return;
     };
 
-    let referenced: HashSet<Handle<Mesh>> = world
-        .query::<&MeshRenderer>()
+    let referenced: HashSet<Handle<Mesh>> = renderers
+        .iter()
         .map(|(_, renderer)| renderer.mesh.0)
         .filter(|handle| assets.contains(handle))
         .collect();
-    let mut extracted = render_world
-        .remove_resource::<ExtractedMeshes>()
-        .unwrap_or_default();
-    extracted
-        .0
-        .retain(|id, _| referenced.iter().any(|handle| handle.id() == *id));
+    let referenced_ids: HashSet<AssetId> = referenced.iter().map(|handle| handle.id()).collect();
+    // The updates are precomputed against the current revisions; the render
+    // world is only touched once, after this system, through the commands.
+    let mut updates = Vec::new();
     for handle in referenced {
         let Some(revision) = assets.revision(&handle) else {
             continue;
         };
         if extracted
-            .0
-            .get(&handle.id())
+            .as_deref()
+            .and_then(|current| current.0.get(&handle.id()))
             .is_some_and(|mesh| mesh.revision == revision)
         {
             continue;
@@ -261,15 +265,24 @@ pub fn extract_mesh_assets(world: &World, render_world: &mut World) {
         let Some(mesh) = assets.get(&handle) else {
             continue;
         };
-        extracted.0.insert(
+        updates.push((
             handle.id(),
             ExtractedMesh {
                 revision,
                 mesh: mesh.clone(),
             },
-        );
+        ));
     }
-    render_world.insert_resource(extracted);
+    commands.queue(move |render_world| {
+        let mut extracted = render_world
+            .remove_resource::<ExtractedMeshes>()
+            .unwrap_or_default();
+        extracted.0.retain(|id, _| referenced_ids.contains(id));
+        for (id, mesh) in updates {
+            extracted.0.insert(id, mesh);
+        }
+        render_world.insert_resource(extracted);
+    });
 }
 
 impl Mesh {

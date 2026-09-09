@@ -70,7 +70,7 @@ pub use message::{
     message_update_system,
 };
 pub use name::Name;
-pub use query::{EntityMut, EntityRef, WorldQuery};
+pub use query::{EntityMut, EntityRef, QueryIter, WorldQuery};
 pub use relationship::{Relationship, RelationshipTarget};
 pub use resource::Resource;
 pub use schedule::{
@@ -81,7 +81,7 @@ pub use system::{
     SystemParamItem, SystemState,
 };
 pub use template::{Template, TemplateContext, TemplateError};
-pub use world::World;
+pub use world::{MainWorld, World};
 
 /// Common ECS imports.
 pub mod prelude {

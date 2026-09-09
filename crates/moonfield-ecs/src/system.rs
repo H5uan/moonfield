@@ -22,7 +22,11 @@ use std::cell::{Ref, RefMut};
 use std::marker::PhantomData;
 use std::ops::{Deref, DerefMut};
 
-use crate::{Entity, Resource, World, filter::QueryFilter, query::WorldQuery};
+use crate::{
+    Entity, Resource, World,
+    filter::QueryFilter,
+    query::{QueryIter, WorldQuery},
+};
 
 /// A unit of work that operates on a [`World`].
 ///
@@ -299,18 +303,18 @@ pub struct Query<'w, Q: WorldQuery, F: QueryFilter = ()> {
 
 impl<'w, Q: WorldQuery, F: QueryFilter> Query<'w, Q, F> {
     /// Iterate all matching entities with shared access.
-    pub fn iter(&self) -> Q::Iter<'_> {
-        Q::fetch_with(self.world, &archetype_matches::<F>)
+    pub fn iter(&self) -> QueryIter<'_, Q> {
+        QueryIter::new_shared(self.world, &archetype_matches::<F>)
     }
 
     /// Iterate all matching entities with mutable access.
-    pub fn iter_mut(&mut self) -> Q::Iter<'_> {
+    pub fn iter_mut(&mut self) -> QueryIter<'_, Q> {
         // SAFETY: the returned iterator and the items it yields borrow this
         // `Query` mutably, so no second mutable iterator can be created from
         // it while they are alive; the running system holds the world's only
         // access. Conflicting columns across *different* params are still
         // caught by the archetype borrow flags.
-        unsafe { Q::fetch_mut_cell_with(self.world, &archetype_matches::<F>) }
+        unsafe { QueryIter::new(self.world, &archetype_matches::<F>) }
     }
 
     /// Fetch the item for a single entity, if it matches the query *and* the
