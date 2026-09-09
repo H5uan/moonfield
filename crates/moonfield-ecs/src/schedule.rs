@@ -37,6 +37,9 @@ pub struct SystemConfig {
     label: String,
     before: Vec<String>,
     after: Vec<String>,
+    /// The set this config belongs to ([`IntoSystemConfigs::in_set`]);
+    /// `add_systems` expands it into anchor constraints.
+    in_set: Option<&'static str>,
 }
 
 /// The result of chaining ordering constraints off a system (or tuple of
@@ -90,10 +93,76 @@ pub trait IntoSystemConfigs<M>: Sized {
         }
         SystemConfigs { configs }
     }
+
+    /// Run this system before the set registered with
+    /// [`Schedule::add_sets`].
+    fn before_set<S: SystemSet>(self) -> SystemConfigs {
+        self.before_label(type_name::<S>())
+    }
+
+    /// Run this system after the set registered with
+    /// [`Schedule::add_sets`].
+    fn after_set<S: SystemSet>(self) -> SystemConfigs {
+        self.after_label(type_name::<S>())
+    }
+
+    /// Run this system inside the set `S`: after the set's anchor and
+    /// before the next anchor in the set chain, so systems of neighboring
+    /// sets stay ordered without explicit constraints. The schedule resolves
+    /// the next anchor at registration time.
+    fn in_set<S: SystemSet>(self) -> SystemConfigs {
+        let mut configs = self.into_configs();
+        for config in &mut configs {
+            config.in_set = Some(type_name::<S>());
+        }
+        SystemConfigs { configs }
+    }
 }
 
 /// Marker for single systems registered into a schedule.
 pub struct SingleSystemMarker<M>(PhantomData<fn() -> M>);
+
+/// A named ordering anchor in a schedule: any unit struct identifying the
+/// set. The anchor is a no-op system registered by [`Schedule::add_sets`];
+/// systems attach to it with [`IntoSystemConfigs::before_set`] /
+/// [`IntoSystemConfigs::after_set`].
+pub trait SystemSet: Send + Sync + 'static {}
+
+/// The no-op anchor system behind every set.
+struct NopSystem;
+
+impl System for NopSystem {
+    fn name(&self) -> &str {
+        "set anchor"
+    }
+
+    fn run(&mut self, _world: &mut World) {}
+}
+
+/// Types passable to [`Schedule::add_sets`]: one [`SystemSet`], or a tuple
+/// of sets in chain order.
+pub trait SetChain {
+    /// The set labels in chain order.
+    fn labels() -> Vec<&'static str>;
+}
+
+impl<S: SystemSet> SetChain for S {
+    fn labels() -> Vec<&'static str> {
+        vec![type_name::<S>()]
+    }
+}
+
+macro_rules! impl_set_chain_tuple {
+    ($($set:ident),*) => {
+        impl<$($set: SystemSet),*> SetChain for ($($set,)*) {
+            fn labels() -> Vec<&'static str> {
+                vec![$(type_name::<$set>()),*]
+            }
+        }
+    };
+}
+
+smaller_tuples_too!(impl_set_chain_tuple, S0, S1, S2, S3, S4, S5, S6, S7);
 
 /// Marker for [`SystemConfigs`] chains registered into a schedule.
 pub struct ChainedConfigsMarker;
@@ -113,6 +182,7 @@ where
             label,
             before: Vec::new(),
             after: Vec::new(),
+            in_set: None,
         }]
     }
 }
@@ -172,6 +242,9 @@ pub struct Schedule {
     /// Indices into `systems` in execution order; rebuilt when `dirty`.
     order: Vec<usize>,
     dirty: bool,
+    /// The set anchors in chain order ([`Schedule::add_sets`]), used to
+    /// expand `in_set` membership into anchor constraints.
+    set_chain: Vec<String>,
 }
 
 impl Schedule {
@@ -181,11 +254,53 @@ impl Schedule {
     }
 
     /// Register one or more systems (a system, a `.before()`/`.after()`
-    /// chain, or a tuple of either).
+    /// chain, or a tuple of either). A config marked with
+    /// [`IntoSystemConfigs::in_set`] gains anchor constraints: after its
+    /// set's anchor and before the next anchor in the set chain.
     pub fn add_systems<M>(&mut self, systems: impl IntoSystemConfigs<M>) -> &mut Self {
-        self.systems.extend(systems.into_configs());
+        for mut config in systems.into_configs() {
+            if let Some(set) = config.in_set {
+                config.after.push(set.to_string());
+                if let Some(next) = self.next_set_anchor(set) {
+                    config.before.push(next.to_string());
+                }
+            }
+            self.systems.push(config);
+        }
         self.dirty = true;
         self
+    }
+
+    /// Register an ordered chain of [`SystemSet`]s: one no-op anchor system
+    /// per set, each ordered after the previous. Pass a single set or a
+    /// tuple in chain order — `add_sets((First, Second, Third))`. Systems
+    /// attach with [`IntoSystemConfigs::in_set`] (membership, anchored on
+    /// both sides) or `before_set` / `after_set` (one-sided).
+    pub fn add_sets<S: SetChain>(&mut self, _sets: S) -> &mut Self {
+        let mut previous: Option<String> = None;
+        for label in S::labels() {
+            let mut config = SystemConfig {
+                system: Box::new(NopSystem),
+                label: label.to_string(),
+                before: Vec::new(),
+                after: Vec::new(),
+                in_set: None,
+            };
+            if let Some(previous) = previous.as_deref() {
+                config.after.push(previous.to_string());
+            }
+            previous = Some(label.to_string());
+            self.set_chain.push(label.to_string());
+            self.systems.push(config);
+        }
+        self.dirty = true;
+        self
+    }
+
+    /// The anchor following `set` in the set chain, if any.
+    fn next_set_anchor(&self, set: &str) -> Option<String> {
+        let index = self.set_chain.iter().position(|label| label == set)?;
+        self.set_chain.get(index + 1).cloned()
     }
 
     /// The number of registered systems.
@@ -503,6 +618,37 @@ mod tests {
             world.get_resource::<Log>().unwrap().0,
             ["first", "second", "second"]
         );
+    }
+
+    struct SetA;
+    struct SetB;
+    impl SystemSet for SetA {}
+    impl SystemSet for SetB {}
+
+    #[test]
+    fn test_sets_order_attached_systems() {
+        let mut world = World::new();
+        world.insert_resource(Log::default());
+        let mut schedule = Schedule::new();
+        schedule.add_sets((SetA, SetB));
+        // Registered in reverse order; the set constraints must win.
+        schedule.add_systems((second.after_set::<SetB>(), first.before_set::<SetB>()));
+        schedule.run(&mut world);
+        assert_eq!(world.get_resource::<Log>().unwrap().0, ["first", "second"]);
+    }
+
+    #[test]
+    fn test_in_set_memberships_of_neighboring_sets_stay_ordered() {
+        let mut world = World::new();
+        world.insert_resource(Log::default());
+        let mut schedule = Schedule::new();
+        schedule.add_sets((SetA, SetB));
+        // Registered in reverse order with no constraints between them;
+        // set membership alone must order first (in SetA) before second
+        // (in SetB).
+        schedule.add_systems((second.in_set::<SetB>(), first.in_set::<SetA>()));
+        schedule.run(&mut world);
+        assert_eq!(world.get_resource::<Log>().unwrap().0, ["first", "second"]);
     }
 
     #[test]

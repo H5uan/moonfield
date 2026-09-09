@@ -28,6 +28,9 @@ pub struct Camera {
     pub near: f32,
     /// Target clear color in linear RGBA.
     pub clear_color: [f32; 4],
+    /// Render order among cameras: views run in ascending `(order, entity)`
+    /// order. Cameras with equal order fall back to spawn order.
+    pub order: f32,
 }
 
 impl Default for Camera {
@@ -36,6 +39,7 @@ impl Default for Camera {
             fov_y_radians: std::f32::consts::FRAC_PI_3,
             near: 0.1,
             clear_color: [0.02, 0.02, 0.03, 1.0],
+            order: 0.0,
         }
     }
 }

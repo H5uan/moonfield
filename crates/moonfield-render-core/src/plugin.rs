@@ -15,15 +15,19 @@
 //! `RenderDevice` appears.
 
 use crate::extract::extract_cameras;
+use crate::schedule::{CameraDriver, PostViews, PrepareAssets, PrepareViews, Queue, Submit};
 use crate::window::{
     acquire_window_frames, create_window_surfaces, extract_windows, submit_window_frames,
 };
-use moonfield_app::{App, ExtractSchedule, Plugin, Render, RenderPrepare};
+use moonfield_app::prelude::IntoSystemConfigs;
+use moonfield_app::{App, ExtractSchedule, Plugin, Render};
 use moonfield_log::error;
 use moonfield_rhi::RenderDevice;
 
-/// Runtime plugin: creates the shared [`RenderDevice`] resource and registers
-/// the extraction and window frame-loop systems.
+/// Runtime plugin: creates the shared [`RenderDevice`] resource, registers
+/// the extraction systems, owns the `Render` schedule's set chain, and
+/// brackets it with the window frame loop (acquire before the chain,
+/// submit after it).
 pub struct RenderPlugin;
 
 impl Plugin for RenderPlugin {
@@ -33,8 +37,26 @@ impl Plugin for RenderPlugin {
 
     fn build(&self, app: &mut App) {
         app.add_render_systems(ExtractSchedule, (extract_cameras, extract_windows));
-        app.add_render_systems(RenderPrepare, create_window_surfaces);
-        app.add_render_systems(Render, (acquire_window_frames, submit_window_frames));
+        app.add_render_sets(
+            Render,
+            (
+                PrepareAssets,
+                Queue,
+                crate::schedule::PhaseSort,
+                PrepareViews,
+                CameraDriver,
+                PostViews,
+                Submit,
+            ),
+        );
+        app.add_render_systems(
+            Render,
+            (
+                acquire_window_frames.before_set::<PrepareAssets>(),
+                create_window_surfaces.after_set::<PrepareAssets>(),
+                submit_window_frames.after_set::<Submit>(),
+            ),
+        );
         match RenderDevice::new() {
             Ok(render_device) => {
                 app.render_world_mut().insert_resource(render_device);

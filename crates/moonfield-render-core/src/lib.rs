@@ -10,14 +10,17 @@ pub mod extract;
 pub mod plugin;
 pub mod render_phase;
 pub mod scene;
+pub mod schedule;
+pub mod view;
 pub mod window;
 
 pub use extract::{Extract, MainEntity, extract_cameras, extract_with_transform};
 pub use plugin::RenderPlugin;
 pub use render_phase::{
-    DrawFunction, DrawFunctionId, DrawFunctions, OrderedFloat, PhaseItem, RenderPhase,
+    DrawFunction, DrawFunctionId, DrawFunctions, OrderedFloat, PhaseItem, RenderPhase, sort_phase,
 };
 pub use scene::{ExtractedView, ViewTarget, ViewTargets};
+pub use view::{CurrentView, ViewQuery, camera_driver};
 pub use window::{
     ExtractedWindow, FrameContext, MAX_FRAMES_IN_FLIGHT, WindowFrameDemand, WindowSurfaceData,
     WindowSurfaces, acquire_window_frames, create_window_surfaces, extract_windows,

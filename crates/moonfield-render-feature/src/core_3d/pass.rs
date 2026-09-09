@@ -1,27 +1,30 @@
-//! The core 3D opaque pass: a plain system, not a renderer object.
+//! The core 3D opaque pass: a per-view system, not a renderer object.
 //!
-//! Bevy-style, the pass owns nothing. Persistent GPU state lives in two
+//! Bevy-style, the pass owns nothing. Persistent GPU state lives in
 //! render-world resources — [`Core3dPipeline`] (the flat-lit mesh pipeline)
-//! and [`ViewTargets`] (one offscreen target per logical
-//! [`RenderTarget`]) — and the frame's command buffer comes from
+//! and [`ViewTargets`] (one offscreen target per logical [`RenderTarget`])
+//! — and the frame's command buffer comes from
 //! [`FrameContext`](moonfield_render_core::FrameContext) between
 //! `acquire_window_frames` and `submit_window_frames`.
-//! [`main_opaque_pass_3d`] reads the [`Core3dFrame`] built in `RenderQueue`
-//! and records one render pass per view whose target has an attachment —
-//! offscreen targets (the editor viewport) end in `ShaderRead` and record
-//! whether or not any window frame exists, and a primary view targeting the
-//! primary window draws straight into each in-progress surface's swapchain
-//! image (ending in `Present`), depth-tested against the surface's own
-//! depth buffer.
 //!
-//! With no primary camera targeting a view target, the target is cleared to
-//! a dim background color.
+//! `prepare_view_targets`, `prepare_core_3d_pipeline`, and
+//! `begin_frame_draw_arena` run in the `PrepareViews` set; the camera driver
+//! then runs [`opaque_pass_3d`] once per extracted view (the `Core3d`
+//! schedule). Offscreen views (the editor viewport) draw into their target
+//! ending in `ShaderRead`; a window view draws straight into each
+//! in-progress surface's swapchain image (ending in `Present`),
+//! depth-tested against the surface's own depth buffer. Offscreen targets
+//! no view claims are cleared to a dim background by
+//! [`clear_orphan_view_targets`].
 
-use moonfield_app::prelude::World;
+use moonfield_app::prelude::{Query, Res, World};
 use moonfield_asset::{AssetRevision, Handle};
 use moonfield_camera::RenderTarget;
 use moonfield_log::{error, error_once, info};
-use moonfield_render_core::{FrameContext, ViewTargets, WindowSurfaces};
+use moonfield_render_core::{
+    CurrentView, DrawFunctions, ExtractedView, FrameContext, PhaseItem, RenderPhase, ViewTargets,
+    WindowSurfaces,
+};
 use moonfield_rhi::{
     AttachmentLayout, ClearValue, CommandBuffer, CompareOp, CullMode, CullState, DepthState,
     Format, FrontFace, GraphicsPipeline, LoadOp, Rect2d, RenderAttachment, RenderDevice,
@@ -29,11 +32,8 @@ use moonfield_rhi::{
     Viewport,
 };
 use moonfield_shader::Shader;
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 
-use moonfield_render_core::{DrawFunctions, PhaseItem};
-
-use super::{Core3dFrame, Core3dView};
 use crate::render_phase::{FrameDrawArena, Opaque3d, ViewUniforms};
 use crate::shader::{
     PipelineShader, PipelineShaders, PreparedShader, PreparedShaders, ShaderEntry,
@@ -70,9 +70,9 @@ pub fn core_3d_shader(shader: Handle<Shader>) -> PipelineShader {
 }
 
 /// The flat-lit mesh pipeline of the core 3D pass, as a render-world
-/// resource. [`main_opaque_pass_3d`] (re)builds it from [`PreparedShaders`]
-/// whenever the prepared shader's revision advances past the one the
-/// pipeline was built from.
+/// resource. [`prepare_core_3d_pipeline`] (re)builds it from
+/// [`PreparedShaders`] whenever the prepared shader's revision advances
+/// past the one the pipeline was built from.
 pub struct Core3dPipeline {
     pipeline: GraphicsPipeline,
     /// The `Ptr<DrawData>` root's reflected placement. A draw encodes the
@@ -150,23 +150,17 @@ pub const VIEW_TARGET_FORMAT: Format = Format::B8G8R8A8Unorm;
 #[derive(Default)]
 pub struct RenderTargetSizes(pub HashMap<RenderTarget, (u32, u32)>);
 
-/// `Render` system: ensure every view's target has an offscreen attachment
-/// of the requested size. Runs before [`main_opaque_pass_3d`].
+/// `PrepareViews` system: ensure every offscreen view target has an
+/// attachment of the requested size.
 pub fn prepare_view_targets(world: &mut World) {
-    let requested: Vec<RenderTarget> = {
-        let Some(frame) = world.get_resource::<Core3dFrame>() else {
-            return;
-        };
-        frame
-            .views()
-            .iter()
-            .map(|view| view.target.0)
-            // Only offscreen targets need attachments here; window-targeted
-            // views resolve against the surface's swapchain image and depth
-            // buffer at record time.
-            .filter(|target| matches!(target, RenderTarget::Viewport))
-            .collect()
-    };
+    let requested: Vec<RenderTarget> = world
+        .query::<&ExtractedView>()
+        .map(|(_, view)| view.target.0)
+        // Only offscreen targets need attachments here; window-targeted
+        // views resolve against the surface's swapchain image and depth
+        // buffer at record time.
+        .filter(|target| matches!(target, RenderTarget::Viewport))
+        .collect();
     if requested.is_empty() {
         return;
     }
@@ -190,160 +184,11 @@ pub fn prepare_view_targets(world: &mut World) {
     }
 }
 
-/// A resolved draw target for one pass: the color/depth attachment views, the
-/// extent, and the layout the color attachment is left in. Offscreen targets
-/// end in `ShaderRead` (sampled by the UI); window surfaces end in `Present`.
-pub struct PassTarget {
-    /// The color attachment view (offscreen target or swapchain image).
-    pub color: TextureView,
-    /// The depth attachment view, when the pass is depth-tested.
-    pub depth: Option<TextureView>,
-    /// The target's `(width, height)`.
-    pub extent: (u32, u32),
-    /// The layout the color attachment is transitioned to.
-    pub final_color_layout: AttachmentLayout,
-}
-
-/// Record one view's opaque pass into `command_buffer`: clear color and
-/// depth, then dispatch every queued [`Opaque3d`] item to its registered
-/// draw function. `view: None` clears the target to a dim background color
-/// (no camera case).
-pub fn record_view_pass(
-    world: &World,
-    view: Option<&Core3dView>,
-    target: PassTarget,
-    draw_functions: &DrawFunctions<Opaque3d>,
-    command_buffer: &CommandBuffer,
-) {
-    let phase = view.map(|view| &view.opaque);
-    let (width, height) = target.extent;
-    let clear_color = match view {
-        Some(view) => view.view.camera.clear_color,
-        None => [0.05, 0.0, 0.08, 1.0],
-    };
-
-    // Debug seam: MOONFIELD_DEBUG_SCENE=1 logs the scene contents once.
-    if std::env::var_os("MOONFIELD_DEBUG_SCENE").is_some() {
-        static ONCE: std::sync::Once = std::sync::Once::new();
-        ONCE.call_once(|| {
-            let camera_pos = view.map(|view| {
-                let t = view.view.world_from_view.affine().translation;
-                (t.x, t.y, t.z)
-            });
-            info!(
-                "scene: camera={camera_pos:?} items={} extent=({width}, {height})",
-                phase.map_or(0, |phase| phase.items().len()),
-            );
-            if let Some(phase) = phase {
-                for item in phase.items() {
-                    info!("  item model: {:?}", item.model.to_cols_array());
-                }
-            }
-        });
-    }
-
-    let color_attachment = RenderAttachment {
-        view: target.color,
-        layout: target.final_color_layout,
-        load: LoadOp::Clear,
-        store: StoreOp::Store,
-        clear: ClearValue::Color(clear_color),
-    };
-    // Reverse-Z: the depth clear value is 0.0 (near → 1).
-    let depth_attachment = target.depth.map(|view| RenderAttachment {
-        view,
-        layout: AttachmentLayout::DepthStencil,
-        load: LoadOp::Clear,
-        store: StoreOp::Discard,
-        clear: ClearValue::DepthStencil {
-            depth: 0.0,
-            stencil: 0,
-        },
-    });
-    let begin_info = RenderPassDesc {
-        render_area: Rect2d::full(width, height),
-        layer_count: 1,
-        color_attachments: std::slice::from_ref(&color_attachment),
-        depth_attachment,
-    };
-
-    command_buffer.begin_rendering(&begin_info);
-    if let Some(phase) = phase {
-        // The engine's projection is Y-up NDC; Vulkan framebuffers are
-        // top-left origin. The negative-height viewport performs the flip
-        // at the Vulkan boundary (see AGENTS.md clip-space note).
-        command_buffer.set_viewport(Viewport::y_flipped(width, height));
-        // Reverse-Z depth state + back-face culling with the flipped
-        // viewport (front face = clockwise after the Y flip).
-        command_buffer.set_depth_state(DepthState {
-            test_enable: true,
-            write_enable: true,
-            compare_op: CompareOp::GreaterOrEqual,
-        });
-        command_buffer.set_cull_state(CullState {
-            cull_mode: CullMode::None,
-            front_face: FrontFace::Clockwise,
-        });
-        // Per-pass view uniforms: one arena record, its address pushed
-        // once. The aspect comes from the target's real extent.
-        let view_data = view.expect("phase present implies view");
-        let translation = view_data.view.world_from_view.affine().translation;
-        let uniforms = ViewUniforms {
-            view_proj: view_data
-                .view
-                .clip_from_world(width as f32 / height.max(1) as f32)
-                .to_cols_array(),
-            view_pos: [translation.x, translation.y, translation.z],
-            _pad0: 0.0,
-        };
-        let recorded = (|| -> Option<()> {
-            let arena = world.get_resource::<FrameDrawArena>()?;
-            let pipeline = world.get_resource::<Core3dPipeline>()?;
-            let record = arena.alloc_view_uniforms().ok()?;
-            unsafe {
-                *record.cpu.typed::<ViewUniforms>() = uniforms;
-            }
-            let place = pipeline.view();
-            let bytes = place.pointer_bytes(record.gpu.as_raw()).ok()?;
-            command_buffer.push_data(place.offset as u32, &bytes);
-            Some(())
-        })();
-        if recorded.is_none() {
-            error!("failed to record view uniforms; skipping view items");
-            command_buffer.end_rendering();
-            return;
-        }
-        for item in phase.items() {
-            let Some(draw) = draw_functions.get(item.draw_function()) else {
-                continue;
-            };
-            draw.draw(world, item, command_buffer);
-        }
-    }
-    command_buffer.end_rendering();
-}
-
-/// `Render` system: record the opaque pass of every view whose target has an
-/// attachment, into the frame's command buffer. Offscreen targets record
-/// unconditionally; window-targeted views record per in-progress surface.
-/// No-ops when no frame is in progress (no device, or the begin failed).
-///
-/// Ordering: registered `.after(acquire_window_frames)` and
-/// `.before(submit_window_frames)` by [`RenderFeaturePlugin`].
-pub fn main_opaque_pass_3d(world: &mut World) {
-    if !world.contains_resource::<FrameDrawArena>()
-        && let Some(render_device) = world.get_resource::<RenderDevice>().map(|d| (*d).clone())
-    {
-        match FrameDrawArena::new(render_device.device()) {
-            Ok(arena) => world.insert_resource(arena),
-            Err(e) => error!("failed to create frame draw arena: {e}"),
-        }
-    }
-
-    // (Re)build the pipeline when its prepared shader advanced past the one
-    // the pipeline was built from. While the shader is not ready (never
-    // compiled, or the latest compile failed) the pass keeps the pipeline it
-    // has, or skips with a one-shot log.
+/// `PrepareViews` system: (re)build the core 3D pipeline when its prepared
+/// shader advanced past the one the pipeline was built from. While the
+/// shader is not ready (never compiled, or the latest compile failed) the
+/// pass keeps the pipeline it has, or skips with a one-shot log.
+pub fn prepare_core_3d_pipeline(world: &mut World) {
     let request = world
         .get_resource::<PipelineShaders>()
         .and_then(|requests| requests.get(CORE_3D_SHADER).copied());
@@ -375,7 +220,6 @@ pub fn main_opaque_pass_3d(world: &mut World) {
             None => {
                 if !world.contains_resource::<Core3dPipeline>() {
                     error_once!("the core 3d shader is not ready; skipping the core 3d pass");
-                    return;
                 }
                 None
             }
@@ -387,105 +231,315 @@ pub fn main_opaque_pass_3d(world: &mut World) {
         }
         Some(Err(e)) => {
             error!("failed to build core 3d pipeline: {e}");
-            if !world.contains_resource::<Core3dPipeline>() {
-                return;
-            }
         }
-        None => {
-            if !world.contains_resource::<Core3dPipeline>() {
-                return;
-            }
+        None => {}
+    }
+}
+
+/// `PrepareViews` system: create the frame draw arena on first use and
+/// begin its frame slot for this frame's allocations.
+pub fn begin_frame_draw_arena(world: &mut World) {
+    if !world.contains_resource::<FrameDrawArena>()
+        && let Some(render_device) = world.get_resource::<RenderDevice>().map(|d| (*d).clone())
+    {
+        match FrameDrawArena::new(render_device.device()) {
+            Ok(arena) => world.insert_resource(arena),
+            Err(e) => error!("failed to create frame draw arena: {e}"),
         }
     }
-
     let Some(frame_context) = world.get_resource::<FrameContext>() else {
         return;
     };
     if !frame_context.frame_in_progress() {
         return;
     }
-    // The frame slot is the single slot authority; the command buffer borrow
-    // keeps `frame_context` alive until recording ends.
-    let frame_slot = frame_context.current_slot();
-    let Some(command_buffer) = frame_context.current_command_buffer() else {
+    let slot = frame_context.current_slot();
+    if let Some(arena) = world.get_resource::<FrameDrawArena>() {
+        arena.begin_frame(slot);
+    }
+}
+
+/// A resolved draw target for one pass: the color/depth attachment views, the
+/// extent, and the layout the color attachment is left in. Offscreen targets
+/// end in `ShaderRead` (sampled by the UI); window surfaces end in `Present`.
+pub struct PassTarget {
+    /// The color attachment view (offscreen target or swapchain image).
+    pub color: TextureView,
+    /// The depth attachment view, when the pass is depth-tested.
+    pub depth: Option<TextureView>,
+    /// The target's `(width, height)`.
+    pub extent: (u32, u32),
+    /// The layout the color attachment is transitioned to.
+    pub final_color_layout: AttachmentLayout,
+}
+
+/// Record one view's opaque pass into `command_buffer`: clear color and
+/// depth, then dispatch every queued [`Opaque3d`] item to its registered
+/// draw function. `world` reaches the arena, the pipeline, and the draw
+/// functions' prepared data.
+pub fn record_view_pass(
+    world: &World,
+    view: &ExtractedView,
+    phase: &RenderPhase<Opaque3d>,
+    target: PassTarget,
+    draw_functions: &DrawFunctions<Opaque3d>,
+    command_buffer: &CommandBuffer,
+) {
+    let (width, height) = target.extent;
+    let clear_color = view.camera.clear_color;
+
+    // Debug seam: MOONFIELD_DEBUG_SCENE=1 logs the scene contents once.
+    if std::env::var_os("MOONFIELD_DEBUG_SCENE").is_some() {
+        static ONCE: std::sync::Once = std::sync::Once::new();
+        ONCE.call_once(|| {
+            let camera_pos = view.world_from_view.affine().translation;
+            info!(
+                "scene: camera=({:.1}, {:.1}, {:.1}) items={} extent=({width}, {height})",
+                camera_pos.x,
+                camera_pos.y,
+                camera_pos.z,
+                phase.items().len(),
+            );
+            for item in phase.items() {
+                info!("  item model: {:?}", item.model.to_cols_array());
+            }
+        });
+    }
+
+    let color_attachment = RenderAttachment {
+        view: target.color,
+        layout: target.final_color_layout,
+        load: LoadOp::Clear,
+        store: StoreOp::Store,
+        clear: ClearValue::Color(clear_color),
+    };
+    // Reverse-Z: the depth clear value is 0.0 (near → 1).
+    let depth_attachment = target.depth.map(|view| RenderAttachment {
+        view,
+        layout: AttachmentLayout::DepthStencil,
+        load: LoadOp::Clear,
+        store: StoreOp::Discard,
+        clear: ClearValue::DepthStencil {
+            depth: 0.0,
+            stencil: 0,
+        },
+    });
+    let begin_info = RenderPassDesc {
+        render_area: Rect2d::full(width, height),
+        layer_count: 1,
+        color_attachments: std::slice::from_ref(&color_attachment),
+        depth_attachment,
+    };
+
+    command_buffer.begin_rendering(&begin_info);
+    // The engine's projection is Y-up NDC; Vulkan framebuffers are
+    // top-left origin. The negative-height viewport performs the flip
+    // at the Vulkan boundary (see AGENTS.md clip-space note).
+    command_buffer.set_viewport(Viewport::y_flipped(width, height));
+    // Reverse-Z depth state + back-face culling with the flipped
+    // viewport (front face = clockwise after the Y flip).
+    command_buffer.set_depth_state(DepthState {
+        test_enable: true,
+        write_enable: true,
+        compare_op: CompareOp::GreaterOrEqual,
+    });
+    command_buffer.set_cull_state(CullState {
+        cull_mode: CullMode::None,
+        front_face: FrontFace::Clockwise,
+    });
+    // Per-pass view uniforms: one arena record, its address pushed
+    // once. The aspect comes from the target's real extent.
+    let translation = view.world_from_view.affine().translation;
+    let uniforms = ViewUniforms {
+        view_proj: view
+            .clip_from_world(width as f32 / height.max(1) as f32)
+            .to_cols_array(),
+        view_pos: [translation.x, translation.y, translation.z],
+        _pad0: 0.0,
+    };
+    let recorded = (|| -> Option<()> {
+        let arena = world.get_resource::<FrameDrawArena>()?;
+        let pipeline = world.get_resource::<Core3dPipeline>()?;
+        let record = arena.alloc_view_uniforms().ok()?;
+        unsafe {
+            *record.cpu.typed::<ViewUniforms>() = uniforms;
+        }
+        let place = pipeline.view();
+        let bytes = place.pointer_bytes(record.gpu.as_raw()).ok()?;
+        command_buffer.push_data(place.offset as u32, &bytes);
+        Some(())
+    })();
+    if recorded.is_none() {
+        error!("failed to record view uniforms; skipping view items");
+        command_buffer.end_rendering();
+        return;
+    }
+    for item in phase.items() {
+        let Some(draw) = draw_functions.get(item.draw_function()) else {
+            continue;
+        };
+        draw.draw(world, item, command_buffer);
+    }
+    command_buffer.end_rendering();
+}
+
+/// Record a clear-only pass into `target` — the dim background shown when
+/// no view claims the target this frame.
+pub fn record_clear_pass(target: PassTarget, command_buffer: &CommandBuffer) {
+    let color_attachment = RenderAttachment {
+        view: target.color,
+        layout: target.final_color_layout,
+        load: LoadOp::Clear,
+        store: StoreOp::Store,
+        clear: ClearValue::Color([0.05, 0.0, 0.08, 1.0]),
+    };
+    let depth_attachment = target.depth.map(|view| RenderAttachment {
+        view,
+        layout: AttachmentLayout::DepthStencil,
+        load: LoadOp::Clear,
+        store: StoreOp::Discard,
+        clear: ClearValue::DepthStencil {
+            depth: 0.0,
+            stencil: 0,
+        },
+    });
+    command_buffer.begin_rendering(&RenderPassDesc {
+        render_area: Rect2d::full(target.extent.0, target.extent.1),
+        layer_count: 1,
+        color_attachments: std::slice::from_ref(&color_attachment),
+        depth_attachment,
+    });
+    command_buffer.end_rendering();
+}
+
+/// `Core3d` system: record the current view's opaque pass into the frame's
+/// command buffer. Exclusive — the draw functions read prepared data from
+/// the world. No-ops when no frame is in progress (no device, or the begin
+/// failed) or the view's phase is missing.
+pub fn opaque_pass_3d(world: &mut World) {
+    let Some(view_entity) = world.get_resource::<CurrentView>().map(|view| view.0) else {
         return;
     };
-    let command_buffer: &CommandBuffer = command_buffer;
-
-    let Some(frame) = world.get_resource::<Core3dFrame>() else {
+    let Some(view) = world.get_component::<ExtractedView>(view_entity).copied() else {
+        return;
+    };
+    let Some(phase) = world.get_component::<RenderPhase<Opaque3d>>(view_entity) else {
+        return;
+    };
+    let Some(frame_context) = world.get_resource::<FrameContext>() else {
+        return;
+    };
+    if !frame_context.frame_in_progress() {
+        return;
+    }
+    let Some(command_buffer) = frame_context.current_command_buffer() else {
         return;
     };
     let Some(draw_functions) = world.get_resource::<DrawFunctions<Opaque3d>>() else {
         return;
     };
-    let targets = world.get_resource::<ViewTargets>();
-    let Some(targets) = targets.as_deref() else {
+
+    match view.target.0 {
+        RenderTarget::Viewport => {
+            let Some(targets) = world.get_resource::<ViewTargets>() else {
+                return;
+            };
+            let Some(target) = targets.get(RenderTarget::Viewport) else {
+                return;
+            };
+            let pass_target = PassTarget {
+                color: target.view(),
+                depth: target.depth_view(),
+                extent: target.extent(),
+                final_color_layout: AttachmentLayout::ShaderRead,
+            };
+            record_view_pass(
+                world,
+                &view,
+                phase,
+                pass_target,
+                &draw_functions,
+                command_buffer,
+            );
+        }
+        RenderTarget::PrimaryWindow => {
+            let Some(mut surfaces) = world.get_resource_mut::<WindowSurfaces>() else {
+                return;
+            };
+            for data in surfaces.values_mut() {
+                if !data.frame_in_progress() {
+                    continue;
+                }
+                // The pipeline is baked for the view-target format; a swapchain
+                // with a different (e.g. sRGB) format cannot be drawn into yet.
+                match data.format() {
+                    Ok((VIEW_TARGET_FORMAT, _)) => {}
+                    Ok((other, _)) => {
+                        error_once!(
+                            "window swapchain format {other:?} is not {VIEW_TARGET_FORMAT:?}; \
+                             skipping the window pass"
+                        );
+                        continue;
+                    }
+                    Err(e) => {
+                        error_once!("failed to read window surface format: {e}");
+                        continue;
+                    }
+                }
+                let (Some(color), Some(depth)) = (data.current_image_view(), data.depth_view())
+                else {
+                    continue;
+                };
+                let extent = data.extent();
+                let pass_target = PassTarget {
+                    color,
+                    depth: Some(depth),
+                    extent: (extent.width, extent.height),
+                    final_color_layout: AttachmentLayout::Present,
+                };
+                record_view_pass(
+                    world,
+                    &view,
+                    phase,
+                    pass_target,
+                    &draw_functions,
+                    command_buffer,
+                );
+            }
+        }
+    }
+}
+
+/// `Render` system (after the camera driver): clear every offscreen target
+/// no view claimed this frame, so stale frames do not linger.
+pub fn clear_orphan_view_targets(
+    views: Query<&ExtractedView>,
+    frame: Option<Res<FrameContext>>,
+    targets: Option<Res<ViewTargets>>,
+) {
+    let (Some(frame), Some(targets)) = (frame, targets) else {
         return;
     };
-
-    if let Some(arena) = world.get_resource::<FrameDrawArena>() {
-        arena.begin_frame(frame_slot);
+    if !frame.frame_in_progress() {
+        return;
     }
-
-    // Record every offscreen target: views draw into their target; targets
-    // with no view this frame are still cleared (background color).
+    let Some(command_buffer) = frame.current_command_buffer() else {
+        return;
+    };
+    let claimed: HashSet<RenderTarget> = views.iter().map(|(_, view)| view.target.0).collect();
     for (target_key, target) in targets.iter() {
-        let view = frame
-            .views()
-            .iter()
-            .find(|view| view.is_primary && view.target.0 == *target_key);
-        let target = PassTarget {
-            color: target.view(),
-            depth: target.depth_view(),
-            extent: target.extent(),
-            final_color_layout: AttachmentLayout::ShaderRead,
-        };
-        record_view_pass(&*world, view, target, &draw_functions, command_buffer);
-    }
-
-    // Window-targeted views (the game path) draw straight into each
-    // in-progress surface's swapchain image, ending in `Present` — same
-    // frame command buffer as the offscreen passes.
-    let window_view = frame
-        .views()
-        .iter()
-        .find(|view| view.is_primary && view.target.0 == RenderTarget::PrimaryWindow);
-    if let Some(view) = window_view {
-        let Some(mut surfaces) = world.get_resource_mut::<WindowSurfaces>() else {
-            return;
-        };
-        for data in surfaces.values_mut() {
-            if !data.frame_in_progress() {
-                continue;
-            }
-            // The pipeline is baked for the view-target format; a swapchain
-            // with a different (e.g. sRGB) format cannot be drawn into yet.
-            match data.format() {
-                Ok((VIEW_TARGET_FORMAT, _)) => {}
-                Ok((other, _)) => {
-                    error_once!(
-                        "window swapchain format {other:?} is not {VIEW_TARGET_FORMAT:?}; \
-                         skipping the window pass"
-                    );
-                    continue;
-                }
-                Err(e) => {
-                    error_once!("failed to read window surface format: {e}");
-                    continue;
-                }
-            }
-            let (Some(color), Some(depth)) = (data.current_image_view(), data.depth_view()) else {
-                continue;
-            };
-            let extent = data.extent();
-            let target = PassTarget {
-                color,
-                depth: Some(depth),
-                extent: (extent.width, extent.height),
-                final_color_layout: AttachmentLayout::Present,
-            };
-            record_view_pass(&*world, Some(view), target, &draw_functions, command_buffer);
+        if claimed.contains(target_key) {
+            continue;
         }
+        record_clear_pass(
+            PassTarget {
+                color: target.view(),
+                depth: target.depth_view(),
+                extent: target.extent(),
+                final_color_layout: AttachmentLayout::ShaderRead,
+            },
+            command_buffer,
+        );
     }
 }
 
@@ -498,7 +552,6 @@ mod tests {
     use moonfield_asset::Assets;
     use moonfield_camera::{Camera, PrimaryCamera};
     use moonfield_math::{GlobalTransform, Transform, Vec3};
-    use moonfield_render_core::ViewTarget;
     use moonfield_rhi::{CommandBufferUsage, CommandPool, OffscreenTarget};
 
     const TEST_QUAD_VERTICES: &[[f32; 3]] = &[
@@ -602,11 +655,25 @@ mod tests {
         .expect("target");
 
         let world = app.render_world();
-        let frame = world.get_resource::<Core3dFrame>().expect("Core3dFrame");
-        let view = frame.primary_view(ViewTarget(RenderTarget::Viewport));
+        let view_entity = world
+            .query::<&ExtractedView>()
+            .next()
+            .map(|(entity, _)| entity)
+            .expect("extracted view");
+        let view = world
+            .get_component::<ExtractedView>(view_entity)
+            .copied()
+            .expect("ExtractedView");
+        let phase = world
+            .get_component::<RenderPhase<Opaque3d>>(view_entity)
+            .expect("opaque phase");
         let draw_functions = world
             .get_resource::<DrawFunctions<Opaque3d>>()
             .expect("DrawFunctions<Opaque3d>");
+        assert!(
+            world.get_resource::<Core3dPipeline>().is_some(),
+            "pipeline built during render"
+        );
 
         // Headless tests drive the arena's slot 0 directly (the window frame
         // loop that would reset/advance it does not run here); single slot,
@@ -628,7 +695,14 @@ mod tests {
             extent: target.extent(),
             final_color_layout: AttachmentLayout::ShaderRead,
         };
-        record_view_pass(world, view, pass_target, &draw_functions, &command_buffer);
+        record_view_pass(
+            world,
+            &view,
+            phase,
+            pass_target,
+            &draw_functions,
+            &command_buffer,
+        );
 
         // The trailing UI-pass pattern: another pass in the same buffer.
         let ui_target =

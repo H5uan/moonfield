@@ -15,8 +15,8 @@ mod time;
 
 pub use app::{
     App, AppError, AppExit, ExtractSchedule, First, FixedFirst, FixedLast, FixedMain,
-    FixedPostUpdate, FixedPreUpdate, FixedUpdate, Last, Plugins, PreRender, Render, RenderPrepare,
-    RenderQueue, Runner, Shutdown, Startup, Update, run_once,
+    FixedPostUpdate, FixedPreUpdate, FixedUpdate, Last, Plugins, PreRender, Render, Runner,
+    Shutdown, Startup, Update, run_once,
 };
 pub use hierarchy::HierarchyPlugin;
 pub use moonfield_ecs::Resource;
@@ -29,12 +29,12 @@ pub mod prelude {
     pub use crate::{
         App, AppExit, First, FixedFirst, FixedLast, FixedMain, FixedPostUpdate, FixedPreUpdate,
         FixedUpdate, HierarchyPlugin, Last, Plugin, PluginGroup, PluginGroupBuilder, PreRender,
-        Render, RenderPrepare, RenderQueue, Resource, Shutdown, Startup, TimePlugin, Update,
+        Render, Resource, Shutdown, Startup, TimePlugin, Update,
     };
     pub use moonfield_ecs::prelude::{
         ChildOf, Children, Commands, Component, Entity, EntityCommands, IntoSystem,
         IntoSystemConfigs, Local, Name, Query, Relationship, RelationshipTarget, Res, ResMut,
-        Schedule, ScheduleLabel, System, World, WorldQuery,
+        Schedule, ScheduleLabel, System, SystemSet, World, WorldQuery,
     };
 }
 
@@ -307,22 +307,6 @@ mod tests {
                 .unwrap()
                 .push("extract".to_string());
         });
-        app.add_render_systems(RenderPrepare, |world: &mut World| {
-            world
-                .get_resource_mut::<Arc<Mutex<Vec<String>>>>()
-                .unwrap()
-                .lock()
-                .unwrap()
-                .push("render_prepare".to_string());
-        });
-        app.add_render_systems(RenderQueue, |world: &mut World| {
-            world
-                .get_resource_mut::<Arc<Mutex<Vec<String>>>>()
-                .unwrap()
-                .lock()
-                .unwrap()
-                .push("render_queue".to_string());
-        });
         app.add_render_systems(Render, |world: &mut World| {
             world
                 .get_resource_mut::<Arc<Mutex<Vec<String>>>>()
@@ -336,13 +320,7 @@ mod tests {
 
         assert_eq!(
             events.lock().unwrap().as_slice(),
-            &[
-                "pre_render",
-                "extract",
-                "render_prepare",
-                "render_queue",
-                "render"
-            ]
+            &["pre_render", "extract", "render"]
         );
     }
 

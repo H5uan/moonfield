@@ -74,7 +74,8 @@ pub use query::{EntityMut, EntityRef, QueryIter, WorldQuery};
 pub use relationship::{Relationship, RelationshipTarget};
 pub use resource::Resource;
 pub use schedule::{
-    IntoSystemConfigs, Schedule, ScheduleLabel, Schedules, SystemConfig, SystemConfigs,
+    IntoSystemConfigs, Schedule, ScheduleLabel, Schedules, SetChain, SystemConfig, SystemConfigs,
+    SystemSet,
 };
 pub use system::{
     IntoSystem, Local, Query, Res, ResMut, System, SystemParam, SystemParamFunction,
@@ -89,8 +90,8 @@ pub mod prelude {
         ChildOf, Children, Commands, Component, ComponentHooks, Entity, EntityCommands, IntoSystem,
         IntoSystemConfigs, Local, Message, MessageCursor, MessageId, MessageReader, MessageWriter,
         Messages, Name, Or, Query, QueryFilter, Relationship, RelationshipTarget, Res, ResMut,
-        Resource, Schedule, ScheduleLabel, System, Template, TemplateContext, TemplateError, With,
-        Without, World, WorldQuery,
+        Resource, Schedule, ScheduleLabel, System, SystemSet, Template, TemplateContext,
+        TemplateError, With, Without, World, WorldQuery,
     };
 }
 

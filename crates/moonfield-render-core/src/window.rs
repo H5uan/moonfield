@@ -9,7 +9,8 @@
 //! resource. The frame loop is three public systems that other plugins order
 //! against:
 //!
-//! - [`create_window_surfaces`] (`RenderPrepare`): creates/recreates surfaces
+//! - [`create_window_surfaces`] (`PrepareAssets` set): creates/recreates
+//!   surfaces
 //!   and swapchains to match the extracted windows.
 //! - [`acquire_window_frames`] (`Render`, first): begins the frame (waits the
 //!   in-flight timeline counter, drains the frame slot's retirements, begins
@@ -537,7 +538,7 @@ impl WindowSurfaces {
     }
 }
 
-/// `RenderPrepare` system: create or recreate surface data to match the
+/// `PrepareAssets` set system: create or recreate surface data to match the
 /// extracted windows, and drop surface data whose window disappeared.
 ///
 /// No-ops when no [`RenderDevice`] exists (headless machines without a

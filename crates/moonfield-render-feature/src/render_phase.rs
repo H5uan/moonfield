@@ -8,14 +8,15 @@
 
 use std::sync::Mutex;
 
-use moonfield_app::prelude::World;
+use moonfield_app::prelude::{Query, Res, World};
 use moonfield_asset::AssetId;
 use moonfield_camera::view_matrix;
 use moonfield_math::{GlobalTransform, Mat4, Vec3A};
-use moonfield_render_core::{DrawFunction, DrawFunctionId, MainEntity, OrderedFloat, PhaseItem};
+use moonfield_render_core::{
+    DrawFunction, DrawFunctionId, ExtractedView, MainEntity, OrderedFloat, PhaseItem, RenderPhase,
+};
 use moonfield_rhi::{BumpAlloc, CommandBuffer, GpuBumpAllocator};
 
-use crate::core_3d::Core3dFrame;
 use crate::core_3d::pass::Core3dPipeline;
 use crate::mesh::{ExtractedMeshes, MeshRenderer, PreparedGpuMeshes};
 
@@ -187,21 +188,22 @@ impl DrawFunction<Opaque3d> for DrawMesh {
 #[derive(Debug, Clone, Copy)]
 pub struct Opaque3dDrawFunction(pub DrawFunctionId);
 
-/// `RenderQueue` system: fill every view's opaque [`RenderPhase`] from the
-/// extracted mesh entities. Runs after `prepare_core_3d_frame` so the per-view
-/// phases exist first.
-pub fn queue_opaque_3d(world: &mut World) {
-    let Some(meshes) = world.get_resource::<ExtractedMeshes>() else {
-        return;
-    };
-    let Some(opaque) = world.get_resource::<Opaque3dDrawFunction>() else {
+/// `Queue` system: fill every view's opaque [`RenderPhase`] component from
+/// the extracted mesh entities. Runs after `prepare_view_phases` so the
+/// per-view phases exist first; sorting is the `PhaseSort` set's.
+pub fn queue_opaque_3d(
+    meshes: Option<Res<ExtractedMeshes>>,
+    opaque: Option<Res<Opaque3dDrawFunction>>,
+    drawables: Query<(&MeshRenderer, &GlobalTransform, &MainEntity)>,
+    mut views: Query<(&ExtractedView, &mut RenderPhase<Opaque3d>)>,
+) {
+    let (Some(meshes), Some(opaque)) = (meshes.as_deref(), opaque.as_deref()) else {
         return;
     };
 
-    let drawables: Vec<(MainEntity, AssetId, Vec3A, Mat4, [f32; 4])> = world
-        .query::<(&MeshRenderer, &GlobalTransform)>()
-        .filter_map(|(entity, (renderer, global))| {
-            let main_entity = world.get_component::<MainEntity>(entity).copied()?;
+    let drawable_data: Vec<(MainEntity, AssetId, Vec3A, Mat4, [f32; 4])> = drawables
+        .iter()
+        .filter_map(|(_, (renderer, global, main_entity))| {
             let mesh = renderer.mesh.0.id();
             if meshes
                 .get(mesh)
@@ -211,7 +213,7 @@ pub fn queue_opaque_3d(world: &mut World) {
             }
             let affine = global.affine();
             Some((
-                main_entity,
+                *main_entity,
                 mesh,
                 affine.translation,
                 Mat4::from(affine),
@@ -219,18 +221,15 @@ pub fn queue_opaque_3d(world: &mut World) {
             ))
         })
         .collect();
-    if drawables.is_empty() {
+    if drawable_data.is_empty() {
         return;
     }
 
-    let Some(mut frame) = world.get_resource_mut::<Core3dFrame>() else {
-        return;
-    };
-    for view in frame.views_mut() {
-        let view_from_world = view_matrix(&view.view.world_from_view);
-        for (main_entity, mesh, world_position, model, color) in &drawables {
+    for (_, (view, mut phase)) in views.iter_mut() {
+        let view_from_world = view_matrix(&view.world_from_view);
+        for (main_entity, mesh, world_position, model, color) in &drawable_data {
             let distance = -view_from_world.transform_point3((*world_position).into()).z;
-            view.opaque.add(Opaque3d {
+            phase.add(Opaque3d {
                 main_entity: *main_entity,
                 mesh: *mesh,
                 model: *model,
@@ -239,7 +238,6 @@ pub fn queue_opaque_3d(world: &mut World) {
                 draw_function: opaque.0,
             });
         }
-        view.opaque.sort();
     }
 }
 
@@ -276,16 +274,12 @@ mod tests {
         }
 
         app.render();
-        let frame = app
+        let views: Vec<_> = app
             .render_world()
-            .get_resource::<Core3dFrame>()
-            .expect("Core3dFrame");
-        let view = frame
-            .views()
-            .iter()
-            .find(|view| view.is_primary)
-            .expect("primary");
-        let phase = &view.opaque;
+            .query::<(&ExtractedView, &RenderPhase<Opaque3d>)>()
+            .collect();
+        assert_eq!(views.len(), 1);
+        let (_, (_, phase)) = views[0];
 
         assert_eq!(phase.items().len(), 2);
         assert_eq!(phase.items()[0].mesh, near_mesh.id());

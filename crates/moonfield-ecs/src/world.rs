@@ -558,6 +558,18 @@ impl World {
             .add_systems(systems);
     }
 
+    /// Register a chain of [`SystemSet`](crate::SystemSet) anchors into the
+    /// schedule identified by `label`, creating the schedule as needed.
+    pub fn add_sets<L: ScheduleLabel, S: crate::schedule::SetChain>(&mut self, _label: L, sets: S) {
+        if !self.contains_resource::<Schedules>() {
+            self.insert_resource(Schedules::default());
+        }
+        self.get_resource_mut::<Schedules>()
+            .expect("the Schedules resource was just ensured")
+            .entry(TypeId::of::<L>())
+            .add_sets(sets);
+    }
+
     /// Run the schedule identified by `label` once, if it exists.
     ///
     /// Only this schedule's entry is taken out of the [`Schedules`] resource

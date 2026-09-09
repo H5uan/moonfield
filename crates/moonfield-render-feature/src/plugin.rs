@@ -1,7 +1,10 @@
 //! The renderer's runtime plugin: asset stores and extraction systems.
 
 use moonfield_app::prelude::IntoSystemConfigs;
-use moonfield_app::{App, ExtractSchedule, Plugin, Render, RenderPrepare, RenderQueue};
+use moonfield_app::{App, ExtractSchedule, Plugin, Render};
+use moonfield_render_core::camera_driver;
+use moonfield_render_core::schedule as render_sets;
+use moonfield_render_core::sort_phase;
 use moonfield_render_core::{DrawFunctions, extract_with_transform};
 
 use crate::mesh::{Mesh, MeshRenderer, PreparedGpuMeshes, extract_mesh_assets, prepare_meshes};
@@ -37,8 +40,6 @@ impl Plugin for RenderFeaturePlugin {
             ),
         );
         app.render_world_mut()
-            .insert_resource(crate::core_3d::Core3dFrame::default());
-        app.render_world_mut()
             .insert_resource(PreparedGpuMeshes::default());
         app.render_world_mut()
             .insert_resource(PreparedShaders::default());
@@ -47,22 +48,49 @@ impl Plugin for RenderFeaturePlugin {
         app.render_world_mut().insert_resource(draw_functions);
         app.render_world_mut()
             .insert_resource(Opaque3dDrawFunction(opaque_draw));
-        app.add_render_systems(RenderPrepare, (prepare_meshes, prepare_shaders));
-        app.add_render_systems(RenderQueue, crate::core_3d::prepare_core_3d_frame);
+
         app.add_render_systems(
-            RenderQueue,
-            queue_opaque_3d.after(&crate::core_3d::prepare_core_3d_frame),
+            Render,
+            (prepare_meshes, prepare_shaders).in_set::<render_sets::PrepareAssets>(),
         );
         app.add_render_systems(
             Render,
             (
-                crate::core_3d::pass::prepare_view_targets
-                    .after(&moonfield_render_core::acquire_window_frames)
-                    .before(&crate::core_3d::pass::main_opaque_pass_3d),
-                crate::core_3d::pass::main_opaque_pass_3d
-                    .after(&moonfield_render_core::acquire_window_frames)
-                    .before(&moonfield_render_core::submit_window_frames),
+                crate::core_3d::prepare_view_phases.in_set::<render_sets::Queue>(),
+                queue_opaque_3d
+                    .after(&crate::core_3d::prepare_view_phases)
+                    .in_set::<render_sets::Queue>(),
             ),
+        );
+        app.add_render_systems(
+            Render,
+            sort_phase::<Opaque3d>.in_set::<render_sets::PhaseSort>(),
+        );
+        app.add_render_systems(
+            Render,
+            (
+                crate::core_3d::pass::prepare_view_targets,
+                crate::core_3d::pass::prepare_core_3d_pipeline,
+                crate::core_3d::pass::begin_frame_draw_arena,
+            )
+                .in_set::<render_sets::PrepareViews>(),
+        );
+        app.add_render_systems(
+            Render,
+            camera_driver::<crate::core_3d::Core3d>.in_set::<render_sets::CameraDriver>(),
+        );
+        app.add_render_systems(
+            Render,
+            crate::core_3d::pass::clear_orphan_view_targets
+                .after_set::<render_sets::CameraDriver>()
+                .before_set::<render_sets::PostViews>(),
+        );
+        // The per-view schedule: everything recording 3D geometry runs here,
+        // once per view, anchored on the opaque pass.
+        app.add_render_sets(crate::core_3d::Core3d, crate::core_3d::Core3dOpaquePass);
+        app.add_render_systems(
+            crate::core_3d::Core3d,
+            crate::core_3d::pass::opaque_pass_3d.in_set::<crate::core_3d::Core3dOpaquePass>(),
         );
     }
 }

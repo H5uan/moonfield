@@ -302,7 +302,7 @@ pub fn extract_shader_assets(
     });
 }
 
-/// `RenderPrepare` system: compile every requested shader whose asset
+/// `PrepareAssets` set system: compile every requested shader whose asset
 /// revision advanced. A failed compile is recorded for the new revision (no
 /// per-frame retry of unchanged broken source) and the pass keeps running
 /// the pipeline it already built — the keep-on-error behavior of
@@ -340,7 +340,7 @@ pub fn prepare_shaders(world: &mut World) {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use moonfield_app::{App, ExtractSchedule, RenderPrepare};
+    use moonfield_app::{App, ExtractSchedule, Render};
 
     const TEST_ENTRIES: &[ShaderEntry] = &[ShaderEntry {
         name: "main",
@@ -477,7 +477,7 @@ mod tests {
         let _gpu = crate::test_util::GPU_LOCK.lock().unwrap();
         let (mut app, handles) = shader_world(&[("test", TEST_SHADER)]);
         app.add_render_systems(ExtractSchedule, extract_shader_assets);
-        app.add_render_systems(RenderPrepare, prepare_shaders);
+        app.add_render_systems(Render, prepare_shaders);
 
         app.render();
         let prepared = app

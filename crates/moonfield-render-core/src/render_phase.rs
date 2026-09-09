@@ -7,7 +7,7 @@
 //! registered draw function, so a pass never names the renderable types it
 //! draws.
 
-use moonfield_app::prelude::World;
+use moonfield_app::prelude::{Query, World};
 use moonfield_rhi::CommandBuffer;
 use std::collections::HashMap;
 
@@ -126,5 +126,13 @@ impl<P: PhaseItem> RenderPhase<P> {
     /// Whether this phase contains no draw items.
     pub fn is_empty(&self) -> bool {
         self.items.is_empty()
+    }
+}
+
+/// System: sort every [`RenderPhase`] holding items of type `P`. Register
+/// one instantiation per phase in the `PhaseSort` set.
+pub fn sort_phase<P: PhaseItem>(mut phases: Query<&mut RenderPhase<P>>) {
+    for (_, mut phase) in phases.iter_mut() {
+        phase.sort();
     }
 }

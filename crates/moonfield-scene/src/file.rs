@@ -263,6 +263,7 @@ fn load_node(
                 fov_y_radians: perspective.yfov,
                 near: perspective.znear,
                 clear_color,
+                ..Camera::default()
             }));
         }
     }
@@ -421,6 +422,7 @@ mod tests {
                 fov_y_radians: 0.8,
                 near: 0.5,
                 clear_color: [0.1, 0.2, 0.3, 1.0],
+                ..Camera::default()
             },
             ChildOf(root),
         ));

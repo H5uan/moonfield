@@ -36,6 +36,7 @@ use moonfield_app::{App, ExtractSchedule, Plugin};
 use moonfield_camera::{PrimaryCamera, RenderTarget};
 use moonfield_ecs::{Commands, MessageCursor, Messages, ResMut, ensure_global_transforms};
 use moonfield_log::{error, error_once};
+use moonfield_render_core::schedule as render_sets;
 use moonfield_render_core::{
     Extract, FrameContext, MAX_FRAMES_IN_FLIGHT, ViewTargets, WindowFrameDemand, WindowSurfaces,
 };
@@ -91,13 +92,12 @@ impl Plugin for EditorPlugin {
             Render,
             (
                 prepare_egui_frame
-                    .after(&moonfield_render_core::acquire_window_frames)
-                    .after(&moonfield_render_feature::core_3d::pass::prepare_view_targets)
+                    .in_set::<render_sets::PostViews>()
                     .before(&egui_pass),
                 egui_pass
-                    .after(&moonfield_render_feature::core_3d::pass::main_opaque_pass_3d)
-                    .before(&moonfield_render_core::submit_window_frames),
-                editor_frame_done.after(&moonfield_render_core::submit_window_frames),
+                    .in_set::<render_sets::PostViews>()
+                    .before_set::<render_sets::Submit>(),
+                editor_frame_done.after_set::<render_sets::Submit>(),
             ),
         );
     }

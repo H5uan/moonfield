@@ -44,14 +44,9 @@ pub struct PreRender;
 /// runs; systems read it through `moonfield_render_core::Extract`.
 pub struct ExtractSchedule;
 /// Schedule label for render-world systems, run by [`App::render`] after
-/// [`ExtractSchedule`].
+/// [`ExtractSchedule`]. Its internal ordering anchors are the
+/// `moonfield_render_core::schedule` sets, registered by `RenderPlugin`.
 pub struct Render;
-/// Schedule label for render-world systems that prepare persistent GPU data
-/// from the extracted snapshot.
-pub struct RenderPrepare;
-/// Schedule label for render-world systems that build per-frame render work
-/// from extracted and prepared data.
-pub struct RenderQueue;
 /// Schedule label for systems that run once at app shutdown.
 pub struct Shutdown;
 
@@ -67,8 +62,6 @@ impl ScheduleLabel for Last {}
 impl ScheduleLabel for Update {}
 impl ScheduleLabel for PreRender {}
 impl ScheduleLabel for ExtractSchedule {}
-impl ScheduleLabel for RenderPrepare {}
-impl ScheduleLabel for RenderQueue {}
 impl ScheduleLabel for Render {}
 impl ScheduleLabel for Shutdown {}
 
@@ -127,9 +120,10 @@ pub enum AppError {
 /// Systems live in labeled [`Schedule`]s. The app drives [`Startup`] once,
 /// [`Update`] every update, [`PreRender`] in the main world followed by
 /// [`ExtractSchedule`] (the main world parked as a
-/// [`MainWorld`](moonfield_ecs::MainWorld) resource) and then
-/// [`RenderPrepare`], [`RenderQueue`], and [`Render`] in the render world
-/// every render tick, and [`Shutdown`] once.
+/// [`MainWorld`](moonfield_ecs::MainWorld) resource) and then [`Render`] in
+/// the render world every render tick, and [`Shutdown`] once. The `Render`
+/// schedule's internal ordering anchors are the
+/// `moonfield_render_core::schedule` sets.
 ///
 /// # Runner
 ///
@@ -299,6 +293,21 @@ impl App {
         self
     }
 
+    /// Register a chain of [`SystemSet`](moonfield_ecs::SystemSet) anchors
+    /// into a schedule that runs against the render world.
+    ///
+    /// ```ignore
+    /// app.add_render_sets(Render, (FirstSet, SecondSet));
+    /// ```
+    pub fn add_render_sets<L: ScheduleLabel, S: moonfield_ecs::SetChain>(
+        &mut self,
+        _label: L,
+        sets: S,
+    ) -> &mut Self {
+        self.render_world.add_sets(_label, sets);
+        self
+    }
+
     /// Run the schedule identified by `label` once, if it exists.
     pub fn run_schedule<L: ScheduleLabel>(&mut self, _label: L) {
         self.world.run_schedule(_label);
@@ -401,10 +410,9 @@ impl App {
 
     /// Run one render tick: [`PreRender`] in the main world, then
     /// [`ExtractSchedule`] in the render world with the main world parked as
-    /// a [`MainWorld`](moonfield_ecs::MainWorld) resource, then
-    /// [`RenderPrepare`], [`RenderQueue`], and [`Render`]. Startup runs
-    /// lazily on the first call so a backend that drives `render` without
-    /// `update` still initializes.
+    /// a [`MainWorld`](moonfield_ecs::MainWorld) resource, then [`Render`].
+    /// Startup runs lazily on the first call so a backend that drives
+    /// `render` without `update` still initializes.
     pub fn render(&mut self) {
         if !self.initialized {
             self.startup();
@@ -421,8 +429,6 @@ impl App {
             "App::render re-takes the parked main world after ExtractSchedule"
         );
         self.world = main_world;
-        self.run_render_schedule(RenderPrepare);
-        self.run_render_schedule(RenderQueue);
         self.run_render_schedule(Render);
     }
 
