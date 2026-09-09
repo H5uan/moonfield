@@ -1,6 +1,6 @@
 # Agent Note: Render-function pattern optimization (SystemParam dispatch, pipeline cache, tracked pass)
 
-Status: proposed
+Status: rejected — superseded by [2026-09-09-render-pass-schedule-redesign](../../proposed/architecture/2026-09-09-render-pass-schedule-redesign.md)
 
 [中文](2026-08-31-render-function-optimization.zh.md)
 
