@@ -14,6 +14,7 @@ use ash::vk;
 use std::sync::Arc;
 
 /// One attachment of a render pass, in the crate's own vocabulary.
+#[derive(Clone)]
 pub struct RenderAttachment {
     /// The image view rendered into.
     pub view: TextureView,

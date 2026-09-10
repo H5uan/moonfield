@@ -4,6 +4,7 @@ use moonfield_app::prelude::IntoSystemConfigs;
 use moonfield_app::{App, ExtractSchedule, Plugin, Render};
 use moonfield_render_core::camera_driver;
 use moonfield_render_core::prepare_phase;
+use moonfield_render_core::prepare_view_attachments;
 use moonfield_render_core::schedule as render_sets;
 use moonfield_render_core::{DrawFunctions, SortedPhasePlugin, extract_with_transform};
 
@@ -61,7 +62,9 @@ impl Plugin for RenderFeaturePlugin {
         app.add_render_systems(
             Render,
             (
-                crate::core_3d::pass::prepare_view_targets,
+                // The pooled offscreen targets must exist before render-core
+                // resolves the per-view attachment components.
+                crate::core_3d::pass::prepare_view_targets.before(&prepare_view_attachments),
                 crate::core_3d::pass::prepare_core_3d_pipeline,
                 crate::core_3d::pass::begin_frame_draw_arena,
             )
@@ -70,12 +73,6 @@ impl Plugin for RenderFeaturePlugin {
         app.add_render_systems(
             Render,
             camera_driver::<crate::core_3d::Core3d>.in_set::<render_sets::CameraDriver>(),
-        );
-        app.add_render_systems(
-            Render,
-            crate::core_3d::pass::clear_orphan_view_targets
-                .after_set::<render_sets::CameraDriver>()
-                .before_set::<render_sets::PostViews>(),
         );
         // The per-view schedule: everything recording 3D geometry runs here,
         // once per view, anchored on the opaque pass.

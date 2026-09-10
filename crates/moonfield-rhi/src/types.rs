@@ -4,7 +4,7 @@
 //! renderer code does not need to construct ash types directly.
 
 /// Pixel/color formats supported by the engine. Grow as needed.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord)]
 pub enum Format {
     /// 8-bit BGRA unorm; the preferred swapchain and offscreen format.
     B8G8R8A8Unorm,

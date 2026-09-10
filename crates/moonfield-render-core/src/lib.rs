@@ -22,7 +22,10 @@ pub use render_phase::{
     DrawFunction, DrawFunctionId, DrawFunctions, OrderedFloat, PhaseItem, RenderCommand,
     RenderCommandState, RenderPhase, SortedPhasePlugin, prepare_phase, sort_phase,
 };
-pub use scene::{ExtractedView, ViewTarget, ViewTargets};
+pub use scene::{
+    ExtractedView, RenderTargetSizes, ViewAttachments, ViewTarget, ViewTargets,
+    prepare_view_attachments,
+};
 pub use view::{CurrentView, ViewQuery, camera_driver};
 pub use window::{
     ExtractedWindow, FrameContext, MAX_FRAMES_IN_FLIGHT, WindowFrameDemand, WindowSurfaceData,

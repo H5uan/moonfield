@@ -10,15 +10,15 @@ use std::sync::Mutex;
 
 use moonfield_app::prelude::{Query, Res, World};
 use moonfield_asset::AssetId;
-use moonfield_camera::view_matrix;
+use moonfield_camera::{RenderTarget, view_matrix};
 use moonfield_math::{GlobalTransform, Mat4, Vec3A};
 use moonfield_render_core::{
     DrawFunctionId, DrawFunctions, ExtractedView, MainEntity, OrderedFloat, PhaseItem,
-    RenderCommand, RenderPhase, TrackedRenderPass,
+    RenderCommand, RenderPhase, TrackedRenderPass, WindowSurfaces,
 };
-use moonfield_rhi::{BumpAlloc, GpuBumpAllocator};
+use moonfield_rhi::{BumpAlloc, Format, GpuBumpAllocator};
 
-use crate::core_3d::pass::Core3dPipeline;
+use crate::core_3d::pass::{Core3dPipelines, VIEW_TARGET_FORMAT};
 use crate::mesh::{ExtractedMeshes, MeshRenderer, PreparedGpuMeshes};
 
 /// One opaque mesh draw queued for a view.
@@ -35,6 +35,10 @@ pub struct Opaque3d {
     pub color: [f32; 4],
     /// Positive camera-space depth used for front-to-back sorting.
     pub distance: f32,
+    /// The color format the item's pipeline variant targets, stamped at
+    /// queue time from the view's target ([`DrawMesh`] resolves it against
+    /// the format-keyed `Core3dPipelines`).
+    pub pipeline: Format,
     /// Registered draw command that records this item.
     pub draw_function: DrawFunctionId<Opaque3d>,
 }
@@ -126,12 +130,12 @@ impl FrameDrawArena {
 pub struct DrawMesh;
 
 /// The command's inputs, fetched once per item instead of re-read per
-/// statement: the extracted and prepared meshes, the pipeline, and the
-/// frame draw arena.
+/// statement: the extracted and prepared meshes, the format-keyed pipelines,
+/// and the frame draw arena.
 type DrawMeshParam<'w, 's> = (
     Option<Res<'w, ExtractedMeshes>>,
     Option<Res<'w, PreparedGpuMeshes>>,
-    Option<Res<'w, Core3dPipeline>>,
+    Option<Res<'w, Core3dPipelines>>,
     Option<Res<'w, FrameDrawArena>>,
 );
 
@@ -139,12 +143,12 @@ impl RenderCommand<Opaque3d> for DrawMesh {
     type Param = (
         Option<Res<'static, ExtractedMeshes>>,
         Option<Res<'static, PreparedGpuMeshes>>,
-        Option<Res<'static, Core3dPipeline>>,
+        Option<Res<'static, Core3dPipelines>>,
         Option<Res<'static, FrameDrawArena>>,
     );
 
     fn render(_world: &World, item: &Opaque3d, pass: &mut TrackedRenderPass, param: DrawMeshParam) {
-        let (extracted_meshes, prepared_meshes, pipeline, draw_arena) = match param {
+        let (extracted_meshes, prepared_meshes, pipelines, draw_arena) = match param {
             (Some(a), Some(b), Some(c), Some(d)) => (a, b, c, d),
             _ => return,
         };
@@ -152,6 +156,9 @@ impl RenderCommand<Opaque3d> for DrawMesh {
             return;
         };
         let Some(gpu) = prepared_meshes.get_for_revision(item.mesh, revision) else {
+            return;
+        };
+        let Some(pipeline) = pipelines.get(item.pipeline) else {
             return;
         };
         let root = match draw_arena.alloc_draw_data() {
@@ -200,6 +207,7 @@ impl RenderCommand<Opaque3d> for DrawMesh {
 pub fn queue_opaque_3d(
     meshes: Option<Res<ExtractedMeshes>>,
     draw_functions: Option<Res<DrawFunctions<Opaque3d>>>,
+    surfaces: Option<Res<WindowSurfaces>>,
     drawables: Query<(&MeshRenderer, &GlobalTransform, &MainEntity)>,
     mut views: Query<(&ExtractedView, &mut RenderPhase<Opaque3d>)>,
 ) {
@@ -236,6 +244,23 @@ pub fn queue_opaque_3d(
     }
 
     for (_, (view, mut phase)) in views.iter_mut() {
+        // The pipeline variant the view's target format needs: the offscreen
+        // format for viewport views, the primary surface's format for window
+        // views (unresolvable — no window, unreadable format — means the
+        // pass will skip the view anyway, so nothing is queued).
+        let pipeline = match view.target.0 {
+            RenderTarget::Viewport => VIEW_TARGET_FORMAT,
+            RenderTarget::PrimaryWindow => {
+                let Some(format) = surfaces
+                    .as_deref()
+                    .and_then(|surfaces| surfaces.primary())
+                    .and_then(|data| data.format().ok().map(|(format, _)| format))
+                else {
+                    continue;
+                };
+                format
+            }
+        };
         let view_from_world = view_matrix(&view.world_from_view);
         for (main_entity, mesh, world_position, model, color) in &drawable_data {
             let distance = -view_from_world.transform_point3((*world_position).into()).z;
@@ -245,6 +270,7 @@ pub fn queue_opaque_3d(
                 model: *model,
                 color: *color,
                 distance,
+                pipeline,
                 draw_function,
             });
         }

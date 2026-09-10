@@ -54,6 +54,9 @@ impl Plugin for RenderPlugin {
             (
                 acquire_window_frames.before_set::<PrepareAssets>(),
                 create_window_surfaces.after_set::<PrepareAssets>(),
+                // Per-view attachment components; feature-side pool `ensure`
+                // systems order `.before(this)`.
+                crate::scene::prepare_view_attachments.in_set::<PrepareViews>(),
                 submit_window_frames.after_set::<Submit>(),
             ),
         );

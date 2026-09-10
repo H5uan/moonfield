@@ -55,9 +55,16 @@ mod tests {
             .render_world()
             .query::<(&ExtractedView, &RenderPhase<Opaque3d>)>()
             .collect();
+        // Both views get their own phase component — per-view isolation.
         assert_eq!(views.len(), 2);
-        for (_, (_, phase)) in &views {
-            assert_eq!(phase.items().len(), 1);
+        for (_, (view, phase)) in &views {
+            match view.target.0 {
+                // The viewport view queues the mesh.
+                RenderTarget::Viewport => assert_eq!(phase.items().len(), 1),
+                // A window-targeted view resolves its swapchain image from a
+                // live surface; headless (no surface) queues nothing.
+                RenderTarget::PrimaryWindow => assert!(phase.items().is_empty()),
+            }
         }
     }
 }

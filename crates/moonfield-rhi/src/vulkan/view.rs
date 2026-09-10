@@ -43,6 +43,20 @@ impl TextureView {
     }
 }
 
+impl Clone for TextureView {
+    /// Clone shares the underlying image view: the clone never owns it, so
+    /// only the original (if it owns) destroys the Vulkan object. This lets
+    /// per-frame attachment records (`RenderAttachment`, view components)
+    /// copy views without lifetime plumbing.
+    fn clone(&self) -> Self {
+        Self {
+            view: self.view,
+            device: self.device.clone(),
+            owns: false,
+        }
+    }
+}
+
 impl Drop for TextureView {
     fn drop(&mut self) {
         if self.owns {

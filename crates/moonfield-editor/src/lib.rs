@@ -33,14 +33,14 @@ pub use scene_io::{editor_asset_server, load_asset};
 
 use moonfield_app::prelude::{IntoSystemConfigs, PreRender, Render, World};
 use moonfield_app::{App, ExtractSchedule, Plugin};
-use moonfield_camera::{PrimaryCamera, RenderTarget};
+use moonfield_camera::PrimaryCamera;
 use moonfield_ecs::{Commands, MessageCursor, Messages, ResMut, ensure_global_transforms};
 use moonfield_log::{error, error_once};
 use moonfield_render_core::schedule as render_sets;
 use moonfield_render_core::{
-    Extract, FrameContext, MAX_FRAMES_IN_FLIGHT, ViewTargets, WindowFrameDemand, WindowSurfaces,
+    Extract, ExtractedView, FrameContext, MAX_FRAMES_IN_FLIGHT, MainEntity, RenderTargetSizes,
+    ViewTargets, WindowFrameDemand, WindowSurfaces,
 };
-use moonfield_render_feature::core_3d::pass::RenderTargetSizes;
 use moonfield_render_feature::shader::{PipelineShaders, PreparedShaders};
 use moonfield_rhi::{
     AttachmentLayout, ClearValue, LoadOp, Rect2d, RenderAttachment, RenderDevice, RenderPassDesc,
@@ -119,6 +119,9 @@ struct PreparedEditorFrame {
     textures_delta: egui::TexturesDelta,
     pixels_per_point: f32,
     viewport_panel_points: Option<egui::Vec2>,
+    /// The main-world viewport camera entity, resolved in [`editor_prepare`];
+    /// the extraction keys the panel's size request to it.
+    viewport_camera: Option<moonfield_ecs::Entity>,
 }
 
 impl Drop for PreparedEditorFrame {
@@ -281,7 +284,9 @@ fn extract_editor_frame(
             return;
         };
 
-        if let Some(panel_size) = frame.viewport_panel_points {
+        if let Some(panel_size) = frame.viewport_panel_points
+            && let Some(camera) = frame.viewport_camera
+        {
             let width = (panel_size.x * frame.pixels_per_point).round().max(1.0) as u32;
             let height = (panel_size.y * frame.pixels_per_point).round().max(1.0) as u32;
             if !render_world.contains_resource::<RenderTargetSizes>() {
@@ -291,7 +296,7 @@ fn extract_editor_frame(
                 .get_resource_mut::<RenderTargetSizes>()
                 .expect("RenderTargetSizes was just ensured")
                 .0
-                .insert(RenderTarget::Viewport, (width, height));
+                .insert(MainEntity(camera), (width, height));
         }
 
         let frame = match render_world.remove_resource::<PreparedEditorFrame>() {
@@ -383,6 +388,7 @@ fn editor_prepare(world: &mut World) {
         textures_delta,
         pixels_per_point,
         viewport_panel_points,
+        viewport_camera: viewport_camera_entity(world),
     };
     let mut pending = world
         .get_resource_mut::<PendingEditorFrame>()
@@ -407,9 +413,15 @@ fn editor_prepare(world: &mut World) {
         .0 = Some(state);
 }
 
-/// Write the editor orbit camera's pose into the primary camera entity's
-/// `Transform`. A side effect of the editor owning the viewport camera:
-/// editing the camera's `Transform` in the inspector is overwritten here.
+/// The main-world viewport camera entity (the first `PrimaryCamera`), for
+/// keying the panel's size request in the render world.
+fn viewport_camera_entity(world: &mut World) -> Option<moonfield_ecs::Entity> {
+    world
+        .query::<&PrimaryCamera>()
+        .next()
+        .map(|(entity, _)| entity)
+}
+
 fn apply_orbit_camera(world: &mut World, camera: &interaction::OrbitCamera) {
     let mut target = None;
     for (entity, _) in world.query::<&PrimaryCamera>() {
@@ -587,10 +599,18 @@ fn prepare_egui_frame(world: &mut World) {
     // Bind the viewport's offscreen target as an egui texture. A resize
     // allocates new heap slots for the target, so the registration
     // refreshes whenever the handles change.
-    let viewport_handles = world.get_resource::<ViewTargets>().and_then(|targets| {
-        targets
-            .get(RenderTarget::Viewport)
-            .map(|target| (target.texture_handle(), target.sampler_handle()))
+    // The viewport panel samples the offscreen target of the first viewport
+    // view this frame (the camera the panel drives); the registration
+    // refreshes whenever the handles change (a resize allocates new heap
+    // slots for the target).
+    let viewport_camera: Option<MainEntity> = world
+        .query::<&ExtractedView>()
+        .find(|(_, view)| view.target.0 == moonfield_camera::RenderTarget::Viewport)
+        .map(|(_, view)| view.main_entity);
+    let viewport_handles = viewport_camera.and_then(|camera| {
+        let targets = world.get_resource::<ViewTargets>()?;
+        let target = targets.get(camera)?;
+        Some((target.texture_handle(), target.sampler_handle()))
     });
     if let Some((texture, sampler)) = viewport_handles {
         let (id, handles) = {
@@ -733,8 +753,13 @@ fn dump_viewport_target(world: &World) -> Result<(), String> {
     let targets = world
         .get_resource::<ViewTargets>()
         .ok_or_else(|| "ViewTargets missing".to_string())?;
+    let camera = world
+        .query::<&ExtractedView>()
+        .find(|(_, view)| view.target.0 == moonfield_camera::RenderTarget::Viewport)
+        .map(|(_, view)| view.main_entity)
+        .ok_or_else(|| "no viewport view".to_string())?;
     let target = targets
-        .get(RenderTarget::Viewport)
+        .get(camera)
         .ok_or_else(|| "no viewport view target".to_string())?;
     let (width, height) = target.extent();
     let pixels = target
@@ -764,6 +789,7 @@ mod tests {
             textures_delta: egui::TexturesDelta::default(),
             pixels_per_point: 1.0,
             viewport_panel_points: None,
+            viewport_camera: None,
         }
     }
 

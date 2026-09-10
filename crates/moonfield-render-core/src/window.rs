@@ -537,6 +537,17 @@ impl WindowSurfaces {
     pub fn values_mut(&mut self) -> impl Iterator<Item = &mut WindowSurfaceData> {
         self.surfaces.values_mut()
     }
+
+    /// The surface the `PrimaryWindow` logical target resolves to: the
+    /// in-progress surface with the smallest main entity. `None` when no
+    /// window acquired an image this frame.
+    pub fn primary(&self) -> Option<&WindowSurfaceData> {
+        self.surfaces
+            .iter()
+            .filter(|(_, data)| data.frame_in_progress())
+            .min_by_key(|(entity, _)| entity.0.to_bits())
+            .map(|(_, data)| data)
+    }
 }
 
 /// `PrepareAssets` set system: create or recreate surface data to match the
