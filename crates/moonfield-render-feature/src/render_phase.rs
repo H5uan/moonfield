@@ -13,9 +13,10 @@ use moonfield_asset::AssetId;
 use moonfield_camera::view_matrix;
 use moonfield_math::{GlobalTransform, Mat4, Vec3A};
 use moonfield_render_core::{
-    DrawFunction, DrawFunctionId, ExtractedView, MainEntity, OrderedFloat, PhaseItem, RenderPhase,
+    DrawFunctionId, DrawFunctions, ExtractedView, MainEntity, OrderedFloat, PhaseItem,
+    RenderCommand, RenderPhase, TrackedRenderPass,
 };
-use moonfield_rhi::{BumpAlloc, CommandBuffer, GpuBumpAllocator};
+use moonfield_rhi::{BumpAlloc, GpuBumpAllocator};
 
 use crate::core_3d::pass::Core3dPipeline;
 use crate::mesh::{ExtractedMeshes, MeshRenderer, PreparedGpuMeshes};
@@ -34,8 +35,8 @@ pub struct Opaque3d {
     pub color: [f32; 4],
     /// Positive camera-space depth used for front-to-back sorting.
     pub distance: f32,
-    /// Registered draw function that records this item.
-    pub draw_function: DrawFunctionId,
+    /// Registered draw command that records this item.
+    pub draw_function: DrawFunctionId<Opaque3d>,
 }
 
 impl PhaseItem for Opaque3d {
@@ -45,7 +46,7 @@ impl PhaseItem for Opaque3d {
         OrderedFloat(self.distance)
     }
 
-    fn draw_function(&self) -> DrawFunctionId {
+    fn draw_function(&self) -> DrawFunctionId<Opaque3d> {
         self.draw_function
     }
 }
@@ -121,27 +122,36 @@ impl FrameDrawArena {
     }
 }
 
-/// The opaque phase's registered draw function. A marker type with no state.
+/// The opaque phase's registered draw command. A marker type with no state.
 pub struct DrawMesh;
 
-impl DrawFunction<Opaque3d> for DrawMesh {
-    fn draw(&self, world: &World, item: &Opaque3d, command_buffer: &CommandBuffer) {
-        let Some(extracted_meshes) = world.get_resource::<ExtractedMeshes>() else {
-            return;
-        };
-        let Some(prepared_meshes) = world.get_resource::<PreparedGpuMeshes>() else {
-            return;
-        };
-        let Some(pipeline) = world.get_resource::<Core3dPipeline>() else {
-            return;
+/// The command's inputs, fetched once per item instead of re-read per
+/// statement: the extracted and prepared meshes, the pipeline, and the
+/// frame draw arena.
+type DrawMeshParam<'w, 's> = (
+    Option<Res<'w, ExtractedMeshes>>,
+    Option<Res<'w, PreparedGpuMeshes>>,
+    Option<Res<'w, Core3dPipeline>>,
+    Option<Res<'w, FrameDrawArena>>,
+);
+
+impl RenderCommand<Opaque3d> for DrawMesh {
+    type Param = (
+        Option<Res<'static, ExtractedMeshes>>,
+        Option<Res<'static, PreparedGpuMeshes>>,
+        Option<Res<'static, Core3dPipeline>>,
+        Option<Res<'static, FrameDrawArena>>,
+    );
+
+    fn render(_world: &World, item: &Opaque3d, pass: &mut TrackedRenderPass, param: DrawMeshParam) {
+        let (extracted_meshes, prepared_meshes, pipeline, draw_arena) = match param {
+            (Some(a), Some(b), Some(c), Some(d)) => (a, b, c, d),
+            _ => return,
         };
         let Some(revision) = extracted_meshes.get(item.mesh).map(|mesh| mesh.revision) else {
             return;
         };
         let Some(gpu) = prepared_meshes.get_for_revision(item.mesh, revision) else {
-            return;
-        };
-        let Some(draw_arena) = world.get_resource::<FrameDrawArena>() else {
             return;
         };
         let root = match draw_arena.alloc_draw_data() {
@@ -163,10 +173,11 @@ impl DrawFunction<Opaque3d> for DrawMesh {
         }
 
         // The whole draw state is one arena record behind one pointer: bind
-        // the pipeline, push the record's address, and issue a non-indexed
-        // draw whose vertex count is the index count — the vertex shader
-        // pulls both arrays through the record's pointers.
-        command_buffer.bind_graphics_pipeline(pipeline.pipeline());
+        // the pipeline (deduplicated by the tracked pass), push the record's
+        // address, and issue a non-indexed draw whose vertex count is the
+        // index count — the vertex shader pulls both arrays through the
+        // record's pointers.
+        pass.set_graphics_pipeline(pipeline.pipeline());
 
         // The root is the reflected `Ptr<DrawData>` placement: encode the
         // arena address on the stack and push it at the place's offset —
@@ -178,26 +189,25 @@ impl DrawFunction<Opaque3d> for DrawMesh {
                 return;
             }
         };
-        command_buffer.push_data(pipeline.root().offset as u32, &root_bytes);
-        command_buffer.draw(gpu.index_count(), 1, 0, 0);
+        pass.push_data(pipeline.root().offset as u32, &root_bytes);
+        pass.draw(gpu.index_count(), 1, 0, 0);
     }
 }
-
-/// The opaque phase's registered draw-function id, threaded from plugin build
-/// to the queue system.
-#[derive(Debug, Clone, Copy)]
-pub struct Opaque3dDrawFunction(pub DrawFunctionId);
 
 /// `Queue` system: fill every view's opaque [`RenderPhase`] component from
 /// the extracted mesh entities. Runs after `prepare_view_phases` so the
 /// per-view phases exist first; sorting is the `PhaseSort` set's.
 pub fn queue_opaque_3d(
     meshes: Option<Res<ExtractedMeshes>>,
-    opaque: Option<Res<Opaque3dDrawFunction>>,
+    draw_functions: Option<Res<DrawFunctions<Opaque3d>>>,
     drawables: Query<(&MeshRenderer, &GlobalTransform, &MainEntity)>,
     mut views: Query<(&ExtractedView, &mut RenderPhase<Opaque3d>)>,
 ) {
-    let (Some(meshes), Some(opaque)) = (meshes.as_deref(), opaque.as_deref()) else {
+    let (Some(meshes), Some(draw_functions)) = (meshes.as_deref(), draw_functions.as_deref())
+    else {
+        return;
+    };
+    let Some(draw_function) = draw_functions.id::<DrawMesh>() else {
         return;
     };
 
@@ -235,7 +245,7 @@ pub fn queue_opaque_3d(
                 model: *model,
                 color: *color,
                 distance,
-                draw_function: opaque.0,
+                draw_function,
             });
         }
     }
@@ -245,17 +255,20 @@ pub fn queue_opaque_3d(
 mod tests {
     use super::*;
     use crate::{RenderFeaturePlugin, mesh::Mesh};
-    use moonfield_app::{App, ExtractSchedule};
+    use moonfield_app::App;
     use moonfield_asset::Assets;
     use moonfield_camera::{Camera, PrimaryCamera};
     use moonfield_math::Transform;
-    use moonfield_render_core::extract_cameras;
 
     #[test]
     fn test_queue_opaque_3d_skips_missing_meshes_and_sorts_front_to_back() {
         let mut app = App::new();
+        // The real composition: RenderPlugin registers the set chain that
+        // orders Queue before PhaseSort and provides extract_cameras
+        // (RenderFeaturePlugin alone leaves the set anchors unresolved, so
+        // ordering falls to registration).
+        app.add_plugin(moonfield_render_core::RenderPlugin);
         app.add_plugin(RenderFeaturePlugin);
-        app.add_render_systems(ExtractSchedule, extract_cameras);
         let (near_mesh, far_mesh, removed_mesh) = {
             let mut meshes = app.world().get_resource_mut::<Assets<Mesh>>().unwrap();
             let near = meshes.add(Mesh::new(vec![[0.0; 3]], vec![0], None));

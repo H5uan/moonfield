@@ -3,12 +3,12 @@
 use moonfield_app::prelude::IntoSystemConfigs;
 use moonfield_app::{App, ExtractSchedule, Plugin, Render};
 use moonfield_render_core::camera_driver;
+use moonfield_render_core::prepare_phase;
 use moonfield_render_core::schedule as render_sets;
-use moonfield_render_core::sort_phase;
-use moonfield_render_core::{DrawFunctions, extract_with_transform};
+use moonfield_render_core::{DrawFunctions, SortedPhasePlugin, extract_with_transform};
 
 use crate::mesh::{Mesh, MeshRenderer, PreparedGpuMeshes, extract_mesh_assets, prepare_meshes};
-use crate::render_phase::{DrawMesh, Opaque3d, Opaque3dDrawFunction, queue_opaque_3d};
+use crate::render_phase::{DrawMesh, Opaque3d, queue_opaque_3d};
 use crate::shader::{PipelineShaders, PreparedShaders, extract_shader_assets, prepare_shaders};
 #[cfg(feature = "splat")]
 use crate::splat::cloud::SplatCloud;
@@ -44,27 +44,19 @@ impl Plugin for RenderFeaturePlugin {
         app.render_world_mut()
             .insert_resource(PreparedShaders::default());
         let mut draw_functions = DrawFunctions::<Opaque3d>::default();
-        let opaque_draw = draw_functions.register(DrawMesh);
+        draw_functions.register::<DrawMesh>();
         app.render_world_mut().insert_resource(draw_functions);
-        app.render_world_mut()
-            .insert_resource(Opaque3dDrawFunction(opaque_draw));
 
+        app.add_plugins(SortedPhasePlugin::<Opaque3d>::default());
         app.add_render_systems(
             Render,
             (prepare_meshes, prepare_shaders).in_set::<render_sets::PrepareAssets>(),
         );
         app.add_render_systems(
             Render,
-            (
-                crate::core_3d::prepare_view_phases.in_set::<render_sets::Queue>(),
-                queue_opaque_3d
-                    .after(&crate::core_3d::prepare_view_phases)
-                    .in_set::<render_sets::Queue>(),
-            ),
-        );
-        app.add_render_systems(
-            Render,
-            sort_phase::<Opaque3d>.in_set::<render_sets::PhaseSort>(),
+            queue_opaque_3d
+                .after(&prepare_phase::<Opaque3d>)
+                .in_set::<render_sets::Queue>(),
         );
         app.add_render_systems(
             Render,

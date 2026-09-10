@@ -17,7 +17,9 @@ pub mod window;
 pub use extract::{Extract, MainEntity, extract_cameras, extract_with_transform};
 pub use plugin::RenderPlugin;
 pub use render_phase::{
-    DrawFunction, DrawFunctionId, DrawFunctions, OrderedFloat, PhaseItem, RenderPhase, sort_phase,
+    DrawFunction, DrawFunctionId, DrawFunctions, OrderedFloat, PhaseItem, RenderCommand,
+    RenderCommandState, RenderPhase, SortedPhasePlugin, TrackedRenderPass, prepare_phase,
+    sort_phase,
 };
 pub use scene::{ExtractedView, ViewTarget, ViewTargets};
 pub use view::{CurrentView, ViewQuery, camera_driver};

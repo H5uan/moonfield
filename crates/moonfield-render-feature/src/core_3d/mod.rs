@@ -2,10 +2,7 @@
 
 pub mod pass;
 
-use moonfield_app::prelude::{ScheduleLabel, SystemSet, World};
-use moonfield_render_core::{ExtractedView, RenderPhase};
-
-use crate::render_phase::Opaque3d;
+use moonfield_app::prelude::{ScheduleLabel, SystemSet};
 
 /// Schedule label for the per-view 3D systems; the camera driver runs it
 /// once per extracted view.
@@ -20,27 +17,15 @@ pub struct Core3dOpaquePass;
 
 impl SystemSet for Core3dOpaquePass {}
 
-/// `Queue` system: attach an empty opaque phase to every extracted view;
-/// feature queue systems fill the phases afterwards.
-pub fn prepare_view_phases(world: &mut World) {
-    let views: Vec<_> = world
-        .query::<&ExtractedView>()
-        .map(|(entity, _)| entity)
-        .collect();
-    for entity in views {
-        world.insert_component(entity, RenderPhase::<Opaque3d>::default());
-    }
-}
-
 #[cfg(test)]
 mod tests {
-    use super::*;
+    use crate::render_phase::Opaque3d;
     use crate::{RenderFeaturePlugin, mesh::Mesh, mesh::MeshHandle, mesh::MeshRenderer};
     use moonfield_app::{App, ExtractSchedule};
     use moonfield_asset::Assets;
     use moonfield_camera::{Camera, CameraTarget, PrimaryCamera, RenderTarget};
     use moonfield_math::{GlobalTransform, Transform};
-    use moonfield_render_core::extract_cameras;
+    use moonfield_render_core::{ExtractedView, RenderPhase, extract_cameras};
 
     #[test]
     fn test_every_view_gets_an_isolated_phase() {

@@ -22,8 +22,8 @@ use moonfield_asset::{AssetRevision, Handle};
 use moonfield_camera::RenderTarget;
 use moonfield_log::{error, error_once, info};
 use moonfield_render_core::{
-    CurrentView, DrawFunctions, ExtractedView, FrameContext, PhaseItem, RenderPhase, ViewTargets,
-    WindowSurfaces,
+    CurrentView, DrawFunctions, ExtractedView, FrameContext, PhaseItem, RenderPhase,
+    TrackedRenderPass, ViewTargets, WindowSurfaces,
 };
 use moonfield_rhi::{
     AttachmentLayout, ClearValue, CommandBuffer, CompareOp, CullMode, CullState, DepthState,
@@ -275,14 +275,14 @@ pub struct PassTarget {
 
 /// Record one view's opaque pass into `command_buffer`: clear color and
 /// depth, then dispatch every queued [`Opaque3d`] item to its registered
-/// draw function. `world` reaches the arena, the pipeline, and the draw
-/// functions' prepared data.
+/// draw command through a [`TrackedRenderPass`]. `world` reaches the arena,
+/// the pipeline, and the commands' prepared data.
 pub fn record_view_pass(
     world: &World,
     view: &ExtractedView,
     phase: &RenderPhase<Opaque3d>,
     target: PassTarget,
-    draw_functions: &DrawFunctions<Opaque3d>,
+    draw_functions: &mut DrawFunctions<Opaque3d>,
     command_buffer: &CommandBuffer,
 ) {
     let (width, height) = target.extent;
@@ -331,19 +331,20 @@ pub fn record_view_pass(
         depth_attachment,
     };
 
-    command_buffer.begin_rendering(&begin_info);
+    let mut pass = TrackedRenderPass::new(command_buffer);
+    pass.begin_rendering(&begin_info);
     // The engine's projection is Y-up NDC; Vulkan framebuffers are
     // top-left origin. The negative-height viewport performs the flip
     // at the Vulkan boundary (see AGENTS.md clip-space note).
-    command_buffer.set_viewport(Viewport::y_flipped(width, height));
+    pass.set_viewport(Viewport::y_flipped(width, height));
     // Reverse-Z depth state + back-face culling with the flipped
     // viewport (front face = clockwise after the Y flip).
-    command_buffer.set_depth_state(DepthState {
+    pass.set_depth_state(DepthState {
         test_enable: true,
         write_enable: true,
         compare_op: CompareOp::GreaterOrEqual,
     });
-    command_buffer.set_cull_state(CullState {
+    pass.set_cull_state(CullState {
         cull_mode: CullMode::None,
         front_face: FrontFace::Clockwise,
     });
@@ -366,21 +367,21 @@ pub fn record_view_pass(
         }
         let place = pipeline.view();
         let bytes = place.pointer_bytes(record.gpu.as_raw()).ok()?;
-        command_buffer.push_data(place.offset as u32, &bytes);
+        pass.push_data(place.offset as u32, &bytes);
         Some(())
     })();
     if recorded.is_none() {
         error!("failed to record view uniforms; skipping view items");
-        command_buffer.end_rendering();
+        pass.end_rendering();
         return;
     }
     for item in phase.items() {
-        let Some(draw) = draw_functions.get(item.draw_function()) else {
+        let Some(draw) = draw_functions.get_mut(item.draw_function()) else {
             continue;
         };
-        draw.draw(world, item, command_buffer);
+        draw.draw(world, item, &mut pass);
     }
-    command_buffer.end_rendering();
+    pass.end_rendering();
 }
 
 /// Record a clear-only pass into `target` — the dim background shown when
@@ -435,7 +436,7 @@ pub fn opaque_pass_3d(world: &mut World) {
     let Some(command_buffer) = frame_context.current_command_buffer() else {
         return;
     };
-    let Some(draw_functions) = world.get_resource::<DrawFunctions<Opaque3d>>() else {
+    let Some(mut draw_functions) = world.get_resource_mut::<DrawFunctions<Opaque3d>>() else {
         return;
     };
 
@@ -458,7 +459,7 @@ pub fn opaque_pass_3d(world: &mut World) {
                 &view,
                 phase,
                 pass_target,
-                &draw_functions,
+                &mut draw_functions,
                 command_buffer,
             );
         }
@@ -502,7 +503,7 @@ pub fn opaque_pass_3d(world: &mut World) {
                     &view,
                     phase,
                     pass_target,
-                    &draw_functions,
+                    &mut draw_functions,
                     command_buffer,
                 );
             }
@@ -667,8 +668,8 @@ mod tests {
         let phase = world
             .get_component::<RenderPhase<Opaque3d>>(view_entity)
             .expect("opaque phase");
-        let draw_functions = world
-            .get_resource::<DrawFunctions<Opaque3d>>()
+        let mut draw_functions = world
+            .get_resource_mut::<DrawFunctions<Opaque3d>>()
             .expect("DrawFunctions<Opaque3d>");
         assert!(
             world.get_resource::<Core3dPipeline>().is_some(),
@@ -700,7 +701,7 @@ mod tests {
             &view,
             phase,
             pass_target,
-            &draw_functions,
+            &mut draw_functions,
             &command_buffer,
         );
 
