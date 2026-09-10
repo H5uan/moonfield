@@ -174,8 +174,9 @@ fn egui_headless_frame_is_not_blank() {
             color_attachments: std::slice::from_ref(&color_attachment),
             depth_attachment: None,
         });
+        let mut pass = moonfield_render_core::TrackedRenderPass::new(&command_buffer);
         record_egui(
-            &command_buffer,
+            &mut pass,
             &pipeline,
             &textures,
             &frames,

@@ -6,6 +6,7 @@
 //! frame loop ([`window`]), and the [`RenderPlugin`] that wires them into the
 //! app's render world. Low-level Vulkan objects stay in `moonfield-rhi`.
 
+pub mod context;
 pub mod extract;
 pub mod plugin;
 pub mod render_phase;
@@ -14,12 +15,12 @@ pub mod schedule;
 pub mod view;
 pub mod window;
 
+pub use context::{ComputeRecording, RecordingState, RenderContext, TrackedRenderPass};
 pub use extract::{Extract, MainEntity, extract_cameras, extract_with_transform};
 pub use plugin::RenderPlugin;
 pub use render_phase::{
     DrawFunction, DrawFunctionId, DrawFunctions, OrderedFloat, PhaseItem, RenderCommand,
-    RenderCommandState, RenderPhase, SortedPhasePlugin, TrackedRenderPass, prepare_phase,
-    sort_phase,
+    RenderCommandState, RenderPhase, SortedPhasePlugin, prepare_phase, sort_phase,
 };
 pub use scene::{ExtractedView, ViewTarget, ViewTargets};
 pub use view::{CurrentView, ViewQuery, camera_driver};

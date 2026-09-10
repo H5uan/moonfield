@@ -21,9 +21,9 @@
 //!   acquired window, and advances the frame slot.
 //!
 //! The frame exists every `Render` tick a device exists — offscreen passes
-//! need no window. Everything that records into the frame fetches the
-//! in-progress command buffer from [`FrameContext`] between acquire and
-//! submit. The device-level singletons stay on the shared [`RenderDevice`]
+//! need no window. Everything that records into the frame goes through the
+//! [`RenderContext`](crate::RenderContext) doors between acquire and submit.
+//! The device-level singletons stay on the shared [`RenderDevice`]
 //! resource.
 
 use crate::MainEntity;
@@ -295,8 +295,9 @@ impl FrameContext {
 
     /// The command buffer recording the current frame, if a frame is in
     /// progress (between [`acquire_window_frames`] and
-    /// [`submit_window_frames`]).
-    pub fn current_command_buffer(&self) -> Option<&CommandBuffer> {
+    /// [`submit_window_frames`]). Crate-internal: systems record through the
+    /// [`RenderContext`](crate::RenderContext) doors, never this buffer.
+    pub(crate) fn current_command_buffer(&self) -> Option<&CommandBuffer> {
         if !self.sequencer.frame_in_progress() {
             return None;
         }
@@ -634,6 +635,9 @@ pub fn acquire_window_frames(world: &mut World) {
             }
         }
     };
+    // Fresh recording state: the door-switch barrier machine starts idle
+    // every frame.
+    world.insert_resource(crate::context::RecordingState::default());
     if !world
         .get_resource::<WindowFrameDemand>()
         .is_some_and(|demand| demand.0)
@@ -671,6 +675,9 @@ pub fn acquire_window_frames(world: &mut World) {
 /// window. A frame with no acquired window (offscreen-only) submits
 /// timeline-only.
 pub fn submit_window_frames(world: &mut World) {
+    // Passes are done recording; drop the recording state machine with the
+    // frame.
+    world.remove_resource::<crate::context::RecordingState>();
     // Flush uploads recorded during this frame's preparation (texture
     // deltas, image transitions) ahead of the frame command buffers:
     // same-queue submission order executes them first. Idempotent — a

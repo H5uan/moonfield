@@ -6,9 +6,10 @@
 //! f32→u32 order-preserving key mapping happens at the call site, keeping
 //! this module key-agnostic.
 
+use moonfield_render_core::ComputeRecording;
 use moonfield_rhi::{
-    BarrierHazard, CommandBuffer, ComputePipeline, Device, GpuAllocation, Memory, Result,
-    RootBinder, RootParamPlace, ShaderModule, Stage,
+    ComputePipeline, Device, GpuAllocation, Memory, Result, RootBinder, RootParamPlace,
+    ShaderModule,
 };
 use moonfield_shader::Shader;
 
@@ -131,12 +132,13 @@ impl RadixSort {
     /// sorted pairs.
     ///
     /// `count` must not exceed the `max_count` the sort was built for.
-    /// Nothing is recorded for `count == 0`. The dispatches are separated
-    /// by memory barriers; no trailing barrier is recorded — ordering
-    /// against the caller's other work is the caller's.
+    /// Nothing is recorded for `count == 0`. The dispatch chain's read-after-
+    /// write hazards are the [`ComputeRecording`]'s automatic
+    /// `COMPUTE → COMPUTE` barriers; no trailing barrier is recorded —
+    /// ordering against the caller's other work is the caller's.
     pub fn record(
         &self,
-        cmd: &CommandBuffer,
+        compute: &mut ComputeRecording,
         keys_in: &GpuAllocation,
         values_in: &GpuAllocation,
         keys_out: &GpuAllocation,
@@ -169,7 +171,7 @@ impl RadixSort {
             let hist = self.hist.gpu().as_raw();
             let offsets = self.offsets.gpu().as_raw();
 
-            cmd.bind_compute_pipeline(&self.histogram);
+            compute.bind_pipeline(&self.histogram);
             let hist_params = HistogramParams {
                 keys: src_keys.gpu().as_raw(),
                 hist,
@@ -178,28 +180,26 @@ impl RadixSort {
                 shift,
                 _pad: 0,
             };
-            cmd.push_data(
+            compute.push_data(
                 self.histogram_place.offset as u32,
                 bytemuck::bytes_of(&hist_params),
             );
-            cmd.dispatch(groups, 1, 1);
-            cmd.barrier(Stage::COMPUTE, Stage::COMPUTE, BarrierHazard::Memory);
+            compute.dispatch(groups, 1, 1);
 
-            cmd.bind_compute_pipeline(&self.scan);
+            compute.bind_pipeline(&self.scan);
             let scan_params = ScanParams {
                 hist,
                 offsets,
                 total: groups * 256,
                 _pad: 0,
             };
-            cmd.push_data(
+            compute.push_data(
                 self.scan_place.offset as u32,
                 bytemuck::bytes_of(&scan_params),
             );
-            cmd.dispatch(1, 1, 1);
-            cmd.barrier(Stage::COMPUTE, Stage::COMPUTE, BarrierHazard::Memory);
+            compute.dispatch(1, 1, 1);
 
-            cmd.bind_compute_pipeline(&self.scatter);
+            compute.bind_pipeline(&self.scatter);
             let scatter_params = ScatterParams {
                 keys_in: src_keys.gpu().as_raw(),
                 values_in: src_values.gpu().as_raw(),
@@ -211,15 +211,11 @@ impl RadixSort {
                 shift,
                 _pad: 0,
             };
-            cmd.push_data(
+            compute.push_data(
                 self.scatter_place.offset as u32,
                 bytemuck::bytes_of(&scatter_params),
             );
-            cmd.dispatch(groups, 1, 1);
-
-            if pass < 3 {
-                cmd.barrier(Stage::COMPUTE, Stage::COMPUTE, BarrierHazard::Memory);
-            }
+            compute.dispatch(groups, 1, 1);
         }
     }
 }

@@ -638,9 +638,9 @@ fn prepare_egui_frame(world: &mut World) {
     });
 }
 
-/// `Render` system: record the egui pass into the frame's command buffer for
-/// every window that acquired an image this frame, after the scene pass.
-/// Consumes the [`EguiPreparedFrame`] resource.
+/// `Render` system: record the egui pass through the [`RenderContext`] raster
+/// door for every window that acquired an image this frame, after the scene
+/// pass. Consumes the [`EguiPreparedFrame`] resource.
 fn egui_pass(world: &mut World) {
     let Some(prepared) = world.remove_resource::<EguiPreparedFrame>() else {
         return;
@@ -652,12 +652,7 @@ fn egui_pass(world: &mut World) {
     ) else {
         return;
     };
-    let Some(frame) = world.get_resource::<FrameContext>() else {
-        return;
-    };
-    let Some(command_buffer) = frame.current_command_buffer() else {
-        return;
-    };
+    let mut ctx = moonfield_render_core::RenderContext::get(world);
     let Some(mut surfaces) = world.get_resource_mut::<WindowSurfaces>() else {
         return;
     };
@@ -676,14 +671,16 @@ fn egui_pass(world: &mut World) {
             store: StoreOp::Store,
             clear: ClearValue::Color([0.0, 0.0, 0.0, 1.0]),
         };
-        command_buffer.begin_rendering(&RenderPassDesc {
+        let Some(mut pass) = ctx.begin_rendering(&RenderPassDesc {
             render_area: Rect2d::full(extent.width, extent.height),
             layer_count: 1,
             color_attachments: std::slice::from_ref(&color_attachment),
             depth_attachment: None,
-        });
+        }) else {
+            return;
+        };
         egui_vk::record_egui(
-            command_buffer,
+            &mut pass,
             &pipeline,
             &textures,
             &frames,
@@ -692,7 +689,7 @@ fn egui_pass(world: &mut World) {
             prepared.pixels_per_point,
             &prepared.primitives,
         );
-        command_buffer.end_rendering();
+        pass.end_rendering();
     }
 }
 

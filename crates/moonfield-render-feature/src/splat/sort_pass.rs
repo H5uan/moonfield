@@ -12,7 +12,7 @@
 use std::sync::{Arc, Mutex};
 
 use moonfield_app::prelude::{App, IntoSystemConfigs, Render, World};
-use moonfield_render_core::FrameContext;
+use moonfield_render_core::RenderContext;
 use moonfield_render_core::schedule as render_sets;
 use moonfield_rhi::{GpuAllocation, Memory, RenderDevice};
 use moonfield_shader::Shader;
@@ -75,21 +75,20 @@ pub fn prepare_splat_sort(world: &mut World) {
 }
 
 /// `Core3d` per-view system, ordered after the opaque pass: record the
-/// view's (key, value) sort into the frame command buffer. The sort's
-/// internal dispatches carry their own barriers; ordering against the
-/// frame's other GPU work is the schedule's.
+/// view's (key, value) sort into the frame command buffer through the
+/// [`RenderContext`] compute door. The recording's dispatches carry their
+/// own automatic barriers; ordering against the frame's other GPU work is
+/// the schedule's.
 pub fn sort_splats(world: &mut World) {
     let Some(pass) = world.get_resource::<SplatSortPass>() else {
         return;
     };
-    let Some(frame) = world.get_resource::<FrameContext>() else {
-        return;
-    };
-    let Some(command_buffer) = frame.current_command_buffer() else {
+    let mut ctx = RenderContext::get(world);
+    let Some(mut compute) = ctx.compute() else {
         return;
     };
     pass.sort.record(
-        command_buffer,
+        &mut compute,
         &pass.keys_in,
         &pass.values_in,
         &pass.keys_out,

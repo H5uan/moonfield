@@ -5,6 +5,7 @@ use crate::types::Format;
 use crate::vulkan::device::Device;
 use crate::vulkan::shader_module::ShaderModule;
 use ash::vk;
+use ash::vk::Handle as _;
 use ash::vk::TaggedStructure as _;
 
 /// How the pipeline's single color attachment blends with existing pixels.
@@ -276,6 +277,15 @@ impl GraphicsPipeline {
     /// [`CommandBuffer::bind_graphics_pipeline`](crate::CommandBuffer::bind_graphics_pipeline).
     pub(crate) fn raw(&self) -> vk::Pipeline {
         self.pipeline
+    }
+
+    /// A stable identity for this pipeline, unique among live pipelines.
+    ///
+    /// Pipelines are immutable resources while a render pass records, so the
+    /// raw Vulkan handle is the deduplication key render-layer bind tracking
+    /// uses.
+    pub fn id(&self) -> u64 {
+        self.pipeline.as_raw()
     }
 }
 

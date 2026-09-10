@@ -30,10 +30,9 @@ use moonfield_render_feature::shader::{PipelineShader, PreparedShader, ShaderEnt
 use moonfield_rhi::Memory;
 use moonfield_rhi::types::WrapMode;
 use moonfield_rhi::{
-    BlendMode, CommandBuffer, CompareOp, CullMode, CullState, DepthState, DescriptorHeap, Device,
-    Extent2d, Filter, Format, FrameUploader, FrontFace, GpuAllocation, GraphicsPipeline, Offset2d,
-    Rect2d, RenderDevice, RootBinder, SamplerDesc, SamplerHandle, ShaderModule, Texture,
-    TextureHandle,
+    BlendMode, CompareOp, CullMode, CullState, DepthState, DescriptorHeap, Device, Extent2d,
+    Filter, Format, FrameUploader, FrontFace, GpuAllocation, GraphicsPipeline, Offset2d, Rect2d,
+    RenderDevice, RootBinder, SamplerDesc, SamplerHandle, ShaderModule, Texture, TextureHandle,
 };
 use moonfield_shader::Shader;
 use std::collections::HashMap;
@@ -616,7 +615,7 @@ impl EguiFrameResources {
 /// texture/sampler heap handles right before its draw.
 #[allow(clippy::too_many_arguments)] // one parameter per resource the pass reads
 pub fn record_egui(
-    command_buffer: &CommandBuffer,
+    pass: &mut moonfield_render_core::TrackedRenderPass,
     pipeline: &EguiPipeline,
     textures: &EguiTextures,
     frames: &EguiFrameResources,
@@ -631,17 +630,17 @@ pub fn record_egui(
     // The command buffer's owner (the frame loop, or the test) has bound
     // the descriptor heaps; this pass only records state and draws.
     // egui draws with premultiplied-alpha blending, no culling, no depth.
-    command_buffer.set_blend_state(BlendMode::PremultipliedAlpha);
-    command_buffer.set_cull_state(CullState {
+    pass.set_blend_state(BlendMode::PremultipliedAlpha);
+    pass.set_cull_state(CullState {
         cull_mode: CullMode::None,
         front_face: FrontFace::Clockwise,
     });
-    command_buffer.set_depth_state(DepthState {
+    pass.set_depth_state(DepthState {
         test_enable: false,
         write_enable: false,
         compare_op: CompareOp::GreaterOrEqual,
     });
-    command_buffer.bind_graphics_pipeline(&pipeline.pipeline);
+    pass.set_graphics_pipeline(&pipeline.pipeline);
 
     let options = pipeline.options();
     let screen_size_in_points = [
@@ -665,7 +664,7 @@ pub fn record_egui(
         _pad0: 0,
     };
     let static_len = core::mem::offset_of!(EguiRoot, texture);
-    command_buffer.push_data(0, &bytemuck::bytes_of(&static_prefix)[..static_len]);
+    pass.push_data(0, &bytemuck::bytes_of(&static_prefix)[..static_len]);
     let varying_offset = core::mem::offset_of!(EguiRoot, texture) as u32;
     let mut draws = frame.mesh_draws.iter();
     for clipped in primitives {
@@ -683,12 +682,12 @@ pub fn record_egui(
             continue;
         };
         let (texture, sampler) = entry.handles();
-        command_buffer.set_scissor(scissor);
+        pass.set_scissor(scissor);
         let varying = [texture.0, sampler.0, draw.index_base, 0u32];
-        command_buffer.push_data(varying_offset, bytemuck::bytes_of(&varying));
+        pass.push_data(varying_offset, bytemuck::bytes_of(&varying));
         // Non-indexed draw: `vid` runs over the mesh's index range and the
         // vertex shader pulls both arrays through the root's pointers.
-        command_buffer.draw(draw.index_count, 1, 0, 0);
+        pass.draw(draw.index_count, 1, 0, 0);
     }
 }
 

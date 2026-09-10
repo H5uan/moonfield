@@ -71,7 +71,15 @@ fn run_case(device: &Device, sort: &RadixSort, pool: &CommandPool, name: &str, k
     let mut cmd = pool.allocate_command_buffer().expect("command buffer");
     cmd.begin(CommandBufferUsage::ONE_TIME_SUBMIT)
         .expect("begin");
-    sort.record(&cmd, &keys_in, &values_in, &keys_out, &values_out, n as u32);
+    let mut compute = moonfield_render_core::ComputeRecording::new(&cmd);
+    sort.record(
+        &mut compute,
+        &keys_in,
+        &values_in,
+        &keys_out,
+        &values_out,
+        n as u32,
+    );
     cmd.end().expect("end");
     device.submit_and_wait(&[&cmd]).expect("submit");
 

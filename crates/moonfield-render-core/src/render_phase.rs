@@ -3,18 +3,17 @@
 //! A phase is a per-view, per-frame collection of [`PhaseItem`]s. Items are
 //! pure data queued by feature systems; stateless [`RenderCommand`]s —
 //! registered once per phase type in a [`DrawFunctions`] resource — know how
-//! to record each item's GPU work through a [`TrackedRenderPass`]. Pass
-//! systems iterate the phase and dispatch the item's registered command, so
-//! a pass never names the renderable types it draws.
+//! to record each item's GPU work through a
+//! [`TrackedRenderPass`](crate::TrackedRenderPass). Pass systems iterate the
+//! phase and dispatch the item's registered command, so a pass never names
+//! the renderable types it draws.
 
 use moonfield_app::prelude::{App, IntoSystemConfigs, Plugin, Query, Render, World};
 use moonfield_ecs::{Entity, SystemParam, SystemParamItem, SystemState};
-use moonfield_rhi::{
-    CommandBuffer, CullState, DepthState, GraphicsPipeline, RenderPassDesc, Viewport,
-};
 use std::any::TypeId;
 use std::marker::PhantomData;
 
+use crate::TrackedRenderPass;
 use crate::scene::ExtractedView;
 use crate::schedule::{PhaseSort, Queue};
 
@@ -150,79 +149,6 @@ impl<P: PhaseItem, C: RenderCommand<P>> DrawFunction<P> for RenderCommandState<P
     }
 }
 
-/// A render-pass recording surface over the frame command buffer that skips
-/// redundant state binds. The tracking resets every time
-/// [`TrackedRenderPass::begin_rendering`] runs; pipelines are immutable
-/// resources while a pass records (rebuilds happen in `PrepareViews`), so a
-/// pipeline's address identifies it for the tracking window.
-pub struct TrackedRenderPass<'a> {
-    command_buffer: &'a CommandBuffer,
-    graphics_pipeline: Option<usize>,
-}
-
-impl<'a> TrackedRenderPass<'a> {
-    /// Wrap `command_buffer` with fresh (empty) tracking.
-    pub fn new(command_buffer: &'a CommandBuffer) -> Self {
-        Self {
-            command_buffer,
-            graphics_pipeline: None,
-        }
-    }
-
-    /// Begin a render pass; resets the bind tracking.
-    pub fn begin_rendering(&mut self, desc: &RenderPassDesc) {
-        self.graphics_pipeline = None;
-        self.command_buffer.begin_rendering(desc);
-    }
-
-    /// End the render pass.
-    pub fn end_rendering(&self) {
-        self.command_buffer.end_rendering();
-    }
-
-    /// Set the viewport (recording-surface passthrough).
-    pub fn set_viewport(&self, viewport: Viewport) {
-        self.command_buffer.set_viewport(viewport);
-    }
-
-    /// Set the depth state (recording-surface passthrough).
-    pub fn set_depth_state(&self, state: DepthState) {
-        self.command_buffer.set_depth_state(state);
-    }
-
-    /// Set the cull state (recording-surface passthrough).
-    pub fn set_cull_state(&self, state: CullState) {
-        self.command_buffer.set_cull_state(state);
-    }
-
-    /// Bind `pipeline`, skipping the bind when it is already bound.
-    pub fn set_graphics_pipeline(&mut self, pipeline: &GraphicsPipeline) {
-        let key = pipeline as *const _ as usize;
-        if self.graphics_pipeline == Some(key) {
-            return;
-        }
-        self.command_buffer.bind_graphics_pipeline(pipeline);
-        self.graphics_pipeline = Some(key);
-    }
-
-    /// Push root data at `offset` (recording-surface passthrough).
-    pub fn push_data(&self, offset: u32, data: &[u8]) {
-        self.command_buffer.push_data(offset, data);
-    }
-
-    /// Record a non-indexed draw (recording-surface passthrough).
-    pub fn draw(
-        &self,
-        vertex_count: u32,
-        instance_count: u32,
-        first_vertex: u32,
-        first_instance: u32,
-    ) {
-        self.command_buffer
-            .draw(vertex_count, instance_count, first_vertex, first_instance);
-    }
-}
-
 /// `Queue` set system: attach an empty phase `P` to every extracted view;
 /// feature queue systems fill the phases afterwards.
 pub fn prepare_phase<P: PhaseItem>(world: &mut World) {
@@ -268,6 +194,7 @@ impl<P: PhaseItem> Plugin for SortedPhasePlugin<P> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::TrackedRenderPass;
 
     #[derive(Debug, Clone, Copy, PartialEq)]
     struct TestItem(f32);

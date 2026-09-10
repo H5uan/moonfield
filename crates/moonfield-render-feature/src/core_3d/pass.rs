@@ -22,14 +22,13 @@ use moonfield_asset::{AssetRevision, Handle};
 use moonfield_camera::RenderTarget;
 use moonfield_log::{error, error_once, info};
 use moonfield_render_core::{
-    CurrentView, DrawFunctions, ExtractedView, FrameContext, PhaseItem, RenderPhase,
+    CurrentView, DrawFunctions, ExtractedView, FrameContext, PhaseItem, RenderContext, RenderPhase,
     TrackedRenderPass, ViewTargets, WindowSurfaces,
 };
 use moonfield_rhi::{
-    AttachmentLayout, ClearValue, CommandBuffer, CompareOp, CullMode, CullState, DepthState,
-    Format, FrontFace, GraphicsPipeline, LoadOp, Rect2d, RenderAttachment, RenderDevice,
-    RenderPassDesc, Result, RootBinder, RootParamPlace, ShaderModule, StoreOp, TextureView,
-    Viewport,
+    AttachmentLayout, ClearValue, CompareOp, CullMode, CullState, DepthState, Format, FrontFace,
+    GraphicsPipeline, LoadOp, Rect2d, RenderAttachment, RenderDevice, RenderPassDesc, Result,
+    RootBinder, RootParamPlace, ShaderModule, StoreOp, TextureView, Viewport,
 };
 use moonfield_shader::Shader;
 use std::collections::{HashMap, HashSet};
@@ -273,20 +272,45 @@ pub struct PassTarget {
     pub final_color_layout: AttachmentLayout,
 }
 
-/// Record one view's opaque pass into `command_buffer`: clear color and
-/// depth, then dispatch every queued [`Opaque3d`] item to its registered
-/// draw command through a [`TrackedRenderPass`]. `world` reaches the arena,
-/// the pipeline, and the commands' prepared data.
+/// The attachment records for one view pass: color clear/store from the
+/// camera, reverse-Z depth clear (0.0 — near → 1) with discard store.
+fn pass_attachments(
+    target: PassTarget,
+    clear_color: [f32; 4],
+) -> (RenderAttachment, Option<RenderAttachment>) {
+    let color_attachment = RenderAttachment {
+        view: target.color,
+        layout: target.final_color_layout,
+        load: LoadOp::Clear,
+        store: StoreOp::Store,
+        clear: ClearValue::Color(clear_color),
+    };
+    let depth_attachment = target.depth.map(|view| RenderAttachment {
+        view,
+        layout: AttachmentLayout::DepthStencil,
+        load: LoadOp::Clear,
+        store: StoreOp::Discard,
+        clear: ClearValue::DepthStencil {
+            depth: 0.0,
+            stencil: 0,
+        },
+    });
+    (color_attachment, depth_attachment)
+}
+
+/// Record one view's opaque pass through the [`RenderContext`] raster door:
+/// clear color and depth, then dispatch every queued [`Opaque3d`] item to its
+/// registered draw command through a [`TrackedRenderPass`]. `world` reaches
+/// the arena, the pipeline, and the commands' prepared data.
 pub fn record_view_pass(
     world: &World,
     view: &ExtractedView,
     phase: &RenderPhase<Opaque3d>,
     target: PassTarget,
     draw_functions: &mut DrawFunctions<Opaque3d>,
-    command_buffer: &CommandBuffer,
+    ctx: &mut RenderContext,
 ) {
     let (width, height) = target.extent;
-    let clear_color = view.camera.clear_color;
 
     // Debug seam: MOONFIELD_DEBUG_SCENE=1 logs the scene contents once.
     if std::env::var_os("MOONFIELD_DEBUG_SCENE").is_some() {
@@ -306,33 +330,41 @@ pub fn record_view_pass(
         });
     }
 
-    let color_attachment = RenderAttachment {
-        view: target.color,
-        layout: target.final_color_layout,
-        load: LoadOp::Clear,
-        store: StoreOp::Store,
-        clear: ClearValue::Color(clear_color),
-    };
-    // Reverse-Z: the depth clear value is 0.0 (near → 1).
-    let depth_attachment = target.depth.map(|view| RenderAttachment {
-        view,
-        layout: AttachmentLayout::DepthStencil,
-        load: LoadOp::Clear,
-        store: StoreOp::Discard,
-        clear: ClearValue::DepthStencil {
-            depth: 0.0,
-            stencil: 0,
-        },
-    });
+    let (color_attachment, depth_attachment) = pass_attachments(target, view.camera.clear_color);
     let begin_info = RenderPassDesc {
         render_area: Rect2d::full(width, height),
         layer_count: 1,
         color_attachments: std::slice::from_ref(&color_attachment),
         depth_attachment,
     };
+    let Some(mut pass) = ctx.begin_rendering(&begin_info) else {
+        return;
+    };
+    record_view_items(
+        world,
+        view,
+        phase,
+        (width, height),
+        draw_functions,
+        &mut pass,
+    );
+    pass.end_rendering();
+}
 
-    let mut pass = TrackedRenderPass::new(command_buffer);
-    pass.begin_rendering(&begin_info);
+/// The began pass's body: set the pass's dynamic states (Y-flip viewport,
+/// reverse-Z depth, culling), push the view uniforms, then dispatch the
+/// phase's items. Split from [`record_view_pass`] so tests that own their
+/// command buffer drive the same path. `extent` is the pass target's pixel
+/// extent (the view-projection's aspect ratio).
+pub fn record_view_items(
+    world: &World,
+    view: &ExtractedView,
+    phase: &RenderPhase<Opaque3d>,
+    extent: (u32, u32),
+    draw_functions: &mut DrawFunctions<Opaque3d>,
+    pass: &mut TrackedRenderPass,
+) {
+    let (width, height) = extent;
     // The engine's projection is Y-up NDC; Vulkan framebuffers are
     // top-left origin. The negative-height viewport performs the flip
     // at the Vulkan boundary (see AGENTS.md clip-space note).
@@ -372,21 +404,19 @@ pub fn record_view_pass(
     })();
     if recorded.is_none() {
         error!("failed to record view uniforms; skipping view items");
-        pass.end_rendering();
         return;
     }
     for item in phase.items() {
         let Some(draw) = draw_functions.get_mut(item.draw_function()) else {
             continue;
         };
-        draw.draw(world, item, &mut pass);
+        draw.draw(world, item, pass);
     }
-    pass.end_rendering();
 }
 
 /// Record a clear-only pass into `target` — the dim background shown when
 /// no view claims the target this frame.
-pub fn record_clear_pass(target: PassTarget, command_buffer: &CommandBuffer) {
+pub fn record_clear_pass(target: PassTarget, ctx: &mut RenderContext) {
     let color_attachment = RenderAttachment {
         view: target.color,
         layout: target.final_color_layout,
@@ -404,19 +434,21 @@ pub fn record_clear_pass(target: PassTarget, command_buffer: &CommandBuffer) {
             stencil: 0,
         },
     });
-    command_buffer.begin_rendering(&RenderPassDesc {
+    let Some(pass) = ctx.begin_rendering(&RenderPassDesc {
         render_area: Rect2d::full(target.extent.0, target.extent.1),
         layer_count: 1,
         color_attachments: std::slice::from_ref(&color_attachment),
         depth_attachment,
-    });
-    command_buffer.end_rendering();
+    }) else {
+        return;
+    };
+    pass.end_rendering();
 }
 
-/// `Core3d` system: record the current view's opaque pass into the frame's
-/// command buffer. Exclusive — the draw functions read prepared data from
-/// the world. No-ops when no frame is in progress (no device, or the begin
-/// failed) or the view's phase is missing.
+/// `Core3d` system: record the current view's opaque pass through the
+/// [`RenderContext`] doors. Exclusive — the draw functions read prepared data
+/// from the world. No-ops when there is nothing to record into (no device, no
+/// in-progress frame) or the view's phase is missing.
 pub fn opaque_pass_3d(world: &mut World) {
     let Some(view_entity) = world.get_resource::<CurrentView>().map(|view| view.0) else {
         return;
@@ -427,18 +459,10 @@ pub fn opaque_pass_3d(world: &mut World) {
     let Some(phase) = world.get_component::<RenderPhase<Opaque3d>>(view_entity) else {
         return;
     };
-    let Some(frame_context) = world.get_resource::<FrameContext>() else {
-        return;
-    };
-    if !frame_context.frame_in_progress() {
-        return;
-    }
-    let Some(command_buffer) = frame_context.current_command_buffer() else {
-        return;
-    };
     let Some(mut draw_functions) = world.get_resource_mut::<DrawFunctions<Opaque3d>>() else {
         return;
     };
+    let mut ctx = RenderContext::get(world);
 
     match view.target.0 {
         RenderTarget::Viewport => {
@@ -460,7 +484,7 @@ pub fn opaque_pass_3d(world: &mut World) {
                 phase,
                 pass_target,
                 &mut draw_functions,
-                command_buffer,
+                &mut ctx,
             );
         }
         RenderTarget::PrimaryWindow => {
@@ -504,7 +528,7 @@ pub fn opaque_pass_3d(world: &mut World) {
                     phase,
                     pass_target,
                     &mut draw_functions,
-                    command_buffer,
+                    &mut ctx,
                 );
             }
         }
@@ -515,16 +539,10 @@ pub fn opaque_pass_3d(world: &mut World) {
 /// no view claimed this frame, so stale frames do not linger.
 pub fn clear_orphan_view_targets(
     views: Query<&ExtractedView>,
-    frame: Option<Res<FrameContext>>,
     targets: Option<Res<ViewTargets>>,
+    mut ctx: RenderContext,
 ) {
-    let (Some(frame), Some(targets)) = (frame, targets) else {
-        return;
-    };
-    if !frame.frame_in_progress() {
-        return;
-    }
-    let Some(command_buffer) = frame.current_command_buffer() else {
+    let Some(targets) = targets else {
         return;
     };
     let claimed: HashSet<RenderTarget> = views.iter().map(|(_, view)| view.target.0).collect();
@@ -539,7 +557,7 @@ pub fn clear_orphan_view_targets(
                 extent: target.extent(),
                 final_color_layout: AttachmentLayout::ShaderRead,
             },
-            command_buffer,
+            &mut ctx,
         );
     }
 }
@@ -690,19 +708,30 @@ mod tests {
         command_buffer
             .begin(CommandBufferUsage::ONE_TIME_SUBMIT)
             .expect("begin");
+        let pass_target_width = target.extent().0;
+        let pass_target_height = target.extent().1;
         let pass_target = PassTarget {
             color: target.view(),
             depth: target.depth_view(),
             extent: target.extent(),
             final_color_layout: AttachmentLayout::ShaderRead,
         };
-        record_view_pass(
+        let (color_attachment, depth_attachment) =
+            pass_attachments(pass_target, view.camera.clear_color);
+        let mut pass = TrackedRenderPass::new(&command_buffer);
+        pass.begin_rendering(&RenderPassDesc {
+            render_area: Rect2d::full(pass_target_width, pass_target_height),
+            layer_count: 1,
+            color_attachments: std::slice::from_ref(&color_attachment),
+            depth_attachment,
+        });
+        record_view_items(
             world,
             &view,
             phase,
-            pass_target,
+            (pass_target_width, pass_target_height),
             &mut draw_functions,
-            &command_buffer,
+            &mut pass,
         );
 
         // The trailing UI-pass pattern: another pass in the same buffer.
