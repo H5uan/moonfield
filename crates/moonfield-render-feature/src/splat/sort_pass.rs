@@ -97,15 +97,25 @@ pub fn sort_splats(world: &mut World) {
     );
 }
 
-/// Register the sort pass — what a feature author writes to add a pass:
-/// this call plus the file. The prepare system builds in `PrepareViews`;
-/// the sort runs per view, after the opaque pass.
-pub fn register_sort_pass(app: &mut App) {
-    app.add_render_systems(
-        Render,
-        prepare_splat_sort.in_set::<render_sets::PrepareViews>(),
-    );
-    app.add_render_systems(Core3d, sort_splats.after(&opaque_pass_3d));
+/// The splat sort pass as a plugin — what a feature author writes to add a
+/// pass: this type plus the file. The prepare system builds in `PrepareViews`;
+/// the sort runs per view in `Core3d`, after the opaque pass. Add it to an
+/// app to enable the pass (the acceptance test does; the GS roadmap's M3
+/// replaces the synthetic pairs with real ones).
+pub struct SplatSortPassPlugin;
+
+impl moonfield_app::Plugin for SplatSortPassPlugin {
+    fn name(&self) -> &str {
+        "moonfield_render_feature::splat::SplatSortPassPlugin"
+    }
+
+    fn build(&self, app: &mut App) {
+        app.add_render_systems(
+            Render,
+            prepare_splat_sort.in_set::<render_sets::PrepareViews>(),
+        );
+        app.add_render_systems(Core3d, sort_splats.after(&opaque_pass_3d));
+    }
 }
 
 #[cfg(test)]
@@ -155,7 +165,7 @@ mod tests {
         app.add_plugin(moonfield_render_core::RenderPlugin);
         app.add_plugin(RenderFeaturePlugin);
         // The registration under test: new file plus this call.
-        register_sort_pass(&mut app);
+        app.add_plugin(SplatSortPassPlugin);
 
         // Ordering probes: "before" precedes the opaque pass; "between"
         // runs after the opaque pass and before the sort. A clean frame

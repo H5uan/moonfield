@@ -7,12 +7,12 @@
 //! [`RenderContext`] doors between `acquire_window_frames` and
 //! `submit_window_frames`.
 //!
-//! `prepare_view_targets`, `prepare_core_3d_pipeline`, and
-//! `begin_frame_draw_arena` run in the `PrepareViews` set (the pool's ensure
-//! before render-core's `prepare_view_attachments`); the camera driver then
-//! runs [`opaque_pass_3d`] once per extracted view (the `Core3d` schedule),
-//! recording through the view's [`ViewAttachments`] component — resolved
-//! per view by render-core, so this pass matches no target enum. Offscreen
+//! `prepare_view_targets` and `prepare_core_3d_pipeline` run in the
+//! `PrepareViews` set (the pool's ensure before render-core's
+//! `prepare_view_attachments`; the frame draw arena is core's); the camera
+//! driver then runs [`opaque_pass_3d`] once per extracted view (the `Core3d`
+//! schedule), recording through the view's [`ViewAttachments`] component —
+//! resolved per view by render-core, so this pass matches no target enum. Offscreen
 //! views (the editor viewport) draw into their camera's target ending in
 //! `ShaderRead`; a window view draws into the swapchain image (ending in
 //! `Present`), depth-tested against the surface's depth buffer.
@@ -20,10 +20,10 @@
 use moonfield_app::prelude::World;
 use moonfield_asset::{AssetRevision, Handle};
 use moonfield_camera::RenderTarget;
-use moonfield_log::{error, error_once, info};
+use moonfield_log::{error, error_once};
 use moonfield_render_core::{
-    CurrentView, DrawFunctions, ExtractedView, FrameContext, MainEntity, PhaseItem, RenderContext,
-    RenderPhase, RenderTargetSizes, TrackedRenderPass, ViewAttachments, ViewTargets,
+    CurrentView, DrawFunctions, ExtractedView, FrameDrawArena, MainEntity, PhaseItem,
+    RenderContext, RenderPhase, RenderTargetSizes, TrackedRenderPass, ViewAttachments, ViewTargets,
     WindowSurfaces,
 };
 use moonfield_rhi::{
@@ -33,7 +33,7 @@ use moonfield_rhi::{
 use moonfield_shader::Shader;
 use std::collections::HashMap;
 
-use crate::render_phase::{FrameDrawArena, Opaque3d, ViewUniforms};
+use crate::render_phase::{Opaque3d, ViewUniforms};
 use crate::shader::{
     PipelineShader, PipelineShaders, PreparedShader, PreparedShaders, ShaderEntry,
 };
@@ -262,29 +262,6 @@ pub fn prepare_core_3d_pipeline(world: &mut World) {
     }
 }
 
-/// `PrepareViews` system: create the frame draw arena on first use and
-/// begin its frame slot for this frame's allocations.
-pub fn begin_frame_draw_arena(world: &mut World) {
-    if !world.contains_resource::<FrameDrawArena>()
-        && let Some(render_device) = world.get_resource::<RenderDevice>().map(|d| (*d).clone())
-    {
-        match FrameDrawArena::new(render_device.device()) {
-            Ok(arena) => world.insert_resource(arena),
-            Err(e) => error!("failed to create frame draw arena: {e}"),
-        }
-    }
-    let Some(frame_context) = world.get_resource::<FrameContext>() else {
-        return;
-    };
-    if !frame_context.frame_in_progress() {
-        return;
-    }
-    let slot = frame_context.current_slot();
-    if let Some(arena) = world.get_resource::<FrameDrawArena>() {
-        arena.begin_frame(slot);
-    }
-}
-
 /// The pass's render-pass description from the view's resolved attachments.
 fn view_pass_desc(attachments: &ViewAttachments) -> RenderPassDesc<'_> {
     RenderPassDesc {
@@ -308,26 +285,6 @@ pub fn record_view_pass(
     draw_functions: &mut DrawFunctions<Opaque3d>,
     ctx: &mut RenderContext,
 ) {
-    let (width, height) = attachments.extent;
-
-    // Debug seam: MOONFIELD_DEBUG_SCENE=1 logs the scene contents once.
-    if std::env::var_os("MOONFIELD_DEBUG_SCENE").is_some() {
-        static ONCE: std::sync::Once = std::sync::Once::new();
-        ONCE.call_once(|| {
-            let camera_pos = view.world_from_view.affine().translation;
-            info!(
-                "scene: camera=({:.1}, {:.1}, {:.1}) items={} extent=({width}, {height})",
-                camera_pos.x,
-                camera_pos.y,
-                camera_pos.z,
-                phase.items().len(),
-            );
-            for item in phase.items() {
-                info!("  item model: {:?}", item.model.to_cols_array());
-            }
-        });
-    }
-
     let Some(mut pass) = ctx.begin_rendering(&view_pass_desc(attachments)) else {
         return;
     };
@@ -377,7 +334,7 @@ pub fn record_view_items(
         let arena = world.get_resource::<FrameDrawArena>()?;
         let pipelines = world.get_resource::<Core3dPipelines>()?;
         let pipeline = pipelines.get(attachments.color_format)?;
-        let record = arena.alloc_view_uniforms().ok()?;
+        let record = arena.alloc::<ViewUniforms>().ok()?;
         unsafe {
             *record.cpu.typed::<ViewUniforms>() = uniforms;
         }

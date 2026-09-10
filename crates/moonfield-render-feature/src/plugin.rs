@@ -9,7 +9,7 @@ use moonfield_render_core::schedule as render_sets;
 use moonfield_render_core::{DrawFunctions, SortedPhasePlugin, extract_with_transform};
 
 use crate::mesh::{Mesh, MeshRenderer, PreparedGpuMeshes, extract_mesh_assets, prepare_meshes};
-use crate::render_phase::{DrawMesh, Opaque3d, queue_opaque_3d};
+use crate::render_phase::{DrawMesh, Opaque3d, debug_scene_log, queue_opaque_3d};
 use crate::shader::{PipelineShaders, PreparedShaders, extract_shader_assets, prepare_shaders};
 #[cfg(feature = "splat")]
 use crate::splat::cloud::SplatCloud;
@@ -61,12 +61,17 @@ impl Plugin for RenderFeaturePlugin {
         );
         app.add_render_systems(
             Render,
+            debug_scene_log
+                .after(&queue_opaque_3d)
+                .in_set::<render_sets::Queue>(),
+        );
+        app.add_render_systems(
+            Render,
             (
                 // The pooled offscreen targets must exist before render-core
                 // resolves the per-view attachment components.
                 crate::core_3d::pass::prepare_view_targets.before(&prepare_view_attachments),
                 crate::core_3d::pass::prepare_core_3d_pipeline,
-                crate::core_3d::pass::begin_frame_draw_arena,
             )
                 .in_set::<render_sets::PrepareViews>(),
         );

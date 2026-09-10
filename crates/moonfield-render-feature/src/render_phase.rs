@@ -6,17 +6,15 @@
 //! pass only dispatches items to their registered draw functions; it never
 //! names mesh types.
 
-use std::sync::Mutex;
-
 use moonfield_app::prelude::{Query, Res, World};
 use moonfield_asset::AssetId;
 use moonfield_camera::{RenderTarget, view_matrix};
 use moonfield_math::{GlobalTransform, Mat4, Vec3A};
 use moonfield_render_core::{
-    DrawFunctionId, DrawFunctions, ExtractedView, MainEntity, OrderedFloat, PhaseItem,
-    RenderCommand, RenderPhase, TrackedRenderPass, WindowSurfaces,
+    DrawFunctionId, DrawFunctions, ExtractedView, FrameDrawArena, MainEntity, OrderedFloat,
+    PhaseItem, RenderCommand, RenderPhase, TrackedRenderPass, WindowSurfaces,
 };
-use moonfield_rhi::{BumpAlloc, Format, GpuBumpAllocator};
+use moonfield_rhi::Format;
 
 use crate::core_3d::pass::{Core3dPipelines, VIEW_TARGET_FORMAT};
 use crate::mesh::{ExtractedMeshes, MeshRenderer, PreparedGpuMeshes};
@@ -81,51 +79,6 @@ pub(crate) struct ViewUniforms {
     pub(crate) _pad0: f32,
 }
 
-/// The mesh pipeline's root pointer: one `GpuPtr` per draw, pushed as a
-/// single 8-byte value via `push_data`. The `DrawData` payload itself lives
-/// in the frame draw arena.
-pub(crate) const DRAW_ARENA_BLOCK: u64 = 1024 * 1024;
-
-pub struct FrameDrawArena {
-    inner: std::sync::Mutex<ArenaInner>,
-}
-
-struct ArenaInner {
-    arenas: Vec<GpuBumpAllocator>, // RING = MAX_FRAMES_IN_FLIGHT(2)
-    current: usize,
-}
-
-impl FrameDrawArena {
-    pub fn new(device: &moonfield_rhi::Device) -> moonfield_rhi::Result<Self> {
-        let mut arenas = Vec::with_capacity(moonfield_render_core::MAX_FRAMES_IN_FLIGHT);
-        for _ in 0..moonfield_render_core::MAX_FRAMES_IN_FLIGHT {
-            arenas.push(GpuBumpAllocator::new(device, DRAW_ARENA_BLOCK)?);
-        }
-        Ok(Self {
-            inner: Mutex::new(ArenaInner { arenas, current: 0 }),
-        })
-    }
-
-    pub fn begin_frame(&self, slot: usize) {
-        let mut g = self.inner.lock().unwrap_or_else(|e| e.into_inner());
-        g.arenas[slot].free_all();
-        g.current = slot;
-    }
-
-    /// Allocate the pass's view-uniform record.
-    pub fn alloc_view_uniforms(&self) -> moonfield_rhi::Result<BumpAlloc> {
-        let mut g = self.inner.lock().unwrap_or_else(|e| e.into_inner());
-        let slot = g.current;
-        g.arenas[slot].alloc_typed::<ViewUniforms>(1)
-    }
-
-    pub fn alloc_draw_data(&self) -> moonfield_rhi::Result<BumpAlloc> {
-        let mut g = self.inner.lock().unwrap_or_else(|e| e.into_inner());
-        let slot = g.current;
-        g.arenas[slot].alloc_typed::<DrawData>(1)
-    }
-}
-
 /// The opaque phase's registered draw command. A marker type with no state.
 pub struct DrawMesh;
 
@@ -161,7 +114,7 @@ impl RenderCommand<Opaque3d> for DrawMesh {
         let Some(pipeline) = pipelines.get(item.pipeline) else {
             return;
         };
-        let root = match draw_arena.alloc_draw_data() {
+        let root = match draw_arena.alloc::<DrawData>() {
             Ok(allocation) => allocation,
             Err(e) => {
                 moonfield_log::error!("draw arena allocation failed: {e}");
@@ -275,6 +228,32 @@ pub fn queue_opaque_3d(
             });
         }
     }
+}
+
+/// `Queue` system (debug): with `MOONFIELD_DEBUG_SCENE=1`, log the scene
+/// contents once per process — each view's camera position and every queued
+/// item's model matrix. Replaces the seam that used to live inside the pass
+/// recording body.
+pub fn debug_scene_log(views: Query<(&ExtractedView, &RenderPhase<Opaque3d>)>) {
+    if std::env::var_os("MOONFIELD_DEBUG_SCENE").is_none() {
+        return;
+    }
+    static ONCE: std::sync::Once = std::sync::Once::new();
+    ONCE.call_once(|| {
+        for (_, (view, phase)) in views.iter() {
+            let camera_pos = view.world_from_view.affine().translation;
+            moonfield_log::info!(
+                "scene: camera=({:.1}, {:.1}, {:.1}) items={}",
+                camera_pos.x,
+                camera_pos.y,
+                camera_pos.z,
+                phase.items().len(),
+            );
+            for item in phase.items() {
+                moonfield_log::info!("  item model: {:?}", item.model.to_cols_array());
+            }
+        }
+    });
 }
 
 #[cfg(test)]
