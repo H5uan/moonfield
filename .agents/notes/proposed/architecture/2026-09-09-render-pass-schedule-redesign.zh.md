@@ -43,12 +43,12 @@ phase 机制（[render-phase framework](../../implemented/architecture/2026-08-2
 
 ## Acceptance criteria
 
-- [ ] 一个 pass = 新文件 + 注册：radix-sort dispatch 在 opaque pass 前后运行，不改 render-feature 核心。
-- [ ] editor viewport、PrimaryWindow 直绘、egui 合成行为不变。
-- [ ] M3 落位评审通过：GS forward 链有家——`Core3d` 里的逐 view 系统、产物 map、composite pass。
-- [ ] `Schedules` 入 world、`World::run_schedule`、exclusive system、`SystemState` 就位；抽取闭包列表消失。
-- [ ] 被取代 note 的存活项落地或有意识地放弃；[GS 路线图](2026-09-07-gaussian-splatting-implementation-roadmap.md) M3 措辞与新形状一致。
-- [ ] `cargo fmt`、`cargo clippy --workspace --all-targets`、`cargo test --workspace`、`python3 scripts/verify_agents.py` 通过。
+- [x] 一个 pass = 新文件 + 注册：radix-sort dispatch 在 opaque pass 前后运行，不改 render-feature 核心。
+- [x] editor viewport、PrimaryWindow 直绘、egui 合成行为不变。
+- [x] M3 落位评审通过：GS forward 链有家——`Core3d` 里的逐 view 系统、产物 map、composite pass。
+- [x] `Schedules` 入 world、`World::run_schedule`、exclusive system、`SystemState` 就位；抽取闭包列表消失。
+- [x] 被取代 note 的存活项落地或有意识地放弃；[GS 路线图](2026-09-07-gaussian-splatting-implementation-roadmap.md) M3 措辞与新形状一致。
+- [x] `cargo fmt`、`cargo clippy --workspace --all-targets`、`cargo test --workspace`、`python3 scripts/verify_agents.py` 通过。
 
 ## Risks
 

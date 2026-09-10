@@ -43,12 +43,12 @@ Milestones, each runnable and committed: M0 ECS foundations → M1 the extract s
 
 ## Acceptance criteria
 
-- [ ] A pass is a new file plus registration: the radix-sort dispatch runs ordered around the opaque pass with no edits to render-feature core.
-- [ ] The editor viewport, PrimaryWindow direct-draw, and egui composite render unchanged.
-- [ ] M3 placement review passes: the GS forward chain has its home — per-view systems in `Core3d`, the artifacts map, the composite pass.
-- [ ] `Schedules` in-world, `World::run_schedule`, exclusive systems, and `SystemState` exist; the extract closure list is gone.
-- [ ] The superseded note's surviving items are landed or consciously dropped; the [GS roadmap](2026-09-07-gaussian-splatting-implementation-roadmap.md) M3 wording matches the new shape.
-- [ ] `cargo fmt`, `cargo clippy --workspace --all-targets`, `cargo test --workspace`, and `python3 scripts/verify_agents.py` pass.
+- [x] A pass is a new file plus registration: the radix-sort dispatch runs ordered around the opaque pass with no edits to render-feature core.
+- [x] The editor viewport, PrimaryWindow direct-draw, and egui composite render unchanged.
+- [x] M3 placement review passes: the GS forward chain has its home — per-view systems in `Core3d`, the artifacts map, the composite pass.
+- [x] `Schedules` in-world, `World::run_schedule`, exclusive systems, and `SystemState` exist; the extract closure list is gone.
+- [x] The superseded note's surviving items are landed or consciously dropped; the [GS roadmap](2026-09-07-gaussian-splatting-implementation-roadmap.md) M3 wording matches the new shape.
+- [x] `cargo fmt`, `cargo clippy --workspace --all-targets`, `cargo test --workspace`, and `python3 scripts/verify_agents.py` pass.
 
 ## Risks
 

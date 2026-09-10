@@ -6,3 +6,4 @@ pub mod cloud;
 pub mod io;
 pub mod rasterize;
 pub mod scene;
+pub mod sort_pass;
