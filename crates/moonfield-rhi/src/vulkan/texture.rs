@@ -43,6 +43,9 @@ pub struct Texture {
     width: u32,
     height: u32,
     slot: Option<TextureSlot>,
+    /// The storage-image slot of a compute-writable texture
+    /// ([`Texture::storage_image`]); `None` for upload-only textures.
+    storage_slot: Option<TextureSlot>,
 }
 
 impl Texture {
@@ -51,6 +54,7 @@ impl Texture {
         width: u32,
         height: u32,
         format: Format,
+        usage: vk::ImageUsageFlags,
     ) -> Result<(
         vk::Image,
         vk::ImageView,
@@ -69,7 +73,7 @@ impl Texture {
             .array_layers(1)
             .samples(vk::SampleCountFlags::TYPE_1)
             .tiling(vk::ImageTiling::OPTIMAL)
-            .usage(vk::ImageUsageFlags::SAMPLED | vk::ImageUsageFlags::TRANSFER_DST)
+            .usage(usage)
             .sharing_mode(vk::SharingMode::EXCLUSIVE)
             .initial_layout(vk::ImageLayout::UNDEFINED);
         // SAFETY: the device is valid and the create info describes a legal image.
@@ -131,8 +135,13 @@ impl Texture {
                 "texture dimensions must be non-zero, got {width}x{height}"
             )));
         }
-        let (image, image_view, _view_create_info, allocation) =
-            Self::create_image(device, width, height, format)?;
+        let (image, image_view, _view_create_info, allocation) = Self::create_image(
+            device,
+            width,
+            height,
+            format,
+            vk::ImageUsageFlags::SAMPLED | vk::ImageUsageFlags::TRANSFER_DST,
+        )?;
         Ok(Self {
             image_view,
             image,
@@ -143,6 +152,79 @@ impl Texture {
             width,
             height,
             slot: None,
+            storage_slot: None,
+        })
+    }
+
+    /// Create a compute-writable, shader-readable 2D texture (`SAMPLED |
+    /// STORAGE` usage) with two descriptor-heap slots over one image view: a
+    /// storage-image slot for compute `RWTexture2D` writes
+    /// ([`Texture::storage_handle`]) and a sampled-image slot for shader
+    /// reads ([`Texture::handle`]).
+    ///
+    /// The image starts `UNDEFINED`; `uploader` records its `UNDEFINED ->
+    /// GENERAL` initialization transition (the unified-layout guarantee's
+    /// sanctioned exception), and the caller submits with
+    /// [`FrameUploader::end_frame`] before the first dispatch writes it.
+    pub fn storage_image(
+        device: &Device,
+        uploader: &mut FrameUploader,
+        width: u32,
+        height: u32,
+        format: Format,
+    ) -> Result<Self> {
+        if width == 0 || height == 0 {
+            return Err(Error::Validation(format!(
+                "texture dimensions must be non-zero, got {width}x{height}"
+            )));
+        }
+        let (image, image_view, view_create_info, allocation) = Self::create_image(
+            device,
+            width,
+            height,
+            format,
+            vk::ImageUsageFlags::SAMPLED | vk::ImageUsageFlags::STORAGE,
+        )?;
+        uploader.transition_image(image)?;
+        let heap = device.descriptor_heap();
+        let storage_handle = heap.alloc_image_slot()?;
+        let sampled_handle = heap.alloc_image_slot()?;
+        heap.write_resource_descriptors(&[
+            (
+                storage_handle,
+                crate::vulkan::descriptor_heap::TextureSlotDesc::new(
+                    &view_create_info,
+                    vk::ImageLayout::GENERAL,
+                )
+                .storage(),
+            ),
+            (
+                sampled_handle,
+                crate::vulkan::descriptor_heap::TextureSlotDesc::new(
+                    &view_create_info,
+                    vk::ImageLayout::GENERAL,
+                ),
+            ),
+        ])?;
+        Ok(Self {
+            image_view,
+            image,
+            allocation: Some(allocation),
+            device: device.raw().clone(),
+            allocator: device.allocator().clone(),
+            ring: device.retirement_ring(),
+            width,
+            height,
+            slot: Some(TextureSlot {
+                handle: sampled_handle,
+                heap: heap.clone(),
+                view_create_info,
+            }),
+            storage_slot: Some(TextureSlot {
+                handle: storage_handle,
+                heap,
+                view_create_info,
+            }),
         })
     }
 
@@ -161,8 +243,13 @@ impl Texture {
                 bytes.len()
             )));
         }
-        let (image, image_view, view_create_info, allocation) =
-            Self::create_image(device, width, height, format)?;
+        let (image, image_view, view_create_info, allocation) = Self::create_image(
+            device,
+            width,
+            height,
+            format,
+            vk::ImageUsageFlags::SAMPLED | vk::ImageUsageFlags::TRANSFER_DST,
+        )?;
         uploader.upload_image(image, bytes, None, (width, height))?;
         let heap = device.descriptor_heap();
         let handle = heap.alloc_image_slot()?;
@@ -187,6 +274,7 @@ impl Texture {
                 heap,
                 view_create_info,
             }),
+            storage_slot: None,
         })
     }
 
@@ -221,18 +309,29 @@ impl Texture {
 
     /// The bindless heap slot, `None` for escape-hatch textures (e.g. the
     /// egui interop path) that do not participate in the descriptor heap.
+    /// For [`Texture::storage_image`] this is the *sampled* slot; compute
+    /// writes go through [`Texture::storage_handle`].
     pub fn handle(&self) -> Option<TextureHandle> {
         self.slot.as_ref().map(|slot| slot.handle)
+    }
+
+    /// The storage-image heap slot of a [`Texture::storage_image`]
+    /// (compute `RWTexture2D` writes); `None` for upload-only textures.
+    pub fn storage_handle(&self) -> Option<TextureHandle> {
+        self.storage_slot.as_ref().map(|slot| slot.handle)
     }
 }
 
 impl Drop for Texture {
     fn drop(&mut self) {
         // Teardown is deferred: in-flight frames may still sample the image
-        // through its heap slot. The slot action carries the view create
+        // through its heap slots. Each slot action carries the view create
         // info — the heap's encoded descriptor references it by pointer, so
         // it must stay alive until the slot is freed.
-        if let Some(slot) = self.slot.take() {
+        for slot in [self.slot.take(), self.storage_slot.take()]
+            .into_iter()
+            .flatten()
+        {
             self.ring.push(RetireAction::ImageSlot {
                 heap: slot.heap,
                 handle: slot.handle,

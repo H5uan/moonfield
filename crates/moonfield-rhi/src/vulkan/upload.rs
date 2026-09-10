@@ -107,6 +107,40 @@ impl FrameUploader {
         Ok(())
     }
 
+    /// Transition a freshly created (`UNDEFINED`) image into the unified
+    /// `GENERAL` layout without uploading — the initialization exception of
+    /// the unified-layout guarantee, for images whose first writer is a
+    /// compute dispatch rather than an upload. The caller submits with
+    /// `end_frame` before dispatching.
+    pub(crate) fn transition_image(&mut self, image: vk::Image) -> Result<()> {
+        self.begin_frame()?;
+        let slot = ((self.next_frame - 1) % UPLOAD_FRAME_RING as u64) as usize;
+        let subresource = vk::ImageSubresourceRange::default()
+            .aspect_mask(vk::ImageAspectFlags::COLOR)
+            .base_mip_level(0)
+            .level_count(1)
+            .base_array_layer(0)
+            .layer_count(1);
+        let transition = vk::ImageMemoryBarrier::default()
+            .src_access_mask(vk::AccessFlags::empty())
+            .dst_access_mask(vk::AccessFlags::SHADER_WRITE | vk::AccessFlags::SHADER_READ)
+            .old_layout(vk::ImageLayout::UNDEFINED)
+            .new_layout(vk::ImageLayout::GENERAL)
+            .src_queue_family_index(vk::QUEUE_FAMILY_IGNORED)
+            .dst_queue_family_index(vk::QUEUE_FAMILY_IGNORED)
+            .image(image)
+            .subresource_range(subresource);
+        self.cb[slot].pipeline_barrier(
+            vk::PipelineStageFlags::TOP_OF_PIPE,
+            vk::PipelineStageFlags::COMPUTE_SHADER,
+            vk::DependencyFlags::empty(),
+            &[],
+            &[],
+            &[transition],
+        );
+        Ok(())
+    }
+
     /// Upload RGBA8 pixels (`bytes.len()` == `region.0 * region.1 * 4`) into
     /// `image`, leaving it in a shader-readable layout. `offset: None`
     /// uploads a fresh (`UNDEFINED`) image; `Some((x, y))` updates a

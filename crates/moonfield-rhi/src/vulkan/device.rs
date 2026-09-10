@@ -431,8 +431,15 @@ impl Device {
             vk::PhysicalDeviceShaderAtomicFloatFeaturesEXT::default()
                 .shader_buffer_float32_atomic_add(true);
 
-        let mut features2 =
-            vk::PhysicalDeviceFeatures2::default().features(vk::PhysicalDeviceFeatures::default());
+        // Core features. Storage-image access without a format qualifier:
+        // heap-indexed `RWTexture2D` (the gaussian-splatting intermediate)
+        // has no declaration site to annotate a format, so untyped storage
+        // reads and writes are both requested.
+        let mut features2 = vk::PhysicalDeviceFeatures2::default().features(
+            vk::PhysicalDeviceFeatures::default()
+                .shader_storage_image_write_without_format(true)
+                .shader_storage_image_read_without_format(true),
+        );
         // Feature structures of optional extensions are requested only when the
         // extension was enabled, so the request matches the enable list
         // exactly (drivers ignore structures whose extension they never saw).

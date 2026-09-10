@@ -41,6 +41,18 @@ pub struct TextureHandle(pub u32);
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub struct SamplerHandle(pub u32);
 
+/// The descriptor type an image slot carries.
+///
+/// Crate-internal: sampled slots back `Texture2D` reads; storage slots back
+/// compute `RWTexture2D` writes (one image can carry both kinds in two
+/// slots).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub(crate) enum ImageDescriptorKind {
+    #[default]
+    Sampled,
+    Storage,
+}
+
 /// The description of one texture slot.
 ///
 /// The heap encodes a view's *create info* directly into heap memory
@@ -48,11 +60,13 @@ pub struct SamplerHandle(pub u32);
 /// outlive the slot — the owning `Texture` guarantees that). `layout` is the
 /// image layout the sample sees; the upload path leaves images in `GENERAL`.
 ///
-/// Crate-internal: the only writers are `Texture::bindless` and
-/// `OffscreenTarget`, which own the create info's lifetime.
+/// Crate-internal: the only writers are `Texture::bindless`,
+/// `Texture::storage_image`, and `OffscreenTarget`, which own the create
+/// info's lifetime.
 pub struct TextureSlotDesc<'a> {
     pub(crate) view_create_info: &'a vk::ImageViewCreateInfo<'a>,
     pub(crate) layout: vk::ImageLayout,
+    pub(crate) kind: ImageDescriptorKind,
 }
 
 impl<'a> TextureSlotDesc<'a> {
@@ -66,7 +80,15 @@ impl<'a> TextureSlotDesc<'a> {
         Self {
             view_create_info,
             layout,
+            kind: ImageDescriptorKind::Sampled,
         }
+    }
+
+    /// Describe a storage-image slot (compute writes) instead of a sampled
+    /// one.
+    pub(crate) fn storage(mut self) -> Self {
+        self.kind = ImageDescriptorKind::Storage;
+        self
     }
 }
 
@@ -286,14 +308,16 @@ impl DescriptorHeap {
         }
         let mut resources: Vec<vk::ResourceDescriptorInfoEXT<'_>> =
             Vec::with_capacity(writes.len());
-        for (i, _) in writes.iter().enumerate() {
-            resources.push(
-                vk::ResourceDescriptorInfoEXT::default()
-                    .ty(vk::DescriptorType::SAMPLED_IMAGE)
-                    .data(vk::ResourceDescriptorDataEXT {
-                        p_image: &image_descs[i],
-                    }),
-            );
+        for (i, (_, desc)) in writes.iter().enumerate() {
+            let ty = match desc.kind {
+                ImageDescriptorKind::Sampled => vk::DescriptorType::SAMPLED_IMAGE,
+                ImageDescriptorKind::Storage => vk::DescriptorType::STORAGE_IMAGE,
+            };
+            resources.push(vk::ResourceDescriptorInfoEXT::default().ty(ty).data(
+                vk::ResourceDescriptorDataEXT {
+                    p_image: &image_descs[i],
+                },
+            ));
         }
         let host = self
             .resource_heap

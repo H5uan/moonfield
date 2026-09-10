@@ -10,6 +10,9 @@ pub enum Format {
     B8G8R8A8Unorm,
     /// 8-bit RGBA unorm.
     R8G8B8A8Unorm,
+    /// 16-bit-per-channel RGBA float; the gaussian-splatting intermediate
+    /// (compute-written storage image, sampled by the composite pass).
+    R16G16B16A16Sfloat,
     /// 32-bit float depth (D32_SFLOAT), used for the engine's reverse-Z depth
     /// attachments.
     D32Sfloat,
@@ -21,6 +24,7 @@ impl Format {
         match self {
             Self::B8G8R8A8Unorm => ash::vk::Format::B8G8R8A8_UNORM,
             Self::R8G8B8A8Unorm => ash::vk::Format::R8G8B8A8_UNORM,
+            Self::R16G16B16A16Sfloat => ash::vk::Format::R16G16B16A16_SFLOAT,
             Self::D32Sfloat => ash::vk::Format::D32_SFLOAT,
         }
     }
@@ -29,6 +33,7 @@ impl Format {
     pub(crate) fn bytes_per_pixel(self) -> usize {
         match self {
             Self::B8G8R8A8Unorm | Self::R8G8B8A8Unorm | Self::D32Sfloat => 4,
+            Self::R16G16B16A16Sfloat => 8,
         }
     }
 }
