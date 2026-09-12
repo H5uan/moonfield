@@ -14,7 +14,7 @@ use moonfield_asset::{AssetServer, Assets};
 use moonfield_ml::optimizer::{Adam, AdamParams};
 use moonfield_ml::trainer::{Trainer, TrainingMethod};
 use moonfield_rhi::{
-    BarrierHazard, CommandBuffer, ComputePipeline, Device, GpuAllocation, GpuPtr, Instance, Memory,
+    Access, CommandBuffer, ComputePipeline, Device, GpuAllocation, GpuPtr, Instance, Memory,
     ShaderModule, Stage,
 };
 use moonfield_shader::{Shader, SlangLoader};
@@ -316,7 +316,12 @@ impl TrainingMethod for GaussianFit {
             ],
         );
         cmd.dispatch((SIZE / 8) as u32, (SIZE / 8) as u32, 1);
-        cmd.barrier(Stage::COMPUTE, Stage::COMPUTE, BarrierHazard::Memory);
+        cmd.barrier(
+            Stage::COMPUTE,
+            Access::SHADER_WRITE,
+            Stage::COMPUTE,
+            Access::SHADER_READ | Access::SHADER_WRITE,
+        );
 
         cmd.bind_compute_pipeline(&self.backward);
         push_roots(
@@ -329,7 +334,12 @@ impl TrainingMethod for GaussianFit {
             ],
         );
         cmd.dispatch((SIZE / 8) as u32, (SIZE / 8) as u32, 1);
-        cmd.barrier(Stage::COMPUTE, Stage::COMPUTE, BarrierHazard::Memory);
+        cmd.barrier(
+            Stage::COMPUTE,
+            Access::SHADER_WRITE,
+            Stage::COMPUTE,
+            Access::SHADER_READ | Access::SHADER_WRITE,
+        );
 
         self.adam.record_step(cmd, &self.params, &self.grads, step);
     }

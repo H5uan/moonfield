@@ -7,7 +7,7 @@ use crate::types::{
 };
 use crate::vulkan::device::Device;
 use crate::vulkan::memory::{GpuAllocation, GpuPtr};
-use crate::vulkan::sync::{BarrierHazard, Stage};
+use crate::vulkan::sync::{Access, Stage};
 use crate::vulkan::view::TextureView;
 use crate::{BlendMode, ComputePipeline, GraphicsPipeline};
 use ash::vk;
@@ -458,26 +458,26 @@ impl CommandBuffer {
     /// Order the end of `before` against the start of `after` without naming
     /// any resource.
     ///
-    /// Emits a single global memory barrier (sync2): all memory writes by
-    /// `before` become visible to all memory accesses in `after`. This is the
+    /// Emits a single global memory barrier (sync2): the `before_access`
+    /// writes become visible to the `after_access` accesses. This is the
     /// bindless form of synchronization — shaders touch memory through
     /// pointers, so a resource list would be both impossible and meaningless.
-    pub fn barrier(&self, before: Stage, after: Stage, hazard: BarrierHazard) {
-        let (src_access, dst_access) = match hazard {
-            BarrierHazard::Memory => (
-                vk::AccessFlags2::MEMORY_READ | vk::AccessFlags2::MEMORY_WRITE,
-                vk::AccessFlags2::MEMORY_READ | vk::AccessFlags2::MEMORY_WRITE,
-            ),
-            BarrierHazard::Descriptors => (
-                vk::AccessFlags2::MEMORY_WRITE | vk::AccessFlags2::MEMORY_READ,
-                vk::AccessFlags2::MEMORY_READ | vk::AccessFlags2::SHADER_SAMPLED_READ,
-            ),
-        };
+    /// Keep the access masks honest: name the accesses each side actually
+    /// performs (e.g. heap-sampled reads need [`Access::SHADER_SAMPLED_READ`]
+    /// on the destination side), and widen the *stage* rather than the access
+    /// when in doubt.
+    pub fn barrier(
+        &self,
+        before: Stage,
+        before_access: Access,
+        after: Stage,
+        after_access: Access,
+    ) {
         let memory_barrier = vk::MemoryBarrier2::default()
             .src_stage_mask(before.to_vk())
-            .src_access_mask(src_access)
+            .src_access_mask(before_access.to_vk())
             .dst_stage_mask(after.to_vk())
-            .dst_access_mask(dst_access);
+            .dst_access_mask(after_access.to_vk());
         let dependency_info =
             vk::DependencyInfo::default().memory_barriers(std::slice::from_ref(&memory_barrier));
         // SAFETY: the command buffer is recording; a global memory barrier
@@ -553,32 +553,21 @@ impl CommandBuffer {
         }
     }
 
-    /// Insert a pipeline barrier.
+    /// Insert sync2 image-memory barriers (layout transitions and
+    /// image-access ordering).
     ///
-    /// Crate-internal: the upload and offscreen paths' legacy image-layout
-    /// transitions use it; everything else uses [`barrier`](Self::barrier).
-    pub(crate) fn pipeline_barrier(
-        &self,
-        src_stage: vk::PipelineStageFlags,
-        dst_stage: vk::PipelineStageFlags,
-        dependency_flags: vk::DependencyFlags,
-        memory_barriers: &[vk::MemoryBarrier],
-        buffer_memory_barriers: &[vk::BufferMemoryBarrier],
-        image_memory_barriers: &[vk::ImageMemoryBarrier],
-    ) {
+    /// Crate-internal: the upload and offscreen paths' image-layout
+    /// transitions use it; resource-less synchronization uses
+    /// [`barrier`](Self::barrier). Callers build the
+    /// [`vk::ImageMemoryBarrier2`] structs, so stage/access masks and layouts
+    /// are spelled out at the call site.
+    pub(crate) fn image_barriers(&self, barriers: &[vk::ImageMemoryBarrier2]) {
+        let dependency_info = vk::DependencyInfo::default().image_memory_barriers(barriers);
         // SAFETY: the command buffer is recording and the barrier structs
-        // reference live images and buffers (upload/offscreen layout
-        // transitions).
+        // reference live images (upload/offscreen layout transitions).
         unsafe {
-            self.device.cmd_pipeline_barrier(
-                self.buffer,
-                src_stage,
-                dst_stage,
-                dependency_flags,
-                memory_barriers,
-                buffer_memory_barriers,
-                image_memory_barriers,
-            );
+            self.device
+                .cmd_pipeline_barrier2(self.buffer, &dependency_info);
         }
     }
 }

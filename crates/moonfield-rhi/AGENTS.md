@@ -20,7 +20,7 @@ lives in `moonfield-render-core` (Selene), never here.
   this mechanically.
 - Module map inside `src/vulkan/`: `memory.rs` owns the allocation/pointer
   model (`GpuAllocation`/`GpuPtr`/`HostPtr`/`Memory`), `sync.rs` the barrier
-  vocabulary (`Stage`/`BarrierHazard`) plus fences/semaphores, `pipeline.rs`
+  vocabulary (`Stage`/`Access`) plus fences/semaphores, `pipeline.rs`
   both pipeline types, `view.rs` the `TextureView` wrapper.
 
 ## Object ownership and lifecycle

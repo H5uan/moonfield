@@ -155,11 +155,11 @@ impl Drop for Fence {
 
 /// A GPU pipeline stage mask for bindless barriers.
 ///
-/// Bindless synchronization is stage-to-stage: the barrier orders the end of
-/// a producer stage against the start of a consumer stage, without naming any
+/// Bindless synchronization is stage-to-stage: a barrier orders the end of a
+/// producer stage against the start of a consumer stage, without naming any
 /// resource — shaders address memory indirectly through pointers, so a
-/// resource list would be both impossible and meaningless. The access mask is
-/// the widest possible read/write, matching the pointer model.
+/// resource list would be both impossible and meaningless. The paired
+/// [`Access`] masks name which memory operations each side performs.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct Stage(pub(crate) vk::PipelineStageFlags2);
 
@@ -172,7 +172,10 @@ impl Stage {
     pub const COMPUTE: Self = Self(vk::PipelineStageFlags2::COMPUTE_SHADER);
     /// Transfer stage (buffer/image copy).
     pub const TRANSFER: Self = Self(vk::PipelineStageFlags2::TRANSFER);
-    /// All stages; implies the widest dependency and ignores access masks.
+    /// Every graphics stage — the honest widening for a render pass, whose
+    /// work spans shader, fragment-test, and attachment stages.
+    pub const ALL_GRAPHICS: Self = Self(vk::PipelineStageFlags2::ALL_GRAPHICS);
+    /// All stages; implies the widest dependency.
     pub const ALL: Self = Self(vk::PipelineStageFlags2::ALL_COMMANDS);
 
     pub(crate) fn to_vk(self) -> vk::PipelineStageFlags2 {
@@ -187,16 +190,52 @@ impl std::ops::BitOr for Stage {
     }
 }
 
-/// What kind of hazard a barrier orders — the blog's barrier flags. A plain
-/// memory hazard covers pointer-accessed data; a descriptor hazard additionally
-/// exposes the descriptor read the next stage performs through non-uniform
-/// heap indices (a sampled image read).
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
-pub enum BarrierHazard {
-    /// Plain memory read/write hazard (current behavior).
-    #[default]
-    Memory,
-    /// Descriptor-heap hazard: a stage (or the CPU, through the host mapping)
-    /// just wrote heap descriptors that the next stage samples.
-    Descriptors,
+/// A GPU access mask for bindless barriers — the hazard half of a [`Stage`]
+/// pair: which memory operations the producer finished and which the consumer
+/// will perform.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Access(pub(crate) vk::AccessFlags2);
+
+impl Access {
+    /// No access (a pure execution dependency).
+    pub const NONE: Self = Self(vk::AccessFlags2::NONE);
+    /// Indirect argument/dispatch record read.
+    pub const INDIRECT_COMMAND_READ: Self = Self(vk::AccessFlags2::INDIRECT_COMMAND_READ);
+    /// Shader read through a device address (`GpuPtr`) or storage buffer.
+    pub const SHADER_READ: Self = Self(vk::AccessFlags2::SHADER_READ);
+    /// Shader write through a device address, storage buffer, or storage image.
+    pub const SHADER_WRITE: Self = Self(vk::AccessFlags2::SHADER_WRITE);
+    /// Sampled-image read through a descriptor-heap slot.
+    pub const SHADER_SAMPLED_READ: Self = Self(vk::AccessFlags2::SHADER_SAMPLED_READ);
+    /// Color attachment read (load op, blending).
+    pub const COLOR_ATTACHMENT_READ: Self = Self(vk::AccessFlags2::COLOR_ATTACHMENT_READ);
+    /// Color attachment write.
+    pub const COLOR_ATTACHMENT_WRITE: Self = Self(vk::AccessFlags2::COLOR_ATTACHMENT_WRITE);
+    /// Depth/stencil attachment read (depth test).
+    pub const DEPTH_STENCIL_READ: Self = Self(vk::AccessFlags2::DEPTH_STENCIL_ATTACHMENT_READ);
+    /// Depth/stencil attachment write.
+    pub const DEPTH_STENCIL_WRITE: Self = Self(vk::AccessFlags2::DEPTH_STENCIL_ATTACHMENT_WRITE);
+    /// Transfer read (copy/blit source).
+    pub const TRANSFER_READ: Self = Self(vk::AccessFlags2::TRANSFER_READ);
+    /// Transfer write (copy/blit destination).
+    pub const TRANSFER_WRITE: Self = Self(vk::AccessFlags2::TRANSFER_WRITE);
+    /// Any memory read.
+    pub const MEMORY_READ: Self = Self(vk::AccessFlags2::MEMORY_READ);
+    /// Any memory write.
+    pub const MEMORY_WRITE: Self = Self(vk::AccessFlags2::MEMORY_WRITE);
+    /// The widest mask: every read and write.
+    pub const ALL: Self = Self(vk::AccessFlags2::from_raw(
+        vk::AccessFlags2::MEMORY_READ.as_raw() | vk::AccessFlags2::MEMORY_WRITE.as_raw(),
+    ));
+
+    pub(crate) fn to_vk(self) -> vk::AccessFlags2 {
+        self.0
+    }
+}
+
+impl std::ops::BitOr for Access {
+    type Output = Self;
+    fn bitor(self, rhs: Self) -> Self {
+        Self(self.0 | rhs.0)
+    }
 }

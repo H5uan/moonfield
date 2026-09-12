@@ -9,8 +9,8 @@
 use super::common;
 use crate::indirect::DispatchIndirectArgs;
 use crate::{
-    BarrierHazard, CommandBufferUsage, CommandPool, Compiler, ComputePipeline, Device,
-    GpuAllocation, Instance, Memory, ShaderModule, Stage,
+    Access, CommandBufferUsage, CommandPool, Compiler, ComputePipeline, Device, GpuAllocation,
+    Instance, Memory, ShaderModule, Stage,
 };
 use std::sync::Mutex;
 
@@ -72,7 +72,12 @@ fn bindless_memcpy_roundtrip() {
         .expect("begin");
     cmd.cmd_memcpy(&dst, &src, SIZE);
     // Make the copied data visible after the copy (transfer -> all stages).
-    cmd.barrier(Stage::TRANSFER, Stage::ALL, BarrierHazard::Memory);
+    cmd.barrier(
+        Stage::TRANSFER,
+        Access::TRANSFER_WRITE,
+        Stage::ALL,
+        Access::MEMORY_READ,
+    );
     cmd.end().expect("end");
 
     let commands = [cmd.raw()];

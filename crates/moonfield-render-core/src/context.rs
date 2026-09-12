@@ -7,20 +7,22 @@
 //! - [`RenderContext::begin_rendering`] returns a [`TrackedRenderPass`], the
 //!   raster recording surface (skips redundant state binds);
 //! - [`RenderContext::compute`] returns a [`ComputeRecording`], which
-//!   separates consecutive dispatches with automatic `COMPUTE → COMPUTE`
-//!   memory barriers;
+//!   separates consecutive dispatches with automatic compute-to-compute
+//!   barriers;
 //! - [`RenderContext::barrier`] records a manual barrier as given.
 //!
 //! A stage state machine ([`RecordingState`], reset when the frame begins)
 //! inserts the rhi's global, resource-less barriers automatically on door
-//! switches — the one sync rule every pass shares. A manual `barrier` marks
-//! the hazard handled, so the next door switch records nothing.
+//! switches, scoped to what each door produces and consumes (see the door
+//! methods for the stage/access pairs) — the one sync rule every pass
+//! shares. A manual `barrier` marks the hazard handled, so the next door
+//! switch records nothing.
 
 use crate::window::FrameContext;
 use moonfield_ecs::{SystemParam, World};
 use moonfield_rhi::{
-    BarrierHazard, BlendMode, CommandBuffer, ComputePipeline, CullState, DepthState, GpuPtr,
-    Rect2d, RenderPassDesc, Stage, Viewport,
+    Access, BlendMode, CommandBuffer, ComputePipeline, CullState, DepthState, GpuPtr, Rect2d,
+    RenderPassDesc, Stage, Viewport,
 };
 use std::cell::{Ref, RefMut};
 
@@ -132,9 +134,9 @@ impl<'a> TrackedRenderPass<'a> {
 
 /// A compute recording surface over the frame command buffer. Consecutive
 /// [`ComputeRecording::dispatch`] calls are separated by automatic
-/// `COMPUTE → COMPUTE` memory barriers — the read-after-write chain every
-/// compute pass has; passes needing nothing coarser than that record no
-/// barriers of their own.
+/// `(COMPUTE, SHADER_WRITE) → (COMPUTE, SHADER_READ | SHADER_WRITE)` barriers —
+/// the read-after-write chain every compute pass has; passes needing nothing
+/// coarser than that record no barriers of their own.
 pub struct ComputeRecording<'a> {
     command_buffer: &'a CommandBuffer,
     dispatches: u32,
@@ -167,11 +169,16 @@ impl<'a> ComputeRecording<'a> {
     }
 
     /// Launch a compute kernel. When a dispatch was already recorded into
-    /// this surface, a `COMPUTE → COMPUTE` memory barrier is inserted first.
+    /// this surface, a barrier making the previous dispatch's shader writes
+    /// visible to this one's reads and writes is inserted first.
     pub fn dispatch(&mut self, x: u32, y: u32, z: u32) {
         if self.dispatches > 0 {
-            self.command_buffer
-                .barrier(Stage::COMPUTE, Stage::COMPUTE, BarrierHazard::Memory);
+            self.command_buffer.barrier(
+                Stage::COMPUTE,
+                Access::SHADER_WRITE,
+                Stage::COMPUTE,
+                Access::SHADER_READ | Access::SHADER_WRITE,
+            );
         }
         self.dispatches += 1;
         self.command_buffer.dispatch(x, y, z);
@@ -222,11 +229,38 @@ impl<'a> RenderContext<'a> {
         let state = self.state.as_mut()?;
         match state.phase {
             RecPhase::Idle => {}
-            // No `COLOR_ATTACHMENT_OUTPUT` constant exists in `Stage`, so
-            // raster-involving switches use the broadest stage pair: the
-            // conservative over-synchronization this design accepts.
-            RecPhase::Rendering | RecPhase::Compute => {
-                command_buffer.barrier(Stage::ALL, Stage::ALL, BarrierHazard::Memory);
+            // Compute producer (splat sort, ML training steps): shader writes
+            // the raster pass reads back through vertex pulling
+            // (`SHADER_READ` in VERTEX) and descriptor-heap sampling
+            // (`SHADER_SAMPLED_READ` in FRAGMENT).
+            RecPhase::Compute => {
+                command_buffer.barrier(
+                    Stage::COMPUTE,
+                    Access::SHADER_WRITE,
+                    Stage::VERTEX | Stage::FRAGMENT,
+                    Access::SHADER_READ | Access::SHADER_SAMPLED_READ,
+                );
+            }
+            // Raster producer: attachment writes plus fragment shader writes
+            // through device addresses. The next pass reads them as
+            // vertex-pulled buffers, heap samples, and attachment loads.
+            // `ALL_GRAPHICS` on both sides is the deliberate stage widening:
+            // a pass's work spans shader, fragment-test, and attachment
+            // stages, and `Stage` carries no finer attachment constants.
+            RecPhase::Rendering => {
+                command_buffer.barrier(
+                    Stage::ALL_GRAPHICS,
+                    Access::COLOR_ATTACHMENT_WRITE
+                        | Access::DEPTH_STENCIL_WRITE
+                        | Access::SHADER_WRITE,
+                    Stage::ALL_GRAPHICS,
+                    Access::COLOR_ATTACHMENT_READ
+                        | Access::COLOR_ATTACHMENT_WRITE
+                        | Access::DEPTH_STENCIL_READ
+                        | Access::DEPTH_STENCIL_WRITE
+                        | Access::SHADER_READ
+                        | Access::SHADER_SAMPLED_READ,
+                );
             }
         }
         state.phase = RecPhase::Rendering;
@@ -242,11 +276,25 @@ impl<'a> RenderContext<'a> {
         let state = self.state.as_mut()?;
         match state.phase {
             RecPhase::Idle => {}
+            // Raster producer (see the raster door's comment), read back by
+            // dispatches through device addresses and heap samples.
             RecPhase::Rendering => {
-                command_buffer.barrier(Stage::ALL, Stage::COMPUTE, BarrierHazard::Memory);
+                command_buffer.barrier(
+                    Stage::ALL_GRAPHICS,
+                    Access::COLOR_ATTACHMENT_WRITE
+                        | Access::DEPTH_STENCIL_WRITE
+                        | Access::SHADER_WRITE,
+                    Stage::COMPUTE,
+                    Access::SHADER_READ | Access::SHADER_SAMPLED_READ | Access::SHADER_WRITE,
+                );
             }
             RecPhase::Compute => {
-                command_buffer.barrier(Stage::COMPUTE, Stage::COMPUTE, BarrierHazard::Memory);
+                command_buffer.barrier(
+                    Stage::COMPUTE,
+                    Access::SHADER_WRITE,
+                    Stage::COMPUTE,
+                    Access::SHADER_READ | Access::SHADER_WRITE,
+                );
             }
         }
         state.phase = RecPhase::Compute;
@@ -255,7 +303,13 @@ impl<'a> RenderContext<'a> {
 
     /// The manual door: record the barrier as given. The machine marks the
     /// hazard handled, so the next door switch records nothing extra.
-    pub fn barrier(&mut self, before: Stage, after: Stage, hazard: BarrierHazard) {
+    pub fn barrier(
+        &mut self,
+        before: Stage,
+        before_access: Access,
+        after: Stage,
+        after_access: Access,
+    ) {
         let Some(command_buffer) = self
             .frame
             .as_ref()
@@ -263,7 +317,7 @@ impl<'a> RenderContext<'a> {
         else {
             return;
         };
-        command_buffer.barrier(before, after, hazard);
+        command_buffer.barrier(before, before_access, after, after_access);
         if let Some(state) = self.state.as_mut() {
             state.phase = RecPhase::Idle;
         }

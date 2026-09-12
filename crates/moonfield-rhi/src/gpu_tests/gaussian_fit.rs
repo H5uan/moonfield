@@ -8,8 +8,8 @@
 
 use super::common;
 use crate::{
-    BarrierHazard, CommandBuffer, CommandBufferUsage, CommandPool, Compiler, ComputePipeline,
-    Device, GpuAllocation, GpuPtr, Instance, Memory, ShaderModule, Stage,
+    Access, CommandBuffer, CommandBufferUsage, CommandPool, Compiler, ComputePipeline, Device,
+    GpuAllocation, GpuPtr, Instance, Memory, ShaderModule, Stage,
 };
 
 /// Number of Gaussians in the mixture.
@@ -326,18 +326,33 @@ fn gaussian_fit_converges() {
         cmd.bind_compute_pipeline(&forward);
         push_roots(&cmd, &[params.gpu(), target.gpu(), image.gpu(), loss.gpu()]);
         cmd.dispatch((SIZE / 8) as u32, (SIZE / 8) as u32, 1);
-        cmd.barrier(Stage::COMPUTE, Stage::COMPUTE, BarrierHazard::Memory);
+        cmd.barrier(
+            Stage::COMPUTE,
+            Access::SHADER_WRITE,
+            Stage::COMPUTE,
+            Access::SHADER_READ | Access::SHADER_WRITE,
+        );
         cmd.bind_compute_pipeline(&backward);
         push_roots(
             &cmd,
             &[params.gpu(), target.gpu(), image.gpu(), gradbuf.gpu()],
         );
         cmd.dispatch((SIZE / 8) as u32, (SIZE / 8) as u32, 1);
-        cmd.barrier(Stage::COMPUTE, Stage::COMPUTE, BarrierHazard::Memory);
+        cmd.barrier(
+            Stage::COMPUTE,
+            Access::SHADER_WRITE,
+            Stage::COMPUTE,
+            Access::SHADER_READ | Access::SHADER_WRITE,
+        );
         cmd.bind_compute_pipeline(&reduce);
         push_roots(&cmd, &[gradbuf.gpu(), grads.gpu()]);
         cmd.dispatch(SCALARS.div_ceil(64) as u32, 1, 1);
-        cmd.barrier(Stage::COMPUTE, Stage::COMPUTE, BarrierHazard::Memory);
+        cmd.barrier(
+            Stage::COMPUTE,
+            Access::SHADER_WRITE,
+            Stage::COMPUTE,
+            Access::SHADER_READ | Access::SHADER_WRITE,
+        );
         cmd.bind_compute_pipeline(&adam);
         push_roots(
             &cmd,

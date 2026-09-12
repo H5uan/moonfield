@@ -58,7 +58,7 @@ pub use shader::{
 };
 pub use shader_module::ShaderModule;
 pub use swapchain::{Surface, Swapchain};
-pub use sync::{BarrierHazard, Fence, Semaphore, Stage};
+pub use sync::{Access, Fence, Semaphore, Stage};
 pub use texture::Texture;
 pub use upload::{FrameUploader, UPLOAD_ARENA_SIZE, UPLOAD_FRAME_RING};
 pub use view::TextureView;

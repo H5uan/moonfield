@@ -2,7 +2,8 @@
 //! prerequisite probe.
 //!
 //! A compute kernel writes the image through an `RWTexture2D` storage-image
-//! heap slot, a `barrier(COMPUTE, COMPUTE, Memory)` orders the write, and a
+//! heap slot, a `barrier(COMPUTE, SHADER_WRITE, COMPUTE, …)` orders the
+//! write, and a
 //! second dispatch samples the *same image* through its sampled-image slot
 //! into a readback buffer. Passing proves all three untested links at once:
 //! `STORAGE_IMAGE` descriptors work in the descriptor heap, Slang compiles
@@ -12,7 +13,7 @@
 
 use super::common;
 use crate::{
-    BarrierHazard, CommandBufferUsage, CommandPool, Compiler, ComputePipeline, Device, Format,
+    Access, CommandBufferUsage, CommandPool, Compiler, ComputePipeline, Device, Format,
     FrameUploader, GpuAllocation, Instance, Memory, ShaderModule, Stage, Texture,
     UPLOAD_ARENA_SIZE,
 };
@@ -128,7 +129,12 @@ fn rgba16f_storage_image_roundtrip() {
     cmd.bind_compute_pipeline(&write_pipeline);
     cmd.dispatch(WIDTH / 8, HEIGHT / 8, 1);
 
-    cmd.barrier(Stage::COMPUTE, Stage::COMPUTE, BarrierHazard::Memory);
+    cmd.barrier(
+        Stage::COMPUTE,
+        Access::SHADER_WRITE,
+        Stage::COMPUTE,
+        Access::SHADER_SAMPLED_READ | Access::SHADER_WRITE,
+    );
 
     cmd.bind_compute_pipeline(&check_pipeline);
     cmd.set_bindless_root(result.gpu(), result.gpu());

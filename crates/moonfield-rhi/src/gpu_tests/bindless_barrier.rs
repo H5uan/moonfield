@@ -1,16 +1,17 @@
-//! Headless smoke tests for the bindless stage barrier.
+//! Headless smoke tests for the bindless stage/access barrier.
 //!
 //! Dispatch A writes a fixed value through its output root pointer, a
-//! `barrier(COMPUTE, COMPUTE, hazard)` orders the writes, and dispatch B
-//! reads that buffer and writes 1 to a second buffer only if it observes the
-//! expected value. If the barrier were missing, B could read stale memory;
-//! with it, the payload propagates. Both the plain memory hazard and the
-//! descriptor-heap hazard (the blog's barrier flags) are exercised.
+//! `barrier(COMPUTE, SHADER_WRITE, COMPUTE, …)` orders the writes, and
+//! dispatch B reads that buffer and writes 1 to a second buffer only if it
+//! observes the expected value. If the barrier were missing, B could read
+//! stale memory; with it, the payload propagates. Both a plain
+//! shader-read/write access pair and a destination mask that also names
+//! the descriptor-heap sampled read are exercised.
 
 use super::common;
 use crate::{
-    BarrierHazard, CommandBufferUsage, CommandPool, Compiler, ComputePipeline, Device,
-    GpuAllocation, Instance, Memory, ShaderModule, Stage,
+    Access, CommandBufferUsage, CommandPool, Compiler, ComputePipeline, Device, GpuAllocation,
+    Instance, Memory, ShaderModule, Stage,
 };
 
 /// Dispatch A: write all ones into `payload`.
@@ -67,7 +68,7 @@ fn setup() -> Option<(Instance, Device)> {
 
 /// Run the write A → barrier → check B sequence and return what dispatch B
 /// observed: 1 when every payload element propagated through the barrier.
-fn run_pair(device: &Device, hazard: BarrierHazard) -> u32 {
+fn run_pair(device: &Device, after_access: Access) -> u32 {
     let compiler = Compiler::new().expect("compiler creation");
     let write_spirv = compiler
         .compile_source_to_spirv("write", WRITE_KERNEL, "main")
@@ -102,7 +103,12 @@ fn run_pair(device: &Device, hazard: BarrierHazard) -> u32 {
 
     // The barrier is the point under test: it must make A's writes visible
     // to B without any resource list.
-    cmd.barrier(Stage::COMPUTE, Stage::COMPUTE, hazard);
+    cmd.barrier(
+        Stage::COMPUTE,
+        Access::SHADER_WRITE,
+        Stage::COMPUTE,
+        after_access,
+    );
 
     // Dispatch B: read payload, pass an all-42 check.
     cmd.bind_compute_pipeline(&check_pipeline);
@@ -134,25 +140,28 @@ fn run_pair(device: &Device, hazard: BarrierHazard) -> u32 {
 }
 
 #[test]
-fn memory_hazard_barrier_orders_dispatch() {
+fn shader_read_barrier_orders_dispatch() {
     let Some((_instance, device)) = setup() else {
         return;
     };
     assert_eq!(
-        run_pair(&device, BarrierHazard::Memory),
+        run_pair(&device, Access::SHADER_READ | Access::SHADER_WRITE),
         1,
-        "memory barrier did not make dispatch A visible to B"
+        "barrier did not make dispatch A visible to B"
     );
 }
 
 #[test]
-fn descriptor_hazard_barrier_orders_dispatch() {
+fn sampled_read_barrier_orders_dispatch() {
     let Some((_instance, device)) = setup() else {
         return;
     };
     assert_eq!(
-        run_pair(&device, BarrierHazard::Descriptors),
+        run_pair(
+            &device,
+            Access::SHADER_READ | Access::SHADER_WRITE | Access::SHADER_SAMPLED_READ
+        ),
         1,
-        "descriptor barrier did not make dispatch A visible to B"
+        "barrier did not make dispatch A visible to B"
     );
 }

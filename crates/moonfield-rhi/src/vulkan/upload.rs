@@ -121,23 +121,18 @@ impl FrameUploader {
             .level_count(1)
             .base_array_layer(0)
             .layer_count(1);
-        let transition = vk::ImageMemoryBarrier::default()
-            .src_access_mask(vk::AccessFlags::empty())
-            .dst_access_mask(vk::AccessFlags::SHADER_WRITE | vk::AccessFlags::SHADER_READ)
+        let transition = vk::ImageMemoryBarrier2::default()
+            .src_stage_mask(vk::PipelineStageFlags2::TOP_OF_PIPE)
+            .src_access_mask(vk::AccessFlags2::NONE)
+            .dst_stage_mask(vk::PipelineStageFlags2::COMPUTE_SHADER)
+            .dst_access_mask(vk::AccessFlags2::SHADER_WRITE | vk::AccessFlags2::SHADER_READ)
             .old_layout(vk::ImageLayout::UNDEFINED)
             .new_layout(vk::ImageLayout::GENERAL)
             .src_queue_family_index(vk::QUEUE_FAMILY_IGNORED)
             .dst_queue_family_index(vk::QUEUE_FAMILY_IGNORED)
             .image(image)
             .subresource_range(subresource);
-        self.cb[slot].pipeline_barrier(
-            vk::PipelineStageFlags::TOP_OF_PIPE,
-            vk::PipelineStageFlags::COMPUTE_SHADER,
-            vk::DependencyFlags::empty(),
-            &[],
-            &[],
-            &[transition],
-        );
+        self.cb[slot].image_barriers(std::slice::from_ref(&transition));
         Ok(())
     }
 
@@ -172,32 +167,27 @@ impl FrameUploader {
         let (old_layout, src_access, src_stage) = match offset {
             Some(_) => (
                 vk::ImageLayout::GENERAL,
-                vk::AccessFlags::SHADER_READ,
-                vk::PipelineStageFlags::FRAGMENT_SHADER,
+                vk::AccessFlags2::SHADER_READ,
+                vk::PipelineStageFlags2::FRAGMENT_SHADER,
             ),
             None => (
                 vk::ImageLayout::UNDEFINED,
-                vk::AccessFlags::empty(),
-                vk::PipelineStageFlags::TOP_OF_PIPE,
+                vk::AccessFlags2::NONE,
+                vk::PipelineStageFlags2::TOP_OF_PIPE,
             ),
         };
-        let to_transfer = vk::ImageMemoryBarrier::default()
+        let to_transfer = vk::ImageMemoryBarrier2::default()
+            .src_stage_mask(src_stage)
             .src_access_mask(src_access)
-            .dst_access_mask(vk::AccessFlags::TRANSFER_WRITE)
+            .dst_stage_mask(vk::PipelineStageFlags2::TRANSFER)
+            .dst_access_mask(vk::AccessFlags2::TRANSFER_WRITE)
             .old_layout(old_layout)
             .new_layout(vk::ImageLayout::GENERAL)
             .src_queue_family_index(vk::QUEUE_FAMILY_IGNORED)
             .dst_queue_family_index(vk::QUEUE_FAMILY_IGNORED)
             .image(image)
             .subresource_range(subresource);
-        self.cb[slot].pipeline_barrier(
-            src_stage,
-            vk::PipelineStageFlags::TRANSFER,
-            vk::DependencyFlags::empty(),
-            &[],
-            &[],
-            &[to_transfer],
-        );
+        self.cb[slot].image_barriers(std::slice::from_ref(&to_transfer));
 
         let (x, y) = offset.unwrap_or((0, 0));
         let copy_region = vk::BufferImageCopy::default()
@@ -230,9 +220,11 @@ impl FrameUploader {
             );
         }
 
-        let to_shader_read = vk::ImageMemoryBarrier::default()
-            .src_access_mask(vk::AccessFlags::TRANSFER_WRITE)
-            .dst_access_mask(vk::AccessFlags::SHADER_READ)
+        let to_shader_read = vk::ImageMemoryBarrier2::default()
+            .src_stage_mask(vk::PipelineStageFlags2::TRANSFER)
+            .src_access_mask(vk::AccessFlags2::TRANSFER_WRITE)
+            .dst_stage_mask(vk::PipelineStageFlags2::ALL_COMMANDS)
+            .dst_access_mask(vk::AccessFlags2::SHADER_READ)
             .old_layout(vk::ImageLayout::GENERAL)
             .new_layout(vk::ImageLayout::GENERAL)
             .src_queue_family_index(vk::QUEUE_FAMILY_IGNORED)
@@ -241,14 +233,7 @@ impl FrameUploader {
             .subresource_range(subresource);
         // The image is shader-readable for every stage, not just fragment:
         // bindless sampling happens from compute (and future mesh) stages too.
-        self.cb[slot].pipeline_barrier(
-            vk::PipelineStageFlags::TRANSFER,
-            vk::PipelineStageFlags::ALL_COMMANDS,
-            vk::DependencyFlags::empty(),
-            &[],
-            &[],
-            &[to_shader_read],
-        );
+        self.cb[slot].image_barriers(std::slice::from_ref(&to_shader_read));
         Ok(())
     }
 

@@ -3,8 +3,8 @@
 //! Provides [`OffscreenTarget`], a renderable image used for editor viewports:
 //! the scene is rendered into the image and a UI toolkit (e.g. egui) samples
 //! it afterwards. The caller picks the attachment layout when beginning a
-//! rendering pass; `SHADER_READ_ONLY_OPTIMAL` outside a pass keeps the image
-//! sampleable with no explicit transitions. Sampling goes through the
+//! rendering pass; `GENERAL` outside a pass keeps the image sampleable with
+//! no explicit transitions. Sampling goes through the
 //! descriptor heap: the target owns one image slot, and its sampler comes
 //! from the heap's description cache; a resize allocates a new image slot
 //! and retires the old one, so holders re-register when the handles change.
@@ -105,8 +105,8 @@ pub struct OffscreenTarget {
 
 impl OffscreenTarget {
     /// Create an offscreen target of `width`×`height` with the given color
-    /// format. The image is transitioned to `SHADER_READ_ONLY_OPTIMAL` so it
-    /// can be sampled before the first frame is rendered.
+    /// format. The image is transitioned to `GENERAL` so it can be sampled
+    /// before the first frame is rendered.
     pub fn new(device: &Device, width: u32, height: u32, format: Format) -> Result<Self> {
         Self::create(device, width, height, format, false)
     }
@@ -294,23 +294,18 @@ impl OffscreenTarget {
             .level_count(1)
             .base_array_layer(0)
             .layer_count(1);
-        let to_transfer = vk::ImageMemoryBarrier::default()
-            .src_access_mask(vk::AccessFlags::SHADER_READ)
-            .dst_access_mask(vk::AccessFlags::TRANSFER_READ)
+        let to_transfer = vk::ImageMemoryBarrier2::default()
+            .src_stage_mask(vk::PipelineStageFlags2::FRAGMENT_SHADER)
+            .src_access_mask(vk::AccessFlags2::SHADER_READ)
+            .dst_stage_mask(vk::PipelineStageFlags2::TRANSFER)
+            .dst_access_mask(vk::AccessFlags2::TRANSFER_READ)
             .old_layout(vk::ImageLayout::GENERAL)
             .new_layout(vk::ImageLayout::GENERAL)
             .src_queue_family_index(vk::QUEUE_FAMILY_IGNORED)
             .dst_queue_family_index(vk::QUEUE_FAMILY_IGNORED)
             .image(self.image)
             .subresource_range(subresource);
-        command_buffer.pipeline_barrier(
-            vk::PipelineStageFlags::FRAGMENT_SHADER,
-            vk::PipelineStageFlags::TRANSFER,
-            vk::DependencyFlags::empty(),
-            &[],
-            &[],
-            &[to_transfer],
-        );
+        command_buffer.image_barriers(std::slice::from_ref(&to_transfer));
         let region = vk::BufferImageCopy::default()
             .image_subresource(
                 vk::ImageSubresourceLayers::default()
@@ -324,7 +319,8 @@ impl OffscreenTarget {
                 height,
                 depth: 1,
             });
-        // SAFETY: the target is in TRANSFER_SRC_OPTIMAL and the buffer fits it.
+        // SAFETY: the target is in GENERAL (readable as a transfer source)
+        // and the buffer fits it.
         unsafe {
             device.raw().cmd_copy_image_to_buffer(
                 command_buffer.raw(),
@@ -334,23 +330,18 @@ impl OffscreenTarget {
                 std::slice::from_ref(&region),
             );
         }
-        let back = vk::ImageMemoryBarrier::default()
-            .src_access_mask(vk::AccessFlags::TRANSFER_READ)
-            .dst_access_mask(vk::AccessFlags::SHADER_READ)
+        let back = vk::ImageMemoryBarrier2::default()
+            .src_stage_mask(vk::PipelineStageFlags2::TRANSFER)
+            .src_access_mask(vk::AccessFlags2::TRANSFER_READ)
+            .dst_stage_mask(vk::PipelineStageFlags2::FRAGMENT_SHADER)
+            .dst_access_mask(vk::AccessFlags2::SHADER_READ)
             .old_layout(vk::ImageLayout::GENERAL)
             .new_layout(vk::ImageLayout::GENERAL)
             .src_queue_family_index(vk::QUEUE_FAMILY_IGNORED)
             .dst_queue_family_index(vk::QUEUE_FAMILY_IGNORED)
             .image(self.image)
             .subresource_range(subresource);
-        command_buffer.pipeline_barrier(
-            vk::PipelineStageFlags::TRANSFER,
-            vk::PipelineStageFlags::FRAGMENT_SHADER,
-            vk::DependencyFlags::empty(),
-            &[],
-            &[],
-            &[back],
-        );
+        command_buffer.image_barriers(std::slice::from_ref(&back));
         command_buffer.end()?;
 
         let command_buffers = [command_buffer.raw()];
@@ -658,8 +649,8 @@ fn target_sampler_desc() -> SamplerDesc {
     }
 }
 
-/// Transition the image from UNDEFINED to SHADER_READ_ONLY_OPTIMAL via a
-/// one-shot command buffer, so sampling is valid before the first render.
+/// Transition the image from UNDEFINED to GENERAL (the unified layout, so
+/// sampling is valid before the first render) via a one-shot command buffer.
 /// The submission waits on its own fence, not a queue wait: the transition
 /// depends on no prior work, and same-queue submission order already puts
 /// it ahead of the frame command buffers recorded afterwards.
@@ -669,9 +660,11 @@ fn transition_to_shader_read(device: &Device, image: vk::Image) -> Result<()> {
     let mut command_buffer: CommandBuffer = command_pool.allocate_command_buffer()?;
 
     command_buffer.begin(crate::CommandBufferUsage::ONE_TIME_SUBMIT)?;
-    let barrier = vk::ImageMemoryBarrier::default()
-        .src_access_mask(vk::AccessFlags::empty())
-        .dst_access_mask(vk::AccessFlags::SHADER_READ)
+    let barrier = vk::ImageMemoryBarrier2::default()
+        .src_stage_mask(vk::PipelineStageFlags2::TOP_OF_PIPE)
+        .src_access_mask(vk::AccessFlags2::NONE)
+        .dst_stage_mask(vk::PipelineStageFlags2::FRAGMENT_SHADER)
+        .dst_access_mask(vk::AccessFlags2::SHADER_READ)
         .old_layout(vk::ImageLayout::UNDEFINED)
         .new_layout(vk::ImageLayout::GENERAL)
         .src_queue_family_index(vk::QUEUE_FAMILY_IGNORED)
@@ -685,14 +678,7 @@ fn transition_to_shader_read(device: &Device, image: vk::Image) -> Result<()> {
                 .base_array_layer(0)
                 .layer_count(1),
         );
-    command_buffer.pipeline_barrier(
-        vk::PipelineStageFlags::TOP_OF_PIPE,
-        vk::PipelineStageFlags::FRAGMENT_SHADER,
-        vk::DependencyFlags::empty(),
-        &[],
-        &[],
-        &[barrier],
-    );
+    command_buffer.image_barriers(std::slice::from_ref(&barrier));
     command_buffer.end()?;
 
     let fence = Fence::new(device, false)?;
