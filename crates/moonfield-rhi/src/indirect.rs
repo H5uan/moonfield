@@ -5,13 +5,10 @@
 //! `bytemuck::bytes_of` can be submitted directly. The RHI does not expose raw
 //! transmutation to Vulkan types — callers write these structs into a
 //! [`GpuAllocation`](crate::vulkan::memory::GpuAllocation) (whose address
-//! carrier always carries `INDIRECT_BUFFER` usage) and pass it to the command
-//! buffer's indirect draw methods.
-//!
-//! Compute indirect dispatch is wired through the bindless path:
-//! [`CommandBuffer::dispatch_indirect`](crate::CommandBuffer::dispatch_indirect)
-//! takes a [`GpuAllocation`](crate::vulkan::memory::GpuAllocation) holding
-//! these arguments.
+//! carrier always carries `INDIRECT_BUFFER` usage) and pass its
+//! [`GpuPtr`](crate::vulkan::memory::GpuPtr) to the command buffer's
+//! indirect draw/dispatch methods, which consume device addresses directly
+//! (`VK_KHR_device_address_commands`).
 
 /// Argument buffer layout for non-indexed `draw_indirect` commands.
 ///

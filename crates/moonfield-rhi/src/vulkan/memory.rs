@@ -334,9 +334,9 @@ impl GpuAllocation {
         self.size
     }
 
-    /// The raw `vk::Buffer` address carrier. Crate-internal: command recording
-    /// (`cmd_memcpy`, `dispatch_indirect`) and the bump arena's copy-source
-    /// handle use it; consumers work with the paired CPU/GPU pointers.
+    /// The raw `vk::Buffer` address carrier. Crate-internal: the upload and
+    /// readback paths' buffer copies use it as the copy handle; consumers
+    /// work with the paired CPU/GPU pointers.
     pub(crate) fn buffer(&self) -> vk::Buffer {
         self.buffer
     }

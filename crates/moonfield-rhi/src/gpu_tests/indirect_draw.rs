@@ -197,8 +197,7 @@ PsOutput main(PsInput input)
         .expect("vertices pointer encode");
     command_buffer.push_data(vertices_place.offset as u32, &bytes);
     command_buffer.draw_indirect(
-        &args_alloc,
-        0,
+        args_alloc.gpu(),
         1,
         std::mem::size_of::<DrawIndirectArgs>() as u32,
     );
@@ -251,8 +250,7 @@ PsOutput main(PsInput input)
     // own copy of the vertex array pointer.
     second.push_data(vertices_place.offset as u32, &bytes);
     second.draw_indirect(
-        &multi_args_alloc,
-        0,
+        multi_args_alloc.gpu(),
         2,
         std::mem::size_of::<DrawIndirectArgs>() as u32,
     );

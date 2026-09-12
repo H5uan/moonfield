@@ -48,7 +48,7 @@ fn readback(device: &Device, src: &GpuAllocation, n: usize) -> Vec<u8> {
     let mut cb = pool.allocate_command_buffer().expect("command buffer");
     cb.begin(CommandBufferUsage::ONE_TIME_SUBMIT)
         .expect("begin");
-    cb.cmd_memcpy(&dst, src, n as u64);
+    cb.cmd_memcpy(dst.gpu(), src.gpu(), n as u64);
     cb.end().expect("end");
     device.submit_and_wait(&[&cb]).expect("submit and wait");
 

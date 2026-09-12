@@ -6,8 +6,8 @@ use crate::types::{
     Rect2d, StoreOp, Viewport,
 };
 use crate::vulkan::device::Device;
-use crate::vulkan::memory::{GpuAllocation, GpuPtr};
-use crate::vulkan::sync::{Access, Stage};
+use crate::vulkan::memory::GpuPtr;
+use crate::vulkan::sync::{Access, Stage, TimestampQueryPool};
 use crate::vulkan::view::TextureView;
 use crate::{BlendMode, ComputePipeline, GraphicsPipeline};
 use ash::vk;
@@ -427,31 +427,115 @@ impl CommandBuffer {
         unsafe { self.device.cmd_dispatch(self.buffer, x, y, z) };
     }
 
-    /// Launch a compute kernel whose workgroup counts are read from GPU memory.
-    pub fn dispatch_indirect(&self, args: &GpuAllocation) {
+    /// Launch a compute kernel whose workgroup counts are read from GPU
+    /// memory at `args` (a `DispatchIndirectArgs` record).
+    ///
+    /// Address-based (`vkCmdDispatchIndirect2KHR`): the argument location is
+    /// a device address, so no buffer handle or offset is involved.
+    pub fn dispatch_indirect(&self, args: GpuPtr) {
+        let info = vk::DispatchIndirect2InfoKHR::default()
+            .address_range(
+                vk::DeviceAddressRangeKHR::default()
+                    .address(args.as_raw())
+                    .size(std::mem::size_of::<crate::DispatchIndirectArgs>() as u64),
+            )
+            .address_flags(vk::AddressCommandFlagsKHR::FULLY_BOUND);
         // SAFETY: the command buffer is recording with a compute pipeline
-        // bound, and `args` is a live buffer with INDIRECT_BUFFER usage
-        // holding a dispatch record.
+        // bound, and `args` addresses a live, fully-bound allocation holding
+        // a dispatch record (caller contract).
         unsafe {
-            self.device
-                .cmd_dispatch_indirect(self.buffer, args.buffer(), 0);
+            self.ext
+                .device_address_commands
+                .cmd_dispatch_indirect2(self.buffer, &info);
         }
     }
 
-    pub fn cmd_memcpy(&self, dst: &GpuAllocation, src: &GpuAllocation, size: u64) {
-        let region = vk::BufferCopy2::default()
-            .src_offset(0)
-            .dst_offset(0)
-            .size(size);
-        let copy_info = vk::CopyBufferInfo2::default()
-            .src_buffer(src.buffer())
-            .dst_buffer(dst.buffer())
-            .regions(std::slice::from_ref(&region));
-        // SAFETY: the command buffer is recording and both allocations are
-        // live, transfer-capable buffers whose `size` range fits (caller
+    /// Copy `size` GPU bytes from `src` to `dst` — both device addresses
+    /// (`vkCmdCopyMemoryKHR`), with no buffer handles involved.
+    pub fn cmd_memcpy(&self, dst: GpuPtr, src: GpuPtr, size: u64) {
+        let region = vk::DeviceMemoryCopyKHR::default()
+            .src_range(
+                vk::DeviceAddressRangeKHR::default()
+                    .address(src.as_raw())
+                    .size(size),
+            )
+            .src_flags(vk::AddressCommandFlagsKHR::FULLY_BOUND)
+            .dst_range(
+                vk::DeviceAddressRangeKHR::default()
+                    .address(dst.as_raw())
+                    .size(size),
+            )
+            .dst_flags(vk::AddressCommandFlagsKHR::FULLY_BOUND);
+        let copy_info =
+            vk::CopyDeviceMemoryInfoKHR::default().regions(std::slice::from_ref(&region));
+        // SAFETY: the command buffer is recording and both address ranges
+        // reference live, fully-bound, transfer-capable allocations whose
+        // `size` ranges fit (caller contract).
+        unsafe {
+            self.ext
+                .device_address_commands
+                .cmd_copy_memory(self.buffer, &copy_info);
+        }
+    }
+
+    /// Reset every query in `queries` (core `vkCmdResetQueryPool`). Record
+    /// it before a recording pass's [`write_timestamp`](Self::write_timestamp)
+    /// calls whenever the pool is reused across submissions.
+    pub fn reset_timestamps(&self, queries: &TimestampQueryPool) {
+        // SAFETY: the command buffer is recording and the pool is live; the
+        // caller records this before the pass's timestamp writes.
+        unsafe {
+            self.device
+                .cmd_reset_query_pool(self.buffer, queries.raw(), 0, queries.count());
+        }
+    }
+
+    /// Write a GPU timestamp into query `index` of `queries`, stamped at
+    /// `stage` (sync2 `vkCmdWriteTimestamp2`). Pass a single stage —
+    /// multi-stage masks stamp at an unspecified one of them.
+    pub fn write_timestamp(&self, queries: &TimestampQueryPool, index: u32, stage: Stage) {
+        // SAFETY: the command buffer is recording, the pool is live, and
+        // `index` is in range and reset for this submission (caller
+        // contract; see `reset_timestamps`).
+        unsafe {
+            self.device
+                .cmd_write_timestamp2(self.buffer, stage.to_vk(), queries.raw(), index);
+        }
+    }
+
+    /// Resolve `count` timestamps starting at query `first` into `count`
+    /// consecutive `u64` tick values at the device address `dst`
+    /// (`vkCmdCopyQueryPoolResultsToMemoryKHR`, 64-bit results with `WAIT`).
+    /// The consumer reads them from the allocation's host mapping after the
+    /// submission's timeline point; convert with
+    /// [`TimestampQueryPool::timestamp_period_ns`].
+    pub fn resolve_timestamps(
+        &self,
+        queries: &TimestampQueryPool,
+        first: u32,
+        count: u32,
+        dst: GpuPtr,
+    ) {
+        let dst_range = vk::StridedDeviceAddressRangeKHR::default()
+            .address(dst.as_raw())
+            .size(count as u64 * 8)
+            .stride(8);
+        // SAFETY: the command buffer is recording, the pool is live, the
+        // query range was written this submission, and `dst` addresses a
+        // live, fully-bound allocation with room for `count` u64s (caller
         // contract).
         unsafe {
-            self.device.cmd_copy_buffer2(self.buffer, &copy_info);
+            self.ext
+                .device_address_commands
+                .cmd_copy_query_pool_results_to_memory(
+                    self.buffer,
+                    queries.raw(),
+                    first,
+                    count,
+                    &dst_range,
+                    vk::AddressCommandFlagsKHR::FULLY_BOUND,
+                    vk::QueryResultFlags::TYPE_64 | vk::QueryResultFlags::WAIT,
+                );
         }
     }
 
@@ -488,47 +572,66 @@ impl CommandBuffer {
         }
     }
 
-    /// Issue `draw_count` non-indexed draws from an indirect argument
-    /// allocation.
+    /// Issue `draw_count` non-indexed draws with argument records read from
+    /// `args` (a device address — `vkCmdDrawIndirect2KHR`).
     ///
     /// `stride` is the byte stride between consecutive `DrawIndirectArgs`
-    /// records and must be a multiple of 4.
-    pub fn draw_indirect(&self, args: &GpuAllocation, offset: u64, draw_count: u32, stride: u32) {
+    /// records and must be a multiple of 4. Mid-buffer starts use
+    /// [`GpuPtr::offset`]; there is no offset parameter.
+    pub fn draw_indirect(&self, args: GpuPtr, draw_count: u32, stride: u32) {
+        let info = vk::DrawIndirect2InfoKHR::default()
+            .address_range(
+                vk::StridedDeviceAddressRangeKHR::default()
+                    .address(args.as_raw())
+                    .size(draw_count as u64 * stride as u64)
+                    .stride(stride as u64),
+            )
+            .address_flags(vk::AddressCommandFlagsKHR::FULLY_BOUND)
+            .draw_count(draw_count);
         // SAFETY: the command buffer is inside a render pass with a graphics
-        // pipeline bound, and `args` is a live indirect-argument buffer.
+        // pipeline bound, and `args` addresses a live, fully-bound allocation
+        // holding `draw_count` stride-spaced argument records (caller
+        // contract).
         unsafe {
-            self.device
-                .cmd_draw_indirect(self.buffer, args.buffer(), offset, draw_count, stride);
+            self.ext
+                .device_address_commands
+                .cmd_draw_indirect2(self.buffer, &info);
         }
     }
 
     /// Issue non-indexed draws where the draw count is read from
-    /// `count` at runtime (GPU-driven count).
-    ///
-    /// Requires Vulkan 1.2+ (promoted from `VK_KHR_draw_indirect_count`); the
-    /// instance requests `API_VERSION_1_3` so this is always available.
+    /// `count` at runtime (GPU-driven count) — `vkCmdDrawIndirectCount2KHR`,
+    /// both arguments and count addressed by `GpuPtr`.
     pub fn draw_indirect_count(
         &self,
-        args: &GpuAllocation,
-        offset: u64,
-        count: &GpuAllocation,
-        count_offset: u64,
+        args: GpuPtr,
+        count: GpuPtr,
         max_draw_count: u32,
         stride: u32,
     ) {
+        let info = vk::DrawIndirectCount2InfoKHR::default()
+            .address_range(
+                vk::StridedDeviceAddressRangeKHR::default()
+                    .address(args.as_raw())
+                    .size(max_draw_count as u64 * stride as u64)
+                    .stride(stride as u64),
+            )
+            .address_flags(vk::AddressCommandFlagsKHR::FULLY_BOUND)
+            .count_address_range(
+                vk::DeviceAddressRangeKHR::default()
+                    .address(count.as_raw())
+                    .size(4),
+            )
+            .count_address_flags(vk::AddressCommandFlagsKHR::FULLY_BOUND)
+            .max_draw_count(max_draw_count);
         // SAFETY: the command buffer is inside a render pass with a graphics
-        // pipeline bound, and both allocations are live indirect-argument and
-        // count buffers.
+        // pipeline bound, and both addresses reference live, fully-bound
+        // allocations holding the argument records and the u32 count (caller
+        // contract).
         unsafe {
-            self.device.cmd_draw_indirect_count(
-                self.buffer,
-                args.buffer(),
-                offset,
-                count.buffer(),
-                count_offset,
-                max_draw_count,
-                stride,
-            );
+            self.ext
+                .device_address_commands
+                .cmd_draw_indirect_count2(self.buffer, &info);
         }
     }
 

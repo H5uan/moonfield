@@ -172,6 +172,8 @@ impl Stage {
     pub const COMPUTE: Self = Self(vk::PipelineStageFlags2::COMPUTE_SHADER);
     /// Transfer stage (buffer/image copy).
     pub const TRANSFER: Self = Self(vk::PipelineStageFlags2::TRANSFER);
+    /// Indirect-argument consumption (indirect draw/dispatch records).
+    pub const DRAW_INDIRECT: Self = Self(vk::PipelineStageFlags2::DRAW_INDIRECT);
     /// Every graphics stage — the honest widening for a render pass, whose
     /// work spans shader, fragment-test, and attachment stages.
     pub const ALL_GRAPHICS: Self = Self(vk::PipelineStageFlags2::ALL_GRAPHICS);
@@ -237,5 +239,70 @@ impl std::ops::BitOr for Access {
     type Output = Self;
     fn bitor(self, rhs: Self) -> Self {
         Self(self.0 | rhs.0)
+    }
+}
+
+/// A timestamp query pool: GPU timestamps recorded by
+/// [`CommandBuffer::write_timestamp`](crate::CommandBuffer::write_timestamp)
+/// and resolved straight to a GPU address by
+/// [`CommandBuffer::resolve_timestamps`](crate::CommandBuffer::resolve_timestamps)
+/// (`vkCmdCopyQueryPoolResultsToMemoryKHR`). Results are `u64` tick counts
+/// the CPU reads from the resolved allocation's host mapping after the
+/// submission's timeline point — no `vkGetQueryPoolResults` host sync.
+/// Multiply tick deltas by [`timestamp_period_ns`](Self::timestamp_period_ns)
+/// for nanoseconds.
+pub struct TimestampQueryPool {
+    pool: vk::QueryPool,
+    device: ash::Device,
+    count: u32,
+    timestamp_period_ns: f32,
+}
+
+impl TimestampQueryPool {
+    /// Create a pool of `count` timestamp queries.
+    pub fn new(device: &Device, count: u32) -> Result<Self> {
+        let create_info = vk::QueryPoolCreateInfo::default()
+            .query_type(vk::QueryType::TIMESTAMP)
+            .query_count(count);
+        // SAFETY: the device is valid and the create info describes a legal
+        // timestamp query pool.
+        let pool = unsafe {
+            device
+                .raw()
+                .create_query_pool(&create_info, None)
+                .map_err(|e| Error::Backend(format!("failed to create query pool: {:?}", e)))?
+        };
+        Ok(Self {
+            pool,
+            device: device.raw().clone(),
+            count,
+            timestamp_period_ns: device.timestamp_period_ns(),
+        })
+    }
+
+    /// Nanoseconds per timestamp tick (`limits.timestampPeriod` of the
+    /// physical device this pool was created on).
+    pub fn timestamp_period_ns(&self) -> f32 {
+        self.timestamp_period_ns
+    }
+
+    /// Number of queries in the pool.
+    pub(crate) fn count(&self) -> u32 {
+        self.count
+    }
+
+    /// Access the raw `vk::QueryPool` handle.
+    pub(crate) fn raw(&self) -> vk::QueryPool {
+        self.pool
+    }
+}
+
+impl Drop for TimestampQueryPool {
+    fn drop(&mut self) {
+        // SAFETY: the pool was created by this device and is destroyed exactly
+        // once, here.
+        unsafe {
+            self.device.destroy_query_pool(self.pool, None);
+        }
     }
 }

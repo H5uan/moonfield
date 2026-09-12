@@ -35,6 +35,9 @@ pub(crate) struct DeviceExtensionFunctions {
     /// `VK_EXT_descriptor_heap` CPU-visible descriptor heap writes and binding.
     /// Loaded at device creation, consumed by `DescriptorHeap`.
     pub(crate) descriptor_heap: ash::ext::descriptor_heap::Device,
+    /// `VK_KHR_device_address_commands` address-based commands (indirect
+    /// draw/dispatch, memory copies, query-pool resolves to GPU addresses).
+    pub(crate) device_address_commands: ash::khr::device_address_commands::Device,
 }
 
 pub use bump::{BumpAlloc, GpuBumpAllocator};
@@ -58,7 +61,7 @@ pub use shader::{
 };
 pub use shader_module::ShaderModule;
 pub use swapchain::{Surface, Swapchain};
-pub use sync::{Access, Fence, Semaphore, Stage};
+pub use sync::{Access, Fence, Semaphore, Stage, TimestampQueryPool};
 pub use texture::Texture;
 pub use upload::{FrameUploader, UPLOAD_ARENA_SIZE, UPLOAD_FRAME_RING};
 pub use view::TextureView;

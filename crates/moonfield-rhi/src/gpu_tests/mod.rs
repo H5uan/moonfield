@@ -26,4 +26,5 @@ mod indirect_draw;
 mod offscreen_triangle;
 mod storage_image;
 mod texture_bindless;
+mod timestamps;
 mod upload_ring;

@@ -70,7 +70,7 @@ fn bindless_memcpy_roundtrip() {
     let mut cmd = pool.allocate_command_buffer().expect("cmd");
     cmd.begin(CommandBufferUsage::ONE_TIME_SUBMIT)
         .expect("begin");
-    cmd.cmd_memcpy(&dst, &src, SIZE);
+    cmd.cmd_memcpy(dst.gpu(), src.gpu(), SIZE);
     // Make the copied data visible after the copy (transfer -> all stages).
     cmd.barrier(
         Stage::TRANSFER,
@@ -156,7 +156,7 @@ fn bindless_dispatch_indirect_roundtrip() {
         .expect("begin");
     cmd.bind_compute_pipeline(&pipeline);
     cmd.set_bindless_root(input.gpu(), output.gpu());
-    cmd.dispatch_indirect(&args);
+    cmd.dispatch_indirect(args.gpu());
     cmd.end().expect("end");
 
     let commands = [cmd.raw()];

@@ -36,6 +36,10 @@ const REQUIRED_DEVICE_EXTENSIONS: &[&CStr] = &[
     ash::ext::mutable_descriptor_type::NAME,
     ash::ext::vertex_input_dynamic_state::NAME,
     ash::ext::device_generated_commands::NAME,
+    // Address-based commands: indirect draws/dispatches, memory copies, and
+    // query-pool resolves consume buffer device addresses (`GpuPtr`)
+    // directly instead of buffer handles.
+    ash::khr::device_address_commands::NAME,
 ];
 
 // Optional extensions are performance enhancements or whole feature stacks,
@@ -164,6 +168,9 @@ pub struct Device {
     /// fails where the driver does not implement it, like any missing
     /// required extension.
     descriptor_heap_properties: DescriptorHeapProperties,
+    /// Nanoseconds per timestamp tick (`limits.timestampPeriod`), cached at
+    /// creation for `TimestampQueryPool`.
+    timestamp_period_ns: f32,
     /// Aggregated device-extension loaders (blend dynamic state etc.), built
     /// once at device creation and shared with command buffers by `Arc` — no
     /// per-command-buffer copies of the function-pointer tables.
@@ -294,6 +301,9 @@ impl Device {
         // so it must be rebound, not discarded.
         let mut props2 = props2.push(&mut heap_props);
         instance.physical_device_properties2(physical_device, &mut props2);
+        // Nanoseconds per timestamp tick, for converting `TimestampQueryPool`
+        // results to durations.
+        let timestamp_period_ns = props2.properties.limits.timestamp_period;
         let descriptor_heap_properties =
             if heap_props.max_resource_heap_size > 0 && heap_props.image_descriptor_size > 0 {
                 DescriptorHeapProperties {
@@ -424,6 +434,12 @@ impl Device {
         let mut device_generate_commands_features =
             vk::PhysicalDeviceDeviceGeneratedCommandsFeaturesEXT::default()
                 .device_generated_commands(true);
+        // Address-based commands (VK_KHR_device_address_commands): the whole
+        // feature is one bit — address forms of indirect draw/dispatch,
+        // memory copies, and query resolves.
+        let mut device_address_commands_features =
+            vk::PhysicalDeviceDeviceAddressCommandsFeaturesKHR::default()
+                .device_address_commands(true);
 
         // Float32 atomic adds into storage buffers. Only the buffer add bit
         // is requested — the RHI uses no other operation from the extension.
@@ -477,7 +493,8 @@ impl Device {
             .push(&mut mesh_shader_features)
             .push(&mut mutable_descriptor_type_features)
             .push(&mut vertex_input_dynamic_state_features)
-            .push(&mut device_generate_commands_features);
+            .push(&mut device_generate_commands_features)
+            .push(&mut device_address_commands_features);
 
         // `push` requires a chainless `next`, but `features2` heads the whole
         // feature chain built above — merge that chain with `extend` instead.
@@ -506,6 +523,10 @@ impl Device {
                 &device,
             ),
             descriptor_heap: ash::ext::descriptor_heap::Device::load(instance.raw(), &device),
+            device_address_commands: ash::khr::device_address_commands::Device::load(
+                instance.raw(),
+                &device,
+            ),
         });
 
         let allocator = Allocator::new(&AllocatorCreateDesc {
@@ -535,6 +556,7 @@ impl Device {
             present_queue,
             queue_family_indices,
             descriptor_heap_properties,
+            timestamp_period_ns,
             extension_fns,
             optional_extensions: optional_enabled,
             uploader: OnceLock::new(),
@@ -692,6 +714,12 @@ impl Device {
     /// `DescriptorHeap` sizes its heaps and computes slot strides from these.
     pub fn descriptor_heap_properties(&self) -> DescriptorHeapProperties {
         self.descriptor_heap_properties
+    }
+
+    /// Nanoseconds per timestamp tick (`limits.timestampPeriod`), the
+    /// conversion factor for `TimestampQueryPool` results.
+    pub(crate) fn timestamp_period_ns(&self) -> f32 {
+        self.timestamp_period_ns
     }
 
     /// The shared frame-scoped uploader, built on first use. GPU-only
