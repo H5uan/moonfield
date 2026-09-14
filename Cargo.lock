@@ -1145,6 +1145,7 @@ dependencies = [
  "foldhash",
  "moonfield-math",
  "thiserror 2.0.20",
+ "tracing",
 ]
 
 [[package]]

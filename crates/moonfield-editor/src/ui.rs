@@ -62,7 +62,7 @@ pub struct LoadAssetState {
     /// The asset path to load (`.gltf`/`.glb`; splat or mesh by content).
     pub path: String,
     /// Status of the last load attempt.
-    pub message: Option<String>,
+    pub status: Option<theme::Status>,
 }
 
 /// Content panel state for scene save/load: a `.gltf` path field and the
@@ -76,7 +76,7 @@ pub struct SceneIoState {
     /// The scene path to save to / load from.
     pub path: String,
     /// Status of the last save/load attempt.
-    pub message: Option<String>,
+    pub status: Option<theme::Status>,
 }
 
 /// Build the initial dock layout, UE5-style: the viewport dominates the
@@ -246,17 +246,17 @@ fn content_panel(
         );
         if ui.button("Load").clicked() && !load_state.path.trim().is_empty() {
             let path = std::path::PathBuf::from(load_state.path.trim());
-            load_state.message = Some(match crate::scene_io::load_asset(world, &path) {
+            load_state.status = Some(match crate::scene_io::load_asset(world, &path) {
                 Ok(entity) => {
                     *selection = Some(entity);
-                    format!("Loaded {}", path.display())
+                    theme::Status::Success(format!("Loaded {}", path.display()))
                 }
-                Err(e) => format!("Load failed: {e}"),
+                Err(e) => theme::Status::Failure(format!("Load failed: {e}")),
             });
         }
     });
-    if let Some(message) = &load_state.message {
-        ui.colored_label(theme::status_color(message), message);
+    if let Some(status) = &load_state.status {
+        ui.colored_label(status.color(), status.to_string());
     }
 
     // Scene save/load: the world's registered entities ⇄ a .gltf document
@@ -271,14 +271,16 @@ fn content_panel(
         let path_is_empty = scene_state.path.trim().is_empty();
         if ui.button("Save").clicked() && !path_is_empty {
             let path = std::path::PathBuf::from(scene_state.path.trim());
-            scene_state.message = Some(match world.get_resource::<SceneRegistry>() {
+            scene_state.status = Some(match world.get_resource::<SceneRegistry>() {
                 Some(registry) => {
                     match moonfield_scene::save_scene_to_file(world, &registry, &path) {
-                        Ok(()) => format!("Saved {}", path.display()),
-                        Err(e) => format!("Save failed: {e}"),
+                        Ok(()) => theme::Status::Success(format!("Saved {}", path.display())),
+                        Err(e) => theme::Status::Failure(format!("Save failed: {e}")),
                     }
                 }
-                None => "Save failed: SceneRegistry resource missing".to_string(),
+                None => theme::Status::Failure(
+                    "Save failed: SceneRegistry resource missing".to_string(),
+                ),
             });
         }
         if ui.button("Load").clicked() && !path_is_empty {
@@ -286,22 +288,28 @@ fn content_panel(
             // `load_scene_from_file` needs `&mut World` while the registry
             // lives inside the world's resource storage; the scope holds the
             // registry out for the call's duration.
-            scene_state.message = Some(
+            scene_state.status = Some(
                 match world.try_resource_scope(|world, registry: &mut SceneRegistry| {
                     moonfield_scene::load_scene_from_file(world, registry, &path)
                 }) {
                     Some(Ok(roots)) => {
                         *selection = roots.first().copied();
-                        format!("Loaded {} ({} roots)", path.display(), roots.len())
+                        theme::Status::Success(format!(
+                            "Loaded {} ({} roots)",
+                            path.display(),
+                            roots.len()
+                        ))
                     }
-                    Some(Err(e)) => format!("Load failed: {e}"),
-                    None => "Load failed: SceneRegistry resource missing".to_string(),
+                    Some(Err(e)) => theme::Status::Failure(format!("Load failed: {e}")),
+                    None => theme::Status::Failure(
+                        "Load failed: SceneRegistry resource missing".to_string(),
+                    ),
                 },
             );
         }
     });
-    if let Some(message) = &scene_state.message {
-        ui.colored_label(theme::status_color(message), message);
+    if let Some(status) = &scene_state.status {
+        ui.colored_label(status.color(), status.to_string());
     }
 }
 

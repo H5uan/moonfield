@@ -242,11 +242,24 @@ pub fn extract_mesh_assets(
         return;
     };
 
+    let mut dangling = 0usize;
     let referenced: HashSet<Handle<Mesh>> = renderers
         .iter()
         .map(|(_, renderer)| renderer.mesh.0)
-        .filter(|handle| assets.contains(handle))
+        .filter(|handle| {
+            if assets.contains(handle) {
+                true
+            } else {
+                dangling += 1;
+                false
+            }
+        })
         .collect();
+    if dangling > 0 {
+        moonfield_log::warn_once!(
+            "{dangling} mesh renderers reference missing mesh assets; they are not rendered"
+        );
+    }
     let referenced_ids: HashSet<AssetId> = referenced.iter().map(|handle| handle.id()).collect();
     // The updates are precomputed against the current revisions; the render
     // world is only touched once, after this system, through the commands.

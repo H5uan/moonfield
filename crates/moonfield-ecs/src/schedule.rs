@@ -238,8 +238,8 @@ impl_configs_tuples! {
 /// Execution order is registration order, adjusted by `before`/`after`
 /// constraints (resolved with a stable topological sort when the schedule
 /// changes). Constraints referencing labels with no registered system are
-/// ignored — they may point at systems living in other schedules. Cycles
-/// panic.
+/// ignored with a warning — a typo or a renamed system otherwise silently
+/// falls back to registration order. Cycles panic.
 #[derive(Default)]
 pub struct Schedule {
     systems: Vec<SystemConfig>,
@@ -353,17 +353,28 @@ impl Schedule {
 
         // successor edges + in-degree, deduplicated via a set of pairs.
         let mut edges: Vec<(usize, usize)> = Vec::new();
+        let mut unresolved: Vec<&str> = Vec::new();
         for (i, slot) in self.systems.iter().enumerate() {
             for target in &slot.after {
-                for &j in by_label.get(target.as_str()).into_iter().flatten() {
-                    edges.push((j, i));
+                match by_label.get(target.as_str()) {
+                    Some(js) => edges.extend(js.iter().map(|&j| (j, i))),
+                    None => unresolved.push(target.as_str()),
                 }
             }
             for target in &slot.before {
-                for &j in by_label.get(target.as_str()).into_iter().flatten() {
-                    edges.push((i, j));
+                match by_label.get(target.as_str()) {
+                    Some(js) => edges.extend(js.iter().map(|&j| (i, j))),
+                    None => unresolved.push(target.as_str()),
                 }
             }
+        }
+        if !unresolved.is_empty() {
+            unresolved.sort_unstable();
+            unresolved.dedup();
+            tracing::warn!(
+                "ignored ordering constraints on labels with no system in this schedule: {}",
+                unresolved.join(", ")
+            );
         }
         edges.sort_unstable();
         edges.dedup();

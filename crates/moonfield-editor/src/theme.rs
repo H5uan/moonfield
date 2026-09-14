@@ -30,13 +30,30 @@ pub const TEXT_WARNING: Color32 = Color32::from_rgb(0xEB, 0xBF, 0x47);
 /// Error message color (`TEXT_ERROR`).
 pub const TEXT_ERROR: Color32 = Color32::from_rgb(0xE6, 0x52, 0x52);
 
-/// The status color for a Load/Save result message: success green unless the
-/// message names a failure (`TEXT_SUCCESS` / `TEXT_ERROR`).
-pub fn status_color(message: &str) -> Color32 {
-    if message.contains("failed") {
-        TEXT_ERROR
-    } else {
-        TEXT_SUCCESS
+/// The outcome of a Load/Save operation: the message plus its verdict, so
+/// the UI colors by outcome instead of sniffing the text.
+pub enum Status {
+    /// The operation succeeded; rendered with [`TEXT_SUCCESS`].
+    Success(String),
+    /// The operation failed; rendered with [`TEXT_ERROR`].
+    Failure(String),
+}
+
+impl std::fmt::Display for Status {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(match self {
+            Self::Success(text) | Self::Failure(text) => text,
+        })
+    }
+}
+
+impl Status {
+    /// The status color: success green or failure red.
+    pub fn color(&self) -> Color32 {
+        match self {
+            Self::Success(_) => TEXT_SUCCESS,
+            Self::Failure(_) => TEXT_ERROR,
+        }
     }
 }
 

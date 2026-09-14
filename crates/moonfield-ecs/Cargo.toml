@@ -7,3 +7,4 @@ edition.workspace = true
 moonfield-math = { workspace = true }
 thiserror.workspace = true
 foldhash = "=0.2.0"
+tracing = { version = "0.1", default-features = false, features = ["std"] }

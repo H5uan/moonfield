@@ -81,8 +81,12 @@ pub(crate) fn relationship_on_insert<R: Relationship>(world: &mut World, entity:
         );
     }
     if !world.contains(target) {
-        // The target does not exist: discard the invalid relationship (Bevy
-        // warns and removes; we have no warning channel here).
+        // The target does not exist: discard the invalid relationship (the
+        // reference implementation warns and removes).
+        tracing::warn!(
+            "relationship `{}` on {entity:?} pointed at dead entity {target:?}; discarded",
+            type_name::<R>()
+        );
         world.remove_component::<R>(entity);
         return;
     }

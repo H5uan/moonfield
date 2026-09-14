@@ -187,8 +187,16 @@ fn splat_cloud_load(value: &serde_json::Value) -> Result<Box<dyn SceneTemplate>,
 fn mesh_renderer_save(world: &World, entity: Entity) -> Option<serde_json::Value> {
     let renderer = world.get_component::<MeshRenderer>(entity)?;
     let assets = world.get_resource::<Assets<Mesh>>()?;
-    let source = assets.get(&renderer.mesh.0)?.source()?;
-    Some(serde_json::Value::String(source.to_string()))
+    let source = assets.get(&renderer.mesh.0).and_then(|mesh| mesh.source());
+    if source.is_none() {
+        // The component is present but its mesh has no source path (a
+        // procedural mesh or a dangling handle): the entity cannot be
+        // serialized and is skipped by the save.
+        moonfield_log::warn_once!(
+            "MeshRenderer on {entity:?} has no mesh source path; the entity is not saved"
+        );
+    }
+    source.map(|source| serde_json::Value::String(source.to_string()))
 }
 
 /// Builds a [`MeshRenderer`] from a scene file's path string, resolving the
