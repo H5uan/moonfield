@@ -14,7 +14,10 @@ use std::{
 };
 
 use crate::{
-    Component, borrow::AtomicBorrow, change_detection::ComponentTicks, component_ref::ComponentRef,
+    Component,
+    borrow::AtomicBorrow,
+    change_detection::{ComponentTicks, Tick},
+    component_ref::ComponentRef,
 };
 
 /// A [`Hasher`] that forwards the `TypeId` value directly.
@@ -363,6 +366,25 @@ impl Archetype {
     /// borrow state.
     pub(crate) unsafe fn ticks_base(&self, column: usize) -> NonNull<ComponentTicks> {
         unsafe { self.data.get_unchecked(column).ticks }
+    }
+
+    /// Clamp every row's added/changed tick that is older than
+    /// [`Tick::MAX`](crate::Tick::MAX) relative to `present`, so relative
+    /// ages stay comparable once the `u32` clock wraps. Called by the
+    /// world's periodic tick check.
+    pub(crate) fn check_ticks(&mut self, present: Tick) {
+        for column in 0..self.data.len() {
+            // SAFETY: `ticks_base` addresses the column's parallel tick
+            // array; rows `0..self.len` are live.
+            unsafe {
+                let base = self.ticks_base(column);
+                for row in 0..self.len as usize {
+                    let ticks = base.add(row).as_mut();
+                    ticks.added.check_tick(present);
+                    ticks.changed.check_tick(present);
+                }
+            }
+        }
     }
 
     /// Get the address of the first `T` component, given a state index from

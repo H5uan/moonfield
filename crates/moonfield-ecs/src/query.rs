@@ -77,124 +77,83 @@ pub trait WorldQuery {
     where
         Self: 'w;
 
-    /// The item produced by per-entity access ([`Query::get`](crate::Query::get)):
-    /// a guard that dereferences to the component and releases its column
-    /// borrow flag on drop.
-    type EntityFetch<'w>: 'w
-    where
-        Self: 'w;
-
-    /// Fetch the item for a single entity, if it matches the query.
-    ///
-    /// Implemented for the single-component shapes (`&T`, `&mut T`); tuple
-    /// and `Option` shapes panic — port them when a caller needs them.
+    /// Fetch the item for a single entity, if the entity's archetype
+    /// matches: one entity's pass through the iteration protocol, with the
+    /// borrow flags held by the returned [`QueryGetGuard`] until it drops.
     #[doc(hidden)]
-    fn get_entity<'w>(world: &'w World, entity: Entity) -> Option<Self::EntityFetch<'w>>
+    fn get_entity<'w>(
+        world: &'w World,
+        entity: Entity,
+        last_run: Tick,
+        this_run: Tick,
+    ) -> Option<QueryGetGuard<'w, Self>>
     where
-        Self: 'w;
-}
-
-// ---------------------------------------------------------------------
-// Per-entity access guards (Query::get)
-// ---------------------------------------------------------------------
-
-/// Guard produced by per-entity shared access (`Query<&T>::get`).
-///
-/// Dereferences to `&T`; the column's shared borrow flag is released on drop.
-pub struct EntityRef<'w, T: Component> {
-    value: &'w T,
-    archetype: &'w Archetype,
-    column: usize,
-}
-
-impl<T: Component> std::ops::Deref for EntityRef<'_, T> {
-    type Target = T;
-
-    fn deref(&self) -> &Self::Target {
-        self.value
+        Self: Sized + 'w,
+    {
+        let (arch_i, row) = world.locate_entity(entity)?;
+        let archetype = &world.raw_archetypes()[arch_i];
+        if !Self::matches(archetype) {
+            return None;
+        }
+        let fetch = Self::borrow_fetch(archetype, last_run, this_run);
+        // SAFETY: `row` is the entity's live row within the archetype, and
+        // the fetch's column borrows are held by the returned guard until
+        // it drops.
+        let item = unsafe { Self::fetch(&fetch, archetype, row) };
+        Some(QueryGetGuard {
+            item,
+            fetch,
+            archetype,
+        })
     }
 }
 
-impl<T: Component> Drop for EntityRef<'_, T> {
+// ---------------------------------------------------------------------
+// Per-entity access guard (Query::get)
+// ---------------------------------------------------------------------
+
+/// Per-entity query item with its column borrows — the value
+/// [`Query::get`](crate::Query::get) returns for any query shape, built by
+/// running one entity through the iteration protocol.
+///
+/// The guard holds the fetch's borrow flags until it drops, so the item
+/// (references into the entity's columns) stays sound while the guard
+/// lives. Dereference to use the item; mutable elements go through
+/// `DerefMut`, marking change ticks like iteration does.
+pub struct QueryGetGuard<'w, Q: WorldQuery + 'w> {
+    item: Q::Item<'w>,
+    fetch: Q::Fetch<'w>,
+    archetype: &'w Archetype,
+}
+
+impl<Q: WorldQuery> Drop for QueryGetGuard<'_, Q> {
     fn drop(&mut self) {
-        self.archetype.release::<T>(self.column);
+        Q::release(&self.fetch, self.archetype);
     }
 }
 
-/// Guard produced by per-entity mutable access (`Query<&mut T>::get`).
-///
-/// Dereferences to `Mut<T>` (and thus `T`); the column's unique borrow flag is
-/// released on drop.
-pub struct EntityMut<'w, T: Component> {
-    inner: Mut<'w, T>,
-    archetype: &'w Archetype,
-    column: usize,
-}
-
-impl<T: Component> std::ops::Deref for EntityMut<'_, T> {
-    type Target = T;
+impl<'w, Q: WorldQuery + 'w> std::ops::Deref for QueryGetGuard<'w, Q> {
+    type Target = Q::Item<'w>;
 
     fn deref(&self) -> &Self::Target {
-        &self.inner
+        &self.item
     }
 }
 
-impl<T: Component> std::ops::DerefMut for EntityMut<'_, T> {
+impl<'w, Q: WorldQuery + 'w> std::ops::DerefMut for QueryGetGuard<'w, Q> {
     fn deref_mut(&mut self) -> &mut Self::Target {
-        &mut self.inner
+        &mut self.item
     }
 }
 
-impl<T: Component> Drop for EntityMut<'_, T> {
-    fn drop(&mut self) {
-        self.archetype.release_mut::<T>(self.column);
-    }
-}
+/// Per-entity shared access guard (`Query<&T>::get`) — the single-component
+/// shape of [`QueryGetGuard`].
+pub type EntityRef<'w, T> = QueryGetGuard<'w, &'w T>;
 
-/// Shared per-entity fetch for single-component queries.
-fn get_entity_ref<'w, T: Component>(world: &'w World, entity: Entity) -> Option<EntityRef<'w, T>> {
-    let (arch_i, row) = world.locate_entity(entity)?;
-    let archetype = &world.raw_archetypes()[arch_i];
-    let column = archetype.get_state::<T>()?;
-    archetype.borrow::<T>(column);
-    // SAFETY: the column is shared-borrowed above and the row is live.
-    let value = unsafe { &*archetype.get_base::<T>(column).as_ptr().add(row as usize) };
-    Some(EntityRef {
-        value,
-        archetype,
-        column,
-    })
-}
-
-/// Mutable per-entity fetch for single-component queries.
-fn get_entity_mut<'w, T: Component>(world: &'w World, entity: Entity) -> Option<EntityMut<'w, T>> {
-    let (arch_i, row) = world.locate_entity(entity)?;
-    let archetype = &world.raw_archetypes()[arch_i];
-    let column = archetype.get_state::<T>()?;
-    archetype.borrow_mut::<T>(column);
-    let base = unsafe { archetype.get_base::<T>(column) };
-    let ticks = unsafe { archetype.ticks_base(column) };
-    // SAFETY: the column is uniquely borrowed above and the row is live; both
-    // the component row and its tick row are exclusively ours until the guard
-    // drops.
-    let inner = unsafe {
-        Mut::new(
-            base.as_ptr().add(row as usize),
-            ticks.as_ptr().add(row as usize),
-            world.last_change_tick(),
-            world.change_tick(),
-        )
-    };
-    Some(EntityMut {
-        inner,
-        archetype,
-        column,
-    })
-}
-
-fn get_entity_unsupported<Q>() -> Option<Q> {
-    panic!("per-entity `Query::get` is only implemented for `&T` and `&mut T` queries")
-}
+/// Per-entity mutable access guard (`Query<&mut T>::get`) — the
+/// single-component shape of [`QueryGetGuard`]; `is_added`/`is_changed`
+/// arrive through the [`Mut`](crate::Mut) item.
+pub type EntityMut<'w, T> = QueryGetGuard<'w, &'w mut T>;
 
 // ---------------------------------------------------------------------
 // Elements: `&T`, `&mut T`, `Option<Q>`, tuples
@@ -244,18 +203,6 @@ impl<T: Component> WorldQuery for &T {
         // SAFETY: the column is shared-borrowed for 'w and the row is within
         // the archetype's length.
         unsafe { &*a.get_base::<T>(fetch.column).as_ptr().add(row as usize) }
-    }
-
-    type EntityFetch<'w>
-        = EntityRef<'w, T>
-    where
-        Self: 'w;
-
-    fn get_entity<'w>(world: &'w World, entity: Entity) -> Option<EntityRef<'w, T>>
-    where
-        Self: 'w,
-    {
-        get_entity_ref::<T>(world, entity)
     }
 }
 
@@ -319,18 +266,6 @@ impl<T: Component> WorldQuery for &mut T {
             )
         }
     }
-
-    type EntityFetch<'w>
-        = EntityMut<'w, T>
-    where
-        Self: 'w;
-
-    fn get_entity<'w>(world: &'w World, entity: Entity) -> Option<EntityMut<'w, T>>
-    where
-        Self: 'w,
-    {
-        get_entity_mut::<T>(world, entity)
-    }
 }
 
 /// `Option<Q>`: matches every archetype; rows where `Q`'s column is absent
@@ -386,19 +321,6 @@ impl<Q: WorldQuery> WorldQuery for Option<Q> {
             None => None,
         }
     }
-
-    type EntityFetch<'w>
-        = ()
-    where
-        Self: 'w;
-
-    fn get_entity<'w>(world: &'w World, entity: Entity) -> Option<()>
-    where
-        Self: 'w,
-    {
-        let _ = (world, entity);
-        get_entity_unsupported()
-    }
 }
 
 macro_rules! impl_world_query_tuple {
@@ -452,16 +374,6 @@ macro_rules! impl_world_query_tuple {
                 // holds every element's column borrows for 'w.
                 unsafe { ($($q::fetch($q, a, row),)*) }
             }
-
-            type EntityFetch<'w> = () where Self: 'w;
-
-            fn get_entity<'w>(world: &'w World, entity: Entity) -> Option<()>
-            where
-                Self: 'w,
-            {
-                let _ = (world, entity);
-                get_entity_unsupported()
-            }
         }
     };
 }
@@ -488,14 +400,23 @@ impl<'w, Q: WorldQuery + 'w> QueryIter<'w, Q> {
     /// Build a read-only iterator, rejecting queries that contain mutable
     /// access — those need the exclusive entries (`World::query_mut`,
     /// `Query::iter_mut`).
-    pub(crate) fn new_shared(world: &'w World, filter: ArchetypeFilter<'_>) -> Self {
+    pub(crate) fn new_shared(
+        world: &'w World,
+        filter: ArchetypeFilter<'_>,
+        last_run: Tick,
+        this_run: Tick,
+    ) -> Self {
         assert_shared::<Q>();
         // SAFETY: `Q` is read-only, so the fetches take only shared flags.
-        unsafe { Self::new(world, filter) }
+        unsafe { Self::new(world, filter, last_run, this_run) }
     }
 
     /// Build an iterator that may take unique column flags from a *shared*
     /// world reference.
+    ///
+    /// The `last_run`/`this_run` window is the caller's: a system's own
+    /// window for the [`Query`](crate::Query) param, the world's default
+    /// window for `World::query`.
     ///
     /// # Safety
     ///
@@ -504,9 +425,12 @@ impl<'w, Q: WorldQuery + 'w> QueryIter<'w, Q> {
     /// still alive — in practice, that an exclusive borrow gates every other
     /// access to the same columns (as `&mut World` and `Query::iter_mut`'s
     /// `&mut self` do).
-    pub(crate) unsafe fn new(world: &'w World, filter: ArchetypeFilter<'_>) -> Self {
-        let last_run = world.last_change_tick();
-        let this_run = world.change_tick();
+    pub(crate) unsafe fn new(
+        world: &'w World,
+        filter: ArchetypeFilter<'_>,
+        last_run: Tick,
+        this_run: Tick,
+    ) -> Self {
         let archetypes = world.raw_archetypes();
         let meta = world.raw_entity_meta();
         let mut hits = Vec::new();
@@ -645,5 +569,43 @@ mod tests {
         let mut world = World::new();
         world.spawn((A(1),));
         let _ = world.query::<(&mut A, Option<&B>)>();
+    }
+
+    #[test]
+    fn tuple_and_option_get_per_entity() {
+        use crate::{Query, SystemState};
+
+        let mut world = World::new();
+        let both = world.spawn((A(1), B(2)));
+        let only_a = world.spawn((A(3),));
+        let bare = world.spawn((B(9),));
+
+        let mut state = SystemState::<Query<(&mut A, Option<&B>)>>::new();
+        let query = state.get(&world);
+
+        {
+            let mut guard = query.get(both).expect("both components present");
+            let (a, b) = &mut *guard;
+            assert_eq!(a.0, 1);
+            assert_eq!(b.unwrap().0, 2);
+            a.0 += 10;
+        }
+        // The guard dropped and released every column borrow: a second get
+        // on the same entity works and observes the write.
+        {
+            let guard = query.get(both).expect("both components present");
+            let (a, b) = &*guard;
+            assert_eq!(a.0, 11);
+            assert_eq!(b.unwrap().0, 2);
+        }
+
+        // Option yields None for the missing column, matching iteration.
+        let guard = query.get(only_a).expect("A present");
+        let (a, b) = &*guard;
+        assert_eq!(a.0, 3);
+        assert!(b.is_none());
+
+        // An entity whose archetype does not match the query shape: None.
+        assert!(query.get(bare).is_none());
     }
 }

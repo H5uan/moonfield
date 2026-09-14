@@ -70,7 +70,7 @@ pub use message::{
     message_update_system,
 };
 pub use name::Name;
-pub use query::{EntityMut, EntityRef, QueryIter, WorldQuery};
+pub use query::{EntityMut, EntityRef, QueryGetGuard, QueryIter, WorldQuery};
 pub use relationship::{Relationship, RelationshipTarget};
 pub use resource::Resource;
 pub use schedule::{
@@ -217,7 +217,7 @@ mod tests {
 
     #[test]
     fn world_change_tick_advances() {
-        let mut world = World::new();
+        let world = World::new();
         assert_eq!(world.change_tick().get(), 1);
         assert_eq!(world.last_change_tick().get(), 0);
 
@@ -420,5 +420,54 @@ mod tests {
         let mut iter = world.query::<(&Position, &Velocity)>();
         assert!(iter.next().is_some());
         assert!(iter.next().is_none());
+    }
+
+    #[test]
+    fn resource_scope_lends_resource_and_world() {
+        // The scoped resource is out of the world's storage, so the closure
+        // holds `&mut Server` while mutably using `Store` through the world.
+        #[derive(Default)]
+        struct Server(u32);
+        #[derive(Default)]
+        struct Store(u32);
+
+        let mut world = World::new();
+        world.insert_resource(Server(0));
+        world.insert_resource(Store(0));
+
+        world.resource_scope(|world, server: &mut Server| {
+            server.0 = 1;
+            world.get_resource_mut::<Store>().unwrap().0 = 2;
+        });
+        assert_eq!(world.get_resource::<Server>().unwrap().0, 1);
+        assert_eq!(world.get_resource::<Store>().unwrap().0, 2);
+    }
+
+    #[test]
+    fn resource_scope_reinserts_on_every_path() {
+        #[derive(Default)]
+        struct Flag(bool);
+
+        let mut world = World::new();
+        world.insert_resource(Flag(false));
+
+        // An early return inside the scope still reinserts the resource.
+        world.resource_scope(|_world, flag: &mut Flag| {
+            if !flag.0 {
+                flag.0 = true;
+                return;
+            }
+            unreachable!("the flag starts false");
+        });
+        assert!(world.get_resource::<Flag>().unwrap().0);
+
+        // `try_resource_scope` yields None when the resource is absent.
+        world.remove_resource::<Flag>();
+        assert!(
+            world
+                .try_resource_scope(|_, _: &mut Flag| unreachable!())
+                .is_none()
+        );
+        assert!(!world.contains_resource::<Flag>());
     }
 }

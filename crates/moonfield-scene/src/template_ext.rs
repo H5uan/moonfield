@@ -48,22 +48,26 @@ impl<T: Send + Sync + 'static> Template for HandleTemplate<T> {
             Self::Handle(handle) => Ok(*handle),
             Self::Path(path) => {
                 // `AssetServer::load` needs `&mut AssetServer` and
-                // `&mut Assets<T>` at once, but the world's resource storage
-                // hands out one borrow per resource; take the server out,
-                // use it, and put it back (also on the error path).
-                let mut server = ctx.world.remove_resource::<AssetServer>().ok_or(
-                    TemplateError::MissingResource(std::any::type_name::<AssetServer>()),
-                )?;
-                let result = match ctx.world.get_resource_mut::<Assets<T>>() {
-                    Some(mut assets) => server
-                        .load(&mut assets, path)
-                        .map_err(|err| TemplateError::Build(format!("{err}"))),
-                    None => Err(TemplateError::MissingResource(std::any::type_name::<
-                        Assets<T>,
-                    >())),
-                };
-                ctx.world.insert_resource(server);
-                result
+                // `&mut Assets<T>` at once; the scope holds the server out
+                // of the world's storage while the store is borrowed from
+                // the world.
+                ctx.world
+                    .try_resource_scope(|world, server: &mut AssetServer| {
+                        match world.get_resource_mut::<Assets<T>>() {
+                            Some(mut assets) => server
+                                .load(&mut assets, path)
+                                .map_err(|err| TemplateError::Build(format!("{err}"))),
+                            None => Err(TemplateError::MissingResource(std::any::type_name::<
+                                Assets<T>,
+                            >(
+                            ))),
+                        }
+                    })
+                    .unwrap_or_else(|| {
+                        Err(TemplateError::MissingResource(std::any::type_name::<
+                            AssetServer,
+                        >()))
+                    })
             }
         }
     }

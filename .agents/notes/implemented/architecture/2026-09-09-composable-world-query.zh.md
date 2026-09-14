@@ -13,7 +13,7 @@ query 引擎为每种形状手写一个迭代器——`&T`、`&mut T`、三种�
 - `WorldQuery` 是 Bevy 式的组合契约：每个元素决定 archetype 归属（`matches`）、为迭代器的生命周期借住自己的列（`borrow_fetch` / `release`，即 archetype 借用标志）、逐行产出 item（`fetch`）。`READ_ONLY` 常量说明查询是否含 `&mut T`。
 - 一个通用 `QueryIter` 取代全部逐形状迭代器。`World::query` / `query_mut` / `query_filtered(_mut)` 与 `Query` 系统参数是它上面的薄入口；共享入口拒绝可变查询（独占入口是 `query_mut` 和 `iter_mut`），与原先的 panic 行为一致。
 - 元组按合取组合三步协议（宏展开，元数 0–8，与系统参数元组对齐）；`Option<Q>` 匹配所有 archetype，在 `Q` 的列缺失处产出 `None` 行。
-- 逐实体 `Query::get` 仍只支持单组件。
+- 逐实体访问让单个实体走同一套协议：`WorldQuery::get_entity` 解析实体的行、`borrow_fetch` 借列、`fetch` 产出条目；返回的 `QueryGetGuard` 持有借用直到 drop。元组与 `Option` 无需逐形状代码即可组合；`EntityRef`/`EntityMut` 是守卫的 `&T`/`&mut T` 别名，`Query::get` 直接返回守卫（`EntityFetch` 关联类型不复存在）。
 
 ## Alternatives considered
 
@@ -25,4 +25,5 @@ query 引擎为每种形状手写一个迭代器——`&T`、`&mut T`、三种�
 
 - 查询调用点不变（`world.query::<Q>()` 写法照旧）；公开表面上的 `Q::Iter` 消失——`QueryIter<'w, Q>` 是唯一迭代器。
 - 全部既有查询测试在新引擎上原样通过；五个新测试钉死元组合取、共享/可变元组中的 `Option`、单独 `Option` 的等价性、共享入口对可变访问的拒绝。
+- `propagate_transforms` 从四个并列 query 参数（单组件限制的变通）收敛为一个组合 query，在 `Local` 工作列表上排空；一个测试钉死逐实体的元组 + `Option` get，包括两次 get 之间的借用释放。
 - [extract schedule](2026-09-09-extract-schedule.zh.md) 是新形状的第一个消费者。

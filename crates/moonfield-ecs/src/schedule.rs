@@ -12,15 +12,17 @@
 //!
 //! Command semantics: [`World::apply_commands`] runs after **every** system,
 //! so a system's [`Commands`](crate::Commands) are visible to every system
-//! that runs after it in the same schedule run. At the end of a run the
-//! world's change tick advances once, giving change detection its per-run
-//! window.
+//! that runs after it in the same schedule run. Every system run advances
+//! the world's change tick once (see [`System::run`](crate::System)), so
+//! each system's queries see exactly the writes made since that system last
+//! ran; the run opens with the world's periodic tick check
+//! ([`World::check_change_ticks`](crate::World::check_change_ticks)).
 
 use std::any::{TypeId, type_name};
 use std::collections::HashMap;
 use std::marker::PhantomData;
 
-use crate::{IntoSystem, System, World};
+use crate::{IntoSystem, System, World, change_detection::Tick};
 
 /// Marker for schedule labels: unit structs identifying a schedule.
 ///
@@ -136,6 +138,8 @@ impl System for NopSystem {
         "set anchor"
     }
 
+    // An anchor neither observes nor writes, so its run does not advance
+    // the change tick.
     fn run(&mut self, _world: &mut World) {}
 }
 
@@ -314,8 +318,10 @@ impl Schedule {
     }
 
     /// Run every system once, in resolved order, applying deferred commands
-    /// after each system and advancing the world's change tick at the end.
+    /// after each system. Each system's run advances the world's change
+    /// tick itself; the run opens with the world's periodic tick check.
     pub fn run(&mut self, world: &mut World) {
+        world.check_change_ticks();
         if self.dirty {
             self.rebuild_order();
         }
@@ -325,7 +331,15 @@ impl Schedule {
             world.apply_commands();
         }
         self.order = order;
-        world.increment_change_tick();
+    }
+
+    /// Clamp every system's window tick that has aged past
+    /// [`Tick::MAX`](crate::Tick::MAX) relative to `present`; part of the
+    /// world's periodic tick check.
+    pub(crate) fn check_change_ticks(&mut self, present: Tick) {
+        for config in &mut self.systems {
+            config.system.check_change_ticks(present);
+        }
     }
 
     /// Resolve `before`/`after` constraints into an execution order: a stable
@@ -422,6 +436,15 @@ impl Schedules {
     /// Put `schedule` back under `label`.
     pub(crate) fn insert(&mut self, label: TypeId, schedule: Schedule) {
         self.0.insert(label, schedule);
+    }
+
+    /// Clamp every stored schedule's system window ticks (see
+    /// [`Schedule::check_change_ticks`]); part of the world's periodic tick
+    /// check.
+    pub(crate) fn check_change_ticks(&mut self, present: Tick) {
+        for schedule in self.0.values_mut() {
+            schedule.check_change_ticks(present);
+        }
     }
 }
 
@@ -570,12 +593,18 @@ mod tests {
     }
 
     #[test]
-    fn test_change_tick_advances_per_run() {
+    fn test_change_tick_advances_per_system_run() {
+        fn noop() {}
+
         let mut world = World::new();
         let mut schedule = Schedule::new();
         let before = world.change_tick();
+        // An empty schedule runs no systems and advances nothing.
         schedule.run(&mut world);
-        assert_eq!(world.change_tick().get(), before.get() + 1);
+        assert_eq!(world.change_tick().get(), before.get());
+        schedule.add_systems((noop, noop, noop));
+        schedule.run(&mut world);
+        assert_eq!(world.change_tick().get(), before.get() + 3);
     }
 
     struct A;

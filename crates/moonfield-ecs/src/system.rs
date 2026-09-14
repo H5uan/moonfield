@@ -16,6 +16,15 @@
 //!
 //! Exclusive systems — `FnMut(&mut World)` — remain supported for code that
 //! needs unrestricted world access, mirroring Bevy's exclusive systems.
+//!
+//! Every system run advances the world's change tick once
+//! ([`World::increment_change_tick`]): the run's tick is the returned one and
+//! the world counter moves on to the next run's, so writes made after a run —
+//! by later systems in the same schedule, applied commands, or world
+//! accessors — record a strictly newer tick than everything the run observed.
+//! A system's queries therefore compare against its own `(last_run,
+//! this_run)` window. Schedule set anchors observe nothing and do not
+//! advance the tick.
 
 use std::any::type_name;
 use std::cell::{Ref, RefMut};
@@ -24,8 +33,9 @@ use std::ops::{Deref, DerefMut};
 
 use crate::{
     Entity, Resource, World,
+    change_detection::Tick,
     filter::QueryFilter,
-    query::{QueryIter, WorldQuery},
+    query::{QueryGetGuard, QueryIter, WorldQuery},
 };
 
 /// A unit of work that operates on a [`World`].
@@ -39,6 +49,11 @@ pub trait System: Send + Sync + 'static {
 
     /// Run the system once against `world`.
     fn run(&mut self, world: &mut World);
+
+    /// Clamp this system's change-detection window when it has aged past
+    /// [`Tick::MAX`] relative to `present`. Called by the world's periodic
+    /// tick check; systems without a window keep the no-op default.
+    fn check_change_ticks(&mut self, _present: Tick) {}
 }
 
 impl System for Box<dyn System> {
@@ -48,6 +63,10 @@ impl System for Box<dyn System> {
 
     fn run(&mut self, world: &mut World) {
         (**self).run(world);
+    }
+
+    fn check_change_ticks(&mut self, present: Tick) {
+        (**self).check_change_ticks(present);
     }
 }
 
@@ -86,6 +105,11 @@ pub trait SystemParam: Sized {
     type Item<'w, 's>;
     /// Create the initial state.
     fn init_state() -> Self::State;
+    /// Refresh the change-detection window this param's state carries for
+    /// the run about to fetch: `last_run` is the owning system's previous
+    /// run tick, `this_run` the tick of the run being fetched. Params whose
+    /// state carries no window keep the no-op default.
+    fn refresh_window(_state: &mut Self::State, _last_run: Tick, _this_run: Tick) {}
     /// Fetch the parameter for one run from `world` and `state`.
     fn fetch<'w, 's>(world: &'w World, state: &'s mut Self::State) -> Self::Item<'w, 's>;
 }
@@ -100,6 +124,8 @@ pub type SystemParamItem<'w, 's, P> = <P as SystemParam>::Item<'w, 's>;
 /// to hold param state across calls the way a function system does internally.
 pub struct SystemState<P: SystemParam> {
     state: P::State,
+    /// The tick of the latest `get` call — the start of the next window.
+    last_run: Tick,
 }
 
 impl<P: SystemParam> SystemState<P> {
@@ -107,11 +133,19 @@ impl<P: SystemParam> SystemState<P> {
     pub fn new() -> Self {
         Self {
             state: P::init_state(),
+            last_run: Tick::new(0),
         }
     }
 
     /// Fetch the param value for one run against `world`.
+    ///
+    /// Each call follows the function-system contract: it advances the
+    /// world's change tick once and opens a fresh change-detection window,
+    /// so tick-aware params report the changes made since the previous call.
     pub fn get<'w, 's>(&'s mut self, world: &'w World) -> SystemParamItem<'w, 's, P> {
+        let this_run = world.increment_change_tick();
+        P::refresh_window(&mut self.state, self.last_run, this_run);
+        self.last_run = this_run;
         P::fetch(world, &mut self.state)
     }
 }
@@ -132,6 +166,12 @@ macro_rules! impl_system_param_tuple {
 
             fn init_state() -> Self::State {
                 ($($param::init_state(),)*)
+            }
+
+            #[allow(unused_variables)]
+            fn refresh_window(state: &mut Self::State, last_run: Tick, this_run: Tick) {
+                let ($($param,)*) = state;
+                $($param::refresh_window($param, last_run, this_run);)*
             }
 
             #[allow(unused_variables)]
@@ -298,13 +338,30 @@ impl<T: Default + Send + Sync + 'static> SystemParam for Local<'_, T> {
 /// [`World::query_mut`].
 pub struct Query<'w, Q: WorldQuery, F: QueryFilter = ()> {
     world: &'w World,
+    window: QueryWindow,
     _marker: PhantomData<fn() -> (Q, F)>,
+}
+
+/// The change-detection window a [`Query`] param's state carries between
+/// runs: the owning system's `last_run` and the tick of the run being
+/// fetched. The system runner refreshes it before every fetch.
+#[derive(Copy, Clone, Debug)]
+pub struct QueryWindow {
+    /// The tick of the system's previous completed run.
+    pub(crate) last_run: Tick,
+    /// The tick of the run being fetched.
+    pub(crate) this_run: Tick,
 }
 
 impl<'w, Q: WorldQuery, F: QueryFilter> Query<'w, Q, F> {
     /// Iterate all matching entities with shared access.
     pub fn iter(&self) -> QueryIter<'_, Q> {
-        QueryIter::new_shared(self.world, &archetype_matches::<F>)
+        QueryIter::new_shared(
+            self.world,
+            &archetype_matches::<F>,
+            self.window.last_run,
+            self.window.this_run,
+        )
     }
 
     /// Iterate all matching entities with mutable access.
@@ -314,22 +371,34 @@ impl<'w, Q: WorldQuery, F: QueryFilter> Query<'w, Q, F> {
         // it while they are alive; the running system holds the world's only
         // access. Conflicting columns across *different* params are still
         // caught by the archetype borrow flags.
-        unsafe { QueryIter::new(self.world, &archetype_matches::<F>) }
+        unsafe {
+            QueryIter::new(
+                self.world,
+                &archetype_matches::<F>,
+                self.window.last_run,
+                self.window.this_run,
+            )
+        }
     }
 
     /// Fetch the item for a single entity, if it matches the query *and* the
     /// filter.
     ///
-    /// Returns a guard that releases the column's borrow flag on drop
-    /// ([`EntityRef`](crate::EntityRef) for `&T` queries,
-    /// [`EntityMut`](crate::EntityMut) for `&mut T` queries). Only the
-    /// single-component query shapes support per-entity access for now.
-    pub fn get(&self, entity: Entity) -> Option<Q::EntityFetch<'_>> {
+    /// Returns a [`QueryGetGuard`](crate::QueryGetGuard) holding the item
+    /// and its column borrows for any query shape — tuples and `Option`
+    /// compose exactly as in iteration. Mutable elements go through
+    /// `DerefMut` and mark change ticks like iteration does.
+    pub fn get(&self, entity: Entity) -> Option<QueryGetGuard<'_, Q>> {
         let (arch_i, _) = self.world.locate_entity(entity)?;
         if !archetype_matches::<F>(&self.world.raw_archetypes()[arch_i]) {
             return None;
         }
-        Q::get_entity(self.world, entity)
+        Q::get_entity(
+            self.world,
+            entity,
+            self.window.last_run,
+            self.window.this_run,
+        )
     }
 }
 
@@ -340,14 +409,25 @@ pub(crate) fn archetype_matches<F: QueryFilter>(archetype: &crate::archetype::Ar
 }
 
 impl<Q: WorldQuery, F: QueryFilter> SystemParam for Query<'_, Q, F> {
-    type State = ();
+    type State = QueryWindow;
     type Item<'w, 's> = Query<'w, Q, F>;
 
-    fn init_state() -> Self::State {}
+    fn init_state() -> Self::State {
+        // last_run 0: a system's first run observes every component as new.
+        QueryWindow {
+            last_run: Tick::new(0),
+            this_run: Tick::new(0),
+        }
+    }
 
-    fn fetch<'w, 's>(world: &'w World, _state: &'s mut Self::State) -> Self::Item<'w, 's> {
+    fn refresh_window(state: &mut Self::State, last_run: Tick, this_run: Tick) {
+        *state = QueryWindow { last_run, this_run };
+    }
+
+    fn fetch<'w, 's>(world: &'w World, state: &'s mut Self::State) -> Self::Item<'w, 's> {
         Query {
             world,
+            window: *state,
             _marker: PhantomData,
         }
     }
@@ -425,6 +505,7 @@ where
     fn into_system(self) -> Box<dyn System> {
         Box::new(FunctionSystem::<F, F::Param, M> {
             state: <F::Param as SystemParam>::init_state(),
+            last_run: Tick::new(0),
             f: self,
             name: type_name::<F>(),
             _marker: PhantomData,
@@ -435,6 +516,9 @@ where
 struct FunctionSystem<F, P: SystemParam, M> {
     f: F,
     state: P::State,
+    /// The tick of this system's latest completed run — the start of its
+    /// change-detection window.
+    last_run: Tick,
     name: &'static str,
     _marker: PhantomData<fn() -> M>,
 }
@@ -450,8 +534,19 @@ where
     }
 
     fn run(&mut self, world: &mut World) {
+        // One system run = one tick: the returned tick is this run's, and
+        // the world counter moves on to the next run's, so every write made
+        // after this run — by later systems, applied commands, or world
+        // accessors — records a strictly newer tick.
+        let this_run = world.increment_change_tick();
+        P::refresh_window(&mut self.state, self.last_run, this_run);
         let params = P::fetch(world, &mut self.state);
         SystemParamFunction::run(&mut self.f, params);
+        self.last_run = this_run;
+    }
+
+    fn check_change_ticks(&mut self, present: Tick) {
+        self.last_run.check_tick(present);
     }
 }
 
@@ -481,6 +576,10 @@ where
     }
 
     fn run(&mut self, world: &mut World) {
+        // One system run = one tick, like a function system: an exclusive
+        // system can write through world accessors, and those writes must
+        // rank strictly newer than the previous run's observations.
+        world.increment_change_tick();
         (self.f)(world);
     }
 }
@@ -488,7 +587,7 @@ where
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::Commands;
+    use crate::{Commands, Schedule};
 
     #[derive(Debug, Clone, PartialEq)]
     struct Position {
@@ -606,5 +705,92 @@ mod tests {
             assert_eq!(n.to_string(), expected);
         }
         assert_eq!(world.get_resource::<Log>().unwrap().0, ["1", "2"]);
+    }
+
+    #[test]
+    fn test_idle_system_sees_changes_made_while_idle() {
+        // The fixed-update shape: `observer` runs every third frame while
+        // `writer` runs every frame; writes made while `observer` was idle
+        // must still be reported.
+        fn writer(mut query: Query<&mut Position>) {
+            for (_, mut pos) in query.iter_mut() {
+                pos.x += 1.0;
+            }
+        }
+        fn observer(mut query: Query<&mut Position>, mut log: ResMut<Log>) {
+            let changed = query.iter_mut().any(|(_, pos)| pos.is_changed());
+            log.0
+                .push(if changed { "changed" } else { "unchanged" }.to_string());
+        }
+
+        let mut world = World::new();
+        world.insert_resource(Log::default());
+        world.spawn((Position { x: 0.0 },));
+        let mut update = Schedule::new();
+        update.add_systems(writer);
+        let mut observer = IntoSystem::into_system(observer);
+
+        for frame in 0..3 {
+            update.run(&mut world);
+            if frame == 2 {
+                observer.run(&mut world);
+            }
+        }
+        assert_eq!(world.get_resource::<Log>().unwrap().0, ["changed"]);
+    }
+
+    #[test]
+    fn test_reader_sees_later_writer_on_its_next_run() {
+        // `reader` runs before `writer` in the same schedule, so the write
+        // lands after `reader` fetched; `reader`'s next run must see it.
+        fn reader(mut query: Query<&mut Position>, mut log: ResMut<Log>) {
+            let changed = query.iter_mut().any(|(_, pos)| pos.is_changed());
+            log.0
+                .push(if changed { "changed" } else { "unchanged" }.to_string());
+        }
+        fn writer(mut step: Local<u32>, mut query: Query<&mut Position>) {
+            if *step == 0 {
+                for (_, mut pos) in query.iter_mut() {
+                    pos.x += 1.0;
+                }
+            }
+            *step += 1;
+        }
+
+        let mut world = World::new();
+        world.insert_resource(Log::default());
+        world.spawn((Position { x: 0.0 },));
+        let mut schedule = Schedule::new();
+        schedule.add_systems((reader, writer));
+        schedule.run(&mut world);
+        schedule.run(&mut world);
+        schedule.run(&mut world);
+        // Run 1: the spawn is new to `reader`. Run 2: `writer`'s run-1
+        // write. Run 3: nothing new.
+        assert_eq!(
+            world.get_resource::<Log>().unwrap().0,
+            ["changed", "changed", "unchanged"]
+        );
+    }
+
+    #[test]
+    fn test_system_state_windows_advance_per_get() {
+        // `SystemState::get` follows the same one-run-one-tick contract as
+        // a function system: each fetch opens a fresh window.
+        let mut world = World::new();
+        let entity = world.spawn((Position { x: 0.0 },));
+        let mut state = SystemState::<Query<&mut Position>>::new();
+
+        {
+            let query = state.get(&world);
+            let mut pos = query.get(entity).expect("the entity was just spawned");
+            assert!(pos.is_changed()); // first window: everything is new
+            pos.x += 1.0; // stamps the window's this_run
+        }
+        {
+            let query = state.get(&world);
+            let pos = query.get(entity).expect("the entity was just spawned");
+            assert!(!pos.is_changed()); // own write is not re-reported
+        }
     }
 }

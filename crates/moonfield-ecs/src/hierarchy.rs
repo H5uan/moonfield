@@ -18,7 +18,7 @@
 use moonfield_math::{Affine3A, GlobalTransform, Transform};
 
 use crate::relationship::relationship_on_insert;
-use crate::{Commands, Entity, Query, Relationship, RelationshipTarget, World};
+use crate::{Commands, Entity, Local, Query, Relationship, RelationshipTarget, World};
 
 /// The child → parent relationship: `ChildOf(parent)` is stored on the child.
 ///
@@ -142,51 +142,47 @@ pub fn ensure_global_transforms(
 
 /// Propagates [`Transform`]s down the hierarchy into [`GlobalTransform`]s:
 /// roots (entities with a [`Transform`] and no [`ChildOf`]) take their local
-/// affine as global; every child composes `parent_global * local`,
-/// recursively.
+/// affine as global; every descendant composes `parent_global * local`.
 ///
 /// Entities with a [`ChildOf`] link whose ancestor chain has no [`Transform`]
 /// root are not reached (their global stays stale) — same coverage as Bevy's
 /// propagation query. Children without their own [`Transform`] are skipped.
 pub fn propagate_transforms(
-    transforms: Query<&Transform>,
-    childofs: Query<&ChildOf>,
-    children: Query<&Children>,
-    mut globals: Query<&mut GlobalTransform>,
+    mut nodes: Query<(
+        &Transform,
+        Option<&ChildOf>,
+        Option<&mut GlobalTransform>,
+        Option<&Children>,
+    )>,
+    mut pending: Local<Vec<(Entity, Affine3A)>>,
 ) {
-    for (entity, local) in transforms.iter() {
-        if childofs.get(entity).is_some() {
-            // Not a root: reached through its ancestor's recursion.
+    // Roots first, collecting their children; then drain the worklist —
+    // each entry's parent affine is final when it is pushed.
+    pending.clear();
+    for (_entity, (local, childof, global, kids)) in nodes.iter_mut() {
+        if childof.is_some() {
+            // Not a root: reached through its ancestor's propagation.
             continue;
         }
         let affine = local.compute_affine();
-        if let Some(mut global) = globals.get(entity) {
+        if let Some(mut global) = global {
             global.set_affine(affine);
         }
-        if let Some(kids) = children.get(entity) {
-            propagate_children(&kids, affine, &transforms, &children, &mut globals);
+        if let Some(kids) = kids {
+            pending.extend(kids.entities().iter().map(|&kid| (kid, affine)));
         }
     }
-}
-
-fn propagate_children(
-    kids: &Children,
-    parent: Affine3A,
-    transforms: &Query<&Transform>,
-    children: &Query<&Children>,
-    globals: &mut Query<&mut GlobalTransform>,
-) {
-    for &child in kids.entities() {
-        let Some(local) = transforms.get(child) else {
+    while let Some((entity, parent_affine)) = pending.pop() {
+        let Some(mut node) = nodes.get(entity) else {
             continue;
         };
-        let affine = parent * local.compute_affine();
-        drop(local);
-        if let Some(mut global) = globals.get(child) {
+        let (local, _childof, global, kids) = &mut *node;
+        let affine = parent_affine * local.compute_affine();
+        if let Some(global) = global {
             global.set_affine(affine);
         }
-        if let Some(grandkids) = children.get(child) {
-            propagate_children(&grandkids, affine, transforms, children, globals);
+        if let Some(kids) = kids {
+            pending.extend(kids.entities().iter().map(|&kid| (kid, affine)));
         }
     }
 }
@@ -448,20 +444,22 @@ mod tests {
 
     #[test]
     fn test_query_get_guards_release_borrows() {
-        use crate::SystemParam;
+        use crate::SystemState;
 
         let mut world = World::new();
         let e = world.spawn((Transform::from_xyz(1.0, 2.0, 3.0),));
 
         // Two sequential gets on the same column must not conflict.
         {
-            let transforms = <Query<&Transform> as SystemParam>::fetch(&world, &mut ());
+            let mut state = SystemState::<Query<&Transform>>::new();
+            let transforms = state.get(&world);
             let t = transforms.get(e).unwrap();
             approx(t.translation, Vec3::new(1.0, 2.0, 3.0));
         }
         // A mutable get after the shared guard dropped.
         {
-            let transforms = <Query<&mut Transform> as SystemParam>::fetch(&world, &mut ());
+            let mut state = SystemState::<Query<&mut Transform>>::new();
+            let transforms = state.get(&world);
             let mut t = transforms.get(e).unwrap();
             t.translation.x = 9.0;
         }

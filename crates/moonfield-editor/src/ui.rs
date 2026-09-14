@@ -284,22 +284,20 @@ fn content_panel(
         if ui.button("Load").clicked() && !path_is_empty {
             let path = std::path::PathBuf::from(scene_state.path.trim());
             // `load_scene_from_file` needs `&mut World` while the registry
-            // lives inside the world's resource storage: take the registry
-            // out, use it, and put it back (also on the error path).
-            scene_state.message = Some(match world.remove_resource::<SceneRegistry>() {
-                Some(registry) => {
-                    let result = moonfield_scene::load_scene_from_file(world, &registry, &path);
-                    world.insert_resource(registry);
-                    match result {
-                        Ok(roots) => {
-                            *selection = roots.first().copied();
-                            format!("Loaded {} ({} roots)", path.display(), roots.len())
-                        }
-                        Err(e) => format!("Load failed: {e}"),
+            // lives inside the world's resource storage; the scope holds the
+            // registry out for the call's duration.
+            scene_state.message = Some(
+                match world.try_resource_scope(|world, registry: &mut SceneRegistry| {
+                    moonfield_scene::load_scene_from_file(world, registry, &path)
+                }) {
+                    Some(Ok(roots)) => {
+                        *selection = roots.first().copied();
+                        format!("Loaded {} ({} roots)", path.display(), roots.len())
                     }
-                }
-                None => "Load failed: SceneRegistry resource missing".to_string(),
-            });
+                    Some(Err(e)) => format!("Load failed: {e}"),
+                    None => "Load failed: SceneRegistry resource missing".to_string(),
+                },
+            );
         }
     });
     if let Some(message) = &scene_state.message {

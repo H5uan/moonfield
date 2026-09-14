@@ -235,34 +235,29 @@ pub fn editor_scene_registry() -> SceneRegistry {
 }
 
 /// Run `AssetServer::load` against the world's resources. `load` needs
-/// `&mut AssetServer` and `&mut Assets<T>` at once, but the world's resource
-/// storage hands out one borrow per resource; take the server out, use it,
-/// and put it back (also on the error path) — the same pattern
-/// `HandleTemplate::build` uses.
+/// `&mut AssetServer` and `&mut Assets<T>` at once; the scope holds the
+/// server out of the world's storage while the store is borrowed from the
+/// world.
 fn load_with_server<T: Send + Sync + 'static>(
     world: &mut World,
     path: &Path,
 ) -> Result<Handle<T>, String> {
-    let mut server = world
-        .remove_resource::<AssetServer>()
-        .expect("AssetServer was just ensured");
-    let result = if world.contains_resource::<Assets<T>>() {
-        let mut assets = world
-            .get_resource_mut::<Assets<T>>()
-            .expect("Assets<T> was just checked");
-        server.load(&mut assets, path)
-    } else {
-        // Keep failures side-effect free: the store only appears once an
-        // asset actually loads.
-        let mut assets = Assets::<T>::default();
-        let result = server.load(&mut assets, path);
-        if result.is_ok() {
-            world.insert_resource(assets);
-        }
-        result
-    };
-    world.insert_resource(server);
-    result.map_err(|e| e.to_string())
+    world
+        .resource_scope(|world, server: &mut AssetServer| {
+            if let Some(mut assets) = world.get_resource_mut::<Assets<T>>() {
+                server.load(&mut assets, path)
+            } else {
+                // Keep failures side-effect free: the store only appears once
+                // an asset actually loads.
+                let mut assets = Assets::<T>::default();
+                let result = server.load(&mut assets, path);
+                if result.is_ok() {
+                    world.insert_resource(assets);
+                }
+                result
+            }
+        })
+        .map_err(|e| e.to_string())
 }
 
 /// Load a glTF asset into the world synchronously through the `AssetServer`

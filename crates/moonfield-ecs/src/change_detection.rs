@@ -1,10 +1,13 @@
 //! Change detection: wrapping change ticks and tick-aware reference wrappers.
 //!
 //! Every component records the tick at which it was added and the tick at
-//! which it was last mutably dereferenced. The world advances a global change
-//! tick once per schedule run, and each system remembers the window
-//! `(last_run, this_run)` it last executed in, so filters can answer "was this
-//! component added/changed since I last ran?" without per-entity bookkeeping.
+//! which it was last mutably dereferenced. Each system run advances the
+//! world's change tick once and remembers the tick it ran at, so the
+//! system's queries compare against its own `(last_run, this_run)` window —
+//! "was this component added/changed since I last ran?" — without
+//! per-entity bookkeeping. Ticks older than [`Tick::MAX`] are clamped
+//! periodically (see [`CHECK_TICK_THRESHOLD`]) so relative ages never
+//! overflow.
 
 /// The world tick is clamped and rescanned every `CHECK_TICK_THRESHOLD`
 /// increments, so relative ages never overflow.

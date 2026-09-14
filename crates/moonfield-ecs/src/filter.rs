@@ -74,7 +74,7 @@ smaller_tuples_too!(impl_query_filter_tuple, F0, F1, F2, F3, F4, F5, F6, F7);
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::{Entity, Query, Schedule, SystemParam, World};
+    use crate::{Entity, Query, Schedule, SystemState, World};
 
     #[derive(Debug, PartialEq)]
     struct Pos(f32);
@@ -181,7 +181,8 @@ mod tests {
         let (mut world, k) = filter_world();
         let _ = &mut world;
         // Filtered out by With<Vel>: pos_only has no Vel.
-        let query = <Query<&Pos, With<Vel>> as SystemParam>::fetch(&world, &mut ());
+        let mut state = SystemState::<Query<&Pos, With<Vel>>>::new();
+        let query = state.get(&world);
         assert!(query.get(k.pos_only).is_none());
         assert!(query.get(k.pos_vel).is_some());
         // A bare entity (no Pos at all) is rejected by the query item itself.

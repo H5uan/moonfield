@@ -1,4 +1,4 @@
-use std::any::TypeId;
+use std::any::{TypeId, type_name};
 use std::borrow::Borrow;
 use std::collections::{HashMap, hash_map::Entry};
 use std::hash::{BuildHasherDefault, Hasher};
@@ -6,14 +6,14 @@ use std::sync::atomic::AtomicU64;
 
 use crate::archetype::{Archetype, ComponentMeta, TypeIdMap};
 use crate::bundle::{Bundle, DynamicBundle};
-use crate::change_detection::{Mut, Ref, Tick};
+use crate::change_detection::{CHECK_TICK_THRESHOLD, Mut, Ref, Tick};
 use crate::commands::Command;
 use crate::entities::{AllocManyState, Entities, Location, NoSuchEntity, ReserveEntitiesIterator};
 use crate::hooks::{ComponentHooks, HookKind};
 use crate::query::QueryIter;
 use crate::schedule::{IntoSystemConfigs, ScheduleLabel, Schedules};
 use crate::{Component, Entity, Resources, WorldQuery};
-use std::cell::RefCell;
+use std::cell::{Cell, RefCell};
 use std::mem;
 
 struct ArchetypeSet {
@@ -210,13 +210,19 @@ pub struct World {
     /// Lifecycle hooks registered per component type, keyed by [`TypeId`].
     pub(crate) component_hooks: HashMap<TypeId, ComponentHooks>,
 
-    /// The world's current change-detection tick. Component writes record this
-    /// value; it advances once per schedule run via [`Self::increment_change_tick`].
-    change_tick: Tick,
+    /// The world's current change-detection tick. Component writes record
+    /// this value; each system run advances it once via
+    /// [`Self::increment_change_tick`]. Interior-mutable so `SystemState`
+    /// can advance it through a shared world borrow.
+    change_tick: Cell<Tick>,
     /// The tick at which trackers were last advanced. Together with
     /// `change_tick` it forms the default `(last, current)` window used by
     /// tick-aware accessors.
-    last_change_tick: Tick,
+    last_change_tick: Cell<Tick>,
+    /// The tick at the previous periodic tick check; `check_change_ticks`
+    /// is a no-op until the clock has advanced `CHECK_TICK_THRESHOLD` times
+    /// past it.
+    last_check_tick: Tick,
 
     id: AtomicU64,
 }
@@ -240,8 +246,9 @@ impl World {
             component_hooks: HashMap::new(),
             // The change clock starts at 1 so that a system's initial
             // `last_run` of 0 observes every component as new.
-            change_tick: Tick::new(1),
-            last_change_tick: Tick::new(0),
+            change_tick: Cell::new(Tick::new(1)),
+            last_change_tick: Cell::new(Tick::new(0)),
+            last_check_tick: Tick::new(0),
             id: AtomicU64::new(0),
         }
     }
@@ -260,26 +267,51 @@ impl World {
     /// Reads the world's current change tick.
     #[inline]
     pub fn change_tick(&self) -> Tick {
-        self.change_tick
+        self.change_tick.get()
     }
 
     /// The tick at which change trackers were last advanced.
     #[inline]
     pub fn last_change_tick(&self) -> Tick {
-        self.last_change_tick
+        self.last_change_tick.get()
     }
 
-    /// Advances the change clock, returning the previous tick.
+    /// Advances the change clock, returning the tick of the run about to
+    /// fetch.
     ///
-    /// The previous tick becomes [`Self::last_change_tick`], so the window
-    /// `(last_change_tick, change_tick)` always spans exactly the writes made
-    /// since the previous call.
+    /// The returned tick is the calling system's run tick; the world counter
+    /// moves to the next run's, so writes made after this call — by later
+    /// systems, applied commands, or world accessors — record a strictly
+    /// newer tick. The previous tick becomes [`Self::last_change_tick`], so
+    /// the window `(last_change_tick, change_tick)` spans exactly the writes
+    /// made since the previous call.
     #[inline]
-    pub fn increment_change_tick(&mut self) -> Tick {
-        let prev = self.change_tick;
-        self.last_change_tick = prev;
-        self.change_tick = Tick::new(prev.get().wrapping_add(1));
+    pub fn increment_change_tick(&self) -> Tick {
+        let prev = self.change_tick.get();
+        self.last_change_tick.set(prev);
+        self.change_tick.set(Tick::new(prev.get().wrapping_add(1)));
         prev
+    }
+
+    /// Clamp change ticks that have aged past [`Tick::MAX`](crate::Tick::MAX)
+    /// relative to the current tick, so relative ages never overflow once
+    /// the `u32` clock wraps.
+    ///
+    /// A no-op unless the clock has advanced at least
+    /// [`CHECK_TICK_THRESHOLD`](crate::CHECK_TICK_THRESHOLD) times since the
+    /// previous pass; schedules call this at the start of every run.
+    pub fn check_change_ticks(&mut self) {
+        let present = self.change_tick.get();
+        if present.relative_to(self.last_check_tick).get() < CHECK_TICK_THRESHOLD {
+            return;
+        }
+        self.last_check_tick = present;
+        for archetype in &mut self.archetypes.archetypes {
+            archetype.check_ticks(present);
+        }
+        if let Some(mut schedules) = self.get_resource_mut::<Schedules>() {
+            schedules.check_change_ticks(present);
+        }
     }
 
     /// Create an entity with certain components
@@ -356,7 +388,7 @@ impl World {
             None => self.archetypes.get_for(&components),
         };
 
-        let tick = self.change_tick;
+        let tick = self.change_tick.get();
         let index = unsafe {
             let archetype = self.archetypes.get_mut(archetype_id);
             let row = archetype.allocate(entity.id());
@@ -398,7 +430,7 @@ impl World {
             entities: &mut self.entities,
             archetype_id,
             archetype: &mut self.archetypes.archetypes[archetype_id as usize],
-            tick: self.change_tick,
+            tick: self.change_tick.get(),
         }
     }
 
@@ -522,6 +554,37 @@ impl World {
         self.resources.remove::<R>()
     }
 
+    /// Temporarily remove `R` from the world, run `f` with the world and
+    /// the resource, then reinsert the resource.
+    ///
+    /// The resource is out of the world's storage for the duration of `f`,
+    /// so `f` can hold `&mut R` while using the world — including mutable
+    /// access to other resources. The reinsert runs after `f` returns on
+    /// every path, so an early `return` inside `f` cannot leave the
+    /// resource out of the world; an `R` inserted inside `f` is replaced.
+    ///
+    /// Panics when the resource does not exist; see
+    /// [`Self::try_resource_scope`] for the `Option` form.
+    pub fn resource_scope<R: crate::Resource, U>(
+        &mut self,
+        f: impl FnOnce(&mut World, &mut R) -> U,
+    ) -> U {
+        self.try_resource_scope(f)
+            .unwrap_or_else(|| panic!("resource `{}` does not exist", type_name::<R>()))
+    }
+
+    /// The `Option` form of [`Self::resource_scope`]: `None` when the
+    /// resource does not exist in this world.
+    pub fn try_resource_scope<R: crate::Resource, U>(
+        &mut self,
+        f: impl FnOnce(&mut World, &mut R) -> U,
+    ) -> Option<U> {
+        let mut resource = self.remove_resource::<R>()?;
+        let result = f(self, &mut resource);
+        self.insert_resource(resource);
+        Some(result)
+    }
+
     // ------------------------------------------------------------------
     // Main-world parking (extract schedules)
     // ------------------------------------------------------------------
@@ -602,20 +665,37 @@ impl World {
     /// Panics when the query contains mutable access; use [`Self::query_mut`]
     /// for those.
     pub fn query<'a, Q: WorldQuery>(&'a self) -> QueryIter<'a, Q> {
-        QueryIter::new_shared(self, &|_| true)
+        QueryIter::new_shared(
+            self,
+            &|_| true,
+            self.last_change_tick.get(),
+            self.change_tick.get(),
+        )
     }
 
     /// Query the world for a mutable combination of components.
     pub fn query_mut<'a, Q: WorldQuery>(&'a mut self) -> QueryIter<'a, Q> {
         // SAFETY: `&mut self` excludes every other access to the fetched
         // columns for the iterator's (and its items') lifetime.
-        unsafe { QueryIter::new(self, &|_| true) }
+        unsafe {
+            QueryIter::new(
+                self,
+                &|_| true,
+                self.last_change_tick.get(),
+                self.change_tick.get(),
+            )
+        }
     }
 
     /// Query with an archetype filter
     /// ([`With`](crate::With)/[`Without`](crate::Without)/[`Or`](crate::Or)).
     pub fn query_filtered<'a, Q: WorldQuery, F: crate::QueryFilter>(&'a self) -> QueryIter<'a, Q> {
-        QueryIter::new_shared(self, &crate::system::archetype_matches::<F>)
+        QueryIter::new_shared(
+            self,
+            &crate::system::archetype_matches::<F>,
+            self.last_change_tick.get(),
+            self.change_tick.get(),
+        )
     }
 
     /// Mutable query with an archetype filter.
@@ -624,7 +704,14 @@ impl World {
     ) -> QueryIter<'a, Q> {
         // SAFETY: `&mut self` excludes every other access to the fetched
         // columns for the iterator's (and its items') lifetime.
-        unsafe { QueryIter::new(self, &crate::system::archetype_matches::<F>) }
+        unsafe {
+            QueryIter::new(
+                self,
+                &crate::system::archetype_matches::<F>,
+                self.last_change_tick.get(),
+                self.change_tick.get(),
+            )
+        }
     }
 
     // ------------------------------------------------------------------
@@ -700,8 +787,8 @@ impl World {
         Some(Ref::new(
             value,
             ticks,
-            self.last_change_tick,
-            self.change_tick,
+            self.last_change_tick.get(),
+            self.change_tick.get(),
         ))
     }
 
@@ -713,8 +800,8 @@ impl World {
         // Resolve the location first so the borrow of `self.entities` is
         // released before we take a mutable borrow of the archetype slice.
         let loc = self.entities.get(entity).ok()?;
-        let last_run = self.last_change_tick;
-        let this_run = self.change_tick;
+        let last_run = self.last_change_tick.get();
+        let this_run = self.change_tick.get();
         let archetypes = &mut self.archetypes.archetypes;
         let arch = &mut archetypes[loc.archetype as usize];
         let col = arch.get_state::<T>()?;
@@ -756,7 +843,7 @@ impl World {
         let loc = self.entities.get(entity).ok()?;
         let old_id = loc.archetype;
         let old_row = loc.index;
-        let tick = self.change_tick;
+        let tick = self.change_tick.get();
 
         // Replace in place when the archetype already holds `T`.
         let old_arch = &self.archetypes.archetypes[old_id as usize];
@@ -873,7 +960,7 @@ impl World {
         let loc = self.entities.get(entity).ok()?;
         let old_id = loc.archetype;
         let old_row = loc.index;
-        let tick = self.change_tick;
+        let tick = self.change_tick.get();
 
         // Target type set = old set ∪ bundle set, in archetype key order.
         let old_arch = &self.archetypes.archetypes[old_id as usize];

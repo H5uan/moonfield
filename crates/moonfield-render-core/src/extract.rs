@@ -12,7 +12,7 @@
 use crate::scene::{ExtractedView, ViewTarget};
 use crate::window::WindowFrameDemand;
 use moonfield_camera::{Camera, CameraTarget, PrimaryCamera, RenderTarget};
-use moonfield_ecs::{Commands, Component, MainWorld, Query, SystemParam, World};
+use moonfield_ecs::{Commands, Component, MainWorld, Query, SystemParam, Tick, World};
 use moonfield_math::GlobalTransform;
 use std::cell::Ref;
 use std::ops::{Deref, DerefMut};
@@ -37,13 +37,31 @@ pub struct Extract<'w, 's, T: SystemParam> {
     param: T::Item<'w, 's>,
 }
 
+/// The inner param's persistent state plus the main-world tick of the
+/// latest fetch — the start of the next change-detection window.
+///
+/// This is the [`SystemParam`] state type of [`Extract`]; it is never
+/// constructed outside the trait implementation.
+pub struct ExtractState<S> {
+    inner: S,
+    last_run: Tick,
+}
+
 impl<'w, 's, T: SystemParam> SystemParam for Extract<'w, 's, T> {
-    type State = T::State;
+    type State = ExtractState<T::State>;
     type Item<'wi, 'si> = Extract<'wi, 'si, T>;
 
     fn init_state() -> Self::State {
-        T::init_state()
+        ExtractState {
+            inner: T::init_state(),
+            last_run: Tick::new(0),
+        }
     }
+
+    // The render schedule's window does not apply: the inner param fetches
+    // against the main world, whose change clock is independent. `fetch`
+    // derives the window from the main world instead.
+    fn refresh_window(_state: &mut Self::State, _last_run: Tick, _this_run: Tick) {}
 
     fn fetch<'wi, 'si>(world: &'wi World, state: &'si mut Self::State) -> Self::Item<'wi, 'si> {
         let main = world.get_resource::<MainWorld>().unwrap_or_else(|| {
@@ -57,7 +75,13 @@ impl<'w, 's, T: SystemParam> SystemParam for Extract<'w, 's, T> {
         // cannot be replaced while `param` borrows into it; the pointer is
         // valid for the schedule's duration by `MainWorld`'s contract.
         let main_world: &'wi World = unsafe { main.world() };
-        let param = T::fetch(main_world, state);
+        // The inner param's change window is measured on the main world's
+        // clock: changes made there since this param last fetched — the
+        // window an extractor means by "changed since last frame".
+        let this_run = main_world.change_tick();
+        T::refresh_window(&mut state.inner, state.last_run, this_run);
+        state.last_run = this_run;
+        let param = T::fetch(main_world, &mut state.inner);
         Extract { _main: main, param }
     }
 }
