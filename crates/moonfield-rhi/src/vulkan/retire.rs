@@ -1,12 +1,12 @@
 //! Deferred GPU resource retirement, keyed by frame slot.
 //!
 //! [`RetirementRing`] is the RHI's single lifetime mechanism for resources an
-//! in-flight frame may still reference: textures, buffers, allocations, and
-//! descriptor-heap slots. Dropping such a resource does not destroy it — the
-//! resource's `Drop` pushes teardown steps into the current frame slot's
-//! queue, and the frame loop drains that queue `RETIRE_RING` frames later,
-//! after its in-flight wait has passed. `Device::drop` drains whatever
-//! remains once the device is idle.
+//! in-flight frame may still reference: textures, buffers, allocations,
+//! pipelines, and descriptor-heap slots. Dropping such a resource does not
+//! destroy it — the resource's `Drop` pushes teardown steps into the current
+//! frame slot's queue, and the frame loop drains that queue `RETIRE_RING`
+//! frames later, after its in-flight wait has passed. `Device::drop` drains
+//! whatever remains once the device is idle.
 //!
 
 use crate::vulkan::descriptor_heap::{DescriptorHeap, TextureHandle};
@@ -23,7 +23,7 @@ pub const RETIRE_RING: usize = 2;
 /// composes its teardown out of these; nothing else runs at drain.
 ///
 /// Crate-internal: constructed by the resource `Drop` implementations in
-/// `memory`, `buffer`, `texture`, and `offscreen`.
+/// `memory`, `buffer`, `texture`, `offscreen`, and `pipeline`.
 pub(crate) enum RetireAction {
     /// Return an image slot to the heap's freelist. Carries the view's
     /// create info — the heap encodes it by pointer (see `TextureSlotDesc`),
@@ -51,6 +51,13 @@ pub(crate) enum RetireAction {
         buffer: vk::Buffer,
         allocation: Option<Allocation>,
         allocator: Arc<Mutex<Allocator>>,
+    },
+    /// Destroy a pipeline. Command buffers reference pipelines through
+    /// binds, so a pipeline dropped mid-frame-loop (a shader-revision
+    /// rebuild) must defer destruction past the in-flight frames.
+    Pipeline {
+        device: ash::Device,
+        pipeline: vk::Pipeline,
     },
 }
 
@@ -107,6 +114,13 @@ impl RetireAction {
                         .free(allocation)
                 {
                     tracing::error!("failed to free retired buffer allocation: {e}");
+                }
+            }
+            Self::Pipeline { device, pipeline } => {
+                // SAFETY: as `Image` — no in-flight work references the
+                // pipeline.
+                unsafe {
+                    device.destroy_pipeline(pipeline, None);
                 }
             }
         }

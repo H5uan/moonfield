@@ -21,10 +21,11 @@ in-flight frames could still read.
 ## Decision
 
 - `Device` owns a `RetirementRing`: one teardown queue per frame slot,
-  holding atomic `RetireAction`s (buffer and image destruction, heap-slot
-  return) that resource `Drop`s compose.
+  holding atomic `RetireAction`s (buffer, image, and pipeline destruction,
+  heap-slot return) that resource `Drop`s compose.
 - Covered resources — `Buffer`, `GpuAllocation`, the bump arena's
-  blocks, `Texture`, and `OffscreenTarget` — enqueue their teardown into
+  blocks, `Texture`, `OffscreenTarget`, `DepthBuffer`, and
+  `GraphicsPipeline`/`ComputePipeline` — enqueue their teardown into
   the current frame slot instead of destroying themselves.
   `Device::begin_gpu_frame` drains the slot the frame loop is about to
   record into: the in-flight timeline wait has already guaranteed that
@@ -49,10 +50,15 @@ in-flight frames could still read.
 
 ## Consequences
 
-- `Buffer`, `GpuAllocation`, bump-arena block, `Texture`, and
-  `OffscreenTarget` teardown runs `RETIRE_RING` frames after drop;
-  in-flight frames read intact memory by construction, and the
-  buffer-replacement paths need no caller discipline.
+- `Buffer`, `GpuAllocation`, bump-arena block, `Texture`,
+  `OffscreenTarget`, `DepthBuffer`, and pipeline teardown runs
+  `RETIRE_RING` frames after drop; in-flight frames read intact memory by
+  construction, and the buffer-replacement paths need no caller
+  discipline. Pipelines are bound into command buffers, so a
+  shader-revision rebuild mid-frame-loop retires the replaced pipeline
+  the same way. `ShaderModule` stays immediate: pipelines consume the
+  module at creation (the SPIR-V is baked), and command buffers never
+  reference modules.
 - The bump allocator carries a `RetirementRing` handle alongside its raw
   `ash::Device` (its block constructor is lifetime-free and cannot fetch
   one from `&Device`).

@@ -24,6 +24,7 @@ mod graphics_heap_sampling;
 mod headless_triangle;
 mod indirect_draw;
 mod offscreen_triangle;
+mod pipeline_retire;
 mod storage_image;
 mod texture_bindless;
 mod timestamps;

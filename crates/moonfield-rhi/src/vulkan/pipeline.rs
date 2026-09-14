@@ -3,10 +3,12 @@
 use crate::error::{Error, Result};
 use crate::types::Format;
 use crate::vulkan::device::Device;
+use crate::vulkan::retire::{RetireAction, RetirementRing};
 use crate::vulkan::shader_module::ShaderModule;
 use ash::vk;
 use ash::vk::Handle as _;
 use ash::vk::TaggedStructure as _;
+use std::sync::Arc;
 
 /// How the pipeline's single color attachment blends with existing pixels.
 ///
@@ -38,6 +40,7 @@ pub struct ShaderStageDesc<'a> {
 pub struct GraphicsPipeline {
     pipeline: vk::Pipeline,
     device: ash::Device,
+    ring: Arc<RetirementRing>,
 }
 
 impl GraphicsPipeline {
@@ -269,6 +272,7 @@ impl GraphicsPipeline {
         Ok(Self {
             pipeline: pipelines[0],
             device: device.raw().clone(),
+            ring: device.retirement_ring(),
         })
     }
 
@@ -291,11 +295,12 @@ impl GraphicsPipeline {
 
 impl Drop for GraphicsPipeline {
     fn drop(&mut self) {
-        // SAFETY: the pipeline was created by this device and is destroyed
-        // exactly once, here.
-        unsafe {
-            self.device.destroy_pipeline(self.pipeline, None);
-        }
+        // Pipelines are bound into command buffers; in-flight frames may
+        // still reference this one, so teardown defers through the ring.
+        self.ring.push(RetireAction::Pipeline {
+            device: self.device.clone(),
+            pipeline: self.pipeline,
+        });
     }
 }
 
@@ -310,6 +315,7 @@ impl Drop for GraphicsPipeline {
 pub struct ComputePipeline {
     pipeline: vk::Pipeline,
     device: ash::Device,
+    ring: Arc<RetirementRing>,
 }
 
 impl ComputePipeline {
@@ -361,6 +367,7 @@ impl ComputePipeline {
         Ok(Self {
             pipeline: pipelines[0],
             device: device.raw().clone(),
+            ring: device.retirement_ring(),
         })
     }
 
@@ -374,10 +381,11 @@ impl ComputePipeline {
 
 impl Drop for ComputePipeline {
     fn drop(&mut self) {
-        // SAFETY: the pipeline was created by this device and is destroyed
-        // exactly once, here.
-        unsafe {
-            self.device.destroy_pipeline(self.pipeline, None);
-        }
+        // As `GraphicsPipeline::drop`: command buffers reference pipelines
+        // through binds, so teardown defers through the ring.
+        self.ring.push(RetireAction::Pipeline {
+            device: self.device.clone(),
+            pipeline: self.pipeline,
+        });
     }
 }

@@ -17,9 +17,9 @@ buffer 增长、prepared-mesh 剔除）销毁的 buffer 仍可能被在飞帧读
 ## Decision
 
 - `Device` 持有 `RetirementRing`：每个帧槽一条 teardown 队列，存放原子化的
-  `RetireAction`（销毁 buffer 与 image、归还 heap slot），由各资源的 `Drop` 组合压入。
+  `RetireAction`（销毁 buffer、image 与 pipeline，归还 heap slot），由各资源的 `Drop` 组合压入。
 - 受覆盖的资源——`Buffer`、`GpuAllocation`、bump arena 的块、`Texture`、
-  `OffscreenTarget`——`Drop` 时把 teardown 压入当前帧槽而非就地销毁。`Device::begin_gpu_frame` 排空帧循环
+  `OffscreenTarget`、`DepthBuffer`、`GraphicsPipeline`/`ComputePipeline`——`Drop` 时把 teardown 压入当前帧槽而非就地销毁。`Device::begin_gpu_frame` 排空帧循环
   即将录制的那个槽：in-flight timeline 的 wait 已保证该槽上一次提交完成。
   `Device::flush_retirements` 为测试与析构排空全部槽，仅在 GPU idle 时可调用。
 - `Device::drop` 先让设备 idle，再 drop 懒建的 uploader 与 descriptor heap
@@ -37,9 +37,12 @@ buffer 增长、prepared-mesh 剔除）销毁的 buffer 仍可能被在飞帧读
 
 ## Consequences
 
-- `Buffer`、`GpuAllocation`、bump arena 块、`Texture`、`OffscreenTarget` 的
-  teardown 在 drop 之后 `RETIRE_RING` 帧执行；在飞帧按构造读到完好内存，
-  buffer 替换路径不再依赖调用方自律。
+- `Buffer`、`GpuAllocation`、bump arena 块、`Texture`、`OffscreenTarget`、
+  `DepthBuffer` 与 pipeline 的 teardown 在 drop 之后 `RETIRE_RING` 帧执行；
+  在飞帧按构造读到完好内存，buffer 替换路径不再依赖调用方自律。pipeline 被
+  command buffer 通过 bind 引用，帧循环中因 shader revision 重建的 pipeline
+  同样走 retire。`ShaderModule` 保持立即销毁：pipeline 创建时即消费掉模块
+  （SPIR-V 已烘焙），command buffer 从不引用模块。
 - bump allocator 在裸 `ash::Device` 之外另持一个 `RetirementRing` 句柄（其
   块构造是 lifetime-free 的，拿不到 `&Device`）。
 - 帧循环驱动 ring：`acquire` 排空即将录制的槽（在等待 in-flight timeline
