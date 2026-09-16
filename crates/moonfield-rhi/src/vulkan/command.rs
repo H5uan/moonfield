@@ -431,7 +431,9 @@ impl CommandBuffer {
     /// memory at `args` (a `DispatchIndirectArgs` record).
     ///
     /// Address-based (`vkCmdDispatchIndirect2KHR`): the argument location is
-    /// a device address, so no buffer handle or offset is involved.
+    /// a device address, so no buffer handle or offset is involved. Panics
+    /// if the device lacks `VK_KHR_device_address_commands` (gate on
+    /// [`Device::device_address_commands`](crate::Device::device_address_commands)).
     pub fn dispatch_indirect(&self, args: GpuPtr) {
         let info = vk::DispatchIndirect2InfoKHR::default()
             .address_range(
@@ -443,15 +445,19 @@ impl CommandBuffer {
         // SAFETY: the command buffer is recording with a compute pipeline
         // bound, and `args` addresses a live, fully-bound allocation holding
         // a dispatch record (caller contract).
+        let ext = self.ext.device_address_commands.as_ref().expect(
+            "dispatch_indirect requires VK_KHR_device_address_commands \
+             (query Device::device_address_commands first)",
+        );
         unsafe {
-            self.ext
-                .device_address_commands
-                .cmd_dispatch_indirect2(self.buffer, &info);
+            ext.cmd_dispatch_indirect2(self.buffer, &info);
         }
     }
 
     /// Copy `size` GPU bytes from `src` to `dst` — both device addresses
-    /// (`vkCmdCopyMemoryKHR`), with no buffer handles involved.
+    /// (`vkCmdCopyMemoryKHR`), with no buffer handles involved. Panics if the
+    /// device lacks `VK_KHR_device_address_commands` (gate on
+    /// [`Device::device_address_commands`](crate::Device::device_address_commands)).
     pub fn cmd_memcpy(&self, dst: GpuPtr, src: GpuPtr, size: u64) {
         let region = vk::DeviceMemoryCopyKHR::default()
             .src_range(
@@ -471,10 +477,12 @@ impl CommandBuffer {
         // SAFETY: the command buffer is recording and both address ranges
         // reference live, fully-bound, transfer-capable allocations whose
         // `size` ranges fit (caller contract).
+        let ext = self.ext.device_address_commands.as_ref().expect(
+            "cmd_memcpy requires VK_KHR_device_address_commands \
+             (query Device::device_address_commands first)",
+        );
         unsafe {
-            self.ext
-                .device_address_commands
-                .cmd_copy_memory(self.buffer, &copy_info);
+            ext.cmd_copy_memory(self.buffer, &copy_info);
         }
     }
 
@@ -508,7 +516,9 @@ impl CommandBuffer {
     /// (`vkCmdCopyQueryPoolResultsToMemoryKHR`, 64-bit results with `WAIT`).
     /// The consumer reads them from the allocation's host mapping after the
     /// submission's timeline point; convert with
-    /// [`TimestampQueryPool::timestamp_period_ns`].
+    /// [`TimestampQueryPool::timestamp_period_ns`]. Panics if the device
+    /// lacks `VK_KHR_device_address_commands` (gate on
+    /// [`Device::device_address_commands`](crate::Device::device_address_commands)).
     pub fn resolve_timestamps(
         &self,
         queries: &TimestampQueryPool,
@@ -524,18 +534,20 @@ impl CommandBuffer {
         // query range was written this submission, and `dst` addresses a
         // live, fully-bound allocation with room for `count` u64s (caller
         // contract).
+        let ext = self.ext.device_address_commands.as_ref().expect(
+            "resolve_timestamps requires VK_KHR_device_address_commands \
+             (query Device::device_address_commands first)",
+        );
         unsafe {
-            self.ext
-                .device_address_commands
-                .cmd_copy_query_pool_results_to_memory(
-                    self.buffer,
-                    queries.raw(),
-                    first,
-                    count,
-                    &dst_range,
-                    vk::AddressCommandFlagsKHR::FULLY_BOUND,
-                    vk::QueryResultFlags::TYPE_64 | vk::QueryResultFlags::WAIT,
-                );
+            ext.cmd_copy_query_pool_results_to_memory(
+                self.buffer,
+                queries.raw(),
+                first,
+                count,
+                &dst_range,
+                vk::AddressCommandFlagsKHR::FULLY_BOUND,
+                vk::QueryResultFlags::TYPE_64 | vk::QueryResultFlags::WAIT,
+            );
         }
     }
 
@@ -577,7 +589,9 @@ impl CommandBuffer {
     ///
     /// `stride` is the byte stride between consecutive `DrawIndirectArgs`
     /// records and must be a multiple of 4. Mid-buffer starts use
-    /// [`GpuPtr::offset`]; there is no offset parameter.
+    /// [`GpuPtr::offset`]; there is no offset parameter. Panics if the device
+    /// lacks `VK_KHR_device_address_commands` (gate on
+    /// [`Device::device_address_commands`](crate::Device::device_address_commands)).
     pub fn draw_indirect(&self, args: GpuPtr, draw_count: u32, stride: u32) {
         let info = vk::DrawIndirect2InfoKHR::default()
             .address_range(
@@ -592,16 +606,20 @@ impl CommandBuffer {
         // pipeline bound, and `args` addresses a live, fully-bound allocation
         // holding `draw_count` stride-spaced argument records (caller
         // contract).
+        let ext = self.ext.device_address_commands.as_ref().expect(
+            "draw_indirect requires VK_KHR_device_address_commands \
+             (query Device::device_address_commands first)",
+        );
         unsafe {
-            self.ext
-                .device_address_commands
-                .cmd_draw_indirect2(self.buffer, &info);
+            ext.cmd_draw_indirect2(self.buffer, &info);
         }
     }
 
     /// Issue non-indexed draws where the draw count is read from
     /// `count` at runtime (GPU-driven count) — `vkCmdDrawIndirectCount2KHR`,
-    /// both arguments and count addressed by `GpuPtr`.
+    /// both arguments and count addressed by `GpuPtr`. Panics if the device
+    /// lacks `VK_KHR_device_address_commands` (gate on
+    /// [`Device::device_address_commands`](crate::Device::device_address_commands)).
     pub fn draw_indirect_count(
         &self,
         args: GpuPtr,
@@ -628,10 +646,12 @@ impl CommandBuffer {
         // pipeline bound, and both addresses reference live, fully-bound
         // allocations holding the argument records and the u32 count (caller
         // contract).
+        let ext = self.ext.device_address_commands.as_ref().expect(
+            "draw_indirect_count requires VK_KHR_device_address_commands \
+             (query Device::device_address_commands first)",
+        );
         unsafe {
-            self.ext
-                .device_address_commands
-                .cmd_draw_indirect_count2(self.buffer, &info);
+            ext.cmd_draw_indirect_count2(self.buffer, &info);
         }
     }
 

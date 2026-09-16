@@ -31,6 +31,10 @@ fn timestamps_resolve_to_gpu_address() {
             return;
         }
     };
+    if !device.device_address_commands() {
+        eprintln!("skipping: VK_KHR_device_address_commands is not supported by this driver");
+        return;
+    }
 
     let queries = TimestampQueryPool::new(&device, 2).expect("timestamp query pool");
     assert!(

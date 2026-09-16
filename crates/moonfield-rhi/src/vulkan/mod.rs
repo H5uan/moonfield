@@ -37,7 +37,10 @@ pub(crate) struct DeviceExtensionFunctions {
     pub(crate) descriptor_heap: ash::ext::descriptor_heap::Device,
     /// `VK_KHR_device_address_commands` address-based commands (indirect
     /// draw/dispatch, memory copies, query-pool resolves to GPU addresses).
-    pub(crate) device_address_commands: ash::khr::device_address_commands::Device,
+    /// `None` when the device does not expose the extension; the address
+    /// command methods then panic with a clear message, and callers gate on
+    /// [`Device::device_address_commands`].
+    pub(crate) device_address_commands: Option<ash::khr::device_address_commands::Device>,
 }
 
 pub use bump::{BumpAlloc, GpuBumpAllocator};

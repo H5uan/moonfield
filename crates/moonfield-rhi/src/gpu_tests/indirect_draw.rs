@@ -41,6 +41,10 @@ fn indirect_draw_records_without_panic() {
             return;
         }
     };
+    if !device.device_address_commands() {
+        eprintln!("skipping: VK_KHR_device_address_commands is not supported by this driver");
+        return;
+    }
 
     let compiler = Compiler::new().expect("compiler creation");
 

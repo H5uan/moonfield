@@ -36,10 +36,6 @@ const REQUIRED_DEVICE_EXTENSIONS: &[&CStr] = &[
     ash::ext::mutable_descriptor_type::NAME,
     ash::ext::vertex_input_dynamic_state::NAME,
     ash::ext::device_generated_commands::NAME,
-    // Address-based commands: indirect draws/dispatches, memory copies, and
-    // query-pool resolves consume buffer device addresses (`GpuPtr`)
-    // directly instead of buffer handles.
-    ash::khr::device_address_commands::NAME,
 ];
 
 // Optional extensions are performance enhancements or whole feature stacks,
@@ -62,6 +58,14 @@ const OPTIONAL_DEVICE_EXTENSIONS: &[&CStr] = &[
     ash::khr::pipeline_library::NAME,
     ash::khr::deferred_host_operations::NAME,
     ash::ext::ray_tracing_invocation_reorder::NAME,
+    // Address-based commands and the GPU-address timestamp resolve
+    // (`VK_KHR_device_address_commands`). Optional as a group: indirect
+    // draws/dispatches, `cmd_memcpy`, and query-pool resolves consume device
+    // addresses (`GpuPtr`) with no handle-based fallback, and the extension
+    // is absent on some real drivers (NVIDIA entry-Turing such as the dev
+    // machine's T1000). Callers gate on
+    // [`Device::device_address_commands`] before relying on those paths.
+    ash::khr::device_address_commands::NAME,
     // Float32 atomic adds into storage buffers (`OpAtomicFAddEXT`) for the
     // ml gradient path. Enabled only when the driver also supports the
     // `shaderBufferFloat32AtomicAdd` feature bit — see the probe in
@@ -479,6 +483,9 @@ impl Device {
         if optional_enabled.contains(&ash::ext::shader_atomic_float::NAME) {
             features2 = features2.push(&mut shader_atomic_float_features);
         }
+        if optional_enabled.contains(&ash::khr::device_address_commands::NAME) {
+            features2 = features2.push(&mut device_address_commands_features);
+        }
         // `TaggedStructure::push` consumes `self` and returns the chained struct —
         // the return value is the one that carries the pNext link, so the
         // whole core chain must be rebound, not discarded (the optional RT
@@ -493,8 +500,7 @@ impl Device {
             .push(&mut mesh_shader_features)
             .push(&mut mutable_descriptor_type_features)
             .push(&mut vertex_input_dynamic_state_features)
-            .push(&mut device_generate_commands_features)
-            .push(&mut device_address_commands_features);
+            .push(&mut device_generate_commands_features);
 
         // `push` requires a chainless `next`, but `features2` heads the whole
         // feature chain built above — merge that chain with `extend` instead.
@@ -523,10 +529,13 @@ impl Device {
                 &device,
             ),
             descriptor_heap: ash::ext::descriptor_heap::Device::load(instance.raw(), &device),
-            device_address_commands: ash::khr::device_address_commands::Device::load(
-                instance.raw(),
-                &device,
-            ),
+            // Loaded only when the extension was enabled (see
+            // [`OPTIONAL_DEVICE_EXTENSIONS`]); the commands behind it panic
+            // with a clear message when `None`, so callers gate on
+            // [`Device::device_address_commands`].
+            device_address_commands: optional_enabled
+                .contains(&ash::khr::device_address_commands::NAME)
+                .then(|| ash::khr::device_address_commands::Device::load(instance.raw(), &device)),
         });
 
         let allocator = Allocator::new(&AllocatorCreateDesc {
@@ -589,6 +598,19 @@ impl Device {
     pub fn buffer_float32_atomic_add(&self) -> bool {
         self.optional_extensions
             .contains(&ash::ext::shader_atomic_float::NAME)
+    }
+
+    /// Whether address-based GPU commands are available
+    /// (`VK_KHR_device_address_commands`): indirect draw/dispatch from device
+    /// addresses, `cmd_memcpy`, and GPU-address timestamp resolves. The
+    /// extension is optional — absent on some real drivers (NVIDIA
+    /// entry-Turing such as the dev machine's T1000) — so
+    /// [`CommandBuffer`](crate::CommandBuffer)'s address-command methods
+    /// panic and [`TimestampQueryPool`](crate::TimestampQueryPool) creation
+    /// fails when it is missing; gate callers on this query.
+    pub fn device_address_commands(&self) -> bool {
+        self.optional_extensions
+            .contains(&ash::khr::device_address_commands::NAME)
     }
 
     /// The shared aggregated device-extension loaders (see

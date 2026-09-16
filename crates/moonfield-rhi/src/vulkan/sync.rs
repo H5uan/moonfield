@@ -260,7 +260,21 @@ pub struct TimestampQueryPool {
 
 impl TimestampQueryPool {
     /// Create a pool of `count` timestamp queries.
+    ///
+    /// Requires `VK_KHR_device_address_commands` (query
+    /// [`Device::device_address_commands`]): the pool's only read path,
+    /// [`CommandBuffer::resolve_timestamps`](crate::CommandBuffer::resolve_timestamps),
+    /// resolves straight to a GPU address through that extension, so creating
+    /// a pool on a device without it fails instead of building a pool whose
+    /// results can never be read.
     pub fn new(device: &Device, count: u32) -> Result<Self> {
+        if !device.device_address_commands() {
+            return Err(Error::Unsupported(
+                "timestamp pools resolve through VK_KHR_device_address_commands, \
+                 which this device does not support (see Device::device_address_commands)"
+                    .to_string(),
+            ));
+        }
         let create_info = vk::QueryPoolCreateInfo::default()
             .query_type(vk::QueryType::TIMESTAMP)
             .query_count(count);

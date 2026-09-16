@@ -28,6 +28,10 @@ fn setup() -> Option<(Instance, Device)> {
             return None;
         }
     };
+    if !device.device_address_commands() {
+        eprintln!("skipping: VK_KHR_device_address_commands is not supported by this driver");
+        return None;
+    }
     Some((instance, device))
 }
 

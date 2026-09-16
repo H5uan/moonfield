@@ -53,6 +53,10 @@ fn bindless_memcpy_roundtrip() {
             return;
         }
     };
+    if !device.device_address_commands() {
+        eprintln!("skipping: VK_KHR_device_address_commands is not supported by this driver");
+        return;
+    }
 
     const N: usize = 8;
     const SIZE: u64 = (N * 4) as u64;
@@ -124,6 +128,10 @@ fn bindless_dispatch_indirect_roundtrip() {
             return;
         }
     };
+    if !device.device_address_commands() {
+        eprintln!("skipping: VK_KHR_device_address_commands is not supported by this driver");
+        return;
+    }
 
     let compiler = Compiler::new().expect("compiler");
     let spirv = compiler

@@ -8,7 +8,8 @@
 //! carrier always carries `INDIRECT_BUFFER` usage) and pass its
 //! [`GpuPtr`](crate::vulkan::memory::GpuPtr) to the command buffer's
 //! indirect draw/dispatch methods, which consume device addresses directly
-//! (`VK_KHR_device_address_commands`).
+//! (`VK_KHR_device_address_commands`, optional — see
+//! [`Device::device_address_commands`](crate::Device::device_address_commands)).
 
 /// Argument buffer layout for non-indexed `draw_indirect` commands.
 ///
