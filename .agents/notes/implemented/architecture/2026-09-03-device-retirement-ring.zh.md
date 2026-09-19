@@ -16,15 +16,18 @@ buffer 增长、prepared-mesh 剔除）销毁的 buffer 仍可能被在飞帧读
 
 ## Decision
 
-- `Device` 持有 `RetirementRing`：每个帧槽一条 teardown 队列，存放原子化的
-  `RetireAction`（销毁 buffer、image 与 pipeline，归还 heap slot），由各资源的 `Drop` 组合压入。
+- `Device` 持有 `RetirementRing`(在其共享的 `DeviceShared` 状态内):每个帧槽
+  一条 teardown 队列,存放原子化的 `RetireAction`(销毁 buffer、image 与
+  pipeline、归还 heap slot),由各资源的 `Drop` 组合压入。
 - 受覆盖的资源——`Buffer`、`GpuAllocation`、bump arena 的块、`Texture`、
   `OffscreenTarget`、`DepthBuffer`、`GraphicsPipeline`/`ComputePipeline`——`Drop` 时把 teardown 压入当前帧槽而非就地销毁。`Device::begin_gpu_frame` 排空帧循环
-  即将录制的那个槽：in-flight timeline 的 wait 已保证该槽上一次提交完成。
-  `Device::flush_retirements` 为测试与析构排空全部槽，仅在 GPU idle 时可调用。
-- `Device::drop` 先让设备 idle，再 drop 懒建的 uploader 与 descriptor heap
-  单例使其后备 allocation 入环，然后排空——所有 teardown 都发生在
-  `vkDestroyDevice` 之前，而不是在它之后的字段析构阶段。
+  即将录制的那个槽:in-flight timeline 的 wait 已保证该槽上一次提交完成。
+  `Device::flush_retirements` 为测试与析构排空全部槽,仅在 GPU idle 时可调用。
+- 设备析构按所有权拆分:`Device::drop` 持久化 pipeline cache 并 drop 懒建的
+  uploader 与 descriptor heap 单例,使其后备 allocation 入环;
+  `DeviceShared::drop`——在最后一个设备引用(包括任何存活资源)消失时运行——
+  让 GPU idle、排空 ring、释放 allocator,然后销毁设备。所有 teardown 都发生在
+  `vkDestroyDevice` 之前。
 
 ## Alternatives considered
 
@@ -38,25 +41,27 @@ buffer 增长、prepared-mesh 剔除）销毁的 buffer 仍可能被在飞帧读
 ## Consequences
 
 - `Buffer`、`GpuAllocation`、bump arena 块、`Texture`、`OffscreenTarget`、
-  `DepthBuffer` 与 pipeline 的 teardown 在 drop 之后 `RETIRE_RING` 帧执行；
-  在飞帧按构造读到完好内存，buffer 替换路径不再依赖调用方自律。pipeline 被
-  command buffer 通过 bind 引用，帧循环中因 shader revision 重建的 pipeline
-  同样走 retire。`ShaderModule` 保持立即销毁：pipeline 创建时即消费掉模块
-  （SPIR-V 已烘焙），command buffer 从不引用模块。
-- bump allocator 在裸 `ash::Device` 之外另持一个 `RetirementRing` 句柄（其
-  块构造是 lifetime-free 的，拿不到 `&Device`）。
+  `DepthBuffer` 与 pipeline 的 teardown 在 drop 之后 `RETIRE_RING` 帧执行;
+  在飞帧按构造读到完好内存,buffer 替换路径不再依赖调用方自律。pipeline 被
+  command buffer 通过 bind 引用,帧循环中因 shader revision 重建的 pipeline
+  同样走 retire。`ShaderModule` 保持立即销毁:pipeline 创建时即消费掉模块
+  (SPIR-V 已烘焙),command buffer 从不引用模块。
+- bump allocator 持有一个 `DeviceContext`(共享设备状态句柄;其块构造是
+  lifetime-free 的,拿不到 `&Device`)。
 - 帧循环驱动 ring：`acquire` 排空即将录制的槽（在等待 in-flight timeline
-  之后），`submit_window_frames` 在帧命令缓冲之前 flush 共享 uploader——
-  同队列的提交顺序让上传先行执行。`RenderPlugin` 断言
-  `MAX_FRAMES_IN_FLIGHT == RETIRE_RING`。
-- 排空在 ring 锁外执行，且 `drain_all` 循环到静止：teardown 可能级联——
-  某个 action 释放最后一个 `Arc<DescriptorHeap>` 时，heap 的后备 allocation
-  随之入环。
+  之后），帧提交 flush 共享 uploader 并等待其最近提交的批次——让上传写入对
+  shader 读可见的内存依赖是这个 timeline 等待，而非同队列提交顺序（见
+  [pipeline 退休与上传可见性](../bug-fix/2026-09-19-pipeline-retirement-and-upload-visibility.zh.md)）。
+  `RenderPlugin` 断言 `MAX_FRAMES_IN_FLIGHT == RETIRE_RING`。
+- 排空在 ring 锁外执行,且 `drain_all` 循环到静止,不遗留排空中途入队的
+  action。
+
 - `OffscreenTarget::resize` 为新 image 一并分配新 heap slot；旧槽与旧 image
   走 retire。heap descriptor 只在创建时写一次、永不重写，resize 路径不再
   让整个设备 idle。持有者在 `texture_handle` 变化时重新注册——编辑器的
   视口绑定随之刷新。
 - egui 后端按帧槽的延迟释放环已删除：纹理的 drop 与释放统一走 ring，
   上传搭乘共享 uploader。
-- 设备析构顺序固定：idle、drop 懒建单例、排空 ring、拆除 allocator、销毁
+- 设备析构顺序固定:`Device` 句柄持久化 pipeline cache 并 drop 懒建单例;
+  共享状态的 drop(最后一个引用)让 GPU idle、排空 ring、拆除 allocator、销毁
   设备。

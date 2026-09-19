@@ -16,9 +16,11 @@
 //!   the frame (waits the in-flight timeline counter, drains the frame
 //!   slot's retirements, begins the frame's command buffer) and acquires
 //!   the next swapchain image for every window with [`WindowFrameDemand`].
-//! - [`submit_window_frames`] (`Render`, last): flushes the shared uploader,
-//!   ends recording, submits to the graphics queue once, presents every
-//!   acquired window, and advances the frame slot.
+//! - [`submit_window_frames`] (`Render`, last): ends recording, flushes the
+//!   shared uploader, and submits to the graphics queue once — the submit
+//!   waits on the uploader's latest batch so upload writes are visible to
+//!   the frame's shader reads — then presents every acquired window and
+//!   advances the frame slot.
 //!
 //! The frame exists every `Render` tick a device exists — offscreen passes
 //! need no window. Everything that records into the frame goes through the
@@ -266,18 +268,29 @@ impl FrameContext {
         Ok(plan.slot)
     }
 
-    /// End the frame: finish recording and submit the slot's command buffer
-    /// to the graphics queue, waiting on `waits` (the acquired windows'
-    /// `image_available`), signaling `signals` (their `render_finished`) plus
-    /// the timeline with the frame number. An offscreen-only frame passes
-    /// empty slices.
+    /// End the frame: finish recording, flush the shared uploader's recorded
+    /// batches, and submit the slot's command buffer to the graphics queue —
+    /// waiting on `waits` (the acquired windows' `image_available`) and on
+    /// the uploader's latest submitted batch (the memory dependency that
+    /// makes this frame's upload writes visible to shader reads), signaling
+    /// `signals` (their `render_finished`) plus the timeline with the frame
+    /// number. An offscreen-only frame passes empty slices.
     fn end_frame(&mut self, waits: &[&Semaphore], signals: &[&Semaphore]) -> Result<()> {
         let (slot, signal) = self.sequencer.take_for_submit();
         self.command_buffers[slot].end()?;
+        // Flush uploads recorded during this frame's preparation (texture
+        // deltas, mesh uploads, image transitions) ahead of the frame
+        // command buffer. Idempotent — a frame with no uploads submits
+        // nothing, and `pending_signal` then names the previous batch.
+        let uploader = self.device.uploader();
+        let mut uploader = uploader.lock().unwrap_or_else(|e| e.into_inner());
+        uploader.end_frame()?;
+        let upload_wait = uploader.pending_signal();
         self.device.submit_frame_timeline(
             &self.command_buffers[slot],
             waits,
             signals,
+            upload_wait.as_slice(),
             &self.timeline,
             signal,
         )?;
@@ -839,28 +852,14 @@ pub fn acquire_window_frames(world: &mut World) {
 
 /// `Render` system (ordering anchor; pass systems run `.before()` it): end
 /// recording, submit the frame's command buffer once — waiting on every
-/// acquired window's `image_available`, signaling every acquired window's
-/// `render_finished` plus the frame timeline — and present each acquired
-/// window. A frame with no acquired window (offscreen-only) submits
-/// timeline-only.
+/// acquired window's `image_available` and on the uploader's latest
+/// submitted batch, signaling every acquired window's `render_finished` plus
+/// the frame timeline — and present each acquired window. A frame with no
+/// acquired window (offscreen-only) submits timeline-only.
 pub fn submit_window_frames(world: &mut World) {
     // Passes are done recording; drop the recording state machine with the
     // frame.
     world.remove_resource::<crate::context::RecordingState>();
-    // Flush uploads recorded during this frame's preparation (texture
-    // deltas, image transitions) ahead of the frame command buffers:
-    // same-queue submission order executes them first. Idempotent — a
-    // frame with no uploads submits nothing.
-    if let Some(render_device) = world.get_resource::<RenderDevice>()
-        && let Err(e) = render_device
-            .device()
-            .uploader()
-            .lock()
-            .unwrap_or_else(|e| e.into_inner())
-            .end_frame()
-    {
-        error!("failed to flush frame uploads: {e}");
-    }
     let Some(mut frame) = world.get_resource_mut::<FrameContext>() else {
         return;
     };

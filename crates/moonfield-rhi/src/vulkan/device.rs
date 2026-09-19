@@ -746,15 +746,44 @@ impl Device {
     /// Submit recorded command buffers to the graphics queue and block until
     /// they complete. Test and upload-path convenience — frame loops use the
     /// window systems' semaphores/fences instead.
+    ///
+    /// When the shared uploader has submitted batches, this submission waits
+    /// on its latest one: same-queue submission order sequences execution
+    /// but creates no memory dependency, so staged uploads need the timeline
+    /// wait to be visible to shader reads.
     pub fn submit_and_wait(&self, command_buffers: &[&crate::CommandBuffer]) -> Result<()> {
-        let raw: Vec<vk::CommandBuffer> =
-            command_buffers.iter().map(|buffer| buffer.raw()).collect();
-        let submit_info = vk::SubmitInfo::default().command_buffers(&raw);
-        // SAFETY: the command buffers are fully recorded and the queue is valid.
+        let command_infos: Vec<vk::CommandBufferSubmitInfo> = command_buffers
+            .iter()
+            .map(|buffer| vk::CommandBufferSubmitInfo::default().command_buffer(buffer.raw()))
+            .collect();
+        let wait_infos: Vec<vk::SemaphoreSubmitInfo> = self
+            .uploader
+            .get()
+            .map(|uploader| {
+                uploader
+                    .lock()
+                    .unwrap_or_else(|e| e.into_inner())
+                    .pending_signal()
+                    .into_iter()
+                    .map(|(semaphore, value)| {
+                        vk::SemaphoreSubmitInfo::default()
+                            .semaphore(semaphore.raw())
+                            .stage_mask(vk::PipelineStageFlags2::ALL_COMMANDS)
+                            .value(value)
+                    })
+                    .collect()
+            })
+            .unwrap_or_default();
+        let submit_info = vk::SubmitInfo2::default()
+            .wait_semaphore_infos(&wait_infos)
+            .command_buffer_infos(&command_infos);
+        // SAFETY: the command buffers are fully recorded; the queue, the
+        // uploader's timeline semaphore (kept alive by the `uploader`
+        // singleton), and the info arrays are valid and outlive the call.
         unsafe {
             self.shared
                 .raw()
-                .queue_submit(
+                .queue_submit2(
                     self.graphics_queue,
                     std::slice::from_ref(&submit_info),
                     vk::Fence::null(),
@@ -770,18 +799,20 @@ impl Device {
 
     /// Submit the frame's command buffer to the graphics queue: wait on
     /// `wait_semaphores` (binary acquire signals, at the color-attachment
-    /// stage), signal `signal_semaphores` (binary present signals) plus
-    /// `timeline` with `signal_value`. An offscreen-only frame passes empty
-    /// semaphore slices.
+    /// stage) and `timeline_waits` (the uploader's latest batch and other
+    /// producer timelines, at every stage), signal `signal_semaphores`
+    /// (binary present signals) plus `timeline` with `signal_value`. An
+    /// offscreen-only frame passes empty semaphore slices.
     pub fn submit_frame_timeline(
         &self,
         command_buffer: &crate::CommandBuffer,
         wait_semaphores: &[&Semaphore],
         signal_semaphores: &[&Semaphore],
+        timeline_waits: &[(&Semaphore, u64)],
         timeline: &Semaphore,
         signal_value: u64,
     ) -> Result<()> {
-        let wait_infos: Vec<vk::SemaphoreSubmitInfo> = wait_semaphores
+        let mut wait_infos: Vec<vk::SemaphoreSubmitInfo> = wait_semaphores
             .iter()
             .map(|semaphore| {
                 vk::SemaphoreSubmitInfo::default()
@@ -789,6 +820,12 @@ impl Device {
                     .stage_mask(vk::PipelineStageFlags2::COLOR_ATTACHMENT_OUTPUT)
             })
             .collect();
+        wait_infos.extend(timeline_waits.iter().map(|(semaphore, value)| {
+            vk::SemaphoreSubmitInfo::default()
+                .semaphore(semaphore.raw())
+                .stage_mask(vk::PipelineStageFlags2::ALL_COMMANDS)
+                .value(*value)
+        }));
         // Binary semaphores ignore the value field (placeholder 0); the
         // timeline's value is the signal value.
         let mut signal_infos: Vec<vk::SemaphoreSubmitInfo> = signal_semaphores
@@ -982,14 +1019,24 @@ impl Drop for Device {
     }
 }
 
-/// Where the pipeline cache lives on disk: `<XDG_CACHE_HOME or
-/// ~/.cache>/moonfield/pipeline_cache.bin`.
+/// Where the pipeline cache lives on disk: the per-user cache dir —
+/// `%LOCALAPPDATA%` (falling back to `%APPDATA%`) on Windows,
+/// `$XDG_CACHE_HOME` (falling back to `~/.cache`) elsewhere, and the temp dir
+/// when no cache root is set — plus `moonfield/pipeline_cache.bin`. The
+/// temp-dir fallback keeps the path absolute: an empty root would otherwise
+/// resolve against the process's working directory.
 fn pipeline_cache_path() -> std::path::PathBuf {
+    #[cfg(windows)]
+    let dir = std::env::var_os("LOCALAPPDATA")
+        .or_else(|| std::env::var_os("APPDATA"))
+        .map(std::path::PathBuf::from)
+        .unwrap_or_else(std::env::temp_dir);
+    #[cfg(not(windows))]
     let dir = std::env::var_os("XDG_CACHE_HOME")
         .map(std::path::PathBuf::from)
         .or_else(|| {
             std::env::var_os("HOME").map(|home| std::path::PathBuf::from(home).join(".cache"))
         })
-        .unwrap_or_default();
+        .unwrap_or_else(std::env::temp_dir);
     dir.join("moonfield").join("pipeline_cache.bin")
 }

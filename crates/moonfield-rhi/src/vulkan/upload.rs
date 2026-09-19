@@ -82,8 +82,9 @@ impl FrameUploader {
     /// Stage `bytes` into the frame's arena and record a copy into the
     /// `GpuAllocation`'s address carrier — the upload path for GPU-only
     /// allocations (static geometry). The copy executes when the frame
-    /// flushes (`end_frame`), ordered ahead of the frame command buffer by
-    /// same-queue submission order.
+    /// flushes (`end_frame`); the frame's submission waits on this
+    /// uploader's timeline (see [`pending_signal`](Self::pending_signal)), so
+    /// the frame's shader reads observe the write.
     pub fn upload_alloc(&mut self, dst: &GpuAllocation, bytes: &[u8]) -> Result<()> {
         self.begin_frame()?;
         let slot = ((self.next_frame - 1) % UPLOAD_FRAME_RING as u64) as usize;
@@ -279,5 +280,26 @@ impl FrameUploader {
             self.timeline.wait(self.next_frame - 1, u64::MAX)?;
         }
         Ok(())
+    }
+
+    /// The latest submitted batch as a timeline wait point — what a frame
+    /// submission waits on so its shader reads observe the batches' transfer
+    /// writes. Same-queue submission order sequences the batches against the
+    /// frame command buffer but creates no memory dependency between them,
+    /// so the wait is the visibility half. `None` before the first submitted
+    /// batch.
+    pub fn pending_signal(&self) -> Option<(&Semaphore, u64)> {
+        (self.next_frame > 1).then(|| (&self.timeline, self.next_frame - 1))
+    }
+}
+
+impl Drop for FrameUploader {
+    fn drop(&mut self) {
+        // An in-flight batch may still be executing; the command buffers and
+        // their pool drop right after this body and must not be freed under
+        // the GPU. Best-effort: a dead device errors and teardown continues.
+        if let Err(e) = self.wait_idle() {
+            tracing::error!("failed to wait for in-flight uploads during teardown: {e}");
+        }
     }
 }

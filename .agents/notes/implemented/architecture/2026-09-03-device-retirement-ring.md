@@ -20,9 +20,10 @@ in-flight frames could still read.
 
 ## Decision
 
-- `Device` owns a `RetirementRing`: one teardown queue per frame slot,
-  holding atomic `RetireAction`s (buffer, image, and pipeline destruction,
-  heap-slot return) that resource `Drop`s compose.
+- `Device` owns a `RetirementRing` (inside its shared `DeviceShared` state):
+  one teardown queue per frame slot, holding atomic `RetireAction`s (buffer,
+  image, and pipeline destruction, heap-slot return) that resource `Drop`s
+  compose.
 - Covered resources — `Buffer`, `GpuAllocation`, the bump arena's
   blocks, `Texture`, `OffscreenTarget`, `DepthBuffer`, and
   `GraphicsPipeline`/`ComputePipeline` — enqueue their teardown into
@@ -32,10 +33,12 @@ in-flight frames could still read.
   slot's previous submission completed. `Device::flush_retirements`
   drains every slot for tests and teardown, which must call it only with
   the GPU idle.
-- `Device::drop` idles the device, drops the lazy uploader and descriptor
-  heap singletons so their backing allocations retire, then drains — all
-  teardown now runs ahead of `vkDestroyDevice` instead of during field
-  teardown after it.
+- Device teardown is split by ownership: `Device::drop` persists the
+  pipeline cache and drops the lazy uploader/descriptor-heap singletons so
+  their backing allocations retire; `DeviceShared::drop` — which runs when
+  the last device referent (including any live resource) goes away — idles
+  the GPU, drains the ring, frees the allocator, and destroys the device.
+  All teardown runs ahead of `vkDestroyDevice`.
 
 ## Alternatives considered
 
@@ -59,17 +62,18 @@ in-flight frames could still read.
   the same way. `ShaderModule` stays immediate: pipelines consume the
   module at creation (the SPIR-V is baked), and command buffers never
   reference modules.
-- The bump allocator carries a `RetirementRing` handle alongside its raw
-  `ash::Device` (its block constructor is lifetime-free and cannot fetch
-  one from `&Device`).
+- The bump allocator carries a `DeviceContext` (the shared device-state
+  handle): its block constructor is lifetime-free and cannot fetch one from
+  `&Device`.
 - The frame loop drives the ring: `acquire` drains the slot it is about
-  to record into (after the in-flight timeline wait), and
-  `submit_window_frames` flushes the shared uploader ahead of the frame
-  command buffers — same-queue submission order executes the uploads
-  first. `RenderPlugin` asserts `MAX_FRAMES_IN_FLIGHT == RETIRE_RING`.
-- Drains run outside the ring lock, and `drain_all` loops to quiescence:
-  teardown can cascade, because an action releasing the last
-  `Arc<DescriptorHeap>` retires the heap's backing allocations in turn.
+  to record into (after the in-flight timeline wait), and the frame submit
+  flushes the shared uploader and waits on its latest submitted batch —
+  the timeline wait, not same-queue submission order, is the memory
+  dependency that makes upload writes visible to shader reads (see
+  [pipeline retirement and upload visibility](../bug-fix/2026-09-19-pipeline-retirement-and-upload-visibility.md)).
+  `RenderPlugin` asserts `MAX_FRAMES_IN_FLIGHT == RETIRE_RING`.
+- Drains run outside the ring lock, and `drain_all` loops to quiescence so
+  nothing queued mid-drain is left behind.
 - `OffscreenTarget::resize` allocates new heap slots with the new image;
   the old slots and image retire. Heap descriptors are written once at
   creation and never rewritten, and the resize path no longer idles the
@@ -78,5 +82,7 @@ in-flight frames could still read.
 - The egui backend's per-slot deferred-free ring is deleted: texture
   drops and frees retire through the ring, and its uploads ride the
   shared uploader.
-- Device teardown order is fixed: idle, drop the lazy singletons, drain
-  the ring, tear down the allocator, destroy the device.
+- Device teardown order is fixed: the `Device` handle persists the
+  pipeline cache and drops the lazy singletons; the shared state's drop
+  (last referent) idles the GPU, drains the ring, tears down the
+  allocator, and destroys the device.
