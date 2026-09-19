@@ -116,11 +116,6 @@ impl Fence {
         })
     }
 
-    /// Access the raw `vk::Fence` handle.
-    pub(crate) fn raw(&self) -> vk::Fence {
-        self.fence
-    }
-
     /// Wait for the fence to be signaled.
     pub fn wait(&self, timeout_ns: u64) -> Result<()> {
         // SAFETY: the fence is live and owned by `self`; waiting is valid in

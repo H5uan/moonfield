@@ -102,6 +102,15 @@ fn graphics_heap_sampling_roundtrip() {
 
     let target = OffscreenTarget::new(&device, 64, 64, Format::B8G8R8A8Unorm).expect("target");
     let heap = device.descriptor_heap();
+    // The target's layout transition records into the shared uploader; flush
+    // it ahead of the command buffer below (the frame loop does this at
+    // submit). `submit_and_wait` waits on the uploader's latest batch.
+    device
+        .uploader()
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+        .end_frame()
+        .expect("flush target transition");
 
     let pool = CommandPool::new(&device, device.queue_family_indices().graphics).expect("pool");
     let mut cmd = pool.allocate_command_buffer().expect("cmd");
@@ -211,6 +220,15 @@ float4 main() : SV_TARGET
     .expect("pipeline");
 
     let target = OffscreenTarget::new(&device, 64, 64, Format::B8G8R8A8Unorm).expect("target");
+    // The target's layout transition records into the shared uploader; flush
+    // it ahead of the command buffer below (the frame loop does this at
+    // submit). `submit_and_wait` waits on the uploader's latest batch.
+    device
+        .uploader()
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+        .end_frame()
+        .expect("flush target transition");
 
     let pool = CommandPool::new(&device, device.queue_family_indices().graphics).expect("pool");
     let mut cmd = pool.allocate_command_buffer().expect("cmd");

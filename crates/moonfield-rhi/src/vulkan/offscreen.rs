@@ -18,8 +18,7 @@ use crate::vulkan::device::{Device, DeviceContext};
 use crate::vulkan::image::Image2d;
 use crate::vulkan::memory::{GpuAllocation, Memory};
 use crate::vulkan::retire::RetireAction;
-use crate::vulkan::sync::Fence;
-use crate::{CommandBuffer, CommandPool, DescriptorHeap, SamplerHandle, TextureHandle};
+use crate::{CommandPool, DescriptorHeap, SamplerHandle, TextureHandle};
 use ash::vk;
 use gpu_allocator::vulkan::Allocation;
 use std::sync::Arc;
@@ -105,8 +104,11 @@ pub struct OffscreenTarget {
 
 impl OffscreenTarget {
     /// Create an offscreen target of `width`×`height` with the given color
-    /// format. The image is transitioned to `GENERAL` so it can be sampled
-    /// before the first frame is rendered.
+    /// format. The fresh image's transition to `GENERAL` records into the
+    /// device's shared frame uploader and executes at its next flush — the
+    /// frame loop's submit, which orders the frame's command buffer behind
+    /// the uploader batch. Callers outside a frame loop flush the uploader
+    /// (`Device::uploader`) before submitting work that touches the target.
     pub fn new(device: &Device, width: u32, height: u32, format: Format) -> Result<Self> {
         Self::create(device, width, height, format, false)
     }
@@ -176,7 +178,9 @@ impl OffscreenTarget {
     /// old one retires through the ring when the fields are replaced, so
     /// in-flight frames keep sampling valid memory. Holders re-register
     /// when [`texture_handle`](Self::texture_handle) changes. Zero
-    /// dimensions are ignored (e.g. a minimized viewport panel).
+    /// dimensions are ignored (e.g. a minimized viewport panel). The new
+    /// image's `GENERAL` transition rides the shared uploader, same as at
+    /// creation (see [`new`](Self::new)).
     pub fn resize(&mut self, device: &Device, width: u32, height: u32) -> Result<()> {
         if width == 0 || height == 0 {
             return Ok(());
@@ -503,55 +507,15 @@ fn target_sampler_desc() -> SamplerDesc {
     }
 }
 
-/// Transition the image from UNDEFINED to GENERAL (the unified layout, so
-/// sampling is valid before the first render) via a one-shot command buffer.
-/// The submission waits on its own fence, not a queue wait: the transition
-/// depends on no prior work, and same-queue submission order already puts
-/// it ahead of the frame command buffers recorded afterwards.
+/// Record the fresh image's `UNDEFINED` → `GENERAL` transition (the unified
+/// layout, so sampling is valid before the first render) into the device's
+/// shared frame uploader. Recording only, never blocking: the batch submits
+/// at the next uploader flush, and the frame loop's submit orders the frame
+/// command buffer behind it through the uploader's timeline.
 fn transition_to_shader_read(device: &Device, image: vk::Image) -> Result<()> {
-    let queue_family_index = device.queue_family_indices().graphics;
-    let command_pool = CommandPool::new(device, queue_family_index)?;
-    let mut command_buffer: CommandBuffer = command_pool.allocate_command_buffer()?;
-
-    command_buffer.begin(crate::CommandBufferUsage::ONE_TIME_SUBMIT)?;
-    let barrier = vk::ImageMemoryBarrier2::default()
-        .src_stage_mask(vk::PipelineStageFlags2::TOP_OF_PIPE)
-        .src_access_mask(vk::AccessFlags2::NONE)
-        .dst_stage_mask(vk::PipelineStageFlags2::FRAGMENT_SHADER)
-        .dst_access_mask(vk::AccessFlags2::SHADER_READ)
-        .old_layout(vk::ImageLayout::UNDEFINED)
-        .new_layout(vk::ImageLayout::GENERAL)
-        .src_queue_family_index(vk::QUEUE_FAMILY_IGNORED)
-        .dst_queue_family_index(vk::QUEUE_FAMILY_IGNORED)
-        .image(image)
-        .subresource_range(
-            vk::ImageSubresourceRange::default()
-                .aspect_mask(vk::ImageAspectFlags::COLOR)
-                .base_mip_level(0)
-                .level_count(1)
-                .base_array_layer(0)
-                .layer_count(1),
-        );
-    command_buffer.image_barriers(std::slice::from_ref(&barrier));
-    command_buffer.end()?;
-
-    let fence = Fence::new(device, false)?;
-    let command_buffers = [command_buffer.raw()];
-    let submit_info = vk::SubmitInfo::default().command_buffers(&command_buffers);
-    // SAFETY: the command buffer is fully recorded and the queue is valid.
-    unsafe {
-        device
-            .raw()
-            .queue_submit(
-                device.graphics_queue(),
-                std::slice::from_ref(&submit_info),
-                fence.raw(),
-            )
-            .map_err(|e| Error::Backend(format!("failed to submit layout transition: {:?}", e)))?;
-        device
-            .raw()
-            .wait_for_fences(std::slice::from_ref(&fence.raw()), true, u64::MAX)
-            .map_err(|e| Error::Backend(format!("failed to wait for transition: {:?}", e)))?;
-    }
-    Ok(())
+    device
+        .uploader()
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+        .transition_image(image)
 }

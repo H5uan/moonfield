@@ -590,6 +590,16 @@ mod tests {
         command_buffer.end_rendering();
         command_buffer.end().expect("end");
 
+        // The targets' layout transitions recorded into the shared uploader
+        // after the mesh-upload flush above; flush again so both batches land
+        // ahead of this command buffer (`submit_and_wait` waits on the
+        // uploader's latest batch).
+        device
+            .uploader()
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .end_frame()
+            .expect("flush target transitions");
         device
             .submit_and_wait(&[&command_buffer])
             .expect("submit and wait");

@@ -306,7 +306,10 @@ the surface's own `DepthBuffer` (render-core sizes it to the swapchain and
 resizes it on recreation); camera extraction sets the base
 `WindowFrameDemand` for such views, and the editor ORs its UI demand in later.
 Image layouts are unified: every non-swapchain image lives in `GENERAL` —
-creation and upload transitions land there, `AttachmentLayout::ShaderRead` and
+creation and upload transitions land there, recorded into the shared frame
+uploader (the frame submit waits on the uploader's batch, so a target created
+in `PrepareViews` is sampleable later in the same frame without blocking on
+the queue), `AttachmentLayout::ShaderRead` and
 `DepthStencil` both map to it, and dynamic rendering performs no implicit
 layout transitions — while swapchain images stay in `PRESENT_SRC_KHR`
 (`AttachmentLayout::Present`). The pass's pipelines are format-keyed:

@@ -150,6 +150,15 @@ fn fragment_heap_sampling_roundtrip() {
     let fragment_shader = ShaderModule::from_compiled(&device, &fragment_spirv).expect("fs module");
 
     let target = OffscreenTarget::new(&device, SIZE, SIZE, Format::B8G8R8A8Unorm).expect("target");
+    // The target's layout transition records into the shared uploader; flush
+    // it ahead of the command buffer below (the frame loop does this at
+    // submit).
+    device
+        .uploader()
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+        .end_frame()
+        .expect("flush target transition");
     // Descriptor-heap pipeline: the fragment entry point's `Ptr<float4>` root
     // parameter is delivered through push data.
     let pipeline = GraphicsPipeline::new_with_options(

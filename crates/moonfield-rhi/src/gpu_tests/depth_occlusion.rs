@@ -128,6 +128,15 @@ float4 main(PsInput input) : SV_TARGET
     let target = OffscreenTarget::new_with_depth(&device, SIZE, SIZE, Format::B8G8R8A8Unorm)
         .expect("target");
     assert!(target.has_depth(), "depth target must report has_depth");
+    // The target's layout transition records into the shared uploader; flush
+    // it ahead of the command buffer below (the frame loop does this at
+    // submit).
+    device
+        .uploader()
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+        .end_frame()
+        .expect("flush target transition");
 
     let pipeline = GraphicsPipeline::new_with_options(
         &device,

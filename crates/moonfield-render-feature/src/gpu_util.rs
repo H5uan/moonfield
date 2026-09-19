@@ -70,6 +70,11 @@ pub struct RadixSort {
     scan_place: RootParamPlace,
     scatter_place: RootParamPlace,
     /// One histogram and one offsets slot set per 256-item group.
+    ///
+    /// The temporaries are pure-GPU scratch — read and written by the
+    /// passes, never mapped — so they live in device-local memory; only the
+    /// caller's in/out buffers (written and read back on the host) stay
+    /// host-visible.
     hist: GpuAllocation,
     offsets: GpuAllocation,
     /// The ping-pong pair between the caller's input and output.
@@ -114,15 +119,15 @@ impl RadixSort {
             histogram_place,
             scan_place,
             scatter_place,
-            hist: GpuAllocation::new(device, hist_bytes, Memory::Default)?,
-            offsets: GpuAllocation::new(device, hist_bytes, Memory::Default)?,
+            hist: GpuAllocation::new(device, hist_bytes, Memory::Gpu)?,
+            offsets: GpuAllocation::new(device, hist_bytes, Memory::Gpu)?,
             tmp_keys: [
-                GpuAllocation::new(device, item_bytes, Memory::Default)?,
-                GpuAllocation::new(device, item_bytes, Memory::Default)?,
+                GpuAllocation::new(device, item_bytes, Memory::Gpu)?,
+                GpuAllocation::new(device, item_bytes, Memory::Gpu)?,
             ],
             tmp_values: [
-                GpuAllocation::new(device, item_bytes, Memory::Default)?,
-                GpuAllocation::new(device, item_bytes, Memory::Default)?,
+                GpuAllocation::new(device, item_bytes, Memory::Gpu)?,
+                GpuAllocation::new(device, item_bytes, Memory::Gpu)?,
             ],
         })
     }
