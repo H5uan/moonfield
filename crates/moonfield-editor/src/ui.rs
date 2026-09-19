@@ -2,8 +2,9 @@
 //! details (inspector) stacked in the right column, content browser below.
 //!
 //! The hierarchy and inspector panels read and edit the ECS world directly
-//! (the single-threaded render seam). [`collect_hierarchy`] is factored out
-//! as a pure world-reading function so it can be tested without a display.
+//! (the single-threaded render seam). [`collect_hierarchy_into`] is factored
+//! out as a pure world-reading function so it can be tested without a
+//! display.
 
 use egui_dock::{DockArea, DockState, NodeIndex, TabViewer};
 use moonfield_camera::{Camera, PrimaryCamera, view_matrix};
@@ -49,6 +50,9 @@ pub struct TabContext<'w> {
     pub gizmo_mode: &'w mut GizmoMode,
     /// The in-progress gizmo drag, if any.
     pub gizmo_drag: &'w mut Option<GizmoDrag>,
+    /// The hierarchy panel's row buffer, reused across frames (cleared and
+    /// refilled by [`collect_hierarchy_into`]).
+    pub hierarchy_entries: &'w mut Vec<HierarchyEntry>,
 }
 
 /// Content panel state for loading assets: a path field and the last
@@ -130,7 +134,12 @@ impl TabViewer for EditorTabViewer<'_, '_> {
 
     fn ui(&mut self, ui: &mut egui::Ui, tab: &mut Self::Tab) {
         match tab {
-            Tab::Hierarchy => hierarchy_panel(ui, self.context.world, self.context.selection),
+            Tab::Hierarchy => hierarchy_panel(
+                ui,
+                self.context.world,
+                self.context.selection,
+                self.context.hierarchy_entries,
+            ),
             Tab::Inspector => inspector_panel(ui, self.context.world, self.context.selection),
             Tab::Viewport => viewport_panel(ui, self.context),
             Tab::Content => content_panel(
@@ -148,21 +157,23 @@ impl TabViewer for EditorTabViewer<'_, '_> {
 // Hierarchy panel
 // ---------------------------------------------------------------------
 
-/// One row of the hierarchy tree view.
-#[derive(Debug, Clone, PartialEq, Eq)]
+/// One row of the hierarchy tree view. The label is resolved at draw time
+/// from the entity's `Name` (see [`entity_label`]) instead of being stored,
+/// so rebuilding the tree every frame allocates nothing per row.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct HierarchyEntry {
     /// The entity shown on this row.
     pub entity: Entity,
-    /// Display label: the `Name` if any, otherwise the raw entity.
-    pub label: String,
     /// Nesting depth (roots are 0).
     pub depth: usize,
 }
 
-/// Flatten the world's entity hierarchy into display order: every entity
-/// without a [`ChildOf`] is a root (sorted for stable display), followed
-/// recursively by its [`Children`].
-pub fn collect_hierarchy(world: &World) -> Vec<HierarchyEntry> {
+/// Flatten the world's entity hierarchy into display order, into the
+/// caller's buffer (reused across frames): every entity without a
+/// [`ChildOf`] is a root (sorted for stable display), followed recursively
+/// by its [`Children`].
+pub fn collect_hierarchy_into(world: &World, entries: &mut Vec<HierarchyEntry>) {
+    entries.clear();
     // `Option<&ChildOf>` iterates every entity, yielding `None` for roots.
     let mut roots: Vec<Entity> = world
         .query::<Option<&ChildOf>>()
@@ -171,19 +182,13 @@ pub fn collect_hierarchy(world: &World) -> Vec<HierarchyEntry> {
         .collect();
     roots.sort_by_key(|e| e.to_bits());
 
-    let mut entries = Vec::new();
     for root in roots {
-        collect_subtree(world, root, 0, &mut entries);
+        collect_subtree(world, root, 0, entries);
     }
-    entries
 }
 
 fn collect_subtree(world: &World, entity: Entity, depth: usize, entries: &mut Vec<HierarchyEntry>) {
-    entries.push(HierarchyEntry {
-        entity,
-        label: entity_label(world, entity),
-        depth,
-    });
+    entries.push(HierarchyEntry { entity, depth });
     if let Some(children) = world.get_component::<Children>(entity) {
         for &child in children.entities() {
             collect_subtree(world, child, depth + 1, entries);
@@ -191,27 +196,38 @@ fn collect_subtree(world: &World, entity: Entity, depth: usize, entries: &mut Ve
     }
 }
 
-fn entity_label(world: &World, entity: Entity) -> String {
+/// A row's display label: the `Name` if any, otherwise the raw entity's
+/// debug form. Named rows borrow, so only unnamed entities allocate.
+fn entity_label(world: &World, entity: Entity) -> std::borrow::Cow<'_, str> {
     match world.get_component::<Name>(entity) {
-        Some(name) => name.to_string(),
-        None => format!("{entity:?}"),
+        Some(name) => std::borrow::Cow::Borrowed(name.as_str()),
+        None => std::borrow::Cow::Owned(format!("{entity:?}")),
     }
 }
 
-fn hierarchy_panel(ui: &mut egui::Ui, world: &mut World, selection: &mut Option<Entity>) {
-    let entries = collect_hierarchy(world);
+fn hierarchy_panel(
+    ui: &mut egui::Ui,
+    world: &mut World,
+    selection: &mut Option<Entity>,
+    entries: &mut Vec<HierarchyEntry>,
+) {
+    collect_hierarchy_into(world, entries);
     if entries.is_empty() {
         ui.label("Scene is empty");
         return;
     }
     egui::ScrollArea::vertical().show(ui, |ui| {
-        for entry in entries {
+        for entry in entries.iter() {
             ui.horizontal(|ui| {
                 ui.add_space(entry.depth as f32 * 16.0);
                 let selected = *selection == Some(entry.entity);
+                // The hover tooltip's text is built only while the row is
+                // hovered (`on_hover_ui`), not for every row every frame.
                 if ui
-                    .selectable_label(selected, &entry.label)
-                    .on_hover_text(format!("{:?}", entry.entity))
+                    .selectable_label(selected, entity_label(world, entry.entity).as_ref())
+                    .on_hover_ui(|ui| {
+                        ui.label(format!("{:?}", entry.entity));
+                    })
                     .clicked()
                 {
                     *selection = Some(entry.entity);
@@ -436,26 +452,25 @@ fn viewport_panel(ui: &mut egui::Ui, context: &mut TabContext) {
 
     // Status overlay, top-left corner: the active gizmo mode (so W/E/R give
     // visible feedback), the controls, and a hint when nothing is selected.
-    let mode_label = match *context.gizmo_mode {
-        GizmoMode::Translate => "Translate",
-        GizmoMode::Rotate => "Rotate",
-        GizmoMode::Scale => "Scale",
+    // Static text per mode: the overlay allocates no Strings per frame.
+    let mode_line = match *context.gizmo_mode {
+        GizmoMode::Translate => "Mode: Translate  (W/E/R to switch)",
+        GizmoMode::Rotate => "Mode: Rotate  (W/E/R to switch)",
+        GizmoMode::Scale => "Mode: Scale  (W/E/R to switch)",
     };
     let has_selection = (*context.selection)
         .filter(|e| context.world.contains(*e))
         .is_some();
-    let mut lines = vec![
-        format!("Mode: {mode_label}  (W/E/R to switch)"),
-        "RMB orbit · MMB pan · wheel zoom · LMB drag gizmo".to_string(),
+    let lines = [
+        Some(mode_line),
+        Some("RMB orbit · MMB pan · wheel zoom · LMB drag gizmo"),
+        (!has_selection).then_some("Select an entity in the Hierarchy to show its gizmo"),
     ];
-    if !has_selection {
-        lines.push("Select an entity in the Hierarchy to show its gizmo".to_string());
-    }
-    for (row, line) in lines.iter().enumerate() {
+    for (row, line) in lines.iter().flatten().enumerate() {
         ui.painter().text(
             rect.min + egui::vec2(8.0, 8.0 + row as f32 * 16.0),
             egui::Align2::LEFT_TOP,
-            line,
+            *line,
             egui::FontId::proportional(12.0),
             theme::TEXT_SECONDARY,
         );
@@ -641,6 +656,12 @@ mod tests {
         world.spawn((Name::new(name),))
     }
 
+    fn collect_hierarchy(world: &World) -> Vec<HierarchyEntry> {
+        let mut entries = Vec::new();
+        collect_hierarchy_into(world, &mut entries);
+        entries
+    }
+
     #[test]
     fn test_collect_hierarchy_empty_world() {
         let world = World::new();
@@ -660,7 +681,12 @@ mod tests {
         named(&mut world, "Other Root");
 
         let entries = collect_hierarchy(&world);
-        let find = |label: &str| entries.iter().find(|e| e.label == label).unwrap();
+        let find = |label: &str| {
+            entries
+                .iter()
+                .find(|e| entity_label(&world, e.entity).as_ref() == label)
+                .unwrap()
+        };
 
         assert_eq!(find("Parent").depth, 0);
         assert_eq!(find("Child").depth, 1);
@@ -668,7 +694,12 @@ mod tests {
         assert_eq!(find("Other Root").depth, 0);
 
         // Parents appear before their children in display order.
-        let pos = |label: &str| entries.iter().position(|e| e.label == label).unwrap();
+        let pos = |label: &str| {
+            entries
+                .iter()
+                .position(|e| entity_label(&world, e.entity).as_ref() == label)
+                .unwrap()
+        };
         assert!(pos("Parent") < pos("Child"));
         assert!(pos("Child") < pos("Grandchild"));
         assert_eq!(entries.len(), 4);
@@ -680,7 +711,8 @@ mod tests {
         let e = world.spawn(());
         let entries = collect_hierarchy(&world);
         assert_eq!(entries.len(), 1);
-        assert_eq!(entries[0].label, format!("{e:?}"));
+        assert_eq!(entries[0].entity, e);
+        assert_eq!(entity_label(&world, e).as_ref(), format!("{e:?}"));
     }
 
     /// The viewport panel runs headless: without a registered texture it
@@ -694,6 +726,7 @@ mod tests {
         let mut camera = None;
         let mut gizmo_mode = GizmoMode::Translate;
         let mut gizmo_drag = None;
+        let mut hierarchy_entries = Vec::new();
 
         let ctx = egui::Context::default();
         let mut reported = None;
@@ -710,6 +743,7 @@ mod tests {
                 camera: &mut camera,
                 gizmo_mode: &mut gizmo_mode,
                 gizmo_drag: &mut gizmo_drag,
+                hierarchy_entries: &mut hierarchy_entries,
             };
             viewport_panel(ui, &mut context);
             reported = context.viewport_size_points;
@@ -734,6 +768,7 @@ mod tests {
         let mut camera = None;
         let mut gizmo_mode = GizmoMode::Translate;
         let mut gizmo_drag = None;
+        let mut hierarchy_entries = Vec::new();
 
         let ctx = egui::Context::default();
         ctx.run_ui(egui::RawInput::default(), |ui| {
@@ -747,6 +782,7 @@ mod tests {
                 camera: &mut camera,
                 gizmo_mode: &mut gizmo_mode,
                 gizmo_drag: &mut gizmo_drag,
+                hierarchy_entries: &mut hierarchy_entries,
             };
             viewport_panel(ui, &mut context);
         })
@@ -781,6 +817,7 @@ mod tests {
         let mut camera = None;
         let mut gizmo_mode = GizmoMode::Translate;
         let mut gizmo_drag = None;
+        let mut hierarchy_entries = Vec::new();
 
         let ctx = egui::Context::default();
         let input = egui::RawInput {
@@ -801,6 +838,7 @@ mod tests {
                 camera: &mut camera,
                 gizmo_mode: &mut gizmo_mode,
                 gizmo_drag: &mut gizmo_drag,
+                hierarchy_entries: &mut hierarchy_entries,
             };
             viewport_panel(ui, &mut context);
         });
@@ -824,6 +862,7 @@ mod tests {
         let mut camera = None;
         let mut gizmo_mode = GizmoMode::Translate;
         let mut gizmo_drag = None;
+        let mut hierarchy_entries = Vec::new();
 
         let ctx = egui::Context::default();
         let press = |key| egui::RawInput {
@@ -855,6 +894,7 @@ mod tests {
                     camera: &mut camera,
                     gizmo_mode,
                     gizmo_drag: &mut gizmo_drag,
+                    hierarchy_entries: &mut hierarchy_entries,
                 };
                 viewport_panel(ui, &mut context);
             })
@@ -904,6 +944,7 @@ mod tests {
         let mut camera = None;
         let mut gizmo_mode = GizmoMode::Translate;
         let mut gizmo_drag: Option<GizmoDrag> = None;
+        let mut hierarchy_entries = Vec::new();
 
         let ctx = egui::Context::default();
         let mut frame = 0u64;
@@ -935,6 +976,7 @@ mod tests {
                         camera: &mut camera,
                         gizmo_mode,
                         gizmo_drag,
+                        hierarchy_entries: &mut hierarchy_entries,
                     };
                     viewport_panel(ui, &mut context);
                 },

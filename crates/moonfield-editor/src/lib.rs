@@ -75,6 +75,12 @@ impl Plugin for EditorPlugin {
         app.insert_resource(PendingEditorFrame::default());
         app.insert_resource(feedback.clone());
         app.render_world_mut().insert_resource(feedback);
+        // Env-var debug switches are process-launch configuration: parse
+        // once at startup, share with both worlds (reading `std::env::var`
+        // every frame costs a lookup per tick per var).
+        let debug_env = EditorDebugEnv::from_env();
+        app.insert_resource(debug_env);
+        app.render_world_mut().insert_resource(debug_env);
         app.render_world_mut()
             .insert_resource(ViewportTexture::default());
         app.insert_resource(registry::InspectorRegistry::with_engine_types());
@@ -154,6 +160,29 @@ struct EditorFeedback {
     frames_rendered: u64,
 }
 
+/// The editor's env-var debug switches, parsed once at plugin build and
+/// inserted into both worlds. Changing the variables mid-run has no effect —
+/// the same semantics a launch-time flag has always had in practice.
+#[derive(Clone, Copy, Default)]
+struct EditorDebugEnv {
+    /// `MOONFIELD_EDITOR_AUTO_CLOSE=N`: request exit once N frames have been
+    /// presented.
+    auto_close_frames: Option<u64>,
+    /// `MOONFIELD_EDITOR_DUMP_VIEWPORT=N`: dump the viewport target's pixels
+    /// when presented frame N completes.
+    dump_viewport_frame: Option<u64>,
+}
+
+impl EditorDebugEnv {
+    fn from_env() -> Self {
+        let parse = |key: &str| std::env::var(key).ok().and_then(|value| value.parse().ok());
+        Self {
+            auto_close_frames: parse("MOONFIELD_EDITOR_AUTO_CLOSE"),
+            dump_viewport_frame: parse("MOONFIELD_EDITOR_DUMP_VIEWPORT"),
+        }
+    }
+}
+
 /// The feedback channel shared between both worlds — the same `Arc` is
 /// inserted into each. The payload is an `Option` so `take` can distinguish
 /// "no new feedback" from a payload whose fields happen to be empty.
@@ -221,6 +250,8 @@ struct EditorMainState {
     gizmo_drag: Option<interaction::GizmoDrag>,
     /// Render-world completion count, for the auto-close debug helper.
     frames_rendered: u64,
+    /// The hierarchy panel's row buffer, reused across frames.
+    hierarchy_entries: Vec<ui::HierarchyEntry>,
 }
 
 impl EditorMainState {
@@ -254,6 +285,7 @@ impl EditorMainState {
             gizmo_mode: interaction::GizmoMode::Translate,
             gizmo_drag: None,
             frames_rendered: 0,
+            hierarchy_entries: Vec::new(),
         })
     }
 }
@@ -362,6 +394,7 @@ fn editor_prepare(world: &mut World) {
             camera: &mut state.camera,
             gizmo_mode: &mut state.gizmo_mode,
             gizmo_drag: &mut state.gizmo_drag,
+            hierarchy_entries: &mut state.hierarchy_entries,
         };
         let full_output = egui_ctx.run_ui(raw_input, |ui| {
             ui::show(ui, &mut state.dock_state, &mut tab_context);
@@ -399,8 +432,11 @@ fn editor_prepare(world: &mut World) {
     });
     drop(pending);
 
-    if let Ok(frames) = std::env::var("MOONFIELD_EDITOR_AUTO_CLOSE")
-        && let Ok(limit) = frames.parse::<u64>()
+    let auto_close_frames = world
+        .get_resource::<EditorDebugEnv>()
+        .expect("EditorDebugEnv registered in build")
+        .auto_close_frames;
+    if let Some(limit) = auto_close_frames
         && state.frames_rendered >= limit
         && let Some(ctrl) = world.get_resource::<WindowControl>()
     {
@@ -442,7 +478,7 @@ fn apply_orbit_camera(world: &mut World, camera: &interaction::OrbitCamera) {
 
 /// `Render` system: turn the extracted [`PreparedEditorFrame`] into GPU-ready
 /// form. Lazily creates the egui GPU resources (from the shared
-/// [`RenderDevice`] and the first window surface's format), applies texture
+/// [`RenderDevice`] and the primary window surface's format), applies texture
 /// deltas with deferred frees, (re)binds the viewport's view target as an
 /// egui texture, tessellates, and uploads the frame slot's buffers. Produces
 /// the [`EguiPreparedFrame`] resource [`egui_pass`] consumes.
@@ -474,17 +510,21 @@ fn prepare_egui_frame(world: &mut World) {
             return;
         }
         let frame_slot = frame.current_slot();
-        let Some(mut surfaces) = world.get_resource_mut::<WindowSurfaces>() else {
+        let Some(surfaces) = world.get_resource::<WindowSurfaces>() else {
             return;
         };
-        surfaces.values_mut().next().and_then(|surface| {
+        // The pipeline bakes in the primary window's swapchain format —
+        // resolved by the `PrimaryWindow` marker (see
+        // `WindowSurfaces::primary`), not whichever surface the HashMap
+        // happens to yield first.
+        surfaces.primary().and_then(|surface| {
             surface
                 .format()
                 .ok()
-                .map(|(format, srgb)| (format, srgb, frame_slot, surface.extent()))
+                .map(|(format, srgb)| (format, srgb, frame_slot))
         })
     };
-    let Some((color_format, srgb_framebuffer, frame_slot, _extent)) = surface_info else {
+    let Some((color_format, srgb_framebuffer, frame_slot)) = surface_info else {
         return;
     };
 
@@ -732,11 +772,12 @@ fn editor_frame_done(world: &mut World) {
         frames_rendered: presented_frames,
     });
 
+    let dump_viewport_frame = world
+        .get_resource::<EditorDebugEnv>()
+        .expect("EditorDebugEnv registered in build")
+        .dump_viewport_frame;
     if presented_frames > 0
-        && std::env::var("MOONFIELD_EDITOR_DUMP_VIEWPORT")
-            .ok()
-            .and_then(|value| value.parse::<u64>().ok())
-            == Some(presented_frames)
+        && dump_viewport_frame == Some(presented_frames)
         && let Err(error) = dump_viewport_target(world)
     {
         error!("failed to dump viewport target: {error}");

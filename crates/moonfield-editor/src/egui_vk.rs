@@ -350,10 +350,9 @@ impl EguiTextures {
         if width == 0 || height == 0 {
             return Err("egui texture with zero extent".to_string());
         }
-        let mut bytes = Vec::with_capacity(image.pixels.len() * 4);
-        for pixel in &image.pixels {
-            bytes.extend_from_slice(&pixel.to_array());
-        }
+        // `Color32` is `Pod` (egui's `bytemuck` feature): the pixel slice
+        // casts straight to bytes — no per-pixel copy.
+        let bytes: &[u8] = bytemuck::cast_slice(&image.pixels);
 
         if let Some(pos) = delta.pos {
             // Partial update of an existing managed texture: the heap slot
@@ -375,7 +374,7 @@ impl EguiTextures {
                 .texture
                 .upload(
                     &mut uploader,
-                    &bytes,
+                    bytes,
                     Some((pos[0] as i32, pos[1] as i32)),
                     (width, height),
                 )
@@ -398,7 +397,7 @@ impl EguiTextures {
                 width,
                 height,
                 Format::R8G8B8A8Unorm,
-                &bytes,
+                bytes,
             )
             .map_err(|e| e.to_string())?
         };
@@ -476,6 +475,10 @@ struct FrameResources {
     vertex_capacity: usize,
     index_capacity: usize,
     mesh_draws: Vec<MeshDraw>,
+    /// CPU staging the upload fills before copying into the mapped arrays;
+    /// cleared and reused every frame, never shrunk.
+    staging_vertices: Vec<PodVertex>,
+    staging_indices: Vec<u32>,
 }
 
 impl FrameResources {
@@ -498,6 +501,8 @@ impl FrameResources {
             vertex_capacity: INITIAL_VERTEX_CAPACITY,
             index_capacity: INITIAL_INDEX_CAPACITY,
             mesh_draws: Vec::new(),
+            staging_vertices: Vec::new(),
+            staging_indices: Vec::new(),
         })
     }
 }
@@ -536,9 +541,14 @@ impl EguiFrameResources {
             .get_mut(frame_slot)
             .ok_or_else(|| format!("frame slot {frame_slot} out of range"))?;
 
-        let mut vertices: Vec<PodVertex> = Vec::new();
-        let mut indices: Vec<u32> = Vec::new();
-        let mut mesh_draws = Vec::new();
+        // The staging buffers persist on the frame slot: clear and refill
+        // instead of allocating a fresh set every frame.
+        frame.staging_vertices.clear();
+        frame.staging_indices.clear();
+        frame.mesh_draws.clear();
+        let vertices = &mut frame.staging_vertices;
+        let indices = &mut frame.staging_indices;
+        let mesh_draws = &mut frame.mesh_draws;
         for clipped in primitives {
             // Callback primitives carry user paint closures; not supported in
             // this slice, so they are skipped.
@@ -602,7 +612,6 @@ impl EguiFrameResources {
                 std::ptr::copy_nonoverlapping(indices.as_ptr(), host.typed::<u32>(), indices.len());
             }
         }
-        frame.mesh_draws = mesh_draws;
         Ok(())
     }
 }

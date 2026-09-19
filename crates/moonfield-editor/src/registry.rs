@@ -90,6 +90,9 @@ pub fn show_components(
 /// collapsing headers, leaves get a widget by `Any` downcast.
 pub fn reflect_ui(ui: &mut egui::Ui, value: &mut dyn Reflect) {
     let infos = value.field_infos();
+    // Label scratch, reused across this level's fields (the walker runs
+    // every frame); nested structs allocate their own on recursion.
+    let mut label = String::new();
     for info in infos {
         let Some(field) = value.field_mut(info.name) else {
             continue;
@@ -97,11 +100,11 @@ pub fn reflect_ui(ui: &mut egui::Ui, value: &mut dyn Reflect) {
         if field.field_infos().is_empty() {
             // Leaf: label + widget on one row.
             ui.horizontal(|ui| {
-                ui.label(prettify(info.name));
+                ui.label(prettify(&mut label, info.name));
                 leaf_widget(ui, field);
             });
         } else {
-            egui::CollapsingHeader::new(prettify(info.name))
+            egui::CollapsingHeader::new(prettify(&mut label, info.name))
                 .id_salt((ui.id(), info.name))
                 .default_open(true)
                 .show(ui, |ui| reflect_ui(ui, field));
@@ -109,13 +112,20 @@ pub fn reflect_ui(ui: &mut egui::Ui, value: &mut dyn Reflect) {
     }
 }
 
-/// `"clear_color"` → `"Clear color"`.
-fn prettify(field_name: &str) -> String {
-    let mut s = field_name.replace('_', " ");
-    if let Some(first) = s.get_mut(..1) {
-        first.make_ascii_uppercase();
+/// `"clear_color"` → `"Clear color"`, written into the caller's scratch
+/// buffer instead of allocating a fresh String per field per frame.
+fn prettify<'a>(scratch: &'a mut String, field_name: &str) -> &'a str {
+    scratch.clear();
+    scratch.reserve(field_name.len());
+    for (index, ch) in field_name.chars().enumerate() {
+        let ch = if ch == '_' { ' ' } else { ch };
+        if index == 0 {
+            scratch.push(ch.to_ascii_uppercase());
+        } else {
+            scratch.push(ch);
+        }
     }
-    s
+    scratch
 }
 
 /// Leaf-value editing widget, dispatched by type downcast.

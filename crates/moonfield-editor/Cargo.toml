@@ -25,7 +25,7 @@ moonfield-window = { workspace = true }
 moonfield-winit = { workspace = true }
 bytemuck = { workspace = true }
 winit = "0.30"
-egui = "0.36.1"
+egui = { version = "0.36.1", features = ["bytemuck"] }
 egui-winit = { version = "0.36.1", default-features = false }
 egui_dock = "0.21.1"
 serde_json = { workspace = true }
