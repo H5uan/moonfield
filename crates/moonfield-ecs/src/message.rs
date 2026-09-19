@@ -473,8 +473,10 @@ impl MessageRegistry {
         });
     }
 
-    fn update_fns(&self) -> Vec<fn(&mut World)> {
-        self.updates.clone()
+    /// The update fn at `index`, if any. [`message_update_system`] iterates
+    /// by index so no borrow of the registry outlives one fn-pointer copy.
+    fn update_fn(&self, index: usize) -> Option<fn(&mut World)> {
+        self.updates.get(index).copied()
     }
 }
 
@@ -485,14 +487,18 @@ impl MessageRegistry {
 /// Unlike the reference, buffers are swapped unconditionally (our resources
 /// carry no per-resource change ticks to skip unchanged stores on); the
 /// observable semantics for per-frame readers are identical.
+///
+/// Iteration holds the registry borrow only long enough to copy one fn
+/// pointer, so an update fn — which runs against the whole world — may
+/// itself touch `MessageRegistry` without a borrow conflict.
 pub fn message_update_system(world: &mut World) {
-    let Some(registry) = world.get_resource::<MessageRegistry>() else {
-        return;
-    };
-    let updates = registry.update_fns();
-    drop(registry);
-    for update in updates {
+    let mut index = 0;
+    while let Some(update) = world
+        .get_resource::<MessageRegistry>()
+        .and_then(|registry| registry.update_fn(index))
+    {
         update(world);
+        index += 1;
     }
 }
 

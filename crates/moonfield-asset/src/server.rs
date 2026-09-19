@@ -2,9 +2,9 @@
 //! path cache on top of [`Assets<T>`].
 //!
 //! Deliberately minimal, in the crate's spirit: loading happens on the
-//! calling thread, the cache is a plain map from `(type, path)` to
-//! [`AssetId`], and there is no task pool, no async, no hot reload. Those
-//! stay roadmap known-debts.
+//! calling thread, the cache is nested maps from type to path to [`AssetId`]
+//! (so a hit borrows the `&Path` key instead of cloning it), and there is no
+//! task pool, no async, no hot reload. Those stay roadmap known-debts.
 
 use std::any::{Any, TypeId};
 use std::collections::HashMap;
@@ -81,13 +81,14 @@ impl From<std::io::Error> for AssetError {
 
 /// Extension-dispatching, path-caching asset loader.
 ///
-/// Stored as a world resource. The cache keys on `(TypeId, PathBuf)` so the
-/// same file loaded as two different asset types stays distinct, and so a
-/// path is loaded at most once per type.
+/// Stored as a world resource. The cache keys on `(TypeId, PathBuf)` — stored
+/// as nested maps so a hit looks up by a borrowed `&Path` without cloning —
+/// so the same file loaded as two different asset types stays distinct, and
+/// so a path is loaded at most once per type.
 #[derive(Default)]
 pub struct AssetServer {
     loaders: Vec<Box<dyn AssetLoader>>,
-    cache: HashMap<(TypeId, PathBuf), AssetId>,
+    cache: HashMap<TypeId, HashMap<PathBuf, AssetId>>,
 }
 
 impl AssetServer {
@@ -101,14 +102,18 @@ impl AssetServer {
     ///
     /// A cached `(T, path)` hit rebuilds the handle without touching the
     /// loader, provided the slot still resolves in `assets`; an asset that
-    /// was removed since is loaded again and the cache entry replaced.
+    /// was removed since is loaded again and the cache entry replaced. A hit
+    /// never allocates: the path key is borrowed, not cloned.
     pub fn load<T: 'static>(
         &mut self,
         assets: &mut Assets<T>,
         path: &Path,
     ) -> Result<Handle<T>, AssetError> {
-        let key = (TypeId::of::<T>(), path.to_path_buf());
-        if let Some(&id) = self.cache.get(&key) {
+        if let Some(&id) = self
+            .cache
+            .get(&TypeId::of::<T>())
+            .and_then(|paths| paths.get(path))
+        {
             let handle = Handle::from_id(id);
             if assets.contains(&handle) {
                 return Ok(handle);
@@ -134,7 +139,10 @@ impl AssetServer {
                 expected: std::any::type_name::<T>(),
             })?;
         let handle = assets.add(*asset);
-        self.cache.insert(key, handle.id());
+        self.cache
+            .entry(TypeId::of::<T>())
+            .or_default()
+            .insert(path.to_path_buf(), handle.id());
         Ok(handle)
     }
 }
