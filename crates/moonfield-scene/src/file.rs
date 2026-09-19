@@ -31,7 +31,7 @@ use moonfield_camera::Camera;
 use moonfield_ecs::{ChildOf, Children, Entity, TemplateError, World};
 use moonfield_math::{Quat, Transform, Vec3};
 
-use crate::registry::{CAMERA, EntryKind, HIERARCHY, NAME, SceneRegistry, TRANSFORM};
+use crate::registry::{CAMERA, EntryKind, HIERARCHY, NAME, SaveFn, SceneRegistry, TRANSFORM};
 use crate::{ResolvedScene, SceneTemplate};
 
 /// Errors produced while saving or loading a scene document.
@@ -51,7 +51,12 @@ pub enum SceneError {
     Invalid(String),
 }
 
-fn has_registered_component(world: &World, registry: &SceneRegistry, entity: Entity) -> bool {
+fn has_registered_component(
+    world: &World,
+    registry: &SceneRegistry,
+    extras: &[(&str, SaveFn)],
+    entity: Entity,
+) -> bool {
     if matches!(registry.kind(TRANSFORM), Some(EntryKind::NativeTransform))
         && world.get_component::<Transform>(entity).is_some()
     {
@@ -62,15 +67,13 @@ fn has_registered_component(world: &World, registry: &SceneRegistry, entity: Ent
     {
         return true;
     }
-    registry
-        .extras_entries()
-        .iter()
-        .any(|(_, save)| save(world, entity).is_some())
+    extras.iter().any(|(_, save)| save(world, entity).is_some())
 }
 
 fn save_node(
     world: &World,
     registry: &SceneRegistry,
+    extras: &[(&str, SaveFn)],
     root: &mut Root,
     entity: Entity,
     hierarchy: bool,
@@ -112,11 +115,11 @@ fn save_node(
         camera_extras = Some(serde_json::json!({ "clear_color": engine_camera.clear_color }));
     }
 
-    for (name, save) in registry.extras_entries() {
+    for (name, save) in extras {
         let Some(value) = save(world, entity) else {
             continue;
         };
-        if name == NAME {
+        if *name == NAME {
             // `Name` rides the node's native field, not the extras map.
             let Some(text) = value.as_str() else {
                 return Err(SceneError::Invalid(format!(
@@ -129,19 +132,19 @@ fn save_node(
         }
     }
 
-    let mut extras = serde_json::Map::new();
+    let mut node_extras = serde_json::Map::new();
     if !components.is_empty() {
-        extras.insert(
+        node_extras.insert(
             "components".to_string(),
             serde_json::Value::Object(components),
         );
     }
     if let Some(camera_extras) = camera_extras {
-        extras.insert("camera".to_string(), camera_extras);
+        node_extras.insert("camera".to_string(), camera_extras);
     }
-    if !extras.is_empty() {
+    if !node_extras.is_empty() {
         node.extras = Some(serde_json::value::to_raw_value(
-            &serde_json::Value::Object(extras),
+            &serde_json::Value::Object(node_extras),
         )?);
     }
 
@@ -150,8 +153,8 @@ fn save_node(
         for &child in children.iter() {
             // Children without any registered component carry no data;
             // they (and their subtrees) stay out of the document.
-            if has_registered_component(world, registry, child) {
-                indices.push(save_node(world, registry, root, child, hierarchy)?);
+            if has_registered_component(world, registry, extras, child) {
+                indices.push(save_node(world, registry, extras, root, child, hierarchy)?);
             }
         }
         if !indices.is_empty() {
@@ -174,6 +177,9 @@ pub fn save_scene(world: &World, registry: &SceneRegistry) -> Result<Root, Scene
     root.asset.generator = Some("moonfield".to_string());
 
     let hierarchy = registry.contains(HIERARCHY);
+    // Collected once per save: the registry may be mutated between saves, so
+    // caching inside it would need invalidation.
+    let extras = registry.extras_entries();
     let mut scene = Scene {
         extensions: None,
         extras: None,
@@ -181,15 +187,15 @@ pub fn save_scene(world: &World, registry: &SceneRegistry) -> Result<Root, Scene
         nodes: Vec::new(),
     };
     for entity in world.iter_entities() {
-        if !has_registered_component(world, registry, entity) {
+        if !has_registered_component(world, registry, &extras, entity) {
             continue;
         }
         if hierarchy && world.get_component::<ChildOf>(entity).is_some() {
             continue; // reached through its parent's children
         }
-        scene
-            .nodes
-            .push(save_node(world, registry, &mut root, entity, hierarchy)?);
+        scene.nodes.push(save_node(
+            world, registry, &extras, &mut root, entity, hierarchy,
+        )?);
     }
     root.scenes.push(scene);
     root.scene = Some(Index::new(0));
@@ -291,25 +297,100 @@ fn load_node(
     Ok(ResolvedScene::new(templates, children))
 }
 
-/// Parse the document into a glTF root.
-///
-/// Goes through `serde_json::Value` first to backfill `"nodes": []` on scene
-/// objects that lack it: `gltf-json`'s `Scene::nodes` skips serialization
-/// when empty but has no `#[serde(default)]`, so an empty scene (`{}`, which
-/// [`save_scene`] produces for an empty world) would otherwise fail to
-/// parse.
+/// Load-side mirror of `gltf_json::Scene` whose `nodes` defaults to empty.
+/// `gltf-json`'s `Scene::nodes` skips serialization when empty but has no
+/// `#[serde(default)]`, so the empty scenes [`save_scene`] produces would
+/// fail a direct `Root` parse; this mirror supplies the default.
+#[derive(serde::Deserialize)]
+struct SceneFile {
+    #[serde(default)]
+    extensions: Option<gltf_json::extensions::scene::Scene>,
+    #[serde(default)]
+    extras: gltf_json::Extras,
+    #[serde(default)]
+    name: Option<String>,
+    #[serde(default)]
+    nodes: Vec<Index<Node>>,
+}
+
+/// Load-side mirror of `gltf_json::Root` whose `scenes` route through
+/// [`SceneFile`], so the whole document parses in one typed pass. Fielded
+/// out instead of `#[serde(flatten)]`-wrapping `Root`: flatten buffers the
+/// document through serde's private `Content`, which rejects the `RawValue`
+/// extras gltf-json stores.
+#[derive(serde::Deserialize)]
+struct RootFile {
+    #[serde(default)]
+    accessors: Vec<gltf_json::Accessor>,
+    #[serde(default)]
+    animations: Vec<gltf_json::Animation>,
+    asset: gltf_json::Asset,
+    #[serde(default)]
+    buffers: Vec<gltf_json::Buffer>,
+    #[serde(default, rename = "bufferViews")]
+    buffer_views: Vec<gltf_json::buffer::View>,
+    #[serde(default)]
+    cameras: Vec<gltf_json::Camera>,
+    #[serde(default)]
+    extensions: Option<gltf_json::extensions::root::Root>,
+    #[serde(default)]
+    extras: gltf_json::Extras,
+    #[serde(default, rename = "extensionsRequired")]
+    extensions_required: Vec<String>,
+    #[serde(default, rename = "extensionsUsed")]
+    extensions_used: Vec<String>,
+    #[serde(default)]
+    images: Vec<gltf_json::Image>,
+    #[serde(default)]
+    materials: Vec<gltf_json::Material>,
+    #[serde(default)]
+    meshes: Vec<gltf_json::Mesh>,
+    #[serde(default)]
+    nodes: Vec<Node>,
+    #[serde(default)]
+    samplers: Vec<gltf_json::texture::Sampler>,
+    #[serde(default)]
+    scene: Option<Index<Scene>>,
+    #[serde(default)]
+    scenes: Vec<SceneFile>,
+    #[serde(default)]
+    skins: Vec<gltf_json::Skin>,
+    #[serde(default)]
+    textures: Vec<gltf_json::Texture>,
+}
+
 fn parse_root(text: &str) -> Result<Root, SceneError> {
-    let mut value: serde_json::Value = serde_json::from_str(text)?;
-    if let Some(scenes) = value.get_mut("scenes").and_then(|s| s.as_array_mut()) {
-        for scene in scenes {
-            if let Some(object) = scene.as_object_mut() {
-                object
-                    .entry("nodes")
-                    .or_insert_with(|| serde_json::Value::Array(Vec::new()));
-            }
-        }
-    }
-    Ok(serde_json::from_value(value)?)
+    let file: RootFile = serde_json::from_str(text)?;
+    Ok(Root {
+        accessors: file.accessors,
+        animations: file.animations,
+        asset: file.asset,
+        buffers: file.buffers,
+        buffer_views: file.buffer_views,
+        cameras: file.cameras,
+        extensions: file.extensions,
+        extras: file.extras,
+        extensions_required: file.extensions_required,
+        extensions_used: file.extensions_used,
+        images: file.images,
+        materials: file.materials,
+        meshes: file.meshes,
+        nodes: file.nodes,
+        samplers: file.samplers,
+        scene: file.scene,
+        scenes: file
+            .scenes
+            .into_iter()
+            .map(|scene| Scene {
+                extensions: scene.extensions,
+                extras: scene.extras,
+                name: scene.name,
+                nodes: scene.nodes,
+            })
+            .collect(),
+        skins: file.skins,
+        textures: file.textures,
+    })
 }
 
 /// Parse a glTF scene document and spawn its entities into `world`,

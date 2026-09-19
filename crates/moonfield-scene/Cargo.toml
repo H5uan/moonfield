@@ -14,4 +14,4 @@ serde_json = { workspace = true }
 thiserror.workspace = true
 
 [dev-dependencies]
-moonfield-render-feature = { workspace = true }
+moonfield-render-feature = { workspace = true, features = ["mesh"] }
