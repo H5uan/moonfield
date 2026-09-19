@@ -10,10 +10,14 @@ made.
 
 The frame loop is **redraw-driven**: `about_to_wait` only
 decides `ControlFlow` and requests redraws; `WindowEvent::RedrawRequested`
-runs one full tick via `App::update`. A tick is `First` (message buffer swap,
+runs one full tick via `App::update`. On Windows, while the OS holds the
+thread in the modal size/move loop (`WM_ENTERSIZEMOVE`…`WM_EXITSIZEMOVE`),
+`RedrawRequested` stops arriving entirely, so a window subclass plus a
+16 ms timer drive the same `App::update` tick from the loop's `WM_TIMER`
+dispatch (`moonfield-winit::sizing`). A tick is `First` (message buffer swap,
 clock advance) → the fixed-timestep loop → `Update` → the render pipeline
-(`PreRender` in the main world → extraction → the render-world
-`RenderPrepare`/`RenderQueue`/`Render` schedules) → `Last` (window diff
+(`PreRender` in the main world → extraction → the render-world `Render`
+schedule) → `Last` (window diff
 application, input clearing) — frame-end bookkeeping is systems, not runner
 glue. Update pacing is governed by the `WinitSettings`
 resource (`focused_mode`/`unfocused_mode`: `UpdateMode::Continuous` or
@@ -37,10 +41,10 @@ A `Schedule` groups systems under a `ScheduleLabel` and orders them with
 executor). `Commands` queue into a world-global buffer that
 `World::apply_commands` drains after **every** system run, so a system's
 commands are visible to later systems in the same run; the world's change tick
-advances once per schedule run. `App` owns separate main-world and render-world
-schedule maps. One tick runs `First`, the fixed loop, `Update`, the render
-pipeline (`PreRender` in the main world, then `RenderPrepare`/`RenderQueue`/
-`Render` in the render world after extraction), and `Last`; `Startup` and
+advances once per schedule run. `App` owns
+separate main-world and render-world schedule maps. One tick runs `First`, the fixed loop, `Update`, the render
+pipeline (`PreRender` in the main world, then `ExtractSchedule` and `Render`
+in the render world), and `Last`; `Startup` and
 `Shutdown` run once each. `First` starts every update phase and owns the
 message buffer swap. Exit is signaled by inserting the `AppExit` resource (e.g.
 via `Commands::insert_resource`), not by a system return value. The low-level
@@ -196,12 +200,18 @@ The renderer is Vulkan-only through `ash` and always available in the default
 build. The engine-level clip convention is Y-up with reverse-Z, with any Vulkan
 viewport adjustment handled at the Vulkan boundary.
 
-`App::render` runs `PreRender` in the main world, rebuilds render snapshot
-entities through handwritten extraction, then runs `RenderPrepare`,
-`RenderQueue`, and `Render` in the render world. `RenderPrepare` updates
-persistent GPU data from the snapshot, `RenderQueue` builds per-frame view and
-phase work, and `Render` records and submits commands. Snapshot entities carry
-`MainEntity`; render-world resources persist across the rebuild and own
+`App::render` runs `PreRender` in the main world, parks it in the render
+world's `MainWorld` resource, clears the render world's entities, and runs the
+`ExtractSchedule` — systems read the parked main world through the `Extract`
+param and respawn the snapshot through `Commands` — then runs the single
+`Render` schedule. Its internal ordering is the set chain `RenderPlugin`
+registers: `PrepareAssets` (persistent GPU data updated from the snapshot:
+meshes, shaders, window surfaces) → `Queue` (per-view phase components are
+filled) → `PhaseSort` → `PrepareViews` (per-view pipelines, view-target
+attachments, the frame draw arena) → `CameraDriver` (the camera driver runs
+each view's own schedule) → `PostViews` (post-view work on the frame's
+targets, e.g. UI overlays) → `Submit`. Snapshot entities carry `MainEntity`;
+render-world resources persist across the rebuild and own
 cross-frame caches and GPU objects. The editor's
 orbit-camera update runs before the `PreRender` hierarchy propagation pass, so
 camera extraction receives the updated global pose without a frame of latency.
@@ -215,14 +225,19 @@ resource — the command pool, the per-slot command buffer ring, the timeline
 semaphore, and the slot sequencing — created lazily once a device exists;
 per-window GPU state (surface, swapchain, present synchronization, the
 acquired image) lives in the `WindowSurfaces` resource keyed by `MainEntity`.
-`RenderPlugin` also registers the frame-loop
-systems — `create_window_surfaces` (`RenderPrepare`), `acquire_window_frames`
-and `submit_window_frames` (`Render`, the ordering anchors pass systems chain
-against). The frame begins every `Render` tick a device exists: acquire waits
+`RenderPlugin` also brackets the set chain with the
+window frame loop: `create_window_surfaces` first (creating or recreating
+surfaces and swapchains to match the extracted windows — before acquire,
+so no window holds an acquired image when a swapchain is swapped),
+`acquire_window_frames` before the chain, and
+`submit_window_frames` after `Submit`. Pass systems record into the frame
+between acquire and submit through the `RenderContext` doors. The frame begins
+every `Render` tick a device exists: acquire waits
 the in-flight timeline, drains the frame slot's retirements once, and begins
 the frame's command buffer, then acquires a swapchain image for each window
 the `WindowFrameDemand` resource (written by extraction) marks as having
-content to present; submit ends recording and submits the command buffer
+content to present; submit ends recording, flushes the shared frame uploader,
+and submits the command buffer
 once — waiting on every acquired window's `image_available`, signaling every
 `render_finished` plus the timeline with the frame number — then presents
 each acquired window. Windows are acquire/present targets of the frame, not
@@ -240,7 +255,8 @@ an unconsumed frame so texture deltas are never dropped), reports the viewport
 panel size through `RenderTargetSizes`, and sets `WindowFrameDemand`. The egui
 backend is data, not an object: `EguiPipeline`, `EguiTextures`, and
 `EguiFrameResources` resources driven by the `prepare_egui_frame` → `egui_pass`
-→ `editor_frame_done` `Render` systems. Render feedback (viewport texture id,
+(`PostViews`, after the view passes) → `editor_frame_done` (after `Submit`)
+`Render` systems. Render feedback (viewport texture id,
 presented-frame count) returns through the `EditorFeedbackChannel` cloned into
 both worlds.
 
@@ -257,36 +273,51 @@ the Vulkan RHI. Camera extraction in `moonfield-render-core` produces `Extracted
 from `Camera` + `GlobalTransform` + `MainEntity`; an optional `CameraTarget`
 selects the primary window or editor viewport without changing serialized
 camera fields. `RenderFeaturePlugin` prepares revision-matched GPU meshes and compiles
-pipeline shaders in `RenderPrepare` and rebuilds `Core3dFrame` in
-`RenderQueue` every render tick.
-Each `Core3dView`
-owns a front-to-back `RenderPhase<Opaque3d>`; the mesh feature's
-`queue_opaque_3d` fills it with live-mesh items and registers `DrawMesh` in the
-phase's `DrawFunctions` registry, and the pass dispatches items to their
-registered draw functions.
+pipeline shaders in the `PrepareAssets` set and queues per-view draw work in
+`Queue`.
+Every extracted view carries a
+`RenderPhase<Opaque3d>` component (attached by `prepare_phase`, sorted
+front-to-back in `PhaseSort` by camera-space depth); the mesh feature's
+`queue_opaque_3d` fills it with live-mesh items, `DrawMesh` is registered once
+in the render-world `DrawFunctions<Opaque3d>` registry, and the pass
+dispatches items to their registered draw functions. The `CameraDriver` set
+runs the camera driver, which sorts the extracted views by
+`(Camera::order, entity)` and runs the per-view `Core3d` schedule once per
+view, its `opaque_pass_3d` system anchored in the `Core3dOpaquePass` set.
 
-The `main_opaque_pass_3d` system consumes the primary view targeting the editor
-viewport and records it into the persistent `OffscreenTarget` held by the
-`ViewTargets` resource (final layout `SHADER_READ_ONLY_OPTIMAL`) sampled by
-egui. A primary view targeting the **primary window** instead records into
-each in-progress surface's swapchain image (final layout `PRESENT`),
-depth-tested against the surface's own `DepthBuffer` (render-core sizes it to
-the swapchain and resizes it on recreation); camera extraction sets the base
+`prepare_view_attachments` (`PrepareViews`) resolves every extracted view's
+logical target into a per-view `ViewAttachments` component, and the per-view
+`opaque_pass_3d` system records through it. A view targeting the editor
+viewport resolves to its camera's pooled `OffscreenTarget` in the `ViewTargets`
+resource, sampled by egui. A view targeting the **primary window** instead
+resolves to the in-progress surface's swapchain image, depth-tested against
+the surface's own `DepthBuffer` (render-core sizes it to the swapchain and
+resizes it on recreation); camera extraction sets the base
 `WindowFrameDemand` for such views, and the editor ORs its UI demand in later.
-The pass is format-locked to `VIEW_TARGET_FORMAT` — a swapchain negotiated to
-another format (e.g. sRGB) is skipped with an error until the pipeline becomes
-format-keyed. Referenced mesh assets are copied
+Image layouts are unified: every non-swapchain image lives in `GENERAL` —
+creation and upload transitions land there, `AttachmentLayout::ShaderRead` and
+`DepthStencil` both map to it, and dynamic rendering performs no implicit
+layout transitions — while swapchain images stay in `PRESENT_SRC_KHR`
+(`AttachmentLayout::Present`). The pass's pipelines are format-keyed:
+`Core3dPipelines` holds one `Core3dPipeline` variant per color format the
+frame's views resolve to (`VIEW_TARGET_FORMAT` for viewport views, the primary
+surface's negotiated format for window views, so an sRGB swapchain simply gets
+its own variant), and `queue_opaque_3d` stamps each item with its view's
+format. Referenced mesh assets are copied
 into `ExtractedMeshes`; GPU buffers in the render-world `PreparedGpuMeshes`
 resource are reused only when their `AssetRevision` matches. The pass
-only consumes prepared buffers while recording. Per-draw data (mvp + flat
-color) is a `DrawData` record carved from the render-world `FrameDrawArena`;
-the draw pushes a single `GpuPtr` to it through `push_data`. The offscreen
-target carries a depth attachment
+only consumes prepared buffers while recording. Per-pass view uniforms
+(view-projection + view position) and per-draw data (model matrix, flat color,
+and the geometry's device addresses) are records carved from the render-world
+`FrameDrawArena`, each pushed as a single `GpuPtr` through `push_data`; the
+vertex shader pulls positions and indices through the draw record's pointers,
+so the pipeline has no input assembler. The offscreen target carries a depth
+attachment
 (`OffscreenTarget::new_with_depth`; reverse-Z — depth clears to 0.0 and the
 compare op is `GREATER_OR_EQUAL`), so overlapping meshes occlude.
 Slang packs matrices row-major by default while glam's `to_cols_array()` is
-column-major, so the matrix ships column-major inside `DrawData` and the
-shader declares `column_major float4x4 mvp;`.
+column-major, so matrices ship column-major and the shader declares them
+`column_major float4x4` (`model` in `DrawData`, `view_proj` in `ViewUniforms`).
 The Outliner dock panel lists the entity tree (from `ChildOf`/`Children`,
 labeled by `Name`) and selects an entity; the Details panel renders
 auto-generated editing UI for the selected entity's registered components.
@@ -387,7 +418,7 @@ whose reflection drives root binding) in the main-world `PipelineShaders`
 resource, populated by whoever loads the shader assets — the editor loads
 `core_3d.slang` and `egui.slang` at startup. `extract_shader_assets` copies
 the requested shaders (revision-matched, into `ExtractedShaders`) and the
-requests into the render world; `prepare_shaders` (`RenderPrepare`) compiles
+requests into the render world; `prepare_shaders` (`PrepareAssets`) compiles
 each request whose asset revision advanced, from the extracted source
 through the render-world `PreparedShaders` resource (which owns the shared
 `ShaderCache`). A failed compile is recorded for the new revision — broken
