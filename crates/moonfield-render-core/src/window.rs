@@ -30,12 +30,12 @@ use crate::MainEntity;
 use crate::extract::Extract;
 use moonfield_app::prelude::World;
 use moonfield_ecs::{Commands, Query};
-use moonfield_log::error;
+use moonfield_log::{error, warn_once};
 use moonfield_rhi::{
     CommandBuffer, CommandBufferUsage, CommandPool, DepthBuffer, Device, Error, Extent2d, Format,
     Instance, RenderDevice, Result, Semaphore, Surface, Swapchain, TextureView,
 };
-use moonfield_window::{RawHandleWrapper, Window};
+use moonfield_window::{PrimaryWindow, RawHandleWrapper, Window};
 use raw_window_handle::{
     DisplayHandle, HandleError, HasDisplayHandle, HasWindowHandle, WindowHandle,
 };
@@ -63,6 +63,8 @@ pub struct ExtractedWindow {
     pub physical_width: u32,
     /// Physical height in pixels.
     pub physical_height: u32,
+    /// The source entity carried the [`PrimaryWindow`] marker.
+    pub primary: bool,
 }
 
 impl HasWindowHandle for ExtractedWindow {
@@ -81,15 +83,20 @@ impl HasDisplayHandle for ExtractedWindow {
     }
 }
 
-/// Copy every main-world window (`Window` + `RawHandleWrapper`) into the
-/// render world as an [`ExtractedWindow`] component.
-pub fn extract_windows(windows: Extract<Query<(&Window, &RawHandleWrapper)>>, commands: Commands) {
-    for (entity, (window, handle)) in windows.iter() {
+/// Copy every main-world window (`Window` + `RawHandleWrapper`, plus the
+/// `PrimaryWindow` marker when present) into the render world as an
+/// [`ExtractedWindow`] component.
+pub fn extract_windows(
+    windows: Extract<Query<(&Window, &RawHandleWrapper, Option<&PrimaryWindow>)>>,
+    commands: Commands,
+) {
+    for (entity, (window, handle, primary)) in windows.iter() {
         commands.spawn((ExtractedWindow {
             main_entity: MainEntity(entity),
             handle: handle.clone(),
             physical_width: window.resolution.physical_width(),
             physical_height: window.resolution.physical_height(),
+            primary: primary.is_some(),
         },));
     }
 }
@@ -374,6 +381,10 @@ pub struct WindowSurfaceData {
     /// passed as the creation hint again. Plain data, no drop-order
     /// relevance.
     swapchain_retired: bool,
+    /// The source window carries the `PrimaryWindow` marker; refreshed from
+    /// the extracted windows every frame. Plain data, no drop-order
+    /// relevance.
+    primary: bool,
     /// Swapchains (and their depth buffers) replaced by `recreate`, awaiting
     /// confirmation that no in-flight frame still presents them. Each entry
     /// holds its own device keepalive, so drop order against the fields
@@ -426,6 +437,7 @@ impl WindowSurfaceData {
             current_image: None,
             needs_recreate: false,
             swapchain_retired: false,
+            primary: window.primary,
             retired: Vec::new(),
         })
     }
@@ -615,14 +627,50 @@ impl WindowSurfaces {
     }
 
     /// The surface the `PrimaryWindow` logical target resolves to: the
-    /// in-progress surface with the smallest main entity. `None` when no
-    /// window acquired an image this frame.
+    /// in-progress surface whose window carries the marker (see
+    /// [`resolve_primary`] for the boundary cases). `None` when no window
+    /// acquired an image this frame.
     pub fn primary(&self) -> Option<&WindowSurfaceData> {
-        self.surfaces
+        let candidates: Vec<(MainEntity, bool)> = self
+            .surfaces
             .iter()
             .filter(|(_, data)| data.frame_in_progress())
-            .min_by_key(|(entity, _)| entity.0.to_bits())
-            .map(|(_, data)| data)
+            .map(|(entity, data)| (*entity, data.primary))
+            .collect();
+        let entity = resolve_primary(&candidates)?;
+        self.surfaces.get(&entity)
+    }
+}
+
+/// Pick the primary surface among the in-progress `(entity, is_primary)`
+/// candidates.
+///
+/// Boundary behavior: exactly one marked candidate wins. With no marked
+/// candidate — e.g. a windowing backend that never spawns `PrimaryWindow` —
+/// fall back to the historical guess, the smallest main entity, so such a
+/// backend keeps rendering. Several marked candidates violate the
+/// exactly-one contract: warn once and resolve to the smallest marked
+/// entity for determinism.
+fn resolve_primary(candidates: &[(MainEntity, bool)]) -> Option<MainEntity> {
+    let marked = || {
+        candidates
+            .iter()
+            .filter(|(_, primary)| *primary)
+            .map(|(entity, _)| *entity)
+    };
+    let mut first_two = marked();
+    match (first_two.next(), first_two.next()) {
+        (None, _) => candidates
+            .iter()
+            .map(|(entity, _)| *entity)
+            .min_by_key(|entity| entity.0.to_bits()),
+        (Some(only), None) => Some(only),
+        (Some(_), Some(_)) => {
+            warn_once!(
+                "multiple windows carry `PrimaryWindow`; resolving to the smallest marked entity"
+            );
+            marked().min_by_key(|entity| entity.0.to_bits())
+        }
     }
 }
 
@@ -654,6 +702,7 @@ pub fn create_window_surfaces(world: &mut World) {
             handle: window.handle.clone(),
             physical_width: window.physical_width,
             physical_height: window.physical_height,
+            primary: window.primary,
         })
         .collect();
     // The retirement timestamp: frames submitted so far. `acquire_window_frames`
@@ -689,6 +738,7 @@ pub fn create_window_surfaces(world: &mut World) {
             }
             std::collections::hash_map::Entry::Occupied(mut entry) => {
                 let data = entry.get_mut();
+                data.primary = window.primary;
                 data.drain_retired(presented_frames);
                 let extent = data.extent();
                 data.needs_recreate |= extent.width != window.physical_width
@@ -919,5 +969,42 @@ mod tests {
         seq.finish_submit();
         assert_eq!(seq.current_slot(), 1);
         assert_eq!(seq.presented_frames(), 1);
+    }
+
+    /// A main entity with the given low-32-bits id (generation 1), for
+    /// driving `resolve_primary` without a world.
+    fn main_entity(id: u32) -> MainEntity {
+        MainEntity(moonfield_ecs::Entity::from_bits((1u64 << 32) | id as u64).unwrap())
+    }
+
+    #[test]
+    fn test_resolve_primary_empty_candidates() {
+        assert_eq!(resolve_primary(&[]), None);
+    }
+
+    #[test]
+    fn test_resolve_primary_prefers_the_marked_window() {
+        let small = main_entity(1);
+        let large = main_entity(7);
+        // The marked window is not the smallest entity: the marker, not the
+        // entity guess, decides.
+        let candidates = [(small, false), (large, true)];
+        assert_eq!(resolve_primary(&candidates), Some(large));
+    }
+
+    #[test]
+    fn test_resolve_primary_falls_back_to_smallest_entity_without_marker() {
+        let small = main_entity(1);
+        let large = main_entity(7);
+        let candidates = [(large, false), (small, false)];
+        assert_eq!(resolve_primary(&candidates), Some(small));
+    }
+
+    #[test]
+    fn test_resolve_primary_picks_smallest_marked_on_contract_violation() {
+        let small = main_entity(1);
+        let large = main_entity(7);
+        let candidates = [(large, true), (small, true)];
+        assert_eq!(resolve_primary(&candidates), Some(small));
     }
 }
