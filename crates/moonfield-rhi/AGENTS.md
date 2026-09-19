@@ -22,7 +22,8 @@ lives in `moonfield-render-core` (Selene), never here.
   model (`GpuAllocation`/`GpuPtr`/`HostPtr`/`Memory`), `sync.rs` the barrier
   vocabulary (`Stage`/`Access`) plus fences/semaphores and the
   `TimestampQueryPool`, `pipeline.rs`
-  both pipeline types, `view.rs` the `TextureView` wrapper.
+  both pipeline types, `view.rs` the `TextureView` wrapper, `image.rs` the
+  `Image2d` creation helper (image + allocation + view in one call).
 
 ## Object ownership and lifecycle
 
@@ -31,8 +32,14 @@ lives in `moonfield-render-core` (Selene), never here.
 - Every `unsafe` block carries a `// SAFETY:` comment arguing why it is sound
   (handle validity/lifetime, exclusivity, pointer bounds). A comment that
   cannot be written means the block needs a guard, not a waiver.
-- Devices, descriptor heaps, pipelines, and swapchains are owned by the
-  renderer and destroyed in reverse creation order; keep drop order explicit.
+- Shared ownership, wgpu-style: the device's teardown-critical state lives in
+  `DeviceShared` (device handle, allocator, retirement ring, extension
+  loaders, instance keepalive), and every GPU object holds a cloneable
+  crate-internal `DeviceContext` (`Arc<DeviceShared>`). The logical device is
+  destroyed in `DeviceShared::drop`, when the last referent goes away — an
+  object outliving its `Device` handle is safe by construction, so there are
+  no leak guards and no caller-side drop-order contracts. `Surface` likewise
+  holds an `Arc<InstanceShared>`.
 
 ## Shaders
 

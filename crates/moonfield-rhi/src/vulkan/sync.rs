@@ -1,13 +1,14 @@
 //! Vulkan synchronization primitives.
 
 use crate::error::{Error, Result};
-use crate::vulkan::device::Device;
+use crate::vulkan::device::{Device, DeviceContext};
 use ash::vk::{self, TaggedStructure as _};
 
 /// A Vulkan semaphore.
 pub struct Semaphore {
     semaphore: vk::Semaphore,
-    device: ash::Device,
+    /// Keeps the device alive until the semaphore is destroyed in `Drop`.
+    ctx: DeviceContext,
 }
 
 impl Semaphore {
@@ -25,7 +26,7 @@ impl Semaphore {
 
         Ok(Self {
             semaphore,
-            device: device.raw().clone(),
+            ctx: device.context(),
         })
     }
 
@@ -51,7 +52,7 @@ impl Semaphore {
         };
         Ok(Self {
             semaphore,
-            device: device.raw().clone(),
+            ctx: device.context(),
         })
     }
 
@@ -63,7 +64,8 @@ impl Semaphore {
         // SAFETY: the semaphore is a live timeline semaphore owned by `self`,
         // and the wait info's semaphore and value slices have matching lengths.
         unsafe {
-            self.device
+            self.ctx
+                .raw()
                 .wait_semaphores(&wait_info, timeout_ns)
                 .map_err(|e| {
                     Error::Backend(format!("failed to wait for timeline semaphore: {:?}", e))
@@ -76,9 +78,9 @@ impl Semaphore {
 impl Drop for Semaphore {
     fn drop(&mut self) {
         // SAFETY: the semaphore was created by this device and is destroyed
-        // exactly once, here.
+        // exactly once, here; `ctx` keeps the device alive.
         unsafe {
-            self.device.destroy_semaphore(self.semaphore, None);
+            self.ctx.raw().destroy_semaphore(self.semaphore, None);
         }
     }
 }
@@ -86,7 +88,8 @@ impl Drop for Semaphore {
 /// A Vulkan fence.
 pub struct Fence {
     fence: vk::Fence,
-    device: ash::Device,
+    /// Keeps the device alive until the fence is destroyed in `Drop`.
+    ctx: DeviceContext,
 }
 
 impl Fence {
@@ -109,7 +112,7 @@ impl Fence {
 
         Ok(Self {
             fence,
-            device: device.raw().clone(),
+            ctx: device.context(),
         })
     }
 
@@ -123,7 +126,8 @@ impl Fence {
         // SAFETY: the fence is live and owned by `self`; waiting is valid in
         // any fence state.
         unsafe {
-            self.device
+            self.ctx
+                .raw()
                 .wait_for_fences(std::slice::from_ref(&self.fence), true, timeout_ns)
                 .map_err(|e| Error::Backend(format!("failed to wait for fence: {:?}", e)))?;
         }
@@ -135,7 +139,8 @@ impl Fence {
         // SAFETY: the fence is live and owned by `self`; callers reset only an
         // unsignaled fence with no pending submissions, as Vulkan requires.
         unsafe {
-            self.device
+            self.ctx
+                .raw()
                 .reset_fences(std::slice::from_ref(&self.fence))
                 .map_err(|e| Error::Backend(format!("failed to reset fence: {:?}", e)))?;
         }
@@ -146,9 +151,9 @@ impl Fence {
 impl Drop for Fence {
     fn drop(&mut self) {
         // SAFETY: the fence was created by this device and is destroyed exactly
-        // once, here.
+        // once, here; `ctx` keeps the device alive.
         unsafe {
-            self.device.destroy_fence(self.fence, None);
+            self.ctx.raw().destroy_fence(self.fence, None);
         }
     }
 }
@@ -253,7 +258,8 @@ impl std::ops::BitOr for Access {
 /// for nanoseconds.
 pub struct TimestampQueryPool {
     pool: vk::QueryPool,
-    device: ash::Device,
+    /// Keeps the device alive until the pool is destroyed in `Drop`.
+    ctx: DeviceContext,
     count: u32,
     timestamp_period_ns: f32,
 }
@@ -288,7 +294,7 @@ impl TimestampQueryPool {
         };
         Ok(Self {
             pool,
-            device: device.raw().clone(),
+            ctx: device.context(),
             count,
             timestamp_period_ns: device.timestamp_period_ns(),
         })
@@ -314,9 +320,9 @@ impl TimestampQueryPool {
 impl Drop for TimestampQueryPool {
     fn drop(&mut self) {
         // SAFETY: the pool was created by this device and is destroyed exactly
-        // once, here.
+        // once, here; `ctx` keeps the device alive.
         unsafe {
-            self.device.destroy_query_pool(self.pool, None);
+            self.ctx.raw().destroy_query_pool(self.pool, None);
         }
     }
 }

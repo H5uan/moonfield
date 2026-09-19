@@ -3,6 +3,7 @@
 //! [`TextureView`] is the crate's vocabulary for an `vk::ImageView`: a
 //! borrowed handle owned by a texture, offscreen target, or swapchain.
 
+use crate::vulkan::device::DeviceContext;
 use ash::vk;
 
 /// A Vulkan image view wrapped for the RHI's resource vocabulary.
@@ -13,26 +14,27 @@ use ash::vk;
 /// destroys it).
 pub struct TextureView {
     view: vk::ImageView,
-    device: ash::Device,
+    /// Keeps the device alive so an owned view can be destroyed in `Drop`.
+    ctx: DeviceContext,
     owns: bool,
 }
 
 impl TextureView {
     /// Wrap an image view this wrapper owns; `Drop` destroys it.
     #[allow(dead_code)] // owned views are constructed by future owners
-    pub(crate) fn from_raw(view: vk::ImageView, device: ash::Device) -> Self {
+    pub(crate) fn from_raw(view: vk::ImageView, ctx: DeviceContext) -> Self {
         Self {
             view,
-            device,
+            ctx,
             owns: true,
         }
     }
 
     /// Borrow an image view owned elsewhere; `Drop` does not destroy it.
-    pub(crate) fn borrow_raw(view: vk::ImageView, device: ash::Device) -> Self {
+    pub(crate) fn borrow_raw(view: vk::ImageView, ctx: DeviceContext) -> Self {
         Self {
             view,
-            device,
+            ctx,
             owns: false,
         }
     }
@@ -51,7 +53,7 @@ impl Clone for TextureView {
     fn clone(&self) -> Self {
         Self {
             view: self.view,
-            device: self.device.clone(),
+            ctx: self.ctx.clone(),
             owns: false,
         }
     }
@@ -60,9 +62,10 @@ impl Clone for TextureView {
 impl Drop for TextureView {
     fn drop(&mut self) {
         if self.owns {
-            // SAFETY: the device is valid and this wrapper owns the view.
+            // SAFETY: the device is valid (kept alive by `ctx`) and this
+            // wrapper owns the view.
             unsafe {
-                self.device.destroy_image_view(self.view, None);
+                self.ctx.raw().destroy_image_view(self.view, None);
             }
         }
     }

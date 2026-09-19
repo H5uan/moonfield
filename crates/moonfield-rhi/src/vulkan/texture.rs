@@ -10,12 +10,12 @@ use std::sync::Arc;
 
 use crate::error::{Error, Result};
 use crate::types::Format;
-use crate::vulkan::device::Device;
-use crate::vulkan::retire::{RetireAction, RetirementRing};
+use crate::vulkan::device::{Device, DeviceContext};
+use crate::vulkan::image::Image2d;
+use crate::vulkan::retire::RetireAction;
 use crate::{DescriptorHeap, FrameUploader, TextureHandle};
 use ash::vk;
-use gpu_allocator::MemoryLocation;
-use gpu_allocator::vulkan::{Allocation, AllocationCreateDesc, AllocationScheme};
+use gpu_allocator::vulkan::Allocation;
 
 struct TextureSlot {
     handle: TextureHandle,
@@ -36,10 +36,9 @@ pub struct Texture {
     image_view: vk::ImageView,
     image: vk::Image,
     allocation: Option<Allocation>,
-    device: ash::Device,
-    allocator: std::sync::Arc<std::sync::Mutex<gpu_allocator::vulkan::Allocator>>,
-    /// Device-level retirement ring; `Drop` enqueues the teardown here.
-    ring: Arc<RetirementRing>,
+    /// Shared device state: keeps the device alive and takes the deferred
+    /// teardown in `Drop`.
+    ctx: DeviceContext,
     width: u32,
     height: u32,
     slot: Option<TextureSlot>,
@@ -55,77 +54,20 @@ impl Texture {
         height: u32,
         format: Format,
         usage: vk::ImageUsageFlags,
-    ) -> Result<(
-        vk::Image,
-        vk::ImageView,
-        vk::ImageViewCreateInfo<'static>,
-        Allocation,
-    )> {
-        let image_info = vk::ImageCreateInfo::default()
-            .image_type(vk::ImageType::TYPE_2D)
-            .format(format.to_vk())
-            .extent(vk::Extent3D {
-                width,
-                height,
-                depth: 1,
-            })
-            .mip_levels(1)
-            .array_layers(1)
-            .samples(vk::SampleCountFlags::TYPE_1)
-            .tiling(vk::ImageTiling::OPTIMAL)
-            .usage(usage)
-            .sharing_mode(vk::SharingMode::EXCLUSIVE)
-            .initial_layout(vk::ImageLayout::UNDEFINED);
-        // SAFETY: the device is valid and the create info describes a legal image.
-        let image = unsafe {
-            device
-                .raw()
-                .create_image(&image_info, None)
-                .map_err(|e| Error::Backend(format!("failed to create texture image: {e:?}")))?
-        };
-        // SAFETY: the image was just created and has no bound memory yet.
-        let requirements = unsafe { device.raw().get_image_memory_requirements(image) };
-        let allocation = device
-            .allocator()
-            .lock()
-            .unwrap_or_else(|e| e.into_inner())
-            .allocate(&AllocationCreateDesc {
-                name: "texture",
-                requirements,
-                location: MemoryLocation::GpuOnly,
-                linear: false,
-                allocation_scheme: AllocationScheme::GpuAllocatorManaged,
-            })
-            .map_err(|e| Error::Backend(format!("failed to allocate texture memory: {e}")))?;
-        // SAFETY: the allocation satisfies the image's memory requirements.
-        unsafe {
-            device
-                .raw()
-                .bind_image_memory(image, allocation.memory(), allocation.offset())
-        }
-        .map_err(|e| Error::Backend(format!("failed to bind texture memory: {e:?}")))?;
-
-        let view_info = vk::ImageViewCreateInfo::default()
-            .image(image)
-            .view_type(vk::ImageViewType::TYPE_2D)
-            .format(format.to_vk())
-            .subresource_range(
-                vk::ImageSubresourceRange::default()
-                    .aspect_mask(vk::ImageAspectFlags::COLOR)
-                    .base_mip_level(0)
-                    .level_count(1)
-                    .base_array_layer(0)
-                    .layer_count(1),
-            );
-        // SAFETY: the image is valid and outlives the view.
-        let image_view = unsafe {
-            device
-                .raw()
-                .create_image_view(&view_info, None)
-                .map_err(|e| Error::Backend(format!("failed to create texture view: {e:?}")))?
-        };
-        Ok((image, image_view, view_info, allocation))
+    ) -> Result<(Image2d, DeviceContext)> {
+        let ctx = device.context();
+        let image = Image2d::new(
+            &ctx,
+            "texture",
+            width,
+            height,
+            format.to_vk(),
+            usage,
+            vk::ImageAspectFlags::COLOR,
+        )?;
+        Ok((image, ctx))
     }
+
     /// Create a `width`×`height` sampled texture (single mip, `TRANSFER_DST`
     /// for uploads). The image starts in `UNDEFINED`; the first
     /// [`upload`](Self::upload) transitions it to shader-readable.
@@ -135,7 +77,7 @@ impl Texture {
                 "texture dimensions must be non-zero, got {width}x{height}"
             )));
         }
-        let (image, image_view, _view_create_info, allocation) = Self::create_image(
+        let (image, ctx) = Self::create_image(
             device,
             width,
             height,
@@ -143,12 +85,10 @@ impl Texture {
             vk::ImageUsageFlags::SAMPLED | vk::ImageUsageFlags::TRANSFER_DST,
         )?;
         Ok(Self {
-            image_view,
-            image,
-            allocation: Some(allocation),
-            device: device.raw().clone(),
-            allocator: device.allocator().clone(),
-            ring: device.retirement_ring(),
+            image_view: image.view,
+            image: image.image,
+            allocation: Some(image.allocation),
+            ctx,
             width,
             height,
             slot: None,
@@ -178,14 +118,14 @@ impl Texture {
                 "texture dimensions must be non-zero, got {width}x{height}"
             )));
         }
-        let (image, image_view, view_create_info, allocation) = Self::create_image(
+        let (image, ctx) = Self::create_image(
             device,
             width,
             height,
             format,
             vk::ImageUsageFlags::SAMPLED | vk::ImageUsageFlags::STORAGE,
         )?;
-        uploader.transition_image(image)?;
+        uploader.transition_image(image.image)?;
         let heap = device.descriptor_heap();
         let storage_handle = heap.alloc_image_slot()?;
         let sampled_handle = heap.alloc_image_slot()?;
@@ -193,7 +133,7 @@ impl Texture {
             (
                 storage_handle,
                 crate::vulkan::descriptor_heap::TextureSlotDesc::new(
-                    &view_create_info,
+                    &image.view_create_info,
                     vk::ImageLayout::GENERAL,
                 )
                 .storage(),
@@ -201,18 +141,17 @@ impl Texture {
             (
                 sampled_handle,
                 crate::vulkan::descriptor_heap::TextureSlotDesc::new(
-                    &view_create_info,
+                    &image.view_create_info,
                     vk::ImageLayout::GENERAL,
                 ),
             ),
         ])?;
+        let view_create_info = image.view_create_info;
         Ok(Self {
-            image_view,
-            image,
-            allocation: Some(allocation),
-            device: device.raw().clone(),
-            allocator: device.allocator().clone(),
-            ring: device.retirement_ring(),
+            image_view: image.view,
+            image: image.image,
+            allocation: Some(image.allocation),
+            ctx,
             width,
             height,
             slot: Some(TextureSlot {
@@ -243,36 +182,34 @@ impl Texture {
                 bytes.len()
             )));
         }
-        let (image, image_view, view_create_info, allocation) = Self::create_image(
+        let (image, ctx) = Self::create_image(
             device,
             width,
             height,
             format,
             vk::ImageUsageFlags::SAMPLED | vk::ImageUsageFlags::TRANSFER_DST,
         )?;
-        uploader.upload_image(image, bytes, None, (width, height))?;
+        uploader.upload_image(image.image, bytes, None, (width, height))?;
         let heap = device.descriptor_heap();
         let handle = heap.alloc_image_slot()?;
         heap.write_resource_descriptors(&[(
             handle,
             crate::vulkan::descriptor_heap::TextureSlotDesc::new(
-                &view_create_info,
+                &image.view_create_info,
                 vk::ImageLayout::GENERAL,
             ),
         )])?;
         Ok(Self {
-            image_view,
-            image,
-            allocation: Some(allocation),
-            device: device.raw().clone(),
-            allocator: device.allocator().clone(),
-            ring: device.retirement_ring(),
+            image_view: image.view,
+            image: image.image,
+            allocation: Some(image.allocation),
+            ctx,
             width,
             height,
             slot: Some(TextureSlot {
                 handle,
                 heap,
-                view_create_info,
+                view_create_info: image.view_create_info,
             }),
             storage_slot: None,
         })
@@ -299,7 +236,7 @@ impl Texture {
     /// Borrow the image view as a backend-neutral [`TextureView`]; it must not
     /// outlive the texture.
     pub fn view(&self) -> crate::vulkan::view::TextureView {
-        crate::vulkan::view::TextureView::borrow_raw(self.image_view, self.device.clone())
+        crate::vulkan::view::TextureView::borrow_raw(self.image_view, self.ctx.clone())
     }
 
     /// The `(width, height)` of the texture.
@@ -332,18 +269,18 @@ impl Drop for Texture {
             .into_iter()
             .flatten()
         {
-            self.ring.push(RetireAction::ImageSlot {
-                heap: slot.heap,
+            self.ctx.ring().push(RetireAction::ImageSlot {
+                slots: slot.heap.image_slots(),
                 handle: slot.handle,
                 view_create_info: slot.view_create_info,
             });
         }
-        self.ring.push(RetireAction::Image {
-            device: self.device.clone(),
+        self.ctx.ring().push(RetireAction::Image {
+            device: self.ctx.raw().clone(),
             view: self.image_view,
             image: self.image,
             allocation: self.allocation.take(),
-            allocator: self.allocator.clone(),
+            allocator: self.ctx.allocator().clone(),
         });
     }
 }

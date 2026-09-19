@@ -2,17 +2,21 @@
 
 use crate::error::{Error, Result};
 use crate::types::{Extent2d, Format};
-use crate::vulkan::device::Device;
-use crate::vulkan::instance::Instance;
+use crate::vulkan::device::{Device, DeviceContext};
+use crate::vulkan::instance::{Instance, InstanceShared};
 use crate::vulkan::sync::Semaphore;
 use ash::vk;
 use raw_window_handle::{DisplayHandle, HasDisplayHandle, HasWindowHandle, WindowHandle};
+use std::sync::Arc;
 
 /// A window surface.
 pub struct Surface {
     surface: vk::SurfaceKHR,
     surface_instance: ash::khr::surface::Instance,
     capabilities2: ash::khr::get_surface_capabilities2::Instance,
+    /// Keepalive: destroying a surface requires a live instance, so the
+    /// surface holds one rather than relying on the caller's drop order.
+    _instance: Arc<InstanceShared>,
 }
 
 impl Surface {
@@ -39,6 +43,7 @@ impl Surface {
             surface,
             surface_instance: ash::khr::surface::Instance::load(entry, ash_instance),
             capabilities2: ash::khr::get_surface_capabilities2::Instance::load(entry, ash_instance),
+            _instance: instance.shared(),
         })
     }
 
@@ -125,6 +130,8 @@ impl Surface {
 
 impl Drop for Surface {
     fn drop(&mut self) {
+        // SAFETY: the surface was created from this instance and is destroyed
+        // exactly once, here; `_instance` keeps the instance alive.
         unsafe {
             self.surface_instance.destroy_surface(self.surface, None);
         }
@@ -138,7 +145,9 @@ pub struct Swapchain {
     format: vk::SurfaceFormatKHR,
     extent: vk::Extent2D,
     loader: ash::khr::swapchain::Device,
-    device: ash::Device,
+    /// Keeps the device alive until the swapchain and its image views are
+    /// destroyed in `Drop`.
+    ctx: DeviceContext,
 }
 
 impl Swapchain {
@@ -275,8 +284,28 @@ impl Swapchain {
             format: surface_format,
             extent,
             loader,
-            device: device.raw().clone(),
+            ctx: device.context(),
         })
+    }
+
+    /// Create the successor of `old` on the same surface.
+    ///
+    /// `old`'s handle is passed as `oldSwapchain` so the driver can recycle
+    /// the surface's images; a native window may have only one *non-retired*
+    /// swapchain, so replacing a swapchain that must stay alive (e.g. for
+    /// deferred destruction) has to go through here, not [`new`](Self::new).
+    /// The call retires `old` — even if creation fails: it may no longer be
+    /// acquired from, images already acquired from it may still be
+    /// presented, and ownership stays with the caller, who destroys it by
+    /// dropping it once no in-flight frame can still present it.
+    pub fn succeed(
+        instance: &Instance,
+        device: &Device,
+        surface: &Surface,
+        window_size: [u32; 2],
+        old: &Swapchain,
+    ) -> Result<Self> {
+        Self::create(instance, device, surface, window_size, Some(old.swapchain))
     }
 
     /// Recreate the swapchain for a new window size.
@@ -284,6 +313,8 @@ impl Swapchain {
     /// The current swapchain is passed to the driver as `oldSwapchain` so it
     /// can recycle the surface's images; the old swapchain is dropped after
     /// the new one is created. The caller must ensure the device is idle.
+    /// For recreation that keeps the old swapchain alive (deferred
+    /// destruction), use [`succeed`](Self::succeed) instead.
     pub fn recreate(
         &mut self,
         instance: &Instance,
@@ -303,7 +334,7 @@ impl Swapchain {
     pub fn image_view(&self, index: u32) -> crate::vulkan::view::TextureView {
         crate::vulkan::view::TextureView::borrow_raw(
             self.image_views[index as usize],
-            self.device.clone(),
+            self.ctx.clone(),
         )
     }
 
@@ -388,9 +419,11 @@ impl Swapchain {
 
 impl Drop for Swapchain {
     fn drop(&mut self) {
+        // SAFETY: the swapchain and its views were created by this device and
+        // are destroyed exactly once, here; `ctx` keeps the device alive.
         unsafe {
             for view in self.image_views.drain(..) {
-                self.device.destroy_image_view(view, None);
+                self.ctx.raw().destroy_image_view(view, None);
             }
             self.loader.destroy_swapchain(self.swapchain, None);
         }

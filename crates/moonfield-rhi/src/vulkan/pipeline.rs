@@ -1,14 +1,13 @@
 //! Vulkan pipeline abstractions (graphics and compute).
 
 use crate::error::{Error, Result};
+use crate::retire::RetireAction;
 use crate::types::Format;
-use crate::vulkan::device::Device;
-use crate::vulkan::retire::{RetireAction, RetirementRing};
+use crate::vulkan::device::{Device, DeviceContext};
 use crate::vulkan::shader_module::ShaderModule;
 use ash::vk;
 use ash::vk::Handle as _;
 use ash::vk::TaggedStructure as _;
-use std::sync::Arc;
 
 /// How the pipeline's single color attachment blends with existing pixels.
 ///
@@ -39,8 +38,9 @@ pub struct ShaderStageDesc<'a> {
 /// A Vulkan graphics pipeline.
 pub struct GraphicsPipeline {
     pipeline: vk::Pipeline,
-    device: ash::Device,
-    ring: Arc<RetirementRing>,
+    /// Keeps the device alive; its retirement ring takes the deferred
+    /// teardown in `Drop` (in-flight frames may still bind the pipeline).
+    ctx: DeviceContext,
 }
 
 impl GraphicsPipeline {
@@ -271,8 +271,7 @@ impl GraphicsPipeline {
 
         Ok(Self {
             pipeline: pipelines[0],
-            device: device.raw().clone(),
-            ring: device.retirement_ring(),
+            ctx: device.context(),
         })
     }
 
@@ -295,10 +294,14 @@ impl GraphicsPipeline {
 
 impl Drop for GraphicsPipeline {
     fn drop(&mut self) {
-        // Pipelines are bound into command buffers; in-flight frames may
-        // still reference this one, so teardown defers through the ring.
-        self.ring.push(RetireAction::Pipeline {
-            device: self.device.clone(),
+        // Teardown is deferred: in-flight frames may still execute draws
+        // bound to this pipeline (a hot-reload rebuild replaces it while the
+        // retired copy's frames drain). The ring drains RETIRE_RING frames
+        // later; the action carries the raw device handle, so it stays valid
+        // whenever the ring drains (the device outlives every context holder,
+        // and the drain happens no later than device teardown).
+        self.ctx.ring().push(RetireAction::Pipeline {
+            device: self.ctx.raw().clone(),
             pipeline: self.pipeline,
         });
     }
@@ -314,8 +317,9 @@ impl Drop for GraphicsPipeline {
 /// a kernel with two pointer parameters.
 pub struct ComputePipeline {
     pipeline: vk::Pipeline,
-    device: ash::Device,
-    ring: Arc<RetirementRing>,
+    /// Keeps the device alive; its retirement ring takes the deferred
+    /// teardown in `Drop` (in-flight frames may still bind the pipeline).
+    ctx: DeviceContext,
 }
 
 impl ComputePipeline {
@@ -366,8 +370,7 @@ impl ComputePipeline {
         .map_err(|e| Error::Backend(format!("failed to create compute pipeline: {:?}", e)))?;
         Ok(Self {
             pipeline: pipelines[0],
-            device: device.raw().clone(),
-            ring: device.retirement_ring(),
+            ctx: device.context(),
         })
     }
 
@@ -381,10 +384,10 @@ impl ComputePipeline {
 
 impl Drop for ComputePipeline {
     fn drop(&mut self) {
-        // As `GraphicsPipeline::drop`: command buffers reference pipelines
-        // through binds, so teardown defers through the ring.
-        self.ring.push(RetireAction::Pipeline {
-            device: self.device.clone(),
+        // Teardown is deferred, as `GraphicsPipeline`'s: in-flight frames may
+        // still execute dispatches bound to this pipeline.
+        self.ctx.ring().push(RetireAction::Pipeline {
+            device: self.ctx.raw().clone(),
             pipeline: self.pipeline,
         });
     }

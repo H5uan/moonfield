@@ -14,14 +14,14 @@
 
 use crate::error::{Error, Result};
 use crate::types::{Filter, Format, SamplerDesc, WrapMode};
-use crate::vulkan::device::Device;
+use crate::vulkan::device::{Device, DeviceContext};
+use crate::vulkan::image::Image2d;
 use crate::vulkan::memory::{GpuAllocation, Memory};
-use crate::vulkan::retire::{RetireAction, RetirementRing};
+use crate::vulkan::retire::RetireAction;
 use crate::vulkan::sync::Fence;
 use crate::{CommandBuffer, CommandPool, DescriptorHeap, SamplerHandle, TextureHandle};
 use ash::vk;
-use gpu_allocator::MemoryLocation;
-use gpu_allocator::vulkan::{Allocation, AllocationCreateDesc, AllocationScheme};
+use gpu_allocator::vulkan::Allocation;
 use std::sync::Arc;
 /// The target's descriptor-heap slots: the color view's image slot and the
 /// linear/clamp sampler from the heap's description cache. A resize
@@ -37,8 +37,9 @@ struct HeapSlots {
     /// p_view`), so it must outlive the slot. `Drop` moves it into the
     /// retirement action, which frees the slot.
     view_create_info: vk::ImageViewCreateInfo<'static>,
-    /// Device-level retirement ring; `Drop` enqueues the teardown here.
-    ring: Arc<RetirementRing>,
+    /// Shared device state; `Drop` enqueues the slot teardown into its
+    /// retirement ring.
+    ctx: DeviceContext,
 }
 
 impl HeapSlots {
@@ -60,7 +61,7 @@ impl HeapSlots {
             sampler,
             heap,
             view_create_info,
-            ring: device.retirement_ring(),
+            ctx: device.context(),
         })
     }
 }
@@ -71,8 +72,8 @@ impl Drop for HeapSlots {
         // slot. The action carries the view create info (the heap's
         // encoded descriptor references it by pointer). The sampler slot
         // is cached and never freed.
-        self.ring.push(RetireAction::ImageSlot {
-            heap: self.heap.clone(),
+        self.ctx.ring().push(RetireAction::ImageSlot {
+            slots: self.heap.image_slots(),
             handle: self.texture,
             view_create_info: self.view_create_info,
         });
@@ -94,10 +95,9 @@ pub struct OffscreenTarget {
     depth_image_view: Option<vk::ImageView>,
     depth_image: Option<vk::Image>,
     depth_allocation: Option<Allocation>,
-    device: ash::Device,
-    allocator: std::sync::Arc<std::sync::Mutex<gpu_allocator::vulkan::Allocator>>,
-    /// Device-level retirement ring; `Drop` enqueues the image teardown here.
-    ring: Arc<RetirementRing>,
+    /// Shared device state: keeps the device alive and takes the deferred
+    /// image teardown in `Drop`.
+    ctx: DeviceContext,
     format: Format,
     extent: vk::Extent2D,
     has_depth: bool,
@@ -143,41 +143,29 @@ impl OffscreenTarget {
 
         let format_vk = format.to_vk();
         let extent = vk::Extent2D { width, height };
-        let allocator = device.allocator().clone();
-        let (image, allocation) = create_color_image(device, &allocator, extent, format_vk)?;
-        let (image_view, view_create_info) =
-            create_image_view(device, image, format_vk, vk::ImageAspectFlags::COLOR)?;
-        let (depth_image, depth_allocation, depth_image_view) = if with_depth {
-            let (image, allocation) = create_depth_image(device, &allocator, extent)?;
-            let view = create_image_view(
-                device,
-                image,
-                vk::Format::D32_SFLOAT,
-                vk::ImageAspectFlags::DEPTH,
-            )?
-            .0;
-            (Some(image), Some(allocation), Some(view))
+        let ctx = device.context();
+        let color = create_color_image(&ctx, extent, format_vk)?;
+        let depth = if with_depth {
+            Some(create_depth_image(&ctx, extent)?)
         } else {
-            (None, None, None)
+            None
         };
 
-        transition_to_shader_read(device, image)?;
+        transition_to_shader_read(device, color.image)?;
 
         // Publish the color view and the fixed sampler to the descriptor
         // heap.
-        let heap_slots = HeapSlots::new(device, view_create_info)?;
+        let heap_slots = HeapSlots::new(device, color.view_create_info)?;
 
         Ok(Self {
             heap_slots,
-            image_view,
-            image,
-            allocation: Some(allocation),
-            depth_image_view,
-            depth_image,
-            depth_allocation,
-            device: device.raw().clone(),
-            allocator,
-            ring: device.retirement_ring(),
+            image_view: color.view,
+            image: color.image,
+            allocation: Some(color.allocation),
+            depth_image_view: depth.as_ref().map(|d| d.view),
+            depth_image: depth.as_ref().map(|d| d.image),
+            depth_allocation: depth.map(|d| d.allocation),
+            ctx,
             format,
             extent,
             has_depth: with_depth,
@@ -199,36 +187,26 @@ impl OffscreenTarget {
 
         let extent = vk::Extent2D { width, height };
         let format_vk = self.format.to_vk();
-        let (image, allocation) = create_color_image(device, &self.allocator, extent, format_vk)?;
-        let (image_view, view_create_info) =
-            create_image_view(device, image, format_vk, vk::ImageAspectFlags::COLOR)?;
-        let heap_slots = HeapSlots::new(device, view_create_info)?;
-        let (depth_image, depth_allocation, depth_image_view) = if self.has_depth {
-            let (image, allocation) = create_depth_image(device, &self.allocator, extent)?;
-            let view = create_image_view(
-                device,
-                image,
-                vk::Format::D32_SFLOAT,
-                vk::ImageAspectFlags::DEPTH,
-            )?
-            .0;
-            (Some(image), Some(allocation), Some(view))
+        let color = create_color_image(&self.ctx, extent, format_vk)?;
+        let heap_slots = HeapSlots::new(device, color.view_create_info)?;
+        let depth = if self.has_depth {
+            Some(create_depth_image(&self.ctx, extent)?)
         } else {
-            (None, None, None)
+            None
         };
 
-        transition_to_shader_read(device, image)?;
+        transition_to_shader_read(device, color.image)?;
 
         // Swap in the new target; the old image, views, allocations, and
         // heap slots retire through the ring.
         self.retire_images();
         self.heap_slots = heap_slots;
-        self.image_view = image_view;
-        self.image = image;
-        self.allocation = Some(allocation);
-        self.depth_image_view = depth_image_view;
-        self.depth_image = depth_image;
-        self.depth_allocation = depth_allocation;
+        self.image_view = color.view;
+        self.image = color.image;
+        self.allocation = Some(color.allocation);
+        self.depth_image_view = depth.as_ref().map(|d| d.view);
+        self.depth_image = depth.as_ref().map(|d| d.image);
+        self.depth_allocation = depth.map(|d| d.allocation);
         self.extent = extent;
         Ok(())
     }
@@ -245,14 +223,14 @@ impl OffscreenTarget {
     /// The returned view borrows this target's underlying `vk::ImageView`; it
     /// does not own it and must not outlive the target.
     pub fn view(&self) -> crate::vulkan::view::TextureView {
-        crate::vulkan::view::TextureView::borrow_raw(self.image_view, self.device.clone())
+        crate::vulkan::view::TextureView::borrow_raw(self.image_view, self.ctx.clone())
     }
 
     /// Borrow the depth image view, if present (for the depth attachment of a
     /// [`RenderPassDesc`](crate::RenderPassDesc)).
     pub fn depth_view(&self) -> Option<crate::vulkan::view::TextureView> {
         self.depth_image_view
-            .map(|view| crate::vulkan::view::TextureView::borrow_raw(view, self.device.clone()))
+            .map(|view| crate::vulkan::view::TextureView::borrow_raw(view, self.ctx.clone()))
     }
 
     /// The color attachment format of this target.
@@ -373,24 +351,24 @@ impl OffscreenTarget {
     /// allocations). The heap slots retire separately through `HeapSlots`'s
     /// own `Drop`.
     fn retire_images(&mut self) {
-        self.ring.push(RetireAction::Image {
-            device: self.device.clone(),
+        self.ctx.ring().push(RetireAction::Image {
+            device: self.ctx.raw().clone(),
             view: self.image_view,
             image: self.image,
             allocation: self.allocation.take(),
-            allocator: self.allocator.clone(),
+            allocator: self.ctx.allocator().clone(),
         });
         if let (Some(view), Some(image), Some(allocation)) = (
             self.depth_image_view.take(),
             self.depth_image.take(),
             self.depth_allocation.take(),
         ) {
-            self.ring.push(RetireAction::Image {
-                device: self.device.clone(),
+            self.ctx.ring().push(RetireAction::Image {
+                device: self.ctx.raw().clone(),
                 view,
                 image,
                 allocation: Some(allocation),
-                allocator: self.allocator.clone(),
+                allocator: self.ctx.allocator().clone(),
             });
         }
     }
@@ -415,10 +393,9 @@ pub struct DepthBuffer {
     image: vk::Image,
     image_view: vk::ImageView,
     allocation: Option<Allocation>,
-    device: ash::Device,
-    allocator: std::sync::Arc<std::sync::Mutex<gpu_allocator::vulkan::Allocator>>,
-    /// Device-level retirement ring; `Drop` enqueues the teardown here.
-    ring: Arc<RetirementRing>,
+    /// Shared device state: keeps the device alive and takes the deferred
+    /// teardown in `Drop`.
+    ctx: DeviceContext,
     extent: vk::Extent2D,
 }
 
@@ -432,21 +409,12 @@ impl DepthBuffer {
             )));
         }
         let extent = vk::Extent2D { width, height };
-        let allocator = device.allocator().clone();
-        let (image, allocation) = create_depth_image(device, &allocator, extent)?;
-        let (image_view, _) = create_image_view(
-            device,
-            image,
-            vk::Format::D32_SFLOAT,
-            vk::ImageAspectFlags::DEPTH,
-        )?;
+        let depth = create_depth_image(&device.context(), extent)?;
         Ok(Self {
-            image,
-            image_view,
-            allocation: Some(allocation),
-            device: device.raw().clone(),
-            allocator,
-            ring: device.retirement_ring(),
+            image: depth.image,
+            image_view: depth.view,
+            allocation: Some(depth.allocation),
+            ctx: device.context(),
             extent,
         })
     }
@@ -468,7 +436,7 @@ impl DepthBuffer {
     /// [`RenderPassDesc`](crate::RenderPassDesc)). The view borrows this
     /// buffer's; it must not outlive the buffer.
     pub fn view(&self) -> crate::vulkan::view::TextureView {
-        crate::vulkan::view::TextureView::borrow_raw(self.image_view, self.device.clone())
+        crate::vulkan::view::TextureView::borrow_raw(self.image_view, self.ctx.clone())
     }
 
     /// The `(width, height)` of the buffer.
@@ -480,162 +448,48 @@ impl DepthBuffer {
 impl Drop for DepthBuffer {
     fn drop(&mut self) {
         // Deferred teardown, same contract as `OffscreenTarget::retire_images`.
-        self.ring.push(RetireAction::Image {
-            device: self.device.clone(),
+        self.ctx.ring().push(RetireAction::Image {
+            device: self.ctx.raw().clone(),
             view: self.image_view,
             image: self.image,
             allocation: self.allocation.take(),
-            allocator: self.allocator.clone(),
+            allocator: self.ctx.allocator().clone(),
         });
     }
 }
 
+/// Create the color attachment image (renderable + sampleable + copy source).
 fn create_color_image(
-    device: &Device,
-    allocator: &std::sync::Arc<std::sync::Mutex<gpu_allocator::vulkan::Allocator>>,
+    ctx: &DeviceContext,
     extent: vk::Extent2D,
     format: vk::Format,
-) -> Result<(vk::Image, Allocation)> {
-    let image_info = vk::ImageCreateInfo::default()
-        .image_type(vk::ImageType::TYPE_2D)
-        .format(format)
-        .extent(vk::Extent3D {
-            width: extent.width,
-            height: extent.height,
-            depth: 1,
-        })
-        .mip_levels(1)
-        .array_layers(1)
-        .samples(vk::SampleCountFlags::TYPE_1)
-        .tiling(vk::ImageTiling::OPTIMAL)
-        .usage(
-            vk::ImageUsageFlags::COLOR_ATTACHMENT
-                | vk::ImageUsageFlags::SAMPLED
-                | vk::ImageUsageFlags::TRANSFER_SRC,
-        )
-        .sharing_mode(vk::SharingMode::EXCLUSIVE)
-        .initial_layout(vk::ImageLayout::UNDEFINED);
-
-    // SAFETY: the device is valid and the create info describes a legal image.
-    let image = unsafe {
-        device
-            .raw()
-            .create_image(&image_info, None)
-            .map_err(|e| Error::Backend(format!("failed to create offscreen image: {:?}", e)))?
-    };
-
-    // SAFETY: the image was just created and has no bound memory yet.
-    let requirements = unsafe { device.raw().get_image_memory_requirements(image) };
-    let allocation = allocator
-        .lock()
-        .unwrap_or_else(|e| e.into_inner())
-        .allocate(&AllocationCreateDesc {
-            name: "offscreen-color",
-            requirements,
-            location: MemoryLocation::GpuOnly,
-            linear: false,
-            allocation_scheme: AllocationScheme::GpuAllocatorManaged,
-        })
-        .map_err(|e| Error::Backend(format!("failed to allocate offscreen image memory: {e}")))?;
-
-    // SAFETY: the allocation satisfies the image's memory requirements.
-    unsafe {
-        device
-            .raw()
-            .bind_image_memory(image, allocation.memory(), allocation.offset())
-            .map_err(|e| {
-                Error::Backend(format!("failed to bind offscreen image memory: {:?}", e))
-            })?;
-    }
-
-    Ok((image, allocation))
-}
-
-fn create_image_view(
-    device: &Device,
-    image: vk::Image,
-    format: vk::Format,
-    aspect: vk::ImageAspectFlags,
-) -> Result<(vk::ImageView, vk::ImageViewCreateInfo<'static>)> {
-    let create_info = vk::ImageViewCreateInfo::default()
-        .image(image)
-        .view_type(vk::ImageViewType::TYPE_2D)
-        .format(format)
-        .subresource_range(
-            vk::ImageSubresourceRange::default()
-                .aspect_mask(aspect)
-                .base_mip_level(0)
-                .level_count(1)
-                .base_array_layer(0)
-                .layer_count(1),
-        );
-    // SAFETY: the image is valid and lives longer than the view.
-    let view = unsafe {
-        device
-            .raw()
-            .create_image_view(&create_info, None)
-            .map_err(|e| {
-                Error::Backend(format!("failed to create offscreen image view: {:?}", e))
-            })?
-    };
-    Ok((view, create_info))
+) -> Result<Image2d> {
+    Image2d::new(
+        ctx,
+        "offscreen-color",
+        extent.width,
+        extent.height,
+        format,
+        vk::ImageUsageFlags::COLOR_ATTACHMENT
+            | vk::ImageUsageFlags::SAMPLED
+            | vk::ImageUsageFlags::TRANSFER_SRC,
+        vk::ImageAspectFlags::COLOR,
+    )
 }
 
 /// Create a `D32Sfloat` depth attachment image. No explicit transition is
 /// needed: the render pass moves it from `UNDEFINED` to
 /// `DEPTH_STENCIL_ATTACHMENT_OPTIMAL`.
-fn create_depth_image(
-    device: &Device,
-    allocator: &std::sync::Arc<std::sync::Mutex<gpu_allocator::vulkan::Allocator>>,
-    extent: vk::Extent2D,
-) -> Result<(vk::Image, Allocation)> {
-    let image_info = vk::ImageCreateInfo::default()
-        .image_type(vk::ImageType::TYPE_2D)
-        .format(vk::Format::D32_SFLOAT)
-        .extent(vk::Extent3D {
-            width: extent.width,
-            height: extent.height,
-            depth: 1,
-        })
-        .mip_levels(1)
-        .array_layers(1)
-        .samples(vk::SampleCountFlags::TYPE_1)
-        .tiling(vk::ImageTiling::OPTIMAL)
-        .usage(vk::ImageUsageFlags::DEPTH_STENCIL_ATTACHMENT)
-        .sharing_mode(vk::SharingMode::EXCLUSIVE)
-        .initial_layout(vk::ImageLayout::UNDEFINED);
-
-    // SAFETY: the device is valid and the create info describes a legal image.
-    let image = unsafe {
-        device
-            .raw()
-            .create_image(&image_info, None)
-            .map_err(|e| Error::Backend(format!("failed to create depth image: {:?}", e)))?
-    };
-
-    // SAFETY: the image was just created and has no bound memory yet.
-    let requirements = unsafe { device.raw().get_image_memory_requirements(image) };
-    let allocation = allocator
-        .lock()
-        .unwrap_or_else(|e| e.into_inner())
-        .allocate(&AllocationCreateDesc {
-            name: "offscreen-depth",
-            requirements,
-            location: MemoryLocation::GpuOnly,
-            linear: false,
-            allocation_scheme: AllocationScheme::GpuAllocatorManaged,
-        })
-        .map_err(|e| Error::Backend(format!("failed to allocate depth image memory: {e}")))?;
-
-    // SAFETY: the allocation satisfies the image's memory requirements.
-    unsafe {
-        device
-            .raw()
-            .bind_image_memory(image, allocation.memory(), allocation.offset())
-            .map_err(|e| Error::Backend(format!("failed to bind depth image memory: {:?}", e)))?;
-    }
-
-    Ok((image, allocation))
+fn create_depth_image(ctx: &DeviceContext, extent: vk::Extent2D) -> Result<Image2d> {
+    Image2d::new(
+        ctx,
+        "offscreen-depth",
+        extent.width,
+        extent.height,
+        vk::Format::D32_SFLOAT,
+        vk::ImageUsageFlags::DEPTH_STENCIL_ATTACHMENT,
+        vk::ImageAspectFlags::DEPTH,
+    )
 }
 
 /// The target's fixed sampler settings (linear filtering, clamp to edge),

@@ -5,13 +5,12 @@ use crate::types::{
     AttachmentLayout, ClearValue, CommandBufferUsage, CompareOp, CullMode, FrontFace, LoadOp,
     Rect2d, StoreOp, Viewport,
 };
-use crate::vulkan::device::Device;
+use crate::vulkan::device::{Device, DeviceContext};
 use crate::vulkan::memory::GpuPtr;
 use crate::vulkan::sync::{Access, Stage, TimestampQueryPool};
 use crate::vulkan::view::TextureView;
 use crate::{BlendMode, ComputePipeline, GraphicsPipeline};
 use ash::vk;
-use std::sync::Arc;
 
 /// One attachment of a render pass, in the crate's own vocabulary.
 #[derive(Clone)]
@@ -43,10 +42,10 @@ pub struct RenderPassDesc<'a> {
 /// A Vulkan command pool.
 pub struct CommandPool {
     pool: vk::CommandPool,
-    device: ash::Device,
-    /// Shared aggregated device-extension loaders (an `Arc`, so command
-    /// buffers from this pool share the same function-pointer tables).
-    ext: Arc<crate::vulkan::DeviceExtensionFunctions>,
+    /// Shared device state: keeps the device alive until the pool is
+    /// destroyed in `Drop`, and hands the aggregated extension loaders to
+    /// command buffers without copying the function-pointer tables.
+    ctx: DeviceContext,
 }
 
 impl CommandPool {
@@ -67,8 +66,7 @@ impl CommandPool {
 
         Ok(Self {
             pool,
-            device: device.raw().clone(),
-            ext: device.extension_fns(),
+            ctx: device.context(),
         })
     }
 
@@ -82,7 +80,8 @@ impl CommandPool {
         // SAFETY: the pool is valid and the allocate info requests primary
         // buffers from it.
         let buffers = unsafe {
-            self.device
+            self.ctx
+                .raw()
                 .allocate_command_buffers(&allocate_info)
                 .map_err(|e| {
                     Error::Backend(format!("failed to allocate command buffer: {:?}", e))
@@ -92,8 +91,7 @@ impl CommandPool {
         Ok(CommandBuffer {
             buffer: buffers[0],
             pool: self.pool,
-            device: self.device.clone(),
-            ext: self.ext.clone(),
+            ctx: self.ctx.clone(),
             recording: false,
         })
     }
@@ -102,9 +100,9 @@ impl CommandPool {
 impl Drop for CommandPool {
     fn drop(&mut self) {
         // SAFETY: the pool was created by this device and is destroyed exactly
-        // once, here.
+        // once, here; `ctx` keeps the device alive.
         unsafe {
-            self.device.destroy_command_pool(self.pool, None);
+            self.ctx.raw().destroy_command_pool(self.pool, None);
         }
     }
 }
@@ -128,12 +126,12 @@ pub struct CullState {
 pub struct CommandBuffer {
     buffer: vk::CommandBuffer,
     pool: vk::CommandPool,
-    device: ash::Device,
-    /// Shared aggregated device-extension loaders (`Arc<...>`, so every
+    /// Shared device state: keeps the device alive and carries the
+    /// aggregated extension loaders (reached through `Deref`, so every
     /// command buffer from a pool shares the same function-pointer tables —
     /// wgpu keeps the table in `Arc<DeviceShared>` and never copies it into
     /// the command buffer either).
-    ext: Arc<crate::vulkan::DeviceExtensionFunctions>,
+    ctx: DeviceContext,
     recording: bool,
 }
 
@@ -151,7 +149,8 @@ impl CommandBuffer {
         // (the uploader waits on its slot timeline), and the pool was created
         // with RESET_COMMAND_BUFFER.
         unsafe {
-            self.device
+            self.ctx
+                .raw()
                 .begin_command_buffer(self.buffer, &begin_info)
                 .map_err(|e| Error::Backend(format!("failed to begin command buffer: {:?}", e)))?;
         }
@@ -164,7 +163,8 @@ impl CommandBuffer {
         // SAFETY: the command buffer is in the recording state — callers pair
         // `end` with a successful `begin`.
         unsafe {
-            self.device
+            self.ctx
+                .raw()
                 .end_command_buffer(self.buffer)
                 .map_err(|e| Error::Backend(format!("failed to end command buffer: {:?}", e)))?;
         }
@@ -228,31 +228,39 @@ impl CommandBuffer {
         // live and in the layouts declared by `desc`, and pipelines used in
         // the pass declare these dynamic states (see `pipeline.rs`).
         unsafe {
-            self.device
+            self.ctx
+                .raw()
                 .cmd_begin_rendering(self.buffer, &rendering_info);
-            self.device
+            self.ctx
+                .raw()
                 .cmd_set_viewport(self.buffer, 0, std::slice::from_ref(&viewport));
-            self.device
+            self.ctx
+                .raw()
                 .cmd_set_scissor(self.buffer, 0, std::slice::from_ref(&render_area));
             // Dynamic states are sticky across passes, so entering a rendering
             // pass resets them to defaults (no_gfx_api convention): blend off,
             // back-face culling, depth off. Draws set only the differences.
-            self.device
+            self.ctx
+                .raw()
                 .cmd_set_cull_mode(self.buffer, vk::CullModeFlags::BACK);
-            self.device
+            self.ctx
+                .raw()
                 .cmd_set_front_face(self.buffer, vk::FrontFace::CLOCKWISE);
-            self.device.cmd_set_depth_test_enable(self.buffer, false);
-            self.device.cmd_set_depth_write_enable(self.buffer, false);
-            self.device
+            self.ctx.raw().cmd_set_depth_test_enable(self.buffer, false);
+            self.ctx
+                .raw()
+                .cmd_set_depth_write_enable(self.buffer, false);
+            self.ctx
+                .raw()
                 .cmd_set_depth_compare_op(self.buffer, vk::CompareOp::GREATER_OR_EQUAL);
-            self.ext
+            self.ctx
+                .extension_fns()
                 .extended_dynamic_state3
                 .cmd_set_color_blend_enable(self.buffer, 0, &[0]);
-            self.ext.extended_dynamic_state3.cmd_set_color_write_mask(
-                self.buffer,
-                0,
-                &[vk::ColorComponentFlags::RGBA],
-            );
+            self.ctx
+                .extension_fns()
+                .extended_dynamic_state3
+                .cmd_set_color_write_mask(self.buffer, 0, &[vk::ColorComponentFlags::RGBA]);
         }
     }
 
@@ -260,7 +268,7 @@ impl CommandBuffer {
     pub fn end_rendering(&self) {
         // SAFETY: the command buffer is inside a render pass begun by
         // `begin_rendering`.
-        unsafe { self.device.cmd_end_rendering(self.buffer) }
+        unsafe { self.ctx.raw().cmd_end_rendering(self.buffer) }
     }
 
     /// Override the dynamic viewport (e.g. a negative height to map the
@@ -271,8 +279,11 @@ impl CommandBuffer {
         // SAFETY: the command buffer is recording and pipelines declare
         // dynamic viewport state.
         unsafe {
-            self.device
-                .cmd_set_viewport(self.buffer, 0, std::slice::from_ref(&viewport.to_vk()));
+            self.ctx.raw().cmd_set_viewport(
+                self.buffer,
+                0,
+                std::slice::from_ref(&viewport.to_vk()),
+            );
         }
     }
 
@@ -283,7 +294,8 @@ impl CommandBuffer {
         // SAFETY: the command buffer is recording and pipelines declare
         // dynamic scissor state.
         unsafe {
-            self.device
+            self.ctx
+                .raw()
                 .cmd_set_scissor(self.buffer, 0, std::slice::from_ref(&scissor.to_vk()));
         }
     }
@@ -296,13 +308,13 @@ impl CommandBuffer {
         // SAFETY: the command buffer is recording and the attachment indices
         // target attachment 0 of the current dynamic rendering pass.
         unsafe {
-            self.ext.extended_dynamic_state3.cmd_set_color_blend_enable(
-                self.buffer,
-                0,
-                &[enable as u32],
-            );
+            self.ctx
+                .extension_fns()
+                .extended_dynamic_state3
+                .cmd_set_color_blend_enable(self.buffer, 0, &[enable as u32]);
             if enable {
-                self.ext
+                self.ctx
+                    .extension_fns()
                     .extended_dynamic_state3
                     .cmd_set_color_blend_equation(
                         self.buffer,
@@ -317,11 +329,10 @@ impl CommandBuffer {
                         }],
                     );
             }
-            self.ext.extended_dynamic_state3.cmd_set_color_write_mask(
-                self.buffer,
-                0,
-                &[vk::ColorComponentFlags::RGBA],
-            );
+            self.ctx
+                .extension_fns()
+                .extended_dynamic_state3
+                .cmd_set_color_write_mask(self.buffer, 0, &[vk::ColorComponentFlags::RGBA]);
         }
     }
 
@@ -332,9 +343,11 @@ impl CommandBuffer {
         // SAFETY: the command buffer is recording and the pipeline uses
         // dynamic cull/front-face state.
         unsafe {
-            self.device
+            self.ctx
+                .raw()
                 .cmd_set_cull_mode(self.buffer, state.cull_mode.to_vk());
-            self.device
+            self.ctx
+                .raw()
                 .cmd_set_front_face(self.buffer, state.front_face.to_vk());
         }
     }
@@ -344,11 +357,14 @@ impl CommandBuffer {
         // SAFETY: the command buffer is recording and the pipeline uses
         // dynamic depth-test/write/compare state.
         unsafe {
-            self.device
+            self.ctx
+                .raw()
                 .cmd_set_depth_test_enable(self.buffer, state.test_enable);
-            self.device
+            self.ctx
+                .raw()
                 .cmd_set_depth_write_enable(self.buffer, state.write_enable);
-            self.device
+            self.ctx
+                .raw()
                 .cmd_set_depth_compare_op(self.buffer, state.compare_op.to_vk());
         }
     }
@@ -372,7 +388,10 @@ impl CommandBuffer {
         // SAFETY: the byte range is valid for the call and the command buffer is
         // recording.
         unsafe {
-            self.ext.descriptor_heap.cmd_push_data(self.buffer, &info);
+            self.ctx
+                .extension_fns()
+                .descriptor_heap
+                .cmd_push_data(self.buffer, &info);
         }
     }
 
@@ -381,7 +400,7 @@ impl CommandBuffer {
         // SAFETY: the command buffer is recording and the pipeline is a live
         // graphics pipeline.
         unsafe {
-            self.device.cmd_bind_pipeline(
+            self.ctx.raw().cmd_bind_pipeline(
                 self.buffer,
                 vk::PipelineBindPoint::GRAPHICS,
                 pipeline.raw(),
@@ -394,7 +413,7 @@ impl CommandBuffer {
         // SAFETY: the command buffer is recording and the pipeline is a live
         // compute pipeline.
         unsafe {
-            self.device.cmd_bind_pipeline(
+            self.ctx.raw().cmd_bind_pipeline(
                 self.buffer,
                 vk::PipelineBindPoint::COMPUTE,
                 pipeline.raw(),
@@ -424,7 +443,7 @@ impl CommandBuffer {
         // SAFETY: the command buffer is recording with a compute pipeline
         // bound and its root data pushed (caller contract; see the method
         // docs).
-        unsafe { self.device.cmd_dispatch(self.buffer, x, y, z) };
+        unsafe { self.ctx.raw().cmd_dispatch(self.buffer, x, y, z) };
     }
 
     /// Launch a compute kernel whose workgroup counts are read from GPU
@@ -445,10 +464,15 @@ impl CommandBuffer {
         // SAFETY: the command buffer is recording with a compute pipeline
         // bound, and `args` addresses a live, fully-bound allocation holding
         // a dispatch record (caller contract).
-        let ext = self.ext.device_address_commands.as_ref().expect(
-            "dispatch_indirect requires VK_KHR_device_address_commands \
-             (query Device::device_address_commands first)",
-        );
+        let ext = self
+            .ctx
+            .extension_fns()
+            .device_address_commands
+            .as_ref()
+            .expect(
+                "dispatch_indirect requires VK_KHR_device_address_commands \
+                 (query Device::device_address_commands first)",
+            );
         unsafe {
             ext.cmd_dispatch_indirect2(self.buffer, &info);
         }
@@ -477,10 +501,15 @@ impl CommandBuffer {
         // SAFETY: the command buffer is recording and both address ranges
         // reference live, fully-bound, transfer-capable allocations whose
         // `size` ranges fit (caller contract).
-        let ext = self.ext.device_address_commands.as_ref().expect(
-            "cmd_memcpy requires VK_KHR_device_address_commands \
-             (query Device::device_address_commands first)",
-        );
+        let ext = self
+            .ctx
+            .extension_fns()
+            .device_address_commands
+            .as_ref()
+            .expect(
+                "cmd_memcpy requires VK_KHR_device_address_commands \
+                 (query Device::device_address_commands first)",
+            );
         unsafe {
             ext.cmd_copy_memory(self.buffer, &copy_info);
         }
@@ -493,7 +522,8 @@ impl CommandBuffer {
         // SAFETY: the command buffer is recording and the pool is live; the
         // caller records this before the pass's timestamp writes.
         unsafe {
-            self.device
+            self.ctx
+                .raw()
                 .cmd_reset_query_pool(self.buffer, queries.raw(), 0, queries.count());
         }
     }
@@ -506,7 +536,8 @@ impl CommandBuffer {
         // `index` is in range and reset for this submission (caller
         // contract; see `reset_timestamps`).
         unsafe {
-            self.device
+            self.ctx
+                .raw()
                 .cmd_write_timestamp2(self.buffer, stage.to_vk(), queries.raw(), index);
         }
     }
@@ -534,10 +565,15 @@ impl CommandBuffer {
         // query range was written this submission, and `dst` addresses a
         // live, fully-bound allocation with room for `count` u64s (caller
         // contract).
-        let ext = self.ext.device_address_commands.as_ref().expect(
-            "resolve_timestamps requires VK_KHR_device_address_commands \
-             (query Device::device_address_commands first)",
-        );
+        let ext = self
+            .ctx
+            .extension_fns()
+            .device_address_commands
+            .as_ref()
+            .expect(
+                "resolve_timestamps requires VK_KHR_device_address_commands \
+                 (query Device::device_address_commands first)",
+            );
         unsafe {
             ext.cmd_copy_query_pool_results_to_memory(
                 self.buffer,
@@ -579,7 +615,8 @@ impl CommandBuffer {
         // SAFETY: the command buffer is recording; a global memory barrier
         // names no resources, so no object lifetimes are involved.
         unsafe {
-            self.device
+            self.ctx
+                .raw()
                 .cmd_pipeline_barrier2(self.buffer, &dependency_info);
         }
     }
@@ -606,10 +643,15 @@ impl CommandBuffer {
         // pipeline bound, and `args` addresses a live, fully-bound allocation
         // holding `draw_count` stride-spaced argument records (caller
         // contract).
-        let ext = self.ext.device_address_commands.as_ref().expect(
-            "draw_indirect requires VK_KHR_device_address_commands \
-             (query Device::device_address_commands first)",
-        );
+        let ext = self
+            .ctx
+            .extension_fns()
+            .device_address_commands
+            .as_ref()
+            .expect(
+                "draw_indirect requires VK_KHR_device_address_commands \
+                 (query Device::device_address_commands first)",
+            );
         unsafe {
             ext.cmd_draw_indirect2(self.buffer, &info);
         }
@@ -646,10 +688,15 @@ impl CommandBuffer {
         // pipeline bound, and both addresses reference live, fully-bound
         // allocations holding the argument records and the u32 count (caller
         // contract).
-        let ext = self.ext.device_address_commands.as_ref().expect(
-            "draw_indirect_count requires VK_KHR_device_address_commands \
-             (query Device::device_address_commands first)",
-        );
+        let ext = self
+            .ctx
+            .extension_fns()
+            .device_address_commands
+            .as_ref()
+            .expect(
+                "draw_indirect_count requires VK_KHR_device_address_commands \
+                 (query Device::device_address_commands first)",
+            );
         unsafe {
             ext.cmd_draw_indirect_count2(self.buffer, &info);
         }
@@ -666,7 +713,7 @@ impl CommandBuffer {
         // SAFETY: the command buffer is inside a render pass with a graphics
         // pipeline bound.
         unsafe {
-            self.device.cmd_draw(
+            self.ctx.raw().cmd_draw(
                 self.buffer,
                 vertex_count,
                 instance_count,
@@ -689,7 +736,8 @@ impl CommandBuffer {
         // SAFETY: the command buffer is recording and the barrier structs
         // reference live images (upload/offscreen layout transitions).
         unsafe {
-            self.device
+            self.ctx
+                .raw()
                 .cmd_pipeline_barrier2(self.buffer, &dependency_info);
         }
     }
@@ -701,7 +749,8 @@ impl Drop for CommandBuffer {
         // once here; owners keep the pool alive past their buffers (see
         // `FrameUploader`'s field drop order).
         unsafe {
-            self.device
+            self.ctx
+                .raw()
                 .free_command_buffers(self.pool, std::slice::from_ref(&self.buffer));
         }
     }

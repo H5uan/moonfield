@@ -2,14 +2,14 @@
 //!
 //! [`RetirementRing`] is the RHI's single lifetime mechanism for resources an
 //! in-flight frame may still reference: textures, buffers, allocations,
-//! pipelines, and descriptor-heap slots. Dropping such a resource does not
-//! destroy it — the resource's `Drop` pushes teardown steps into the current
-//! frame slot's queue, and the frame loop drains that queue `RETIRE_RING`
-//! frames later, after its in-flight wait has passed. `Device::drop` drains
-//! whatever remains once the device is idle.
+//! pipelines, and descriptor-heap slots. Dropping such a resource does not destroy it — the
+//! resource's `Drop` pushes teardown steps into the current frame slot's
+//! queue, and the frame loop drains that queue `RETIRE_RING` frames later,
+//! after its in-flight wait has passed. `DeviceShared::drop` drains whatever
+//! remains once the last device referent is gone and the GPU is idle.
 //!
 
-use crate::vulkan::descriptor_heap::{DescriptorHeap, TextureHandle};
+use crate::vulkan::descriptor_heap::{SlotAllocator, TextureHandle};
 use ash::vk;
 use gpu_allocator::vulkan::{Allocation, Allocator};
 use std::sync::{Arc, Mutex};
@@ -23,13 +23,16 @@ pub const RETIRE_RING: usize = 2;
 /// composes its teardown out of these; nothing else runs at drain.
 ///
 /// Crate-internal: constructed by the resource `Drop` implementations in
-/// `memory`, `buffer`, `texture`, `offscreen`, and `pipeline`.
+/// `memory`, `texture`, `offscreen`, and `pipeline`.
 pub(crate) enum RetireAction {
     /// Return an image slot to the heap's freelist. Carries the view's
     /// create info — the heap encodes it by pointer (see `TextureSlotDesc`),
-    /// so it must stay alive until the slot is freed.
+    /// so it must stay alive until the slot is freed. Holds the heap's slot
+    /// allocator directly rather than the heap: the heap's backing
+    /// allocations keep the device alive, and an `Arc<DescriptorHeap>` here
+    /// would close a reference cycle through the ring that owns this action.
     ImageSlot {
-        heap: Arc<DescriptorHeap>,
+        slots: Arc<Mutex<SlotAllocator>>,
         handle: TextureHandle,
         /// Never read: the heap's encoded descriptor references the create
         /// info bytes by pointer, so they must stay valid until the slot is
@@ -52,9 +55,7 @@ pub(crate) enum RetireAction {
         allocation: Option<Allocation>,
         allocator: Arc<Mutex<Allocator>>,
     },
-    /// Destroy a pipeline. Command buffers reference pipelines through
-    /// binds, so a pipeline dropped mid-frame-loop (a shader-revision
-    /// rebuild) must defer destruction past the in-flight frames.
+    /// Destroy a pipeline.
     Pipeline {
         device: ash::Device,
         pipeline: vk::Pipeline,
@@ -66,11 +67,17 @@ impl RetireAction {
     /// drain runs inside the frame loop, which has no error channel.
     fn run(self) {
         match self {
-            Self::ImageSlot { heap, handle, .. } => {
+            Self::ImageSlot { slots, handle, .. } => {
                 // Freeing the slot ends the window in which the encoded
                 // descriptor (and the create info bytes it references) can
-                // be read; the action's copy drops when `run` returns.
-                if let Err(e) = heap.free_image_slot(handle) {
+                // be read; the action's copy drops when `run` returns. If
+                // the heap itself is already gone this is harmless CPU
+                // bookkeeping on its orphaned freelist.
+                if let Err(e) = slots
+                    .lock()
+                    .unwrap_or_else(|e| e.into_inner())
+                    .free(handle.0)
+                {
                     tracing::error!("failed to free retired image slot: {e}");
                 }
             }
@@ -117,8 +124,7 @@ impl RetireAction {
                 }
             }
             Self::Pipeline { device, pipeline } => {
-                // SAFETY: as `Image` — no in-flight work references the
-                // pipeline.
+                // SAFETY: as `Image`.
                 unsafe {
                     device.destroy_pipeline(pipeline, None);
                 }
@@ -152,9 +158,7 @@ impl RetirementRing {
     ///
     /// The caller has waited the in-flight timeline for the frame that last
     /// used `slot` (the frame loop's acquire), so its retirements are safe
-    /// to execute. Teardown cascaded by the drain itself (an action
-    /// releasing the last handle to a container whose fields retire in
-    /// turn) lands in the current slot and drains on its next cycle.
+    /// to execute.
     pub(crate) fn begin_frame(&self, slot: usize) {
         let drained = {
             let mut inner = self.inner.lock().unwrap_or_else(|e| e.into_inner());
@@ -163,7 +167,8 @@ impl RetirementRing {
             inner.current = slot;
             drained
         };
-        // Run outside the lock: cascaded teardown pushes back into the ring.
+        // Run outside the lock: actions may lock their own state (the heap
+        // slot freelist) and must not hold the ring's.
         for action in drained {
             action.run();
         }
@@ -178,10 +183,9 @@ impl RetirementRing {
         inner.slots[current].push(action);
     }
 
-    /// Drain every slot, including teardown cascaded by the drain itself
-    /// (an action releasing the last handle to a container whose fields
-    /// retire in turn). The caller must know the GPU is idle — no in-flight
-    /// work may reference the retired resources.
+    /// Drain every slot, looping so nothing queued mid-drain is left behind.
+    /// The caller must know the GPU is idle — no in-flight work may reference
+    /// the retired resources.
     pub(crate) fn drain_all(&self) {
         loop {
             let batch = {

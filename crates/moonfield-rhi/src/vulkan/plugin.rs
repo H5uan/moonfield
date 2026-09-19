@@ -25,8 +25,9 @@ use tracing::{info, warn};
 /// Cloneable (cheap `Arc` clones) so windowed renderers can hold the device
 /// alive independently of the resource's lifetime.
 ///
-/// Field order matters: `device` drops before `instance` (a Vulkan instance
-/// must not be destroyed while its logical devices are still alive).
+/// Field order is not load-bearing for correctness: the device keeps the
+/// instance alive through its own shared state (`DeviceShared` holds an
+/// `Arc` to the instance's), so any teardown order is safe.
 #[derive(Clone)]
 pub struct RenderDevice {
     device: Arc<Device>,

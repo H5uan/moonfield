@@ -8,6 +8,7 @@ pub mod bump;
 pub mod command;
 pub mod descriptor_heap;
 pub mod device;
+pub mod image;
 pub mod instance;
 pub mod memory;
 pub mod offscreen;
@@ -23,9 +24,10 @@ pub mod upload;
 pub mod view;
 
 /// Aggregated device-extension loaders, built once at device creation and
-/// shared with command buffers through an `Arc` — the same shape
-/// `wgpu_hal::vulkan::DeviceExtensionFunctions` has inside `Arc<DeviceShared>`.
-/// A loader is a function-pointer table; cloning the `Arc` copies no tables.
+/// shared through [`DeviceContext`](device::DeviceContext) — the same shape
+/// `wgpu_hal::vulkan::DeviceExtensionFunctions` has inside
+/// `Arc<DeviceShared>`. A loader is a function-pointer table; every command
+/// buffer reaches the one copy in `DeviceShared` instead of cloning tables.
 pub(crate) struct DeviceExtensionFunctions {
     /// `VK_EXT_extended_dynamic_state3` per-draw blend commands. Loaders are
     /// plain function-pointer tables, not promoted core features; the RHI

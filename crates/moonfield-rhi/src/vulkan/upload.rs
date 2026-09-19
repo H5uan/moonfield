@@ -2,6 +2,7 @@ use ash::vk;
 
 use crate::CommandBufferUsage;
 use crate::error::{Error, Result};
+use crate::vulkan::device::DeviceContext;
 use crate::vulkan::memory::GpuAllocation;
 use crate::{CommandBuffer, CommandPool, GpuBumpAllocator, Semaphore, vulkan::Device};
 pub const UPLOAD_FRAME_RING: usize = 2;
@@ -9,10 +10,11 @@ pub const UPLOAD_FRAME_RING: usize = 2;
 pub const UPLOAD_ARENA_SIZE: u64 = 4 * 1024 * 1024;
 
 pub struct FrameUploader {
-    // Owned resources pulled from `Device` at construction so the uploader
-    // is lifetime-free: it can live in ECS resources or behind an `Arc` and
-    // outlive the `&Device` that created it.
-    device: ash::Device,
+    // Shared device state captured at construction so the uploader is
+    // lifetime-free: it can live in ECS resources or behind an `Arc` and
+    // outlive the `&Device` that created it — the device stays alive while
+    // the uploader exists.
+    ctx: DeviceContext,
     queue: vk::Queue,
     arenas: Vec<GpuBumpAllocator>,
     // One command buffer per slot, like the arenas: re-recording a
@@ -48,7 +50,7 @@ impl FrameUploader {
         }
         let timeline = Semaphore::new_timeline(device, 0)?;
         Ok(Self {
-            device: device.raw().clone(),
+            ctx: device.context(),
             queue: device.graphics_queue(),
             arenas,
             cb,
@@ -101,7 +103,8 @@ impl FrameUploader {
                 .src_offset(mem.src_offset)
                 .dst_offset(0)
                 .size(bytes.len() as u64);
-            self.device
+            self.ctx
+                .raw()
                 .cmd_copy_buffer(self.cb[slot].raw(), mem.src, dst.buffer(), &[copy]);
         }
         Ok(())
@@ -211,7 +214,7 @@ impl FrameUploader {
         // to GENERAL by the barrier above, and the region fits the image and
         // the staged arena bytes.
         unsafe {
-            self.device.cmd_copy_buffer_to_image(
+            self.ctx.raw().cmd_copy_buffer_to_image(
                 self.cb[slot].raw(),
                 mem.src,
                 image,
@@ -257,7 +260,8 @@ impl FrameUploader {
         // queue and timeline semaphore are live, and the submission signals
         // the current frame's timeline value.
         unsafe {
-            self.device
+            self.ctx
+                .raw()
                 .queue_submit2(
                     self.queue,
                     std::slice::from_ref(&submit_info),

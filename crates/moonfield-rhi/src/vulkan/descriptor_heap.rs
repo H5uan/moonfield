@@ -25,7 +25,7 @@ use crate::vulkan::memory::{GpuAllocation, GpuPtr};
 use ash::vk;
 use moonfield_math::gpu::align_up;
 use std::collections::HashMap;
-use std::sync::Mutex;
+use std::sync::{Arc, Mutex};
 
 /// Default descriptor heap capacities, matching the bindless texture budget.
 pub const DESCRIPTOR_HEAP_IMAGE_CAPACITY: u32 = 4096;
@@ -101,7 +101,12 @@ pub struct BufferRange {
 }
 
 /// Bump-counter + freelist slot allocator for one descriptor array.
-struct SlotAllocator {
+///
+/// Shared with retirement actions by `Arc`: a freed slot is returned to the
+/// freelist at ring-drain time, when the heap that owns the freelist may
+/// already be gone (the heap's backing allocations keep the *device* alive;
+/// the freelist itself is plain CPU state).
+pub(crate) struct SlotAllocator {
     next: u32,
     free: Vec<u32>,
     capacity: u32,
@@ -132,7 +137,7 @@ impl SlotAllocator {
         }
     }
 
-    fn free(&mut self, slot: u32) -> Result<()> {
+    pub(crate) fn free(&mut self, slot: u32) -> Result<()> {
         if slot >= self.next {
             return Err(Error::Validation(format!(
                 "freeing slot {slot} that was never allocated"
@@ -153,7 +158,7 @@ impl SlotAllocator {
 /// `&self`; the internal state is mutex-guarded so the heap can live behind an
 /// `Arc` next to an uploader (the `Texture::new` pattern).
 pub struct DescriptorHeap {
-    image_slots: Mutex<SlotAllocator>,
+    image_slots: Arc<Mutex<SlotAllocator>>,
     sampler_slots: Mutex<SlotAllocator>,
     /// Sampler slots by description — the immortal sampler cache behind
     /// [`DescriptorHeap::sampler_for`].
@@ -185,7 +190,7 @@ impl DescriptorHeap {
         let (sampler_heap, sampler_stride, sampler_heap_size, sampler_cap) =
             Self::heap_buffer(device, sampler_capacity, &props, HeapKind::Sampler)?;
         Ok(Self {
-            image_slots: Mutex::new(SlotAllocator::new(image_cap)),
+            image_slots: Arc::new(Mutex::new(SlotAllocator::new(image_cap))),
             sampler_slots: Mutex::new(SlotAllocator::new(sampler_cap)),
             sampler_cache: Mutex::new(HashMap::new()),
             resource_heap,
@@ -259,6 +264,13 @@ impl DescriptorHeap {
             .lock()
             .unwrap_or_else(|e| e.into_inner())
             .free(handle.0)
+    }
+
+    /// The image-slot freelist, shared with retirement actions so a slot can
+    /// be returned at ring-drain time even after the heap itself is gone.
+    /// Crate-internal.
+    pub(crate) fn image_slots(&self) -> Arc<Mutex<SlotAllocator>> {
+        self.image_slots.clone()
     }
 
     /// Allocate a sampler slot (see [`alloc_image_slot`](Self::alloc_image_slot)).

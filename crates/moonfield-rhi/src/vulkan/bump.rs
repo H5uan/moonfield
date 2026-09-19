@@ -9,13 +9,10 @@
 //! owning buffer handle, so the translation from allocation to (cpu, gpu,
 //! vk::Buffer) happens exactly once per block.
 use crate::error::{Error, Result};
-use crate::vulkan::device::Device;
+use crate::vulkan::device::{Device, DeviceContext};
 use crate::vulkan::memory::{GpuAllocation, GpuPtr, HostPtr, Memory};
-use crate::vulkan::retire::RetirementRing;
 use ash::vk;
-use gpu_allocator::vulkan::Allocator;
 use moonfield_math::gpu::align_up;
-use std::sync::{Arc, Mutex};
 
 const MIN_ALIGN: usize = 16;
 
@@ -39,12 +36,10 @@ struct Block {
 }
 
 pub struct GpuBumpAllocator {
-    // Owned resources pulled from `Device` at construction, so the allocator
-    // needs no lifetime: long-lived owners (the frame uploader, ECS
-    // resources) can store it directly.
-    device: ash::Device,
-    allocator: Arc<Mutex<Allocator>>,
-    ring: Arc<RetirementRing>,
+    // Shared device state captured at construction, so the allocator needs no
+    // lifetime: long-lived owners (the frame uploader, ECS resources) can
+    // store it directly, and the device stays alive while it exists.
+    ctx: DeviceContext,
     blocks: Vec<Block>, // 每块独立 buffer + 一次地址翻译 + 底座对齐
     block_size: u64,
     block_idx: usize,
@@ -54,11 +49,10 @@ pub struct GpuBumpAllocator {
 impl GpuBumpAllocator {
     pub fn new(device: &Device, block_size: u64) -> Result<Self> {
         let align = MIN_ALIGN;
+        let ctx = device.context();
         let first = Block {
             alloc: GpuAllocation::from_resources(
-                device.raw(),
-                device.allocator(),
-                device.retirement_ring(),
+                &ctx,
                 block_size,
                 Memory::Default,
                 align as u64,
@@ -68,9 +62,7 @@ impl GpuBumpAllocator {
         };
         Self::check_co_align(&first.alloc, align)?;
         Ok(Self {
-            device: device.raw().clone(),
-            allocator: device.allocator().clone(),
-            ring: device.retirement_ring(),
+            ctx,
             blocks: vec![first],
             block_size,
             block_idx: 0,
@@ -165,9 +157,7 @@ impl GpuBumpAllocator {
                 if self.blocks[slot].alloc.size() < bytes as u64 || self.blocks[slot].align < align
                 {
                     let alloc = GpuAllocation::from_resources(
-                        &self.device,
-                        &self.allocator,
-                        self.ring.clone(),
+                        &self.ctx,
                         size,
                         Memory::Default,
                         align as u64,
@@ -180,9 +170,7 @@ impl GpuBumpAllocator {
             std::cmp::Ordering::Equal => {
                 // 所有已有块都被用过且放不下，追加一块新的（最常见增长路径）。
                 let alloc = GpuAllocation::from_resources(
-                    &self.device,
-                    &self.allocator,
-                    self.ring.clone(),
+                    &self.ctx,
                     size,
                     Memory::Default,
                     align as u64,

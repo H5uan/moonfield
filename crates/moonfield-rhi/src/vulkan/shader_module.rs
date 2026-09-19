@@ -2,7 +2,7 @@
 
 use super::shader::CompiledShader;
 use crate::error::{Error, Result};
-use crate::vulkan::device::Device;
+use crate::vulkan::device::{Device, DeviceContext};
 use ash::vk;
 
 /// A Vulkan shader module created from SPIR-V bytecode.
@@ -12,7 +12,8 @@ use ash::vk;
 /// validate that the module lands in the matching stage slot.
 pub struct ShaderModule {
     module: vk::ShaderModule,
-    device: ash::Device,
+    /// Keeps the device alive until the module is destroyed in `Drop`.
+    ctx: DeviceContext,
     stage: Option<vk::ShaderStageFlags>,
     entry: Option<String>,
 }
@@ -48,7 +49,7 @@ impl ShaderModule {
 
         Ok(Self {
             module,
-            device: device.raw().clone(),
+            ctx: device.context(),
             stage: None,
             entry: None,
         })
@@ -82,8 +83,10 @@ impl ShaderModule {
 
 impl Drop for ShaderModule {
     fn drop(&mut self) {
+        // SAFETY: the module was created by this device and is destroyed
+        // exactly once, here; `ctx` keeps the device alive.
         unsafe {
-            self.device.destroy_shader_module(self.module, None);
+            self.ctx.raw().destroy_shader_module(self.module, None);
         }
     }
 }

@@ -6,18 +6,15 @@
 //! device address in one object. [`Memory`] splits allocations into
 //! CPU-writable default memory, GPU-private memory, and CPU read-back.
 
-use std::sync::{Arc, Mutex};
-
 use ash::vk;
 use gpu_allocator::{
     MemoryLocation,
-    vulkan::{Allocation, AllocationCreateDesc, AllocationScheme, Allocator},
+    vulkan::{Allocation, AllocationCreateDesc, AllocationScheme},
 };
 
-use crate::{
-    Error, Result,
-    retire::{RetireAction, RetirementRing},
-};
+use crate::retire::RetireAction;
+use crate::vulkan::device::{Device, DeviceContext};
+use crate::{Error, Result};
 
 /// GPU memory classes for allocations.
 #[derive(Copy, Clone, Debug, PartialEq, Eq, Default)]
@@ -141,12 +138,9 @@ pub struct GpuAllocation {
     host: Option<HostPtr>,
     /// GPU view (buffer device address), valid on all memory classes.
     gpu: GpuPtr,
-    /// Device handle for teardown in `Drop`.
-    device: ash::Device,
-    /// Pool handle for returning the chunk in `Drop`.
-    allocator: Arc<Mutex<Allocator>>,
-    /// Device-level retirement ring; `Drop` enqueues the teardown here.
-    ring: Arc<RetirementRing>,
+    /// Shared device state: keeps the device and allocator alive, and its
+    /// retirement ring takes the deferred teardown in `Drop`.
+    ctx: DeviceContext,
 }
 
 impl GpuAllocation {
@@ -158,7 +152,7 @@ impl GpuAllocation {
     /// `vkGetBufferDeviceAddress` — since Vulkan has no object-less BDA or
     /// requirement queries. The buffer exists only as that address carrier;
     /// consumers use the returned pointers directly.
-    pub fn new(device: &crate::vulkan::device::Device, size: u64, memory: Memory) -> Result<Self> {
+    pub fn new(device: &Device, size: u64, memory: Memory) -> Result<Self> {
         // The allocator's default base alignment (16 bytes) satisfies every
         // standard use; arena-style carving that needs co-aligned CPU/GPU
         // sub-allocations past 16 bytes uses [`new_aligned`] instead.
@@ -170,51 +164,24 @@ impl GpuAllocation {
     /// `mem_requirements.alignment = max(.., align)`. A host-visible block
     /// mapped and addressed on an `align` boundary lets one shared offset
     /// align both the CPU and GPU view of every sub-allocation up to `align`.
-    pub fn new_aligned(
-        device: &crate::vulkan::device::Device,
-        size: u64,
-        memory: Memory,
-        align: u64,
-    ) -> Result<Self> {
-        Self::from_resources(
-            device.raw(),
-            device.allocator(),
-            device.retirement_ring(),
-            size,
-            memory,
-            align,
-            false,
-        )
+    pub fn new_aligned(device: &Device, size: u64, memory: Memory, align: u64) -> Result<Self> {
+        Self::from_resources(&device.context(), size, memory, align, false)
     }
 
     /// Like [`new_aligned`], but marks the buffer as descriptor-heap backing
     /// memory (`VK_BUFFER_USAGE_DESCRIPTOR_HEAP_EXT` — required by the
     /// extension's bind commands; some drivers fault binding a heap without
     /// it).
-    pub(crate) fn new_heap(
-        device: &crate::vulkan::device::Device,
-        size: u64,
-        align: u64,
-    ) -> Result<Self> {
-        Self::from_resources(
-            device.raw(),
-            device.allocator(),
-            device.retirement_ring(),
-            size,
-            Memory::Default,
-            align,
-            true,
-        )
+    pub(crate) fn new_heap(device: &Device, size: u64, align: u64) -> Result<Self> {
+        Self::from_resources(&device.context(), size, Memory::Default, align, true)
     }
 
     /// Resource-level constructor for long-lived owners that keep their own
-    /// device handle and allocator (e.g. the bump arena): the lifetime-free
-    /// form of [`new_aligned`]. Callers must keep the allocator alive for the
-    /// allocation's whole lifetime.
+    /// device context (e.g. the bump arena): the lifetime-free form of
+    /// [`new_aligned`]. The context keeps the device and allocator alive for
+    /// the allocation's whole lifetime.
     pub(crate) fn from_resources(
-        device: &ash::Device,
-        allocator: &Arc<Mutex<Allocator>>,
-        ring: Arc<RetirementRing>,
+        ctx: &DeviceContext,
         size: u64,
         memory: Memory,
         align: u64,
@@ -234,10 +201,10 @@ impl GpuAllocation {
         if descriptor_heap {
             usage |= vk::BufferUsageFlags::DESCRIPTOR_HEAP_EXT;
         }
-        // SAFETY: the device is valid and the create info describes a legal
-        // buffer.
+        // SAFETY: the device is valid (kept alive by `ctx`) and the create
+        // info describes a legal buffer.
         let buffer = unsafe {
-            device
+            ctx.raw()
                 .create_buffer(
                     &vk::BufferCreateInfo::default()
                         .size(size)
@@ -253,12 +220,12 @@ impl GpuAllocation {
         // CPU/GPU base-pointer delta a multiple of `align` (see
         // `GpuBumpAllocator::check_co_align`).
         // SAFETY: the buffer was just created and is valid.
-        let mut requirements = unsafe { device.get_buffer_memory_requirements(buffer) };
+        let mut requirements = unsafe { ctx.raw().get_buffer_memory_requirements(buffer) };
         requirements.alignment = requirements.alignment.max(align.max(16));
 
-        let allocator = allocator.clone();
         // Carve a chunk out of the allocator's pool for the buffer.
-        let allocation = allocator
+        let allocation = ctx
+            .allocator()
             .lock()
             .unwrap_or_else(|e| e.into_inner())
             .allocate(&AllocationCreateDesc {
@@ -274,14 +241,15 @@ impl GpuAllocation {
         // SAFETY: the allocation satisfies the buffer's memory requirements
         // (queried above) and the buffer has no bound memory yet.
         unsafe {
-            device
+            ctx.raw()
                 .bind_buffer_memory(buffer, allocation.memory(), allocation.offset())
                 .map_err(|e| Error::Backend(format!("failed to bind bindless memory: {:?}", e)))?;
         }
         let address_info = vk::BufferDeviceAddressInfo::default().buffer(buffer);
         // SAFETY: the buffer was created with SHADER_DEVICE_ADDRESS usage and
         // has memory bound, so its device address is well-defined.
-        let gpu_ptr = unsafe { GpuPtr::from_raw(device.get_buffer_device_address(&address_info)) };
+        let gpu_ptr =
+            unsafe { GpuPtr::from_raw(ctx.raw().get_buffer_device_address(&address_info)) };
         let host = allocation
             .mapped_ptr()
             .map(|ptr| HostPtr(ptr.as_ptr().cast()));
@@ -291,9 +259,7 @@ impl GpuAllocation {
             size,
             host,
             gpu: gpu_ptr,
-            device: device.clone(),
-            allocator,
-            ring,
+            ctx: ctx.clone(),
         })
     }
 
@@ -345,12 +311,15 @@ impl GpuAllocation {
 impl Drop for GpuAllocation {
     fn drop(&mut self) {
         // Teardown is deferred: in-flight frames may still dereference the
-        // device address. The ring drains RETIRE_RING frames later.
-        self.ring.push(RetireAction::Buffer {
-            device: self.device.clone(),
+        // device address. The ring drains RETIRE_RING frames later; the
+        // action carries raw handles plus the allocator Arc, so it stays
+        // valid whenever the ring drains (the device outlives every context
+        // holder, and the drain happens no later than device teardown).
+        self.ctx.ring().push(RetireAction::Buffer {
+            device: self.ctx.raw().clone(),
             buffer: self.buffer,
             allocation: self.allocation.take(),
-            allocator: self.allocator.clone(),
+            allocator: self.ctx.allocator().clone(),
         });
     }
 }

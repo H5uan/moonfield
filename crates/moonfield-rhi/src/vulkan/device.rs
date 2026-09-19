@@ -2,7 +2,7 @@
 
 use crate::error::{Error, Result};
 use crate::retire::RetirementRing;
-use crate::vulkan::instance::Instance;
+use crate::vulkan::instance::{Instance, InstanceShared};
 use crate::vulkan::shader::ShaderCache;
 use crate::vulkan::swapchain::Surface;
 use crate::vulkan::sync::Semaphore;
@@ -159,11 +159,134 @@ impl QueueFamilyIndices {
     }
 }
 
+/// The teardown-critical half of the device, shared by `Arc`: everything a
+/// GPU object needs to destroy itself safely — the logical device handle, the
+/// memory allocator, the retirement ring, and the extension loaders.
+///
+/// Every resource object (`Semaphore`, `CommandPool`, pipelines, textures,
+/// allocations, …) holds an [`Arc<DeviceShared>`] through [`DeviceContext`],
+/// so the logical device outlives every object created from it by
+/// construction: `destroy_device` runs in this struct's `Drop`, which the
+/// last resource drop triggers. The `instance` keepalive chains the same
+/// guarantee one level up — the Vulkan instance outlives the device.
+pub(crate) struct DeviceShared {
+    /// Logical device handle. Only core commands; extension entry points are
+    /// in `extension_fns`.
+    device: ash::Device,
+    /// Aggregated device-extension loaders (blend dynamic state etc.), built
+    /// once at device creation. Command buffers reach them through
+    /// [`DeviceContext`] — no per-command-buffer copies of the
+    /// function-pointer tables.
+    extension_fns: crate::vulkan::DeviceExtensionFunctions,
+    /// Deferred GPU resource teardown, keyed by frame slot. Not lazy: every
+    /// resource's `Drop` enqueues into it, so it exists from construction.
+    retirement_ring: RetirementRing,
+    /// Shared GPU memory allocator for buffers and images. Behind an
+    /// `Arc<Mutex>` so retire actions can free their allocations at drain
+    /// time; `Option` so `Drop` can take it out and destroy it while the
+    /// device handle is still valid.
+    allocator: Option<Arc<Mutex<Allocator>>>,
+    /// Keepalive: the instance must outlive the logical device. Destroying
+    /// an instance with live devices is invalid; holding the Arc makes that
+    /// order unrepresentable instead of guarded against.
+    #[allow(dead_code)]
+    instance: Arc<InstanceShared>,
+}
+
+impl DeviceShared {
+    /// Access the raw `ash::Device`.
+    pub(crate) fn raw(&self) -> &ash::Device {
+        &self.device
+    }
+
+    /// The shared aggregated device-extension loaders.
+    pub(crate) fn extension_fns(&self) -> &crate::vulkan::DeviceExtensionFunctions {
+        &self.extension_fns
+    }
+
+    /// The device-level retirement ring.
+    pub(crate) fn ring(&self) -> &RetirementRing {
+        &self.retirement_ring
+    }
+
+    /// Shared GPU memory allocator for buffers and images. Resources allocate
+    /// through this and free their allocations on drop.
+    pub(crate) fn allocator(&self) -> &Arc<Mutex<Allocator>> {
+        self.allocator
+            .as_ref()
+            .expect("allocator taken only during device teardown")
+    }
+}
+
+impl Drop for DeviceShared {
+    fn drop(&mut self) {
+        // This drop runs when the last `Device`/`DeviceContext` referent goes
+        // away, so every resource object created from the device is already
+        // destroyed and the remaining work is final teardown: idle the GPU
+        // (in-flight frames may still reference retired-but-undrained
+        // resources), drain the retirement ring, free the allocator's memory
+        // blocks, then destroy the device. The instance Arc drops after this
+        // body, so the instance outlives the destroy.
+        // SAFETY: the device handle is valid; nothing is submitted after the
+        // last referent is gone.
+        if let Err(e) = unsafe { self.device.device_wait_idle() } {
+            tracing::warn!("device idle wait failed during teardown: {e:?}");
+        }
+        self.retirement_ring.drain_all();
+        // The allocator's memory blocks are freed through the device
+        // (vkFreeMemory), so the allocator must drop before
+        // `destroy_device`. Every allocation Arc was held by a resource that
+        // also held a `DeviceContext`, so this Arc is uniquely held here;
+        // the defensive branch leaks rather than destroying out from under a
+        // hypothetical remaining referent (a leak is recoverable;
+        // use-after-destroy is not).
+        if let Some(allocator) = self.allocator.take() {
+            match Arc::try_unwrap(allocator) {
+                Ok(allocator) => drop(allocator),
+                Err(allocator) => {
+                    tracing::error!(
+                        "device torn down while the allocator is still referenced; \
+                         leaking the allocator and the device"
+                    );
+                    std::mem::forget(allocator);
+                    return;
+                }
+            }
+        }
+        // SAFETY: the GPU is idle, all resources and allocations are gone,
+        // and the destroy happens exactly once, here.
+        unsafe {
+            self.device.destroy_device(None);
+        }
+    }
+}
+
+/// A cloneable handle to the device's shared teardown state — the
+/// crate-internal constructor argument and field type for every GPU object.
+///
+/// Cloning one keeps the logical device (and, through it, the instance)
+/// alive, so an object that outlives the `Device` value it was created from
+/// still destroys itself against a live device. This replaces the per-struct
+/// `device + allocator + retirement ring` field triples.
+#[derive(Clone)]
+pub(crate) struct DeviceContext {
+    shared: Arc<DeviceShared>,
+}
+
+impl std::ops::Deref for DeviceContext {
+    type Target = DeviceShared;
+    fn deref(&self) -> &DeviceShared {
+        &self.shared
+    }
+}
+
 /// Vulkan logical device and its primary queues.
 pub struct Device {
+    /// Shared teardown state; resources keep it alive through
+    /// [`DeviceContext`]. Declared first so the OnceLock singletons below
+    /// drop (and retire into the ring) before the shared state can.
+    shared: Arc<DeviceShared>,
     physical_device: vk::PhysicalDevice,
-    /// Logical device handle. only have core command.
-    device: ash::Device,
     graphics_queue: vk::Queue,
     present_queue: vk::Queue,
     queue_family_indices: QueueFamilyIndices,
@@ -175,20 +298,18 @@ pub struct Device {
     /// Nanoseconds per timestamp tick (`limits.timestampPeriod`), cached at
     /// creation for `TimestampQueryPool`.
     timestamp_period_ns: f32,
-    /// Aggregated device-extension loaders (blend dynamic state etc.), built
-    /// once at device creation and shared with command buffers by `Arc` — no
-    /// per-command-buffer copies of the function-pointer tables.
-    extension_fns: Arc<crate::vulkan::DeviceExtensionFunctions>,
     /// Optional extensions that were actually enabled at creation (a subset
     /// of [`OPTIONAL_DEVICE_EXTENSIONS`]); empty on cards that lack them.
     optional_extensions: Vec<&'static CStr>,
     /// Lazily-built shared frame uploader serving GPU-only staging uploads.
-    /// Declared before `allocator` so it drops first: its arenas free chunks
-    /// through the allocator's `Arc` while the device is still alive, then
-    /// the allocator itself is torn down (see `Drop`).
+    /// The uploader keeps the shared device state alive through its own
+    /// [`DeviceContext`]; `Drop` releases this device's Arc early so a
+    /// last-referent teardown destroys the arenas while the ring still
+    /// drains.
     uploader: OnceLock<Arc<Mutex<FrameUploader>>>,
-    /// Lazily-built shared descriptor heap serving bindless resources. Same shape
-    /// as `uploader`: built once, shared by `Arc`, outlives `&Device`.
+    /// Lazily-built shared descriptor heap serving bindless resources. Same
+    /// shape as `uploader`: built once, shared by `Arc`, keeps the shared
+    /// device state alive through its allocations' [`DeviceContext`]s.
     descriptor_heap: OnceLock<Arc<DescriptorHeap>>,
     /// Lazily-built shared shader cache: memoized Slang compiles (SPIR-V
     /// and reflection) keyed by the compile inputs, so repeated pipeline
@@ -198,19 +319,6 @@ pub struct Device {
     /// back on drop. Passed to every pipeline create call so the driver
     /// skips recompiling pipelines it has already built in earlier runs.
     pipeline_cache: OnceLock<vk::PipelineCache>,
-    /// Deferred GPU resource teardown, keyed by frame slot. Not lazy: every
-    /// resource's `Drop` enqueues into it, so it exists from construction.
-    retirement_ring: Arc<RetirementRing>,
-    /// Shared GPU memory allocator for buffers and images. Wrapped in
-    /// `Arc<Mutex>` so resources can hold clones and free their allocations
-    /// on drop without a borrow on the device. `Option` so `Drop` can take it
-    /// out and destroy it while the device handle is still valid.
-    allocator: Option<Arc<Mutex<Allocator>>>,
-    /// The instance's live-device counter, shared with the `Instance` that
-    /// created this device. Decremented exactly when `Drop` destroys the
-    /// handle; the leak guard (see `Drop`) deliberately keeps the count so
-    /// `Instance::drop` leaks instead of destroying around a live device.
-    live_devices: std::sync::Arc<std::sync::atomic::AtomicUsize>,
 }
 
 impl Device {
@@ -523,7 +631,7 @@ impl Device {
         let graphics_queue = unsafe { device.get_device_queue(queue_family_indices.graphics, 0) };
         let present_queue = unsafe { device.get_device_queue(queue_family_indices.present, 0) };
 
-        let extension_fns = Arc::new(crate::vulkan::DeviceExtensionFunctions {
+        let extension_fns = crate::vulkan::DeviceExtensionFunctions {
             extended_dynamic_state3: ash::ext::extended_dynamic_state3::Device::load(
                 instance.raw(),
                 &device,
@@ -536,7 +644,7 @@ impl Device {
             device_address_commands: optional_enabled
                 .contains(&ash::khr::device_address_commands::NAME)
                 .then(|| ash::khr::device_address_commands::Device::load(instance.raw(), &device)),
-        });
+        };
 
         let allocator = Allocator::new(&AllocatorCreateDesc {
             instance: instance.raw().clone(),
@@ -551,36 +659,40 @@ impl Device {
         })
         .map_err(|e| Error::Backend(format!("failed to create GPU allocator: {e}")))?;
 
-        // Register with the instance's live-device counter: `Instance::drop`
-        // refuses to destroy an instance whose devices are still alive, and
-        // this device's `Drop` decrements exactly when it destroys its
-        // handle.
-        let live_devices = instance.live_devices();
-        live_devices.fetch_add(1, std::sync::atomic::Ordering::Release);
-
         Ok(Self {
+            shared: Arc::new(DeviceShared {
+                device,
+                extension_fns,
+                retirement_ring: RetirementRing::new(),
+                allocator: Some(Arc::new(Mutex::new(allocator))),
+                instance: instance.shared(),
+            }),
             physical_device,
-            device,
             graphics_queue,
             present_queue,
             queue_family_indices,
             descriptor_heap_properties,
             timestamp_period_ns,
-            extension_fns,
             optional_extensions: optional_enabled,
             uploader: OnceLock::new(),
             descriptor_heap: OnceLock::new(),
             shader_cache: OnceLock::new(),
             pipeline_cache: OnceLock::new(),
-            retirement_ring: Arc::new(RetirementRing::new()),
-            live_devices,
-            allocator: Some(Arc::new(Mutex::new(allocator))),
         })
     }
 
     /// Access the raw `ash::Device`.
     pub(crate) fn raw(&self) -> &ash::Device {
-        &self.device
+        self.shared.raw()
+    }
+
+    /// A handle to the device's shared teardown state. Crate-internal: every
+    /// GPU object's constructor clones one into itself, keeping the device
+    /// (and instance) alive for the object's whole lifetime.
+    pub(crate) fn context(&self) -> DeviceContext {
+        DeviceContext {
+            shared: self.shared.clone(),
+        }
     }
 
     /// Whether the optional extension `name` was enabled at device creation.
@@ -615,9 +727,10 @@ impl Device {
 
     /// The shared aggregated device-extension loaders (see
     /// [`DeviceExtensionFunctions`](crate::vulkan::DeviceExtensionFunctions)).
-    /// Command buffers clone the `Arc`, never the function-pointer tables.
-    pub(crate) fn extension_fns(&self) -> Arc<crate::vulkan::DeviceExtensionFunctions> {
-        self.extension_fns.clone()
+    /// Command buffers reach them through their [`DeviceContext`], never by
+    /// copying the function-pointer tables.
+    pub(crate) fn extension_fns(&self) -> &crate::vulkan::DeviceExtensionFunctions {
+        self.shared.extension_fns()
     }
 
     /// Access the underlying physical device handle.
@@ -639,14 +752,16 @@ impl Device {
         let submit_info = vk::SubmitInfo::default().command_buffers(&raw);
         // SAFETY: the command buffers are fully recorded and the queue is valid.
         unsafe {
-            self.device
+            self.shared
+                .raw()
                 .queue_submit(
                     self.graphics_queue,
                     std::slice::from_ref(&submit_info),
                     vk::Fence::null(),
                 )
                 .map_err(|e| Error::Backend(format!("failed to submit command buffers: {e:?}")))?;
-            self.device
+            self.shared
+                .raw()
                 .queue_wait_idle(self.graphics_queue)
                 .map_err(|e| Error::Backend(format!("failed to wait for queue: {e:?}")))?;
         }
@@ -700,7 +815,8 @@ impl Device {
         // SAFETY: the queue, command buffer, and semaphores are valid handles;
         // the info arrays outlive the submit call.
         unsafe {
-            self.device
+            self.shared
+                .raw()
                 .queue_submit2(
                     self.graphics_queue,
                     std::slice::from_ref(&submit_info),
@@ -715,7 +831,8 @@ impl Device {
     pub fn wait_idle(&self) -> Result<()> {
         // SAFETY: the device is valid.
         unsafe {
-            self.device
+            self.shared
+                .raw()
                 .device_wait_idle()
                 .map_err(|e| Error::Backend(format!("failed to wait for device idle: {e:?}")))
         }
@@ -746,8 +863,8 @@ impl Device {
 
     /// The shared frame-scoped uploader, built on first use. GPU-only
     /// targets stage through it (`FrameUploader::upload_alloc`); the uploader
-    /// owns a copy of the device handle, so callers may hold the returned
-    /// `Arc` past this `&Device` borrow.
+    /// keeps the device alive through its own `DeviceContext`, so callers
+    /// may hold the returned `Arc` past this `&Device` borrow.
     pub fn uploader(&self) -> Arc<Mutex<FrameUploader>> {
         self.uploader
             .get_or_init(|| {
@@ -793,12 +910,13 @@ impl Device {
         *self.pipeline_cache.get_or_init(|| {
             let initial = std::fs::read(pipeline_cache_path()).unwrap_or_default();
             let create_info = vk::PipelineCacheCreateInfo::default().initial_data(&initial);
-            match unsafe { self.device.create_pipeline_cache(&create_info, None) } {
+            match unsafe { self.shared.raw().create_pipeline_cache(&create_info, None) } {
                 Ok(cache) => cache,
                 Err(e) => {
                     tracing::warn!("pipeline cache data rejected ({e:?}); starting cold");
                     unsafe {
-                        self.device
+                        self.shared
+                            .raw()
                             .create_pipeline_cache(&vk::PipelineCacheCreateInfo::default(), None)
                             .expect("creating an empty pipeline cache cannot fail")
                     }
@@ -807,46 +925,32 @@ impl Device {
         })
     }
 
-    /// The device-level retirement ring. Crate-internal: resources obtain it
-    /// at construction so their `Drop` can enqueue teardown.
-    pub(crate) fn retirement_ring(&self) -> Arc<RetirementRing> {
-        self.retirement_ring.clone()
-    }
-
     /// Frame-loop boundary: the caller has waited the in-flight timeline,
     /// so the slot's previous submission completed — drain its retirements
     /// and mark it the push target. Call once per acquired frame, before
     /// recording.
     pub fn begin_gpu_frame(&self, frame_slot: usize) {
-        self.retirement_ring.begin_frame(frame_slot);
+        self.shared.ring().begin_frame(frame_slot);
     }
     /// Drain every retirement now. The GPU must be idle (device teardown,
     /// or a test after submit-and-wait); in-flight work must not reference
     /// retired resources.
     pub fn flush_retirements(&self) {
-        self.retirement_ring.drain_all();
-    }
-
-    /// Shared GPU memory allocator for buffers and images. Resources allocate
-    /// through this and free their allocations on drop. Crate-internal.
-    pub(crate) fn allocator(&self) -> &Arc<Mutex<Allocator>> {
-        self.allocator
-            .as_ref()
-            .expect("allocator taken only during device drop")
+        self.shared.ring().drain_all();
     }
 }
 
 impl Drop for Device {
     fn drop(&mut self) {
-        // Retired teardown runs while the logical device is alive, and the
-        // GPU must be idle first — resources dropped by render-world
-        // teardown wait here for the last RenderDevice referent to go away.
-        let _ = self.wait_idle();
-        // Persist the pipeline cache: the merged data saves driver-side
-        // pipeline compilation on the next run. Before the teardown paths
-        // below, while the device is still fully functional.
+        // The logical device itself is destroyed in `DeviceShared::drop`,
+        // when the last `DeviceContext` referent goes away — resources that
+        // outlive this `Device` value keep it alive by construction, so no
+        // leak guard is needed here anymore. What remains is teardown that
+        // belongs to this handle: persisting the pipeline cache and dropping
+        // the lazy singletons early, so a last-referent drop destroys their
+        // arenas and heap backing while the ring can still drain them.
         if let Some(cache) = self.pipeline_cache.get() {
-            match unsafe { self.device.get_pipeline_cache_data(*cache) } {
+            match unsafe { self.shared.raw().get_pipeline_cache_data(*cache) } {
                 Ok(data) => {
                     let path = pipeline_cache_path();
                     if let Some(dir) = path.parent() {
@@ -860,49 +964,20 @@ impl Drop for Device {
                     tracing::warn!("failed to read the pipeline cache data: {e:?}")
                 }
             }
+            // SAFETY: the cache was created by this device and is destroyed
+            // exactly once, here; the device is alive (held by `shared`).
             unsafe {
-                self.device.destroy_pipeline_cache(*cache, None);
+                self.shared.raw().destroy_pipeline_cache(*cache, None);
             }
         }
-        // Drop the lazy singletons while the device is alive: their arenas
-        // and heap backing retire into the ring and drain below, instead of
-        // tearing down after vkDestroyDevice during field teardown. Dropping
-        // the Arc destroys them only when this device is the last referent —
-        // the same invariant the allocator Arc relies on.
+        // Dropping the Arcs destroys the singletons only when this device is
+        // their last referent; otherwise their own `DeviceContext` keeps the
+        // shared state alive until they go away.
         if let Some(uploader) = self.uploader.take() {
             drop(uploader);
         }
         if let Some(heap) = self.descriptor_heap.take() {
             drop(heap);
-        }
-        self.retirement_ring.drain_all();
-        // The allocator's memory blocks must be freed while the logical
-        // device is still alive (they call vkFreeMemory through it), so the
-        // device is destroyed only after the last allocation Arc is gone.
-        // Resources (`Buffer`, `GpuAllocation`) still alive at this point —
-        // a teardown order where GPU state outlives the `RenderDevice` —
-        // would call into a destroyed device when their retirement actions
-        // later run; leak the device instead. A teardown-time leak is
-        // recoverable; use-after-destroy is not.
-        if let Some(allocator) = self.allocator.take()
-            && let Ok(allocator) = Arc::try_unwrap(allocator)
-        {
-            drop(allocator);
-        } else if self.allocator.is_some() {
-            tracing::error!(
-                "device dropped while GPU resources are still alive; \
-                 leaking the device and its allocator"
-            );
-            // Deliberately keep the live-device count registered so
-            // `Instance::drop` leaks rather than destroying around the
-            // still-referenced device.
-            std::mem::forget(self.allocator.take());
-            return;
-        }
-        self.live_devices
-            .fetch_sub(1, std::sync::atomic::Ordering::Release);
-        unsafe {
-            self.device.destroy_device(None);
         }
     }
 }

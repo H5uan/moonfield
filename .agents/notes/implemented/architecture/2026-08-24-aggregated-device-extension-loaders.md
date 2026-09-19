@@ -23,17 +23,17 @@ no single place naming every loaded extension.
 Follow wgpu-hal's `vulkan/mod.rs` shape, simplified to what this RHI actually
 needs:
 
-- `DeviceExtensionFunctions` — one struct aggregating all loaders, held on
-  `Device` as `Arc<DeviceExtensionFunctions>` and built once in
-  `Device::from_physical_device` (the same shape wgpu's
+- `DeviceExtensionFunctions` — one struct aggregating all loaders, built once
+  in `Device::from_physical_device` and stored inline in `DeviceShared`, the
+  `Arc`-shared device teardown state (the same shape wgpu's
   `DeviceExtensionFunctions` has inside `Arc<DeviceShared>`).
-- `CommandPool`/`CommandBuffer` hold that `Arc` — cloned once at pool
-  creation, shared by every command buffer. Loaders are function-pointer
-  tables; cloning the `Arc` copies no tables.
+- `CommandPool`/`CommandBuffer` reach the table through their
+  `DeviceContext` (the `Arc<DeviceShared>` handle every GPU object holds).
+  Loaders are function-pointer tables; cloning the context copies no tables.
 - Call-sites access the loader directly as
-  `self.ext.extended_dynamic_state3.cmd_set_*` — field access, no
-  per-extension getters. `commands` never copies the table; it dereferences
-  through the shared `Arc`.
+  `self.ctx.extension_fns().extended_dynamic_state3.cmd_set_*` — field
+  access, no per-extension getters. `CommandBuffer` never copies the table;
+  it dereferences through the shared `Arc`.
 
 No `ExtensionFn<T>`: the enriched enum added a `Promoted` arm nothing
 constructs. When an extension actually gets promoted (none has), the
@@ -51,18 +51,17 @@ YAGNI until then.
   an accessor, and thread it through `Device` → `CommandPool` → `CommandBuffer`.
   Rejected: multiple extensions would grow into the same flat pile.
 - **Stash the whole table on `CommandBuffer` only.** Loaders are
-  device-scoped; sharing via `Arc` from the device keeps one source of truth
+  device-scoped; sharing from the device keeps one source of truth
   and lets other device consumers (e.g. a future GPU-driven recorder) grab
   the same table.
 
 ## Consequences
 
 - Adding a new device extension loader is now: one field on
-  `DeviceExtensionFunctions`, one load in `from_physical_device`, and one
-  `Arc` clone at pool creation — done.
-- `CommandPool`/`CommandBuffer` share the table by `Arc`; the hot draw path
-  dereferences once through the shared pointer, same indirect-call cost as a
-  local field.
+  `DeviceExtensionFunctions` and one load in `from_physical_device` — done.
+- `CommandPool`/`CommandBuffer` share the table through `DeviceContext`; the
+  hot draw path dereferences once through the shared pointer, same
+  indirect-call cost as a local field.
 - `CullModeFlags` and depth states stay on `ash::Device` core methods — they
   are Vulkan 1.3 core, genuinely promoted, and live separately from the
   extension table on purpose.

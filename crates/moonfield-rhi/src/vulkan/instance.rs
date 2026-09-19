@@ -5,18 +5,36 @@ use crate::vulkan::device::Device;
 use crate::vulkan::swapchain::Surface;
 use ash::vk;
 use std::ffi::{CStr, c_char};
+use std::sync::Arc;
 
-/// Vulkan instance and entry point.
-pub struct Instance {
+/// The teardown-critical instance state, shared by `Arc`.
+///
+/// Every `Device` ([`DeviceShared`](crate::vulkan::device::DeviceShared)) and
+/// every `Surface` holds an `Arc<InstanceShared>`, so the Vulkan instance
+/// outlives everything created from it by construction — no device or surface
+/// can ever reference a destroyed instance, and the instance is destroyed
+/// exactly when the last of them goes away.
+pub(crate) struct InstanceShared {
     entry: ash::Entry,
     instance: ash::Instance,
     surface_instance: ash::khr::surface::Instance,
-    /// Live logical devices created from this instance, shared with each
-    /// `Device` (which holds its own `Arc` to the counter). Destroying an
-    /// instance with live devices is invalid, so `Drop` leaks instead when
-    /// this is non-zero (a teardown order where a `Device` outlives its
-    /// `Instance` referent).
-    live_devices: std::sync::Arc<std::sync::atomic::AtomicUsize>,
+}
+
+impl Drop for InstanceShared {
+    fn drop(&mut self) {
+        // SAFETY: devices and surfaces created from this instance keep it
+        // alive through their own `Arc<InstanceShared>`, so this drop runs
+        // only after the last of them was destroyed; the destroy happens
+        // exactly once, here.
+        unsafe {
+            self.instance.destroy_instance(None);
+        }
+    }
+}
+
+/// Vulkan instance and entry point.
+pub struct Instance {
+    shared: Arc<InstanceShared>,
 }
 
 impl Instance {
@@ -64,10 +82,11 @@ impl Instance {
         let surface_instance = ash::khr::surface::Instance::load(&entry, &instance);
 
         Ok(Self {
-            entry,
-            instance,
-            surface_instance,
-            live_devices: std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0)),
+            shared: Arc::new(InstanceShared {
+                entry,
+                instance,
+                surface_instance,
+            }),
         })
     }
 
@@ -76,21 +95,20 @@ impl Instance {
         Self::new(&[])
     }
 
-    /// The live-device counter, shared with every `Device` created from
-    /// this instance. Crate-internal: `Device` clones it at construction
-    /// and decrements it exactly when it destroys its handle.
-    pub(crate) fn live_devices(&self) -> std::sync::Arc<std::sync::atomic::AtomicUsize> {
-        self.live_devices.clone()
+    /// The shared instance state, for `Device`/`Surface` keepalive.
+    /// Crate-internal.
+    pub(crate) fn shared(&self) -> Arc<InstanceShared> {
+        self.shared.clone()
     }
 
     /// Access the `ash::Entry` (needed e.g. for surface creation).
     pub(crate) fn entry(&self) -> &ash::Entry {
-        &self.entry
+        &self.shared.entry
     }
 
     /// Access the raw `ash::Instance`.
     pub(crate) fn raw(&self) -> &ash::Instance {
-        &self.instance
+        &self.shared.instance
     }
 
     /// Enumerate available physical devices.
@@ -98,9 +116,12 @@ impl Instance {
         // SAFETY: the instance is valid; enumeration returns handles owned by
         // the instance.
         unsafe {
-            self.instance.enumerate_physical_devices().map_err(|e| {
-                Error::Backend(format!("failed to enumerate physical devices: {:?}", e))
-            })
+            self.shared
+                .instance
+                .enumerate_physical_devices()
+                .map_err(|e| {
+                    Error::Backend(format!("failed to enumerate physical devices: {:?}", e))
+                })
         }
     }
 
@@ -116,7 +137,11 @@ impl Instance {
     ) {
         // SAFETY: the instance and physical device are valid, and `out` (with
         // its caller-chained sType list) is a writable struct the driver fills.
-        unsafe { self.instance.get_physical_device_properties2(device, out) }
+        unsafe {
+            self.shared
+                .instance
+                .get_physical_device_properties2(device, out)
+        }
     }
 
     /// Get features for a physical device (Vulkan 1.1+ "2" query).
@@ -131,7 +156,11 @@ impl Instance {
     ) {
         // SAFETY: the instance and physical device are valid, and `out` (with
         // its caller-chained sType list) is a writable struct the driver fills.
-        unsafe { self.instance.get_physical_device_features2(device, out) }
+        unsafe {
+            self.shared
+                .instance
+                .get_physical_device_features2(device, out)
+        }
     }
 
     /// Get queue family properties for a physical device (Vulkan 1.1+ "2"
@@ -144,14 +173,16 @@ impl Instance {
         // SAFETY: the instance and physical device are valid; the query only
         // returns a count.
         let count = unsafe {
-            self.instance
+            self.shared
+                .instance
                 .get_physical_device_queue_family_properties2_len(device)
         };
         let mut out = vec![vk::QueueFamilyProperties2::default(); count];
         // SAFETY: `out` holds exactly `count` default-initialized entries
         // (valid sTypes) for the driver to fill, matching the `_len` query.
         unsafe {
-            self.instance
+            self.shared
+                .instance
                 .get_physical_device_queue_family_properties2(device, &mut out);
         }
         out
@@ -167,7 +198,8 @@ impl Instance {
         // SAFETY: the device and surface handles belong to this instance and
         // are live for the call (the surface is caller-owned).
         unsafe {
-            self.surface_instance
+            self.shared
+                .surface_instance
                 .get_physical_device_surface_support(device, queue_family_index, surface)
                 .unwrap_or(false)
         }
@@ -183,27 +215,5 @@ impl Instance {
             device.queue_family_indices().graphics,
             surface.raw(),
         )
-    }
-}
-
-impl Drop for Instance {
-    fn drop(&mut self) {
-        if self.live_devices.load(std::sync::atomic::Ordering::Acquire) != 0 {
-            // Destroying an instance with live devices is invalid — skip
-            // the destroy and let the handle leak (a device leaked by
-            // `Device::drop`'s guard against out-of-order teardown keeps
-            // its count registered). `ash::Instance`'s own drop is a plain
-            // handle release; `vkDestroyInstance` is only ever this call.
-            tracing::error!(
-                "instance dropped while logical devices are still alive; \
-                 leaking the instance"
-            );
-            return;
-        }
-        // SAFETY: no live logical devices remain (guarded above), so
-        // destroying the instance is valid; it happens exactly once, here.
-        unsafe {
-            self.instance.destroy_instance(None);
-        }
     }
 }
