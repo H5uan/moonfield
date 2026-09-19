@@ -9,7 +9,7 @@ pub mod error;
 pub mod indirect;
 pub mod types;
 
-pub mod vulkan;
+pub(crate) mod vulkan;
 
 #[cfg(test)]
 mod gpu_tests;
