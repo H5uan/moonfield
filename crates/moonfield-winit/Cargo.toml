@@ -10,3 +10,12 @@ moonfield-log = { workspace = true }
 moonfield-window = { workspace = true }
 raw-window-handle = "0.6.2"
 winit = "0.30.13"
+
+# The modal size/move loop frame driver (src/sizing.rs); matches the
+# windows-sys version winit already builds.
+[target.'cfg(windows)'.dependencies]
+windows-sys = { version = "0.61", features = [
+    "Win32_Foundation",
+    "Win32_UI_Shell",
+    "Win32_UI_WindowsAndMessaging",
+] }

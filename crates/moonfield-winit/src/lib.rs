@@ -28,6 +28,8 @@ use winit::{
 };
 
 mod converters;
+#[cfg(target_os = "windows")]
+mod sizing;
 mod windows;
 mod winit_config;
 
@@ -70,8 +72,10 @@ impl std::ops::Deref for EventLoopProxyWrapper {
 /// The plugin stores the raw window as a [`WinitWindow`] resource, spawns
 /// the primary window entity ([`Window`] + [`PrimaryWindow`] +
 /// [`RawHandleWrapper`] components) when the event loop resumes, and
-/// replaces the app's runner with a winit-based event loop. On each
-/// `about_to_wait` event the app's update systems are invoked.
+/// replaces the app's runner with a winit-based event loop. Frames run on
+/// `RedrawRequested` (requested from `about_to_wait` per the update mode).
+/// On Windows, a window subclass plus a timer keep frames running while the
+/// OS holds the thread in the modal size/move loop (see `sizing`).
 ///
 /// Event delivery uses message channels registered via `App::add_message`:
 /// [`WindowEventKind`] (translated lifecycle events) and raw
@@ -225,10 +229,22 @@ pub fn winit_run(app: &mut App) -> AppExit {
         user_event_received: false,
     };
 
+    // Windows: let the modal size/move loop drive frames through a timer
+    // while it blocks the event loop. The driver is the handler itself,
+    // reached re-entrantly on this thread.
+    #[cfg(target_os = "windows")]
+    sizing::set_frame_driver(
+        &mut handler as *mut WinitHandler as *mut (),
+        modal_frame_shim,
+    );
+
     if let Err(e) = event_loop.run_app(&mut handler) {
         error!("event loop exited with error: {e}");
         return AppExit::error();
     }
+
+    #[cfg(target_os = "windows")]
+    sizing::clear_frame_driver();
 
     // Read the exit request (if any) after the loop has fully drained.
     app.world()
@@ -343,6 +359,11 @@ impl ApplicationHandler<WinitUserEvent> for WinitHandler<'_> {
                     windows.insert(entity, window.clone());
                 }
                 self.app.insert_resource(WinitWindow(window.clone()));
+
+                // Windows: start/stop the modal size/move loop's frame timer
+                // for this window (see `sizing`).
+                #[cfg(target_os = "windows")]
+                sizing::attach(window.as_ref());
 
                 self.window = Some(window);
                 self.window_entity = Some(entity);
@@ -603,6 +624,28 @@ impl WinitHandler<'_> {
             event_loop.exit();
         }
     }
+
+    /// Run one frame while Windows holds the thread in a modal size/move
+    /// loop: the sizing timer's tick lands here (see `sizing`). Same
+    /// `App::update` entry as `run_frame`; the exit-request check is deferred
+    /// to the next `about_to_wait`, since the event loop is unreachable from
+    /// the timer.
+    #[cfg(target_os = "windows")]
+    fn run_modal_frame(&mut self) {
+        self.app.update();
+        self.last_frame = std::time::Instant::now();
+        self.redraw_pending = false;
+    }
+}
+
+/// The sizing-loop frame driver entry: unwraps the type-erased handler
+/// pointer registered by `winit_run` (see `sizing`).
+#[cfg(target_os = "windows")]
+unsafe fn modal_frame_shim(context: *mut ()) {
+    // SAFETY: `context` is the `WinitHandler` registered in `winit_run`,
+    // alive for the event loop's duration, and called only on the
+    // event-loop thread from the sizing timer.
+    unsafe { (*(context as *mut WinitHandler<'_>)).run_modal_frame() };
 }
 
 /// `Last` system: clear the frame-scoped input state. Previously called by

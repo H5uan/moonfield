@@ -5,20 +5,27 @@
 //! `EditorPlugin`, loads the repository's teapot mesh into the scene,
 //! and runs the app. Set `MOONFIELD_EDITOR_AUTO_CLOSE=<frames>` to exit
 //! after N rendered frames — used by automated startup/shutdown smoke tests
-//! on machines with a display and a Vulkan driver.
+//! on machines with a display and a Vulkan driver. Set
+//! `MOONFIELD_EDITOR_SIM_RESIZE=1` to emulate a continuous window drag
+//! (every `Update` tick rewrites the primary window's cached physical size,
+//! driving the extract → size-mismatch → swapchain recreate path without
+//! moving the OS window).
 //!
 //! ```sh
 //! MOONFIELD_EDITOR_AUTO_CLOSE=5 cargo run
+//! MOONFIELD_EDITOR_SIM_RESIZE=1 cargo run
 //! ```
 
 use moonfield_app::App;
-use moonfield_app::prelude::{HierarchyPlugin, Name, Startup, World};
+use moonfield_app::prelude::{HierarchyPlugin, Name, Query, Startup, Update, World};
 use moonfield_camera::{Camera, PrimaryCamera};
+use moonfield_ecs::With;
 use moonfield_editor::{EditorPlugin, load_asset};
 use moonfield_log::LogPlugin;
 use moonfield_math::{Transform, Vec3};
 use moonfield_render_core::RenderPlugin;
 use moonfield_render_feature::RenderFeaturePlugin;
+use moonfield_window::{PrimaryWindow, Window};
 use moonfield_winit::{WinitPlugin, WinitSettings};
 use std::path::PathBuf;
 
@@ -35,7 +42,26 @@ fn main() -> std::process::ExitCode {
     app.add_plugin(WinitPlugin::default().with_settings(WinitSettings::continuous()));
     app.add_plugin(EditorPlugin);
     app.add_systems(Startup, spawn_default_scene);
+    if std::env::var_os("MOONFIELD_EDITOR_SIM_RESIZE").is_some() {
+        app.add_systems(Update, simulate_window_drag);
+    }
     app.run().code
+}
+
+/// `MOONFIELD_EDITOR_SIM_RESIZE` hook: every `Update` tick, rewrite the
+/// primary window's cached physical size to an oscillating value. The
+/// winit backend only writes sizes back on OS resize events, so the
+/// component keeps the emulated size and the render world sees a fresh
+/// size mismatch every tick — the load profile of dragging a window edge.
+fn simulate_window_drag(mut windows: Query<&mut Window, With<PrimaryWindow>>) {
+    use std::sync::atomic::{AtomicU64, Ordering};
+    static TICK: AtomicU64 = AtomicU64::new(0);
+    let tick = TICK.fetch_add(1, Ordering::Relaxed);
+    let width = 640 + ((tick * 13) % 400) as u32;
+    let height = 480 + ((tick * 7) % 240) as u32;
+    for (_, mut window) in windows.iter_mut() {
+        window.resolution.set_physical(width, height);
+    }
 }
 
 /// The default scene: a primary camera and the repository-managed teapot mesh.
