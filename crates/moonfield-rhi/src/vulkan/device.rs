@@ -71,6 +71,13 @@ const OPTIONAL_DEVICE_EXTENSIONS: &[&CStr] = &[
     // `shaderBufferFloat32AtomicAdd` feature bit — see the probe in
     // [`Device::from_physical_device`].
     ash::ext::shader_atomic_float::NAME,
+    // With `unifiedImageLayouts` enabled, `VK_IMAGE_LAYOUT_GENERAL` — the
+    // layout every non-swapchain image already lives in — is a
+    // spec-guaranteed-optimal layout for nearly every use. Enabled only when
+    // the driver also supports the `unifiedImageLayouts` feature bit; see the
+    // probe in [`Device::from_physical_device`]. Swapchain images are
+    // unaffected: `PRESENT_SRC_KHR` is exempt from the extension.
+    ash::khr::unified_image_layouts::NAME,
 ];
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -459,6 +466,21 @@ impl Device {
             }
         }
 
+        // `VK_KHR_unified_image_layouts` is dropped from the optional
+        // candidates when the driver lacks the `unifiedImageLayouts` feature
+        // bit: the extension name alone does not imply it, and requesting an
+        // unsupported feature would fail device creation. Same probe shape as
+        // the atomic-float check above.
+        if supported.contains(&ash::khr::unified_image_layouts::NAME) {
+            let features2 = vk::PhysicalDeviceFeatures2::default();
+            let mut unified_layouts = vk::PhysicalDeviceUnifiedImageLayoutsFeaturesKHR::default();
+            let mut features2 = features2.push(&mut unified_layouts);
+            instance.physical_device_features2(physical_device, &mut features2);
+            if unified_layouts.unified_image_layouts != vk::TRUE {
+                supported.retain(|name| name != &ash::khr::unified_image_layouts::NAME);
+            }
+        }
+
         let mut optional_enabled: Vec<&'static CStr> = Vec::new();
         for name in OPTIONAL_DEVICE_EXTENSIONS {
             if supported.contains(name) {
@@ -559,6 +581,14 @@ impl Device {
             vk::PhysicalDeviceShaderAtomicFloatFeaturesEXT::default()
                 .shader_buffer_float32_atomic_add(true);
 
+        // `VK_KHR_unified_image_layouts`: only the `unifiedImageLayouts` bit
+        // is requested — `unifiedImageLayoutsVideo` covers video coding,
+        // which the RHI does not use. With the bit set, `GENERAL` (the layout
+        // every non-swapchain image already lives in) is a
+        // spec-guaranteed-optimal layout for nearly every use.
+        let mut unified_image_layouts_features =
+            vk::PhysicalDeviceUnifiedImageLayoutsFeaturesKHR::default().unified_image_layouts(true);
+
         // Core features. Storage-image access without a format qualifier:
         // heap-indexed `RWTexture2D` (the gaussian-splatting intermediate)
         // has no declaration site to annotate a format, so untyped storage
@@ -593,6 +623,9 @@ impl Device {
         }
         if optional_enabled.contains(&ash::khr::device_address_commands::NAME) {
             features2 = features2.push(&mut device_address_commands_features);
+        }
+        if optional_enabled.contains(&ash::khr::unified_image_layouts::NAME) {
+            features2 = features2.push(&mut unified_image_layouts_features);
         }
         // `TaggedStructure::push` consumes `self` and returns the chained struct —
         // the return value is the one that carries the pNext link, so the

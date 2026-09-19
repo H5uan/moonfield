@@ -312,7 +312,11 @@ in `PrepareViews` is sampleable later in the same frame without blocking on
 the queue), `AttachmentLayout::ShaderRead` and
 `DepthStencil` both map to it, and dynamic rendering performs no implicit
 layout transitions — while swapchain images stay in `PRESENT_SRC_KHR`
-(`AttachmentLayout::Present`). The pass's pipelines are format-keyed:
+(`AttachmentLayout::Present`). Device creation enables the optional
+`VK_KHR_unified_image_layouts` extension when the driver supports its
+feature bit, which upgrades the `GENERAL` policy from valid to
+spec-guaranteed optimal; presentation is exempt from the extension, so the
+swapchain layout stays as-is. The pass's pipelines are format-keyed:
 `Core3dPipelines` holds one `Core3dPipeline` variant per color format the
 frame's views resolve to (`VIEW_TARGET_FORMAT` for viewport views, the primary
 surface's negotiated format for window views, so an sRGB swapchain simply gets

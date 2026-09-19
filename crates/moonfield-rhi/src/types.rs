@@ -276,6 +276,16 @@ impl ClearValue {
 
 /// The image layout an attachment is in during a pass (and stays in — the
 /// engine does not transition layouts across passes yet).
+///
+/// Non-swapchain attachments map to `GENERAL` under the unified-layout
+/// policy (see `docs/architecture.md`). When the optional
+/// `VK_KHR_unified_image_layouts` device extension is enabled, `GENERAL` is
+/// additionally a spec-guaranteed-optimal layout; the extension does not
+/// change this mapping, it blesses it. `Present` keeps `PRESENT_SRC_KHR`
+/// because presentation is explicitly exempt from the extension — the
+/// swapchain already performs its one transition per frame, and on the
+/// desktop targets (Windows/Linux) drivers handle `PRESENT_SRC_KHR` at full
+/// performance.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum AttachmentLayout {
     /// A swapchain image that remains presentable.
