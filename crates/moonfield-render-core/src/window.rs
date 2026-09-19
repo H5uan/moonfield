@@ -9,13 +9,13 @@
 //! resource. The frame loop is three public systems that other plugins order
 //! against:
 //!
-//! - [`create_window_surfaces`] (`PrepareAssets` set): creates/recreates
-//!   surfaces
-//!   and swapchains to match the extracted windows.
-//! - [`acquire_window_frames`] (`Render`, first): begins the frame (waits the
-//!   in-flight timeline counter, drains the frame slot's retirements, begins
-//!   the frame's command buffer) and acquires the next swapchain image for
-//!   every window with [`WindowFrameDemand`].
+//! - [`create_window_surfaces`] (`Render`, before [`acquire_window_frames`]):
+//!   creates/recreates surfaces and swapchains to match the extracted
+//!   windows.
+//! - [`acquire_window_frames`] (`Render`, first in the set chain): begins
+//!   the frame (waits the in-flight timeline counter, drains the frame
+//!   slot's retirements, begins the frame's command buffer) and acquires
+//!   the next swapchain image for every window with [`WindowFrameDemand`].
 //! - [`submit_window_frames`] (`Render`, last): flushes the shared uploader,
 //!   ends recording, submits to the graphics queue once, presents every
 //!   acquired window, and advances the frame slot.
@@ -319,6 +319,30 @@ impl Drop for FrameContext {
     }
 }
 
+/// A swapchain replaced by [`WindowSurfaceData::recreate`], kept alive with
+/// its depth buffer until every frame that may still present it has
+/// completed on the GPU.
+///
+/// `recreate` passes the old swapchain to the driver as `oldSwapchain`,
+/// which retires it: no more acquires, but already-acquired images may
+/// still be presented, and a surface may carry any number of retired
+/// swapchains. Destruction is deferred through this list instead of being
+/// synchronized with `vkDeviceWaitIdle`.
+struct RetiredSwapchain {
+    /// Held for deferred destruction only: the swapchain must not be
+    /// destroyed while an in-flight frame may still present it.
+    #[allow(dead_code)]
+    swapchain: Swapchain,
+    /// Held for deferred destruction only, like `swapchain`.
+    #[allow(dead_code)]
+    depth: Option<DepthBuffer>,
+    /// `FrameContext::presented_frames` at retirement: the frames that may
+    /// still reference this swapchain. Dropped once [`MAX_FRAMES_IN_FLIGHT`]
+    /// more frames have been submitted — the frame loop's in-flight wait has
+    /// by then confirmed every one of those frames completed.
+    retired_at: u64,
+}
+
 /// Persistent GPU state for one window: surface, swapchain, per-frame-in-flight
 /// present synchronization, and the per-window acquire state. The frame-level
 /// objects (command buffers, timeline, sequencing) live in [`FrameContext`].
@@ -341,9 +365,20 @@ pub struct WindowSurfaceData {
     instance: Arc<Instance>,
     /// The acquired swapchain image of the in-progress frame, if any.
     current_image: Option<u32>,
-    /// The swapchain reported itself out of date (or suboptimal). Plain
-    /// data, no drop-order relevance.
+    /// The swapchain reported itself out of date (or suboptimal), or its
+    /// extent no longer matches the window. Plain data, no drop-order
+    /// relevance.
     needs_recreate: bool,
+    /// The live swapchain was retired by a failed `recreate` (`oldSwapchain`
+    /// is retired even when creation fails): it must not be acquired from or
+    /// passed as the creation hint again. Plain data, no drop-order
+    /// relevance.
+    swapchain_retired: bool,
+    /// Swapchains (and their depth buffers) replaced by `recreate`, awaiting
+    /// confirmation that no in-flight frame still presents them. Each entry
+    /// holds its own device keepalive, so drop order against the fields
+    /// above is irrelevant.
+    retired: Vec<RetiredSwapchain>,
 }
 
 impl WindowSurfaceData {
@@ -390,6 +425,8 @@ impl WindowSurfaceData {
             instance,
             current_image: None,
             needs_recreate: false,
+            swapchain_retired: false,
+            retired: Vec::new(),
         })
     }
 
@@ -435,31 +472,70 @@ impl WindowSurfaceData {
             Err(Error::SurfaceOutOfDate) => {
                 self.needs_recreate = true;
             }
-            Err(e) => return Err(e),
+            Err(e) => {
+                return Err(e);
+            }
         }
         Ok(())
     }
 
-    /// Recreate the swapchain for a new window size.
+    /// Recreate the swapchain for a new window size, without idling the
+    /// device: the old swapchain and depth buffer move to the retirement
+    /// list and are destroyed once the frames that may still present them
+    /// have completed (see [`RetiredSwapchain`]). `presented_frames` is the
+    /// frame loop's submitted-frame counter ([`FrameContext::presented_frames`]),
+    /// the retirement timestamp.
     ///
-    /// Waits for the device to go idle first. Zero dimensions are ignored
-    /// (e.g. a minimized window).
-    fn recreate(&mut self, width: u32, height: u32) -> Result<()> {
+    /// The caller runs this only while no acquired image is in flight: an
+    /// acquired image must be presented through the swapchain it was
+    /// acquired from, so the swap waits for the frame that acquired it.
+    /// Zero dimensions are ignored (e.g. a minimized window).
+    fn recreate(&mut self, width: u32, height: u32, presented_frames: u64) -> Result<()> {
         if width == 0 || height == 0 {
             return Ok(());
         }
 
-        self.device.wait_idle()?;
+        // The old swapchain stays alive past this call (deferred
+        // destruction), so the replacement goes through `succeed`: it passes
+        // the old handle as `oldSwapchain`, keeping the surface at one
+        // non-retired swapchain and letting the driver transition smoothly.
+        // `succeed` retires the old swapchain even when creation fails, and
+        // a retired swapchain must not be passed as the hint again — retries
+        // after a failure create without it (legal: the surface then has no
+        // non-retired swapchain).
+        let swapchain = if self.swapchain_retired {
+            Swapchain::new(&self.instance, &self.device, &self.surface, [width, height])?
+        } else {
+            let created = Swapchain::succeed(
+                &self.instance,
+                &self.device,
+                &self.surface,
+                [width, height],
+                &self.swapchain,
+            );
+            self.swapchain_retired = true;
+            created?
+        };
+        let depth = DepthBuffer::new(&self.device, width, height)?;
 
-        // The device is idle; the swapchain passes its own current handle as
-        // `oldSwapchain` so the driver recycles the surface's images.
-        self.swapchain
-            .recreate(&self.instance, &self.device, &self.surface, [width, height])?;
-        if let Some(depth) = &mut self.depth {
-            depth.resize(&self.device, width, height)?;
-        }
+        let retired = RetiredSwapchain {
+            swapchain: std::mem::replace(&mut self.swapchain, swapchain),
+            depth: self.depth.replace(depth),
+            retired_at: presented_frames,
+        };
+        self.retired.push(retired);
+        self.swapchain_retired = false;
         self.needs_recreate = false;
         Ok(())
+    }
+
+    /// Destroy retired swapchains whose frames have drained out of the
+    /// in-flight window: `presented_frames >= retired_at + MAX_FRAMES_IN_FLIGHT`
+    /// means the frame loop's in-flight wait has confirmed completion of
+    /// every frame that could still present the old swapchain.
+    fn drain_retired(&mut self, presented_frames: u64) {
+        self.retired
+            .retain(|entry| presented_frames < entry.retired_at + MAX_FRAMES_IN_FLIGHT as u64);
     }
 
     /// The current swapchain extent.
@@ -550,8 +626,16 @@ impl WindowSurfaces {
     }
 }
 
-/// `PrepareAssets` set system: create or recreate surface data to match the
-/// extracted windows, and drop surface data whose window disappeared.
+/// `Render` system (runs before [`acquire_window_frames`]): create or
+/// recreate surface data to match the extracted windows, drop surface data
+/// whose window disappeared, and drain retired swapchains whose frames
+/// completed.
+///
+/// Running before acquire is what makes recreation safe: at this point in
+/// the tick no window holds an acquired image (last tick's submit presented
+/// and took it), so a swapchain swap never crosses an in-flight present,
+/// and the same tick's acquire can target the fresh swapchain — a resize
+/// costs no blank tick.
 ///
 /// No-ops when no [`RenderDevice`] exists (headless machines without a
 /// Vulkan driver).
@@ -572,6 +656,13 @@ pub fn create_window_surfaces(world: &mut World) {
             physical_height: window.physical_height,
         })
         .collect();
+    // The retirement timestamp: frames submitted so far. `acquire_window_frames`
+    // runs earlier in the same tick, so the frame context exists whenever a
+    // device does; 0 simply defers draining until frames flow.
+    let presented_frames = world
+        .get_resource::<FrameContext>()
+        .map(|frame| frame.presented_frames())
+        .unwrap_or(0);
     if !world.contains_resource::<WindowSurfaces>() {
         world.insert_resource(WindowSurfaces::default());
     }
@@ -598,11 +689,22 @@ pub fn create_window_surfaces(world: &mut World) {
             }
             std::collections::hash_map::Entry::Occupied(mut entry) => {
                 let data = entry.get_mut();
+                data.drain_retired(presented_frames);
                 let extent = data.extent();
-                if (data.needs_recreate
-                    || (extent.width != window.physical_width
-                        || extent.height != window.physical_height))
-                    && let Err(e) = data.recreate(window.physical_width, window.physical_height)
+                data.needs_recreate |= extent.width != window.physical_width
+                    || extent.height != window.physical_height;
+                // This system runs before acquire, so no image is in flight
+                // (`current_image` was taken by last tick's present); the
+                // guard states the invariant recreate relies on — an
+                // acquired image must be presented through the swapchain it
+                // was acquired from.
+                if data.needs_recreate
+                    && !data.frame_in_progress()
+                    && let Err(e) = data.recreate(
+                        window.physical_width,
+                        window.physical_height,
+                        presented_frames,
+                    )
                 {
                     error!("failed to recreate window surface: {e}");
                 }
@@ -615,8 +717,10 @@ pub fn create_window_surfaces(world: &mut World) {
 /// the frame, then acquire the next swapchain image for every window with
 /// [`WindowFrameDemand`]. The frame begins every tick a [`RenderDevice`]
 /// exists — offscreen passes record into it whether or not any window
-/// acquired. Windows whose swapchain is out of date skip this frame and are
-/// recreated by the next [`create_window_surfaces`] run; minimized
+/// acquired. Windows whose swapchain is out of date skip this tick and are
+/// recreated at the start of the next one ([`create_window_surfaces`] runs
+/// before this system); a suboptimal acquire still presents — the driver
+/// scales the image — so a resize never blanks the window. Minimized
 /// (zero-size) windows are skipped entirely.
 pub fn acquire_window_frames(world: &mut World) {
     let Some(render_device) = world
@@ -671,9 +775,13 @@ pub fn acquire_window_frames(world: &mut World) {
             error!("window frame acquired while a frame is still in progress");
             continue;
         }
+        // A suboptimal acquire still yields a usable image: present it and
+        // let the driver scale, so a resize never blanks the window. The
+        // swapchain is swapped by `create_window_surfaces` at the start of
+        // a tick, while no image is in flight.
         match data.acquire_image(slot) {
             Ok(true) => {}
-            Ok(false) => {} // out of date; recreated next frame
+            Ok(false) => {} // out of date; recreated at the next tick's start
             Err(e) => error!("failed to acquire window frame: {e}"),
         }
     }

@@ -52,8 +52,13 @@ impl Plugin for RenderPlugin {
         app.add_render_systems(
             Render,
             (
+                // Surfaces are created/recreated before the frame begins:
+                // at this point no window holds an acquired image (last
+                // tick's submit presented and took it), so the swapchain
+                // swap never crosses an in-flight present, and the acquire
+                // below can target the fresh swapchain the same tick.
+                create_window_surfaces.before(&acquire_window_frames),
                 acquire_window_frames.before_set::<PrepareAssets>(),
-                create_window_surfaces.after_set::<PrepareAssets>(),
                 // Frame scratch arena, then per-view attachment components
                 // (feature-side pool `ensure` systems order `.before(this)`).
                 crate::arena::begin_frame_draw_arena.in_set::<PrepareViews>(),
