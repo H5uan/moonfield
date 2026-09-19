@@ -293,7 +293,7 @@ pub fn record_view_pass(
 }
 
 /// The began pass's body: set the pass's dynamic states (Y-flip viewport,
-/// reverse-Z depth, culling), push the view uniforms, then dispatch the
+/// reverse-Z depth, cull state), push the view uniforms, then dispatch the
 /// phase's items. Split from [`record_view_pass`] so tests that own their
 /// command buffer drive the same path.
 pub fn record_view_items(
@@ -309,8 +309,9 @@ pub fn record_view_items(
     // top-left origin. The negative-height viewport performs the flip
     // at the Vulkan boundary (see AGENTS.md clip-space note).
     pass.set_viewport(Viewport::y_flipped(width, height));
-    // Reverse-Z depth state + back-face culling with the flipped
-    // viewport (front face = clockwise after the Y flip).
+    // Reverse-Z depth state with the flipped viewport. Faces are not culled
+    // (`CullMode::None` — both sides of every triangle rasterize); the
+    // clockwise front face only matters if culling is ever enabled.
     pass.set_depth_state(DepthState {
         test_enable: true,
         write_enable: true,

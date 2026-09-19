@@ -11,9 +11,11 @@ use crate::{Vec3, bounding::BoundingVolume};
 
 /// An axis-aligned bounding box defined by its `min` and `max` corners.
 ///
-/// `#[repr(C)]` + `Pod` so it can be uploaded directly to a GPU storage buffer
-/// as a `vec3 min; vec3 max;` pair (see [`crate::gpu`] for the `Vec3` padding
-/// caveat).
+/// `#[repr(C)]` + `Pod` so its bytes can be uploaded to a GPU buffer. The
+/// Rust layout (two packed 12-byte `Vec3`s, 24 bytes total) does *not* match
+/// a std430 `vec3 min; vec3 max;` struct (which pads `max` to offset 16, 32
+/// bytes total); the shader-side declaration is the source of truth for the
+/// byte layout — see [`crate::gpu`].
 #[repr(C)]
 #[derive(Debug, Clone, Copy, PartialEq, bytemuck::Pod, bytemuck::Zeroable)]
 pub struct Aabb3d {
@@ -173,9 +175,9 @@ impl BoundingVolume for Aabb3d {
 
 /// A bounding sphere defined by a `center` and a `radius`.
 ///
-/// `#[repr(C)]` + `Pod` so it can be uploaded directly to a GPU storage buffer
-/// as a `vec3 center; float radius;` pair (see [`crate::gpu`] for the `Vec3`
-/// padding caveat).
+/// `#[repr(C)]` + `Pod` so its bytes can be uploaded to a GPU buffer; as with
+/// every `Vec3`-carrying struct, the shader-side declaration is the source of
+/// truth for the byte layout — see [`crate::gpu`].
 #[repr(C)]
 #[derive(Debug, Clone, Copy, PartialEq, bytemuck::Pod, bytemuck::Zeroable)]
 pub struct BoundingSphere {
@@ -254,7 +256,10 @@ impl BoundingVolume for BoundingSphere {
 
     fn merge(&self, other: &Self) -> Self {
         let center = (self.center + other.center) * 0.5;
-        // The tightest sphere centered at the midpoint that contains both.
+        // Conservative closed form: the smallest sphere *centered at the
+        // midpoint* that contains both. It is not the minimal enclosing
+        // sphere — when one sphere contains the other, the result is larger
+        // than the containing sphere.
         let to_other = other.center - center;
         let radius = to_other.length() + other.radius.max(self.radius);
         Self { center, radius }

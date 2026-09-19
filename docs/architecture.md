@@ -41,7 +41,10 @@ A `Schedule` groups systems under a `ScheduleLabel` and orders them with
 executor). `Commands` queue into a world-global buffer that
 `World::apply_commands` drains after **every** system run, so a system's
 commands are visible to later systems in the same run; the world's change tick
-advances once per schedule run. `App` owns
+advances once per schedule run. Running a schedule lifts its entry out of the
+world's `Schedules` resource for the run, so a system can run *other* schedules
+from inside (a rerun of the running label is a no-op); systems registered into
+the running label mid-run are merged back when the run ends. `App` owns
 separate main-world and render-world schedule maps. One tick runs `First`, the fixed loop, `Update`, the render
 pipeline (`PreRender` in the main world, then `ExtractSchedule` and `Render`
 in the render world), and `Last`; `Startup` and
@@ -119,8 +122,13 @@ wrappers `Ref<T>` / `Mut<T>` — they deref to the component and answer
 `is_added()` / `is_changed()` relative to the world's last two ticks. Ticks
 are wrapping `u32`s; comparisons clamp relative ages at `MAX_CHANGE_AGE`, so
 wraparound never reports a recent change as unchanged. There are no
-`Changed<T>`/`Added<T>` query filters. Resource and component aliasing is
-enforced at runtime by borrow counters — conflicting access panics.
+`Changed<T>`/`Added<T>` query filters. Resource aliasing is enforced at
+runtime by `RefCell` borrows, component aliasing by archetype borrow counters
+— conflicting access panics. `Query` params additionally register their
+per-component read/write access in the world when fetched (unregistering on
+drop), so a read/write or write/write overlap between a system's params
+panics at fetch time rather than after query items have outlived their
+iterator's borrow flags.
 
 ## Time
 
@@ -238,7 +246,10 @@ the frame's command buffer, then acquires a swapchain image for each window
 the `WindowFrameDemand` resource (written by extraction) marks as having
 content to present; submit ends recording, flushes the shared frame uploader,
 and submits the command buffer
-once — waiting on every acquired window's `image_available`, signaling every
+once — waiting on every acquired window's `image_available` and on the
+uploader's latest submitted batch (same-queue submission order sequences the
+batches but creates no memory dependency, so the timeline wait is what makes
+upload writes visible to shader reads), signaling every
 `render_finished` plus the timeline with the frame number — then presents
 each acquired window. Windows are acquire/present targets of the frame, not
 its owner, so offscreen passes record whether or not any window frame exists;

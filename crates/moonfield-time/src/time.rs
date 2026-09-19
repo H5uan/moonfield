@@ -12,15 +12,19 @@ use std::time::Duration;
 /// previous update and since its creation.
 ///
 /// The instances used by the engine (inserted by `TimePlugin` in
-/// moonfield-app and advanced once per frame by the windowing backend via
-/// [`update_time`](crate::update_time)):
+/// moonfield-app and advanced once per frame by
+/// [`time_update_system`](crate::time_update_system) in the `First` schedule):
 ///
 /// - [`Time<Real>`](crate::Real) tracks real wall-clock time elapsed.
 /// - [`Time<Virtual>`](crate::Virtual) tracks virtual game time that may be
 ///   paused or scaled.
 /// - `Time` is the generic "current" clock systems should read by default; it
-///   mirrors [`Time<Virtual>`](crate::Virtual) (there is no fixed-update
-///   schedule yet, so unlike Bevy it is never swapped for a fixed clock).
+///   mirrors [`Time<Virtual>`](crate::Virtual) outside the fixed loop. During
+///   each fixed iteration
+///   [`run_fixed_main_schedule`](crate::run_fixed_main_schedule) swaps a copy
+///   of [`Time<Fixed>`](crate::Fixed) into it, so systems reading `Res<Time>`
+///   in a fixed schedule see the fixed delta; the virtual clock is restored
+///   after the loop.
 ///
 /// New custom clocks can be created with [`new_with`](Time::new_with) over a
 /// user context type and advanced manually with [`advance_by`](Time::advance_by)

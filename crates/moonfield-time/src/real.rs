@@ -1,8 +1,9 @@
 //! The real wall-clock time, ported from `bevy_time::real`.
 //!
-//! [`Time<Real>`] is fed [`Instant`]s once per frame by the windowing backend
-//! and is unaffected by pause or time scaling. Tests drive it with synthetic
-//! instants via [`update_with_instant`](Time::update_with_instant).
+//! [`Time<Real>`] is fed [`Instant`]s once per frame by
+//! [`time_update_system`](crate::time_update_system) and is unaffected by
+//! pause or time scaling. Tests drive it with synthetic instants via
+//! [`update_with_instant`](Time::update_with_instant).
 
 use std::time::{Duration, Instant};
 
@@ -42,9 +43,10 @@ impl Time<Real> {
 
     /// Updates the clock from [`Instant::now`].
     ///
-    /// Ordinarily only the windowing backend calls this (once per frame, via
-    /// [`update_time`](crate::update_time)); calling it from app code will
-    /// disturb timekeeping.
+    /// Ordinarily only [`time_update_system`](crate::time_update_system)
+    /// drives the clock (once per frame, through
+    /// [`update_time`](crate::update_time) under the `Automatic` strategy);
+    /// calling it from app code will disturb timekeeping.
     pub fn update(&mut self) {
         self.update_with_instant(Instant::now());
     }

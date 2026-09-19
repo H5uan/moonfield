@@ -16,7 +16,9 @@ moonfield-app/      # Plugin-based App/Plugin framework (Plugin, PluginGroup, Ap
 moonfield-asset/    # Sync-only Assets<T> store + Handle<T> (index+generation) + AssetServer
                     # (extension dispatch, path cache); no deps, no async
 moonfield-camera/   # Scene-facing camera components, targets, and projection/view math
-moonfield-ecs/      # ECS world implementation (archetype storage, system params, schedules, hooks, relationships)
+moonfield-ecs/      # ECS world implementation (archetype storage, system params, schedules, hooks,
+                    # relationships) + Transform/GlobalTransform propagation (hierarchy.rs; the math
+                    # types come from moonfield-math — see docs/architecture.md)
 moonfield-editor/   # The editor — the workspace's only binary (src/main.rs). EditorPlugin
                     # (egui + egui_dock + in-house Vulkan backend in src/egui_vk.rs): dock panels, offscreen viewport
 moonfield-log/      # Logging utilities (framework layer: LogPlugin needs moonfield-app;

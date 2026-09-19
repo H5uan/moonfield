@@ -11,7 +11,7 @@ moonfield-reflect = { workspace = true, optional = true }
 [features]
 default = ["std"]
 std = ["glam/std", "moonfield-reflect"]
-# GPU 上传所需的 Pod/bytemuck 支持（默认随 std 一起，但显式暴露以便 future no_std GPU 目标）
+# Pod/bytemuck support for GPU uploads (on by default via std, but exposed explicitly for future no_std GPU targets)
 gpu = []
 
 [package.metadata.docs.rs]

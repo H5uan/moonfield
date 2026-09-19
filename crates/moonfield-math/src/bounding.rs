@@ -75,6 +75,13 @@ pub fn aabb_from_points<'a>(points: impl IntoIterator<Item = &'a Vec3>) -> Optio
 }
 
 /// A bounding sphere that contains `points`.
+///
+/// `points` must be non-empty. The center is the sum of the points divided by
+/// the point count, so an empty slice divides by zero and yields a sphere with
+/// NaN center components and a `0.0` radius (the fold's starting value).
+/// Unlike [`aabb_from_points`], which returns `None` for empty input, this
+/// function has no empty case — check the length up front if empty input is
+/// possible.
 #[must_use]
 pub fn sphere_from_points(points: &[Vec3]) -> BoundingSphere {
     let center = points.iter().fold(Vec3::ZERO, |acc, p| acc + *p) / points.len() as f32;
