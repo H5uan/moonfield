@@ -535,7 +535,9 @@ impl ApplicationHandler<WinitUserEvent> for WinitHandler<'_> {
             // The OS asks for a frame: this is where the frame actually
             // runs (Bevy's redraw_requested-driven model). Frame pacing is
             // paced by the compositor, not by event-loop idle spinning.
-            WindowEvent::RedrawRequested => self.run_frame(event_loop),
+            WindowEvent::RedrawRequested => {
+                self.run_frame(event_loop);
+            }
             _ => {}
         }
     }
