@@ -335,19 +335,25 @@ impl<T: Default + Send + Sync + 'static> SystemParam for Local<'_, T> {
 /// }
 /// ```
 ///
+/// The matching archetypes are cached in the param's per-system
+/// [`QueryState`] (validated at fetch time), so repeated `iter`/`iter_mut`
+/// calls do not re-scan the world's archetype list.
+///
 /// Conflicting component access between two `Query` params of one system
 /// (e.g. `Query<&A>` together with `Query<&mut A>`) panics when the params
 /// are fetched: query items may outlive the iterator that produced them, so
 /// the conflict cannot wait for the archetype borrow flags. Two live
 /// iterators over the same mutable column *within* one param are still caught
 /// by the flags and panic, exactly like [`World::query_mut`].
-pub struct Query<'w, Q: WorldQuery, F: QueryFilter = ()> {
+pub struct Query<'w, 's, Q: WorldQuery, F: QueryFilter = ()> {
     world: &'w World,
     window: QueryWindow,
+    /// The cached match list from the param's [`QueryState`].
+    matched: &'s [u32],
     _marker: PhantomData<fn() -> (Q, F)>,
 }
 
-impl<Q: WorldQuery, F: QueryFilter> Drop for Query<'_, Q, F> {
+impl<Q: WorldQuery, F: QueryFilter> Drop for Query<'_, '_, Q, F> {
     fn drop(&mut self) {
         Q::unregister_access(&mut self.world.access_registry.borrow_mut());
     }
@@ -364,12 +370,72 @@ pub struct QueryWindow {
     pub(crate) this_run: Tick,
 }
 
-impl<'w, Q: WorldQuery, F: QueryFilter> Query<'w, Q, F> {
+/// Per-system persistent state of a [`Query`] param: the system's
+/// change-detection window plus the cached list of archetypes the query and
+/// its filter match.
+///
+/// The world's archetype list only ever grows — archetypes are never
+/// removed, and `World::clear` empties rows without shrinking the list — so
+/// the cache stays valid while the world still has exactly
+/// `archetype_count` archetypes. A different count means new archetypes
+/// appeared and the match list is rebuilt; a different world id means the
+/// state is being fetched against another world and is rebuilt regardless.
+/// Both checks run at fetch time (see [`SystemParam::fetch`]), so iteration
+/// itself never re-scans.
+pub struct QueryState {
+    window: QueryWindow,
+    /// Matching archetype indices, in archetype-set order.
+    matched: Vec<u32>,
+    /// The world the cache was built against; 0 = not yet built (world ids
+    /// start at 1).
+    world_id: u64,
+    /// `World::raw_archetypes().len()` when the cache was built.
+    archetype_count: usize,
+}
+
+impl QueryState {
+    /// Rebuild the match list if the world's archetype set grew (or the state
+    /// is fresh / belongs to another world).
+    fn refresh<Q: WorldQuery, F: QueryFilter>(&mut self, world: &World) {
+        let archetypes = world.raw_archetypes();
+        if self.world_id == world.id() && self.archetype_count == archetypes.len() {
+            return;
+        }
+        self.matched.clear();
+        self.matched.extend(
+            archetypes
+                .iter()
+                .enumerate()
+                .filter(|&(_, a)| archetype_matches::<F>(a) && Q::matches(a))
+                .map(|(i, _)| i as u32),
+        );
+        self.world_id = world.id();
+        self.archetype_count = archetypes.len();
+    }
+}
+
+impl Default for QueryState {
+    fn default() -> Self {
+        Self {
+            window: QueryWindow {
+                // last_run 0: a system's first run observes every component
+                // as new.
+                last_run: Tick::new(0),
+                this_run: Tick::new(0),
+            },
+            matched: Vec::new(),
+            world_id: 0,
+            archetype_count: 0,
+        }
+    }
+}
+
+impl<Q: WorldQuery, F: QueryFilter> Query<'_, '_, Q, F> {
     /// Iterate all matching entities with shared access.
     pub fn iter(&self) -> QueryIter<'_, Q> {
-        QueryIter::new_shared(
+        QueryIter::new_shared_cached(
             self.world,
-            &archetype_matches::<F>,
+            self.matched,
             self.window.last_run,
             self.window.this_run,
         )
@@ -383,9 +449,9 @@ impl<'w, Q: WorldQuery, F: QueryFilter> Query<'w, Q, F> {
         // access. Conflicting access across *different* params is caught at
         // fetch time by the world's access registry.
         unsafe {
-            QueryIter::new(
+            QueryIter::new_cached(
                 self.world,
-                &archetype_matches::<F>,
+                self.matched,
                 self.window.last_run,
                 self.window.this_run,
             )
@@ -419,23 +485,20 @@ pub(crate) fn archetype_matches<F: QueryFilter>(archetype: &crate::archetype::Ar
     F::matches_component_set(&|t| archetype.has_in_runtime(t))
 }
 
-impl<Q: WorldQuery, F: QueryFilter> SystemParam for Query<'_, Q, F> {
-    type State = QueryWindow;
-    type Item<'w, 's> = Query<'w, Q, F>;
+impl<Q: WorldQuery, F: QueryFilter> SystemParam for Query<'_, '_, Q, F> {
+    type State = QueryState;
+    type Item<'w, 's> = Query<'w, 's, Q, F>;
 
     fn init_state() -> Self::State {
-        // last_run 0: a system's first run observes every component as new.
-        QueryWindow {
-            last_run: Tick::new(0),
-            this_run: Tick::new(0),
-        }
+        QueryState::default()
     }
 
     fn refresh_window(state: &mut Self::State, last_run: Tick, this_run: Tick) {
-        *state = QueryWindow { last_run, this_run };
+        state.window = QueryWindow { last_run, this_run };
     }
 
     fn fetch<'w, 's>(world: &'w World, state: &'s mut Self::State) -> Self::Item<'w, 's> {
+        state.refresh::<Q, F>(world);
         // Stage the registration in a scratch copy: if one element of `Q`
         // conflicts with another (e.g. `Query<(&A, &mut A)>`), the panic must
         // not leave a partial registration behind — no `Query` is constructed
@@ -447,7 +510,8 @@ impl<Q: WorldQuery, F: QueryFilter> SystemParam for Query<'_, Q, F> {
         drop(registry);
         Query {
             world,
-            window: *state,
+            window: state.window,
+            matched: &state.matched,
             _marker: PhantomData,
         }
     }
@@ -886,5 +950,66 @@ mod tests {
         read.run(&mut world);
         write.run(&mut world);
         read.run(&mut world);
+    }
+
+    #[test]
+    fn test_query_cache_picks_up_archetypes_added_between_runs() {
+        fn count_positions(q: Query<&Position>, mut log: ResMut<Log>) {
+            log.0.push(q.iter().count().to_string());
+        }
+
+        let mut world = World::new();
+        world.insert_resource(Log::default());
+        let mut system = IntoSystem::into_system(count_positions);
+
+        // First run builds the cache with only the `Position` archetype.
+        world.spawn((Position { x: 0.0 },));
+        system.run(&mut world);
+        // A new archetype appears after the first run; the next run must see
+        // it without rescans having been its only discovery mechanism.
+        world.spawn((Position { x: 1.0 }, Velocity { x: 0.0 }));
+        system.run(&mut world);
+        // Steady state: no new archetypes, the cached list is reused.
+        system.run(&mut world);
+        assert_eq!(world.get_resource::<Log>().unwrap().0, ["1", "2", "2"]);
+    }
+
+    #[test]
+    fn test_query_filter_matches_archetype_added_after_first_run() {
+        use crate::With;
+
+        fn count_movers(q: Query<&Position, With<Velocity>>, mut log: ResMut<Log>) {
+            log.0.push(q.iter().count().to_string());
+        }
+
+        let mut world = World::new();
+        world.insert_resource(Log::default());
+        let mut system = IntoSystem::into_system(count_movers);
+
+        // The filter matches nothing on the first run (only a `Position`
+        // archetype exists).
+        world.spawn((Position { x: 0.0 },));
+        system.run(&mut world);
+        // A `Position + Velocity` archetype appears afterwards and must be
+        // picked up on the next run.
+        world.spawn((Position { x: 1.0 }, Velocity { x: 2.0 }));
+        system.run(&mut world);
+        assert_eq!(world.get_resource::<Log>().unwrap().0, ["0", "1"]);
+    }
+
+    #[test]
+    fn test_query_state_rebuilds_against_a_different_world() {
+        // One shared param state, two worlds with the same archetype count:
+        // only the world-id check catches the mismatch.
+        let mut state = SystemState::<Query<&Position>>::new();
+        let mut a = World::new();
+        a.spawn((Position { x: 0.0 },));
+        let mut b = World::new();
+        b.spawn((Position { x: 1.0 },));
+        b.spawn((Position { x: 2.0 },));
+
+        let first = state.get(&a).iter().count();
+        let second = state.get(&b).iter().count();
+        assert_eq!([first, second], [1, 2]);
     }
 }

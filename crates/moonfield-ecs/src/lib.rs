@@ -1,12 +1,12 @@
 // The ECS crate: archetype-based storage with an archetype query engine. The
 // public `World` is the archetype-backed world (see `world`).
 //
-// The crate is still under active construction. The items silenced below are
-// deliberate in-progress features kept for upcoming milestones (entity-ref /
-// component-ref access, column-batch spawning, dynamic clone bundles, and the
-// insert/remove edge tables for cross-archetype moves). The former sparse-set
-// implementation has been fully removed.
-#![allow(dead_code)]
+// The crate is still under active construction. Deliberate in-progress items
+// (entity-ref / component-ref access, column-batch spawning, dynamic clone
+// bundles, allocator introspection for future serialization) carry targeted
+// `#[allow(dead_code)]` at the item site; there is no crate-wide allow, so
+// new dead code warns. The former sparse-set implementation has been fully
+// removed.
 #![allow(clippy::type_complexity)]
 
 use std::any::{Any, TypeId};
@@ -78,7 +78,7 @@ pub use schedule::{
     SystemSet,
 };
 pub use system::{
-    IntoSystem, Local, Query, Res, ResMut, System, SystemParam, SystemParamFunction,
+    IntoSystem, Local, Query, QueryState, Res, ResMut, System, SystemParam, SystemParamFunction,
     SystemParamItem, SystemState,
 };
 pub use template::{Template, TemplateContext, TemplateError};

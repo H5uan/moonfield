@@ -92,11 +92,15 @@ pub unsafe trait Bundle: DynamicBundle {
 
 #[derive(Copy, Clone)]
 /// Type-erased [`Clone`] implementation
+// In-progress: the dynamic clone bundle milestone (nothing clones bundles yet).
+#[allow(dead_code)]
 pub struct DynamicClone {
     pub(crate) func: unsafe fn(*const u8, &mut dyn FnMut(*mut u8, ComponentMeta)),
 }
 
 impl DynamicClone {
+    // In-progress: see the struct.
+    #[allow(dead_code)]
     pub fn new<T: Component + Clone>() -> Self {
         Self {
             func: |src, f| {
@@ -115,6 +119,8 @@ impl DynamicClone {
 /// The callback passed to [`Self::put_with_clone`] must be invoked with a
 /// pointer to a valid, initialized component value described by the
 /// accompanying [`ComponentMeta`], plus an appropriate [`DynamicClone`].
+// In-progress: the dynamic clone bundle milestone (nothing clones bundles yet).
+#[allow(dead_code)]
 pub unsafe trait DynamicBundleClone: DynamicBundle {
     /// Allow a callback to move all components out of the bundle, cloning each
     /// one with a type-erased [`DynamicClone`].

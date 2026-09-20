@@ -561,6 +561,52 @@ impl<'w, Q: WorldQuery + 'w> QueryIter<'w, Q> {
             row: 0,
         }
     }
+
+    /// Build a read-only iterator over a precomputed match list (the
+    /// per-system [`QueryState`](crate::system::QueryState) cache), skipping
+    /// the archetype scan.
+    pub(crate) fn new_shared_cached(
+        world: &'w World,
+        matched: &[u32],
+        last_run: Tick,
+        this_run: Tick,
+    ) -> Self {
+        assert_shared::<Q>();
+        // SAFETY: `Q` is read-only, so the fetches take only shared flags.
+        unsafe { Self::new_cached(world, matched, last_run, this_run) }
+    }
+
+    /// Build an iterator over a precomputed match list, possibly taking
+    /// unique column flags from a *shared* world reference.
+    ///
+    /// `matched` must be exactly the archetype indices the query and its
+    /// filter accept, in archetype-set order — the invariant
+    /// [`QueryState`](crate::system::QueryState) maintains.
+    ///
+    /// # Safety
+    ///
+    /// Same contract as [`Self::new`].
+    pub(crate) unsafe fn new_cached(
+        world: &'w World,
+        matched: &[u32],
+        last_run: Tick,
+        this_run: Tick,
+    ) -> Self {
+        let archetypes = world.raw_archetypes();
+        let meta = world.raw_entity_meta();
+        let mut hits = Vec::with_capacity(matched.len());
+        for &i in matched {
+            let a = &archetypes[i as usize];
+            hits.push((i as usize, Q::borrow_fetch(a, last_run, this_run)));
+        }
+        Self {
+            meta,
+            archetypes,
+            hits,
+            ai: 0,
+            row: 0,
+        }
+    }
 }
 
 impl<Q: WorldQuery> Drop for QueryIter<'_, Q> {

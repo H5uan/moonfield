@@ -1,14 +1,15 @@
 use std::any::{TypeId, type_name};
 use std::borrow::Borrow;
+use std::cmp::Ordering;
 use std::collections::{HashMap, hash_map::Entry};
 use std::hash::{BuildHasherDefault, Hasher};
-use std::sync::atomic::AtomicU64;
+use std::sync::atomic::{AtomicU64, Ordering as AtomicOrdering};
 
 use crate::archetype::{Archetype, ComponentMeta, TypeIdMap};
 use crate::bundle::{Bundle, DynamicBundle};
 use crate::change_detection::{CHECK_TICK_THRESHOLD, Mut, Ref, Tick};
 use crate::commands::Command;
-use crate::entities::{AllocManyState, Entities, Location, NoSuchEntity, ReserveEntitiesIterator};
+use crate::entities::{Entities, Location, NoSuchEntity, ReserveEntitiesIterator};
 use crate::hooks::{ComponentHooks, HookKind};
 use crate::query::{AccessRegistry, QueryIter};
 use crate::schedule::{IntoSystemConfigs, ScheduleLabel, Schedules};
@@ -68,15 +69,8 @@ impl ArchetypeSet {
     }
 }
 
-struct InsertTarget {
-    replaced: Vec<ComponentMeta>,
-    retained: Vec<ComponentMeta>,
-    index: u32,
-}
-
 #[derive(Default)]
 struct IndexTypeIdHasher(u64);
-
 impl Hasher for IndexTypeIdHasher {
     fn write_u32(&mut self, index: u32) {
         self.0 ^= u64::from(index);
@@ -95,6 +89,11 @@ impl Hasher for IndexTypeIdHasher {
     }
 }
 type IndexTypeIdMap<V> = HashMap<(u32, TypeId), V, BuildHasherDefault<IndexTypeIdHasher>>;
+
+/// Monotonic source of world identities, starting at 1 so that 0 can mean
+/// "uninitialized" in caches keyed by world (see
+/// [`QueryState`](crate::system::QueryState)).
+static NEXT_WORLD_ID: AtomicU64 = AtomicU64::new(1);
 
 pub struct SpawnBatchIter<'a, I>
 where
@@ -165,44 +164,23 @@ where
     }
 }
 
-pub struct SpawnColumnBatchIter<'a> {
-    pending_end: usize,
-    id_alloc: AllocManyState,
-    entities: &'a mut Entities,
-}
-
-impl Iterator for SpawnColumnBatchIter<'_> {
-    type Item = Entity;
-
-    fn next(&mut self) -> Option<Entity> {
-        let id = self.id_alloc.next(self.entities)?;
-        Some(unsafe { self.entities.resolve_unknown_gen(id) })
-    }
-
-    fn size_hint(&self) -> (usize, Option<usize>) {
-        (self.len(), Some(self.len()))
-    }
-}
-
-impl ExactSizeIterator for SpawnColumnBatchIter<'_> {
-    fn len(&self) -> usize {
-        self.id_alloc.len(self.entities)
-    }
-}
-
-impl Drop for SpawnColumnBatchIter<'_> {
-    fn drop(&mut self) {
-        // Consume used freelist entries
-        self.entities.finish_alloc_many(self.pending_end);
-    }
-}
-
 pub struct World {
     entities: Entities,
     archetypes: ArchetypeSet,
     bundle_to_archetype: TypeIdMap<u32>,
-    insert_edges: IndexTypeIdMap<InsertTarget>,
+    /// Edge table for single-component inserts: `(source archetype, component
+    /// type)` → target archetype, memoizing the type-set union. Valid forever:
+    /// archetypes are append-only, so an edge's endpoints never disappear.
+    insert_edges: IndexTypeIdMap<u32>,
+    /// The same memoization for single-component removes
+    /// (`(source archetype, component type)` → target archetype).
     remove_edges: IndexTypeIdMap<u32>,
+    /// The same memoization for statically keyed bundle inserts
+    /// (`(source archetype, bundle type)` → target archetype). Kept apart
+    /// from `insert_edges` because the blanket `Component` impl lets a tuple
+    /// be both a single component and a bundle shape — the two key spaces
+    /// would otherwise collide.
+    bundle_edges: IndexTypeIdMap<u32>,
     resources: Resources,
     /// Deferred structural mutations queued by [`Commands`](crate::Commands),
     /// drained by [`Self::apply_commands`].
@@ -228,7 +206,9 @@ pub struct World {
     /// past it.
     last_check_tick: Tick,
 
-    id: AtomicU64,
+    /// This world's identity, unique per process; used by per-system query
+    /// state to detect being fetched against a different world.
+    id: u64,
 }
 
 impl Default for World {
@@ -245,6 +225,7 @@ impl World {
             bundle_to_archetype: TypeIdMap::default(),
             insert_edges: IndexTypeIdMap::default(),
             remove_edges: IndexTypeIdMap::default(),
+            bundle_edges: IndexTypeIdMap::default(),
             resources: Resources::default(),
             command_queue: RefCell::new(Vec::new()),
             component_hooks: HashMap::new(),
@@ -254,8 +235,13 @@ impl World {
             change_tick: Cell::new(Tick::new(1)),
             last_change_tick: Cell::new(Tick::new(0)),
             last_check_tick: Tick::new(0),
-            id: AtomicU64::new(0),
+            id: NEXT_WORLD_ID.fetch_add(1, AtomicOrdering::Relaxed),
         }
+    }
+
+    /// This world's process-unique identity.
+    pub(crate) fn id(&self) -> u64 {
+        self.id
     }
 
     pub fn flush(&mut self) {
@@ -341,9 +327,15 @@ impl World {
         // valid (`alloc_at` invalidates it until `spawn_inner` re-places the
         // row, which would make the hooks' world access to the entity fail).
         let had_components = if let Ok(loc) = self.entities.get(entity) {
-            let ids: Vec<TypeId> = self.archetypes.archetypes[loc.archetype as usize]
-                .type_ids()
-                .to_vec();
+            // The ids only feed the hook loops; skip the copy when no hooks
+            // can fire (`Vec::new` does not allocate).
+            let ids: Vec<TypeId> = if self.component_hooks.is_empty() {
+                Vec::new()
+            } else {
+                self.archetypes.archetypes[loc.archetype as usize]
+                    .type_ids()
+                    .to_vec()
+            };
             for &id in &ids {
                 self.fire_hook(HookKind::Despawn, id, entity);
             }
@@ -384,7 +376,13 @@ impl World {
     }
 
     fn spawn_inner(&mut self, entity: Entity, components: impl DynamicBundle) {
-        let ids: Vec<TypeId> = components.with_ids(|ids| ids.to_vec());
+        // The ids only feed the add/insert hook loop at the end; skip the
+        // copy when no hooks can fire (`Vec::new` does not allocate).
+        let ids: Vec<TypeId> = if self.component_hooks.is_empty() {
+            Vec::new()
+        } else {
+            components.with_ids(|ids| ids.to_vec())
+        };
         let archetype_id = match components.key() {
             Some(k) => *self
                 .bundle_to_archetype
@@ -452,9 +450,15 @@ impl World {
         // Resolve first so the despawn/discard hooks can fire while every
         // component is still in place.
         let loc = self.entities.get(entity)?;
-        let ids: Vec<TypeId> = self.archetypes.archetypes[loc.archetype as usize]
-            .type_ids()
-            .to_vec();
+        // The ids only feed the hook loops; skip the copy when no hooks can
+        // fire (`Vec::new` does not allocate).
+        let ids: Vec<TypeId> = if self.component_hooks.is_empty() {
+            Vec::new()
+        } else {
+            self.archetypes.archetypes[loc.archetype as usize]
+                .type_ids()
+                .to_vec()
+        };
         // Despawn hooks run first: linked-spawn relationship targets despawn
         // their sources here, and each source's own discard hook then unlinks
         // it from this entity's (still present) target collection.
@@ -864,14 +868,24 @@ impl World {
             return Some(());
         }
 
-        // Build the target archetype type set = old set ∪ {T}, kept in the same
-        // ordered form (alignment desc, then TypeId) used to key archetypes.
-        let mut metas: Vec<ComponentMeta> = old_arch.component_metas().to_vec();
-        metas.push(ComponentMeta::of::<T>());
-        metas.sort_unstable();
-        let ids: Box<[TypeId]> = metas.iter().map(|m| *m.id()).collect();
-        let target_id = self.archetypes.get(ids, || metas.clone());
-        assert_ne!(target_id, old_id, "archetype must gain a new type");
+        // Target archetype = old set ∪ {T}; the edge table memoizes the
+        // union per (source archetype, component type) pair.
+        let target_id = match self.insert_edges.get(&(old_id, TypeId::of::<T>())) {
+            Some(&target_id) => target_id,
+            None => {
+                // Build the target type set in the ordered form (alignment
+                // desc, then TypeId) used to key archetypes.
+                let mut metas: Vec<ComponentMeta> = old_arch.component_metas().to_vec();
+                metas.push(ComponentMeta::of::<T>());
+                metas.sort_unstable();
+                let ids: Box<[TypeId]> = metas.iter().map(|m| *m.id()).collect();
+                let target_id = self.archetypes.get(ids, || metas.clone());
+                assert_ne!(target_id, old_id, "archetype must gain a new type");
+                self.insert_edges
+                    .insert((old_id, TypeId::of::<T>()), target_id);
+                target_id
+            }
+        };
 
         // SAFETY: we refer to two distinct archetype slots by index; `get` above
         // may have reallocated `archetypes`, so the raw pointers are taken *after*
@@ -967,17 +981,50 @@ impl World {
         let old_row = loc.index;
         let tick = self.change_tick.get();
 
-        // Target type set = old set ∪ bundle set, in archetype key order.
+        // Target type set = old set ∪ bundle set, in archetype key order. The
+        // bundle edge table memoizes the union per (source archetype, bundle
+        // type) pair; bundles without a static key always recompute.
         let old_arch = &self.archetypes.archetypes[old_id as usize];
-        let mut metas: Vec<ComponentMeta> = old_arch.component_metas().to_vec();
-        for meta in components.component_meta() {
-            if !metas.contains(&meta) {
-                metas.push(meta);
+        let bundle_key = components.key();
+        let target_id = match bundle_key.and_then(|key| self.bundle_edges.get(&(old_id, key))) {
+            Some(&target_id) => target_id,
+            None => {
+                let old_metas = old_arch.component_metas();
+                let mut bundle_metas = components.component_meta();
+                bundle_metas.sort_unstable();
+                bundle_metas.dedup();
+                // Both lists are sorted by `ComponentMeta::cmp`, so the union
+                // is a single merge pass instead of a quadratic `contains`.
+                let mut metas: Vec<ComponentMeta> =
+                    Vec::with_capacity(old_metas.len() + bundle_metas.len());
+                let (mut i, mut j) = (0, 0);
+                while i < old_metas.len() && j < bundle_metas.len() {
+                    match old_metas[i].cmp(&bundle_metas[j]) {
+                        Ordering::Less => {
+                            metas.push(old_metas[i]);
+                            i += 1;
+                        }
+                        Ordering::Equal => {
+                            metas.push(old_metas[i]);
+                            i += 1;
+                            j += 1;
+                        }
+                        Ordering::Greater => {
+                            metas.push(bundle_metas[j]);
+                            j += 1;
+                        }
+                    }
+                }
+                metas.extend_from_slice(&old_metas[i..]);
+                metas.extend_from_slice(&bundle_metas[j..]);
+                let ids: Box<[TypeId]> = metas.iter().map(|m| *m.id()).collect();
+                let target_id = self.archetypes.get(ids, || metas.clone());
+                if let Some(key) = bundle_key {
+                    self.bundle_edges.insert((old_id, key), target_id);
+                }
+                target_id
             }
-        }
-        metas.sort_unstable();
-        let ids: Box<[TypeId]> = metas.iter().map(|m| *m.id()).collect();
-        let target_id = self.archetypes.get(ids, || metas.clone());
+        };
 
         // SAFETY: `target_id` may equal `old_id` (pure replacement); the raw
         // pointers below are used with disjoint rows in that case, and with
@@ -1092,16 +1139,25 @@ impl World {
                 .read()
         };
 
-        // Target type set = old set − {T} (order preserved by removal).
-        let metas: Vec<ComponentMeta> = old_arch
-            .component_metas()
-            .iter()
-            .copied()
-            .filter(|m| m.id() != &TypeId::of::<T>())
-            .collect();
-        let ids: Box<[TypeId]> = metas.iter().map(|m| *m.id()).collect();
-        let target_id = self.archetypes.get(ids, || metas.clone());
-        debug_assert_ne!(target_id, old_id);
+        // Target type set = old set − {T} (order preserved by removal); the
+        // edge table memoizes it per (source archetype, component type) pair.
+        let target_id = match self.remove_edges.get(&(old_id, TypeId::of::<T>())) {
+            Some(&target_id) => target_id,
+            None => {
+                let metas: Vec<ComponentMeta> = old_arch
+                    .component_metas()
+                    .iter()
+                    .copied()
+                    .filter(|m| m.id() != &TypeId::of::<T>())
+                    .collect();
+                let ids: Box<[TypeId]> = metas.iter().map(|m| *m.id()).collect();
+                let target_id = self.archetypes.get(ids, || metas.clone());
+                debug_assert_ne!(target_id, old_id);
+                self.remove_edges
+                    .insert((old_id, TypeId::of::<T>()), target_id);
+                target_id
+            }
+        };
 
         // SAFETY: distinct archetypes; pointers taken after `get`.
         let old_raw: *const Archetype = &self.archetypes.archetypes[old_id as usize];

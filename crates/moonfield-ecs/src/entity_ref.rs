@@ -8,6 +8,9 @@ pub struct EntityRef<'a> {
 }
 
 impl<'a> EntityRef<'a> {
+    // In-progress: the entity-ref access milestone (no constructor call sites
+    // yet; the type exists to anchor `ComponentRef`).
+    #[allow(dead_code)]
     pub(crate) unsafe fn new(
         meta: &'a [EntityMeta],
         archetype: &'a Archetype,

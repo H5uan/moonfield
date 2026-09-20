@@ -437,6 +437,8 @@ impl Archetype {
     /// # Panics
     ///
     /// Panics if the column is already uniquely borrowed.
+    // In-progress: type-erased access for the entity-ref/component-ref work.
+    #[allow(dead_code)]
     pub(crate) unsafe fn borrow_raw(&self, column: usize) {
         if !self.data[column].borrow_state.try_borrow() {
             panic!(
@@ -475,11 +477,15 @@ impl Archetype {
     }
 
     /// Release a shared borrow on the column at `column`, without a type check.
+    // In-progress: pairs with `borrow_raw` for the entity-ref work.
+    #[allow(dead_code)]
     pub(crate) unsafe fn release_raw(&self, column: usize) {
         self.data[column].borrow_state.release_shared();
     }
 
     /// Release a unique borrow on the column at `column`, without a type check.
+    // In-progress: pairs with `borrow_raw` for the entity-ref work.
+    #[allow(dead_code)]
     pub(crate) unsafe fn release_raw_mut(&self, column: usize) {
         self.data[column].borrow_state.release_unique();
     }
@@ -499,6 +505,8 @@ impl Archetype {
     /// Get a pointer to the raw entity id array.
     ///
     /// Only the first `self.len()` entries are valid.
+    // In-progress: column-batch spawning support.
+    #[allow(dead_code)]
     #[inline]
     pub(crate) fn entities(&self) -> NonNull<u32> {
         unsafe { NonNull::new_unchecked(self.entities.as_ptr() as *mut _) }
@@ -510,6 +518,8 @@ impl Archetype {
     }
 
     /// Overwrite the raw entity id at `index`.
+    // In-progress: column-batch spawning support.
+    #[allow(dead_code)]
     #[inline]
     pub(crate) fn set_entity_id(&mut self, index: usize, id: u32) {
         self.entities[index] = id;
@@ -538,6 +548,8 @@ impl Archetype {
     /// extract every combination of component types currently stored, and map
     /// each archetype to a wrapper object that provides functionality based on
     /// its components.
+    // In-progress: kept for the reflection/serialization layer it describes.
+    #[allow(dead_code)]
     pub(crate) fn component_types(&self) -> impl ExactSizeIterator<Item = TypeId> + '_ {
         self.metas
             .iter()
@@ -691,6 +703,8 @@ impl Archetype {
     ///
     /// `len` must be `<= self.capacity()`, and every row in `0..len` must be
     /// fully initialized.
+    // In-progress: column-batch spawning support.
+    #[allow(dead_code)]
     pub(crate) unsafe fn set_len(&mut self, len: u32) {
         debug_assert!(len <= self.capacity());
         self.len = len;
@@ -747,49 +761,6 @@ impl Archetype {
         }
     }
 
-    /// Move every component of the entity at `index` out via `f`, then pack
-    /// the last row into its place.
-    ///
-    /// Returns the ID of the entity moved into `index`, if any.
-    ///
-    /// # Safety
-    ///
-    /// `index` must be in-bounds and no column may be borrowed. `f` must not
-    /// read or write the moved-out slots.
-    pub(crate) unsafe fn move_to(
-        &mut self,
-        index: u32,
-        mut f: impl FnMut(*mut u8, TypeId, usize),
-    ) -> Option<u32> {
-        unsafe {
-            let last = self.len - 1;
-            for (component_meta, data) in self.metas.iter().zip(&*self.data) {
-                let moved_out = data
-                    .raw_data
-                    .as_ptr()
-                    .add(index as usize * component_meta.layout.size());
-                f(moved_out, component_meta.id, component_meta.layout().size());
-                if index != last {
-                    let moved = data
-                        .raw_data
-                        .as_ptr()
-                        .add(last as usize * component_meta.layout.size());
-                    ptr::copy_nonoverlapping(moved, moved_out, component_meta.layout.size());
-                    // The tick row follows its component row.
-                    let ticks = data.ticks.as_ptr();
-                    *ticks.add(index as usize) = *ticks.add(last as usize);
-                }
-            }
-            self.len -= 1;
-            if index != last {
-                self.entities[index as usize] = self.entities[last as usize];
-                Some(self.entities[last as usize])
-            } else {
-                None
-            }
-        }
-    }
-
     /// Copy a single component value into the row at `index`.
     ///
     /// # Safety
@@ -806,35 +777,6 @@ impl Archetype {
         unsafe {
             let ptr = self.get_ptr(ty, size, index).unwrap().as_ptr().cast::<u8>();
             ptr::copy_nonoverlapping(component, ptr, size);
-        }
-    }
-
-    /// Add components from another archetype with identical components.
-    ///
-    /// Appends the rows of `other` to `self` in order, leaving `other` empty.
-    ///
-    /// # Safety
-    ///
-    /// Component types must match exactly.
-    pub(crate) unsafe fn merge(&mut self, mut other: Archetype) {
-        unsafe {
-            self.reserve(other.len);
-            for ((info, dst), src) in self.metas.iter().zip(&*self.data).zip(&*other.data) {
-                dst.raw_data
-                    .as_ptr()
-                    .add(self.len as usize * info.layout.size())
-                    .copy_from_nonoverlapping(
-                        src.raw_data.as_ptr(),
-                        other.len as usize * info.layout.size(),
-                    );
-                dst.ticks
-                    .as_ptr()
-                    .add(self.len as usize)
-                    .copy_from_nonoverlapping(src.ticks.as_ptr(), other.len as usize);
-            }
-            self.len += other.len;
-            // Transfer ownership of the rows to `self`; `other` must not drop them.
-            other.len = 0;
         }
     }
 

@@ -1,11 +1,9 @@
 use core::fmt;
 use std::{
-    cmp,
     error::Error,
     mem,
     num::NonZeroU32,
     num::NonZeroU64,
-    ops::Range,
     sync::atomic::{AtomicIsize, Ordering},
 };
 
@@ -163,31 +161,6 @@ impl Iterator for ReserveEntitiesIterator<'_> {
     }
 }
 
-/// Track the state of allocation of many entities.
-#[derive(Clone)]
-pub(crate) struct AllocManyState {
-    // the end of kept ids from the pending list
-    pub pending_keep_end: usize,
-    // if freelist is not enough, then use fresh ids
-    fresh: Range<u32>,
-}
-
-impl AllocManyState {
-    pub fn next(&mut self, entities: &Entities) -> Option<u32> {
-        if self.pending_keep_end < entities.pending.len() {
-            let id = entities.pending[self.pending_keep_end];
-            self.pending_keep_end += 1;
-            Some(id)
-        } else {
-            self.fresh.next()
-        }
-    }
-
-    pub fn len(&self, entities: &Entities) -> usize {
-        self.fresh.len() + (entities.pending.len() - self.pending_keep_end)
-    }
-}
-
 /// The central entity allocator and metadata tracker.
 ///
 /// Manages all entity IDs, their generations, and their locations within
@@ -245,6 +218,8 @@ pub(crate) struct Entities {
 }
 
 impl Entities {
+    // Kept from the allocator port: introspection for future serialization.
+    #[allow(dead_code)]
     #[inline]
     pub fn len(&self) -> u32 {
         self.len
@@ -267,6 +242,9 @@ impl Entities {
         })
     }
 
+    // Kept from the allocator port: with `set_freelist`, the seam a future
+    // scene format preserving entity ids would round-trip through.
+    #[allow(dead_code)]
     pub fn freelist(&self) -> impl ExactSizeIterator<Item = Entity> + '_ {
         let free = self.free_cursor.load(Ordering::Relaxed);
         let ids = match usize::try_from(free) {
@@ -279,6 +257,8 @@ impl Entities {
         })
     }
 
+    // Kept from the allocator port: pairs with `freelist`.
+    #[allow(dead_code)]
     pub fn set_freelist(&mut self, freelist: &[Entity]) {
         #[cfg(debug_assertions)]
         {
@@ -377,45 +357,6 @@ impl Entities {
                 id,
             }
         }
-    }
-
-    pub fn alloc_many(&mut self, n: u32, archetype: u32, mut first_index: u32) -> AllocManyState {
-        self.verify_flushed();
-
-        let fresh_needed = (n as usize).saturating_sub(self.pending.len()) as u32;
-        assert!(
-            (self.meta.len() + fresh_needed as usize) < u32::MAX as usize,
-            "too many entities"
-        );
-
-        let pending_keep_end = self.pending.len().saturating_sub(n as usize);
-        for &id in &self.pending[pending_keep_end..] {
-            self.meta[id as usize].location = Location {
-                archetype,
-                index: first_index,
-            };
-            first_index += 1;
-        }
-
-        let fresh_start = self.meta.len() as u32;
-        self.meta.extend(
-            (first_index..(first_index + fresh_needed)).map(|index| EntityMeta {
-                generation: NonZeroU32::MIN,
-                location: Location { archetype, index },
-            }),
-        );
-
-        self.len += n;
-
-        AllocManyState {
-            pending_keep_end,
-            fresh: fresh_start..(fresh_start + fresh_needed),
-        }
-    }
-
-    pub fn finish_alloc_many(&mut self, pending_keep_end: usize) {
-        self.pending.truncate(pending_keep_end);
-        *self.free_cursor.get_mut() = pending_keep_end as isize;
     }
 
     pub fn alloc_at(&mut self, entity: Entity) -> Option<Location> {
@@ -537,6 +478,9 @@ impl Entities {
         self.len = 0;
     }
 
+    // Kept from the allocator port: mutable location access for future
+    // relocation paths.
+    #[allow(dead_code)]
     pub fn get_mut(&mut self, entity: Entity) -> Result<&mut Location, NoSuchEntity> {
         let meta = self.meta.get_mut(entity.id as usize).ok_or(NoSuchEntity)?;
         if meta.generation == entity.generation && meta.location.index != u32::MAX {
@@ -567,31 +511,5 @@ impl Entities {
             return Err(NoSuchEntity);
         }
         Ok(meta.location)
-    }
-
-    pub unsafe fn resolve_unknown_gen(&self, id: u32) -> Entity {
-        let meta_len = self.meta.len();
-
-        if meta_len > id as usize {
-            let meta = &self.meta[id as usize];
-            Entity {
-                generation: meta.generation,
-                id,
-            }
-        } else {
-            // See if it's pending, but not yet flushed.
-            let free_cursor = self.free_cursor.load(Ordering::Relaxed);
-            let num_pending = cmp::max(-free_cursor, 0) as usize;
-
-            if meta_len + num_pending > id as usize {
-                // Pending entities will have the first generation.
-                Entity {
-                    generation: NonZeroU32::MIN,
-                    id,
-                }
-            } else {
-                panic!("entity id is out of range");
-            }
-        }
     }
 }

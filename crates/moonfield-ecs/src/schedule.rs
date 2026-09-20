@@ -485,10 +485,6 @@ mod tests {
         log.0.push("third");
     }
 
-    fn run_schedule(schedule: &mut Schedule, world: &mut World) {
-        schedule.run(world);
-    }
-
     #[test]
     fn test_registration_order_is_default() {
         let mut world = World::new();
