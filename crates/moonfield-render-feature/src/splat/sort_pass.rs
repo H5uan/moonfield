@@ -187,6 +187,13 @@ mod tests {
         app.render();
         assert_eq!(events.lock().unwrap().as_slice(), &["before", "between"]);
 
+        // Headless machines (e.g. CI without a Vulkan driver) have no
+        // RenderDevice: the ordering probe above already ran, but the
+        // recorded-dispatch check below needs a real device.
+        if !app.render_world().contains_resource::<RenderDevice>() {
+            return;
+        }
+
         // Fill the pair buffers with a seeded shuffle (host-visible
         // allocations) and verify the recorded dispatch really sorts:
         // frame 2 records the sort, the frame loop submits it.
