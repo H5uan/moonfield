@@ -11,7 +11,8 @@
 
 use std::any::{Any, TypeId};
 use std::cell::{RefCell, RefMut};
-use std::collections::HashMap;
+
+use crate::archetype::TypeIdMap;
 
 macro_rules! reverse_apply {
     ($m:ident [] $($reversed:tt)*) => {
@@ -104,7 +105,7 @@ pub mod prelude {
 /// this ordering is load-bearing for clean shutdown.
 #[derive(Default)]
 pub(crate) struct Resources {
-    data: HashMap<TypeId, RefCell<Box<dyn Any>>>,
+    data: TypeIdMap<RefCell<Box<dyn Any>>>,
     /// First-insertion order of the keys in `data`; reversed on drop.
     order: Vec<TypeId>,
 }

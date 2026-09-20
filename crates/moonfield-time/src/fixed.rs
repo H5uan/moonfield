@@ -194,14 +194,19 @@ pub fn run_fixed_main_schedule(world: &mut World, mut run_fixed_main: impl FnMut
 
     while world.get_resource_mut::<Time<Fixed>>().unwrap().expend() {
         let snapshot = world.get_resource::<Time<Fixed>>().unwrap().as_generic();
-        world.insert_resource(snapshot);
+        // Write the snapshot into the existing generic clock instead of
+        // re-inserting it, so a steady-state fixed loop allocates nothing.
+        if let Some(mut generic) = world.get_resource_mut::<Time>() {
+            *generic = snapshot;
+        } else {
+            world.insert_resource(snapshot);
+        }
         run_fixed_main(world);
     }
 
     // Restore the generic clock to virtual time for the rest of the frame.
-    if world.contains_resource::<Time>() {
-        let snapshot = world.get_resource::<Time<Virtual>>().unwrap().as_generic();
-        world.insert_resource(snapshot);
+    if let Some(mut generic) = world.get_resource_mut::<Time>() {
+        *generic = world.get_resource::<Time<Virtual>>().unwrap().as_generic();
     }
 }
 

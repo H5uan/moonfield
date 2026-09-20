@@ -165,6 +165,10 @@ impl World {
     /// the hook panics, so a panicking hook never permanently unregisters
     /// itself.
     pub(crate) fn fire_hook(&mut self, kind: HookKind, component: TypeId, entity: Entity) {
+        // The common case: no hooks registered at all. Skip the map lookups.
+        if self.component_hooks.is_empty() {
+            return;
+        }
         let Some(mut hook) = self
             .component_hooks
             .get_mut(&component)

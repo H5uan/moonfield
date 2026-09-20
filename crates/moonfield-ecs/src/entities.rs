@@ -213,11 +213,40 @@ pub(crate) struct Entities {
     ///   come from extending [`meta`](Self::meta).
     free_cursor: AtomicIsize,
 
+    /// Position of each entity ID inside `pending`, or `u32::MAX` when the ID
+    /// is not in `pending` at all.
+    ///
+    /// Reservations only move `free_cursor` (they never reorder `pending`), so
+    /// positions survive reserve/flush cycles; every mutation that adds or
+    /// removes a `pending` entry updates this index. It turns membership
+    /// (`contains`) and removal (`alloc_at`) from linear scans into O(1)
+    /// lookups, at the cost of one extra array write on `alloc`/`free`.
+    pending_pos: Vec<u32>,
+
     /// Number of currently alive (allocated) entities.
     len: u32,
 }
 
 impl Entities {
+    /// The position of `id` in `pending`, if it is there.
+    #[inline]
+    fn pending_position(&self, id: u32) -> Option<u32> {
+        self.pending_pos
+            .get(id as usize)
+            .copied()
+            .filter(|&pos| pos != u32::MAX)
+    }
+
+    /// Record that `id` sits at `pos` in `pending`.
+    #[inline]
+    fn set_pending_position(&mut self, id: u32, pos: u32) {
+        let idx = id as usize;
+        if idx >= self.pending_pos.len() {
+            self.pending_pos.resize(idx + 1, u32::MAX);
+        }
+        self.pending_pos[idx] = pos;
+    }
+
     // Kept from the allocator port: introspection for future serialization.
     #[allow(dead_code)]
     #[inline]
@@ -282,7 +311,9 @@ impl Entities {
         }
         // Reconstruct pending list
         self.pending.clear();
+        self.pending_pos.clear();
         for entity in freelist {
+            self.set_pending_position(entity.id, self.pending.len() as u32);
             self.pending.push(entity.id);
             self.meta[entity.id as usize].generation = entity.generation;
         }
@@ -343,6 +374,7 @@ impl Entities {
         self.len += 1;
 
         if let Some(id) = self.pending.pop() {
+            self.pending_pos[id as usize] = u32::MAX;
             let new_free_cursor = self.pending.len() as isize;
             *self.free_cursor.get_mut() = new_free_cursor;
             Entity {
@@ -364,15 +396,26 @@ impl Entities {
 
         if entity.id as usize >= self.meta.len() {
             // ID was never used. We need to resize the meta list and fill the gap between the last used id and the new id.
+            let first_new = self.pending.len();
             self.pending.extend(self.meta.len() as u32..entity.id);
+            for pos in first_new..self.pending.len() {
+                let id = self.pending[pos];
+                self.set_pending_position(id, pos as u32);
+            }
             let new_free_cursor = self.pending.len() as isize;
             *self.free_cursor.get_mut() = new_free_cursor;
             self.meta.resize(entity.id as usize + 1, EntityMeta::EMPTY);
             self.len += 1;
             None
-        } else if let Some(index) = self.pending.iter().position(|item| *item == entity.id) {
+        } else if let Some(index) = self.pending_position(entity.id) {
             // ID is previously used, but it is in the free list. We need to swap it out.
+            let index = index as usize;
+            self.pending_pos[entity.id as usize] = u32::MAX;
             self.pending.swap_remove(index);
+            if index < self.pending.len() {
+                let moved = self.pending[index];
+                self.pending_pos[moved as usize] = index as u32;
+            }
             let new_free_cursor = self.pending.len() as isize;
             *self.free_cursor.get_mut() = new_free_cursor;
             self.len += 1;
@@ -419,6 +462,7 @@ impl Entities {
         self.len += (self.pending.len() - new_free_cursor) as u32;
         // initialize the remaining pending list
         for id in self.pending.drain(new_free_cursor..) {
+            self.pending_pos[id as usize] = u32::MAX;
             init(id, &mut self.meta[id as usize].location);
         }
     }
@@ -436,6 +480,7 @@ impl Entities {
 
         let loc = mem::replace(&mut meta.location, EntityMeta::EMPTY.location);
 
+        self.set_pending_position(entity.id, self.pending.len() as u32);
         self.pending.push(entity.id);
 
         let new_free_cursor = self.pending.len() as isize;
@@ -459,8 +504,9 @@ impl Entities {
         match self.meta.get(entity.id as usize) {
             Some(meta) => {
                 meta.generation == entity.generation && (meta.location.index != u32::MAX)
-                    || self.pending[self.free_cursor.load(Ordering::Relaxed).max(0) as usize..]
-                        .contains(&entity.id)
+                    || self.pending_position(entity.id).is_some_and(|pos| {
+                        pos as isize >= self.free_cursor.load(Ordering::Relaxed).max(0)
+                    })
             }
             None => {
                 let free = self.free_cursor.load(Ordering::Relaxed);
@@ -474,6 +520,7 @@ impl Entities {
     pub fn clear(&mut self) {
         self.meta.clear();
         self.pending.clear();
+        self.pending_pos.clear();
         *self.free_cursor.get_mut() = 0;
         self.len = 0;
     }

@@ -22,6 +22,7 @@ use std::any::{TypeId, type_name};
 use std::collections::HashMap;
 use std::marker::PhantomData;
 
+use crate::archetype::TypeIdMap;
 use crate::{IntoSystem, System, World, change_detection::Tick};
 
 /// Marker for schedule labels: unit structs identifying a schedule.
@@ -426,7 +427,7 @@ impl Schedule {
 /// and [`World::run_schedule`](crate::World::run_schedule) is the single run
 /// primitive — a system running inside a schedule can run other schedules.
 #[derive(Default)]
-pub struct Schedules(HashMap<TypeId, Schedule>);
+pub struct Schedules(TypeIdMap<Schedule>);
 
 impl Schedules {
     /// The schedule registered under `label`, if any.
