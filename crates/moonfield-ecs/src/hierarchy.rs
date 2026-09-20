@@ -17,7 +17,8 @@
 
 use moonfield_math::{Affine3A, GlobalTransform, Transform};
 
-use crate::relationship::relationship_on_insert;
+use crate::filter::{Added, Changed, Or};
+use crate::relationship::{relationship_on_discard, relationship_on_insert};
 use crate::{Commands, Entity, Local, Query, Relationship, RelationshipTarget, World};
 
 /// The child → parent relationship: `ChildOf(parent)` is stored on the child.
@@ -115,6 +116,18 @@ impl World {
                 assert_acyclic(world, entity, parent);
                 relationship_on_insert::<ChildOf>(world, entity);
             });
+        // Override the discard hook to additionally mark the unlinked
+        // entity's Transform changed: unlinking makes it a root whose stored
+        // global was composed from the old parent, and propagation (which
+        // only visits changed entities) must recompute it.
+        self.register_component_hooks::<ChildOf>()
+            .on_discard(|world, entity| {
+                relationship_on_discard::<ChildOf>(world, entity);
+                if let Some(mut transform) = world.get_component_mut::<Transform>(entity) {
+                    // A mutable deref marks the component changed.
+                    let _ = &mut *transform;
+                }
+            });
     }
 }
 
@@ -122,14 +135,16 @@ impl World {
 // Transform propagation
 // ---------------------------------------------------------------------
 
-/// Inserts [`GlobalTransform::IDENTITY`] on every entity that has a
-/// [`Transform`] but no [`GlobalTransform`] yet.
+/// Inserts [`GlobalTransform::IDENTITY`] on every entity whose [`Transform`]
+/// was added within the system's change window but has no
+/// [`GlobalTransform`] yet.
 ///
 /// Register before [`propagate_transforms`] in the same schedule; the queued
 /// inserts apply between the two systems, so new entities are propagated in
-/// the same run.
+/// the same run. Runs that added no transforms are a cheap no-op (the
+/// [`Added`] filter matches nothing).
 pub fn ensure_global_transforms(
-    transforms: Query<&Transform>,
+    transforms: Query<&Transform, Added<Transform>>,
     globals: Query<&GlobalTransform>,
     commands: Commands,
 ) {
@@ -144,11 +159,22 @@ pub fn ensure_global_transforms(
 /// roots (entities with a [`Transform`] and no [`ChildOf`]) take their local
 /// affine as global; every descendant composes `parent_global * local`.
 ///
+/// Change-driven: the seed scan visits only entities whose `Transform` or
+/// `ChildOf` changed since this system's previous run ([`Changed`] against
+/// the per-system window). A seed's own global is recomputed — from its
+/// local affine, or composed onto the parent's stored global — and its whole
+/// subtree is rewritten through the worklist (a change anywhere in a chain
+/// moves every descendant). Unchanged subtrees are never descended into, so
+/// a quiet frame is a no-op. Correctness does not depend on seed order: if a
+/// seed's ancestor also changed, the ancestor's subtree cascade recomputes
+/// the seed again with the same result.
+///
 /// Entities with a [`ChildOf`] link whose ancestor chain has no [`Transform`]
 /// root are not reached (their global stays stale) — same coverage as Bevy's
 /// propagation query. Children without their own [`Transform`] are skipped.
 pub fn propagate_transforms(
-    mut nodes: Query<(
+    seeds: Query<&Transform, Or<(Changed<Transform>, Changed<ChildOf>)>>,
+    nodes: Query<(
         &Transform,
         Option<&ChildOf>,
         Option<&mut GlobalTransform>,
@@ -156,16 +182,37 @@ pub fn propagate_transforms(
     )>,
     mut pending: Local<Vec<(Entity, Affine3A)>>,
 ) {
-    // Roots first, collecting their children; then drain the worklist —
-    // each entry's parent affine is final when it is pushed.
+    // Seeds first, collecting their children; then drain the worklist — each
+    // entry's parent affine is final when it is pushed. `nodes.get` guards
+    // borrow the `GlobalTransform` column mutably, so they are taken one at
+    // a time and dropped before the next lookup.
     pending.clear();
-    for (_entity, (local, childof, global, kids)) in nodes.iter_mut() {
-        if childof.is_some() {
-            // Not a root: reached through its ancestor's propagation.
+    for (entity, local) in seeds.iter() {
+        let local_affine = local.compute_affine();
+        let parent = match nodes.get(entity) {
+            Some(node) => node.1.map(|childof| childof.parent()),
+            None => continue,
+        };
+        let affine = match parent {
+            // Non-root seed: compose onto the parent's stored global. The
+            // parent is unchanged (any changed ancestor is itself a seed
+            // whose cascade recomputes this entity), so its global is valid.
+            Some(parent) => {
+                let Some(parent_node) = nodes.get(parent) else {
+                    continue;
+                };
+                let Some(parent_global) = &parent_node.2 else {
+                    continue;
+                };
+                parent_global.affine() * local_affine
+            }
+            None => local_affine,
+        };
+        let Some(mut node) = nodes.get(entity) else {
             continue;
-        }
-        let affine = local.compute_affine();
-        if let Some(mut global) = global {
+        };
+        let (_, _, global, kids) = &mut *node;
+        if let Some(global) = global {
             global.set_affine(affine);
         }
         if let Some(kids) = kids {
@@ -440,6 +487,142 @@ mod tests {
             found = true;
         }
         assert!(found);
+    }
+
+    /// A probe system counting the globals written within its own change
+    /// window — the observable trace of what propagation touched.
+    #[derive(Default)]
+    struct ChangedGlobals(u32);
+
+    fn count_changed_globals(
+        query: Query<&GlobalTransform, Changed<GlobalTransform>>,
+        mut count: crate::ResMut<ChangedGlobals>,
+    ) {
+        count.0 = query.iter().count() as u32;
+    }
+
+    fn probed_propagation_schedule() -> Schedule {
+        let mut schedule = Schedule::new();
+        schedule.add_systems((
+            ensure_global_transforms,
+            propagate_transforms.after(&ensure_global_transforms),
+            count_changed_globals.after(&propagate_transforms),
+        ));
+        schedule
+    }
+
+    /// Two independent chains: root_a → child_a → grandchild_a, root_b →
+    /// child_b. Returns them in that order.
+    fn two_chain_world() -> (World, [Entity; 5]) {
+        let mut world = hierarchy_world();
+        let root_a = world.spawn((Transform::from_xyz(1.0, 0.0, 0.0),));
+        let child_a = world.spawn((Transform::from_xyz(0.0, 1.0, 0.0), ChildOf(root_a)));
+        let grandchild_a = world.spawn((Transform::from_xyz(0.0, 0.0, 1.0), ChildOf(child_a)));
+        let root_b = world.spawn((Transform::from_xyz(10.0, 0.0, 0.0),));
+        let child_b = world.spawn((Transform::from_xyz(0.0, 1.0, 0.0), ChildOf(root_b)));
+        world.insert_resource(ChangedGlobals::default());
+        (world, [root_a, child_a, grandchild_a, root_b, child_b])
+    }
+
+    #[test]
+    fn test_propagation_skips_unchanged_subtrees() {
+        let (mut world, [root_a, child_a, grandchild_a, root_b, child_b]) = two_chain_world();
+        let mut schedule = probed_propagation_schedule();
+
+        // Run 1: everything is new, so both chains propagate (5 rows).
+        schedule.run(&mut world);
+        assert_eq!(world.get_resource::<ChangedGlobals>().unwrap().0, 5);
+
+        // Run 2: nothing changed — propagation is a no-op (no global writes).
+        schedule.run(&mut world);
+        assert_eq!(world.get_resource::<ChangedGlobals>().unwrap().0, 0);
+
+        // Move root A: exactly its subtree (3 globals) is rewritten; chain B
+        // is not descended into.
+        world
+            .get_component_mut::<Transform>(root_a)
+            .unwrap()
+            .translation = Vec3::new(2.0, 0.0, 0.0);
+        schedule.run(&mut world);
+        assert_eq!(world.get_resource::<ChangedGlobals>().unwrap().0, 3);
+        approx(
+            world
+                .get_component::<GlobalTransform>(grandchild_a)
+                .unwrap()
+                .translation(),
+            Vec3::new(2.0, 1.0, 1.0),
+        );
+        approx(
+            world
+                .get_component::<GlobalTransform>(child_b)
+                .unwrap()
+                .translation(),
+            Vec3::new(10.0, 1.0, 0.0),
+        );
+
+        // A deep local change recomputes only that entity (composed onto its
+        // ancestors' untouched globals).
+        world
+            .get_component_mut::<Transform>(grandchild_a)
+            .unwrap()
+            .translation = Vec3::new(0.0, 0.0, 2.0);
+        schedule.run(&mut world);
+        assert_eq!(world.get_resource::<ChangedGlobals>().unwrap().0, 1);
+        approx(
+            world
+                .get_component::<GlobalTransform>(grandchild_a)
+                .unwrap()
+                .translation(),
+            Vec3::new(2.0, 1.0, 2.0),
+        );
+        let _ = (child_a, root_b);
+    }
+
+    #[test]
+    fn test_propagation_reaches_newly_attached_child_of_unchanged_parent() {
+        let (mut world, [_, _, _, root_b, _]) = two_chain_world();
+        let mut schedule = probed_propagation_schedule();
+        schedule.run(&mut world);
+
+        // Attach a new child under the unchanged root B: the fresh `ChildOf`
+        // link is a propagation seed even though nothing above it changed.
+        let child = world.spawn((Transform::from_xyz(0.0, 5.0, 0.0), ChildOf(root_b)));
+        schedule.run(&mut world);
+        approx(
+            world
+                .get_component::<GlobalTransform>(child)
+                .unwrap()
+                .translation(),
+            Vec3::new(10.0, 5.0, 0.0),
+        );
+        // Only the new child's global was written.
+        assert_eq!(world.get_resource::<ChangedGlobals>().unwrap().0, 1);
+    }
+
+    #[test]
+    fn test_propagation_recovers_orphaned_entity() {
+        let (mut world, [_, child_a, _, _, _]) = two_chain_world();
+        let mut schedule = probed_propagation_schedule();
+        schedule.run(&mut world);
+        approx(
+            world
+                .get_component::<GlobalTransform>(child_a)
+                .unwrap()
+                .translation(),
+            Vec3::new(1.0, 1.0, 0.0),
+        );
+
+        // Unlinking makes child_a a root; its stored global was composed from
+        // the old parent and must be recomputed from its local transform.
+        world.remove_component::<ChildOf>(child_a).unwrap();
+        schedule.run(&mut world);
+        approx(
+            world
+                .get_component::<GlobalTransform>(child_a)
+                .unwrap()
+                .translation(),
+            Vec3::new(0.0, 1.0, 0.0),
+        );
     }
 
     #[test]

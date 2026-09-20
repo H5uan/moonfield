@@ -63,7 +63,7 @@ pub use change_detection::{ComponentTicks, Mut, Ref, Tick};
 pub use commands::{Commands, EntityCommands};
 pub use component::Component;
 pub use entities::Entity;
-pub use filter::{Or, QueryFilter, With, Without};
+pub use filter::{Added, Changed, Or, QueryFilter, With, Without};
 pub use hierarchy::{ChildOf, Children, ensure_global_transforms, propagate_transforms};
 pub use hooks::{ComponentHook, ComponentHooks};
 pub use message::{
@@ -88,11 +88,11 @@ pub use world::{MainWorld, World};
 /// Common ECS imports.
 pub mod prelude {
     pub use crate::{
-        ChildOf, Children, Commands, Component, ComponentHooks, Entity, EntityCommands, IntoSystem,
-        IntoSystemConfigs, Local, Message, MessageCursor, MessageId, MessageReader, MessageWriter,
-        Messages, Name, Or, Query, QueryFilter, Relationship, RelationshipTarget, Res, ResMut,
-        Resource, Schedule, ScheduleLabel, System, SystemSet, Template, TemplateContext,
-        TemplateError, With, Without, World, WorldQuery,
+        Added, Changed, ChildOf, Children, Commands, Component, ComponentHooks, Entity,
+        EntityCommands, IntoSystem, IntoSystemConfigs, Local, Message, MessageCursor, MessageId,
+        MessageReader, MessageWriter, Messages, Name, Or, Query, QueryFilter, Relationship,
+        RelationshipTarget, Res, ResMut, Resource, Schedule, ScheduleLabel, System, SystemSet,
+        Template, TemplateContext, TemplateError, With, Without, World, WorldQuery,
     };
 }
 

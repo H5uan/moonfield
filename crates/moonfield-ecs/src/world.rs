@@ -674,53 +674,32 @@ impl World {
     /// Panics when the query contains mutable access; use [`Self::query_mut`]
     /// for those.
     pub fn query<'a, Q: WorldQuery>(&'a self) -> QueryIter<'a, Q> {
-        QueryIter::new_shared(
-            self,
-            &|_| true,
-            self.last_change_tick.get(),
-            self.change_tick.get(),
-        )
+        QueryIter::new_shared(self, self.last_change_tick.get(), self.change_tick.get())
     }
 
     /// Query the world for a mutable combination of components.
     pub fn query_mut<'a, Q: WorldQuery>(&'a mut self) -> QueryIter<'a, Q> {
         // SAFETY: `&mut self` excludes every other access to the fetched
         // columns for the iterator's (and its items') lifetime.
-        unsafe {
-            QueryIter::new(
-                self,
-                &|_| true,
-                self.last_change_tick.get(),
-                self.change_tick.get(),
-            )
-        }
+        unsafe { QueryIter::new(self, self.last_change_tick.get(), self.change_tick.get()) }
     }
 
-    /// Query with an archetype filter
-    /// ([`With`](crate::With)/[`Without`](crate::Without)/[`Or`](crate::Or)).
-    pub fn query_filtered<'a, Q: WorldQuery, F: crate::QueryFilter>(&'a self) -> QueryIter<'a, Q> {
-        QueryIter::new_shared(
-            self,
-            &crate::system::archetype_matches::<F>,
-            self.last_change_tick.get(),
-            self.change_tick.get(),
-        )
+    /// Query with a filter ([`With`](crate::With)/[`Without`](crate::Without)/
+    /// [`Or`](crate::Or)/[`Added`](crate::Added)/[`Changed`](crate::Changed)).
+    /// Tick filters compare against the world's default window.
+    pub fn query_filtered<'a, Q: WorldQuery, F: crate::QueryFilter>(
+        &'a self,
+    ) -> QueryIter<'a, Q, F> {
+        QueryIter::new_shared(self, self.last_change_tick.get(), self.change_tick.get())
     }
 
-    /// Mutable query with an archetype filter.
+    /// Mutable query with a filter.
     pub fn query_filtered_mut<'a, Q: WorldQuery, F: crate::QueryFilter>(
         &'a mut self,
-    ) -> QueryIter<'a, Q> {
+    ) -> QueryIter<'a, Q, F> {
         // SAFETY: `&mut self` excludes every other access to the fetched
         // columns for the iterator's (and its items') lifetime.
-        unsafe {
-            QueryIter::new(
-                self,
-                &crate::system::archetype_matches::<F>,
-                self.last_change_tick.get(),
-                self.change_tick.get(),
-            )
-        }
+        unsafe { QueryIter::new(self, self.last_change_tick.get(), self.change_tick.get()) }
     }
 
     // ------------------------------------------------------------------

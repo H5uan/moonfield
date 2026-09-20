@@ -41,7 +41,7 @@ A `Schedule` groups systems under a `ScheduleLabel` and orders them with
 executor). `Commands` queue into a world-global buffer that
 `World::apply_commands` drains after **every** system run, so a system's
 commands are visible to later systems in the same run; the world's change tick
-advances once per schedule run. Running a schedule lifts its entry out of the
+advances once per system run. Running a schedule lifts its entry out of the
 world's `Schedules` resource for the run, so a system can run *other* schedules
 from inside (a rerun of the running label is a no-op); systems registered into
 the running label mid-run are merged back when the run ends. `App` owns
@@ -57,10 +57,14 @@ param.
 Queries accept an optional second type parameter — the filter:
 `Query<&Transform, With<MeshRenderer>>`, `Query<&mut Transform,
 Without<ChildOf>>`, `Query<&T, Or<(With<A>, With<B>)>>` (tuples of filters
-conjoin, `Or` disjoins, `()` is no filter). Filters are archetypal: each is
-evaluated once per archetype against its component type set at iterator
-construction, never per entity. The same filtering is available imperatively
-via `World::query_filtered::<Q, F>()` / `query_filtered_mut`.
+conjoin, `Or` disjoins, `()` is no filter). Every filter has an archetypal
+part — evaluated once per archetype against its component type set at
+iterator construction — which is what the per-system query cache memorizes.
+`Added<T>`/`Changed<T>` additionally carry a per-row part: the row's
+component tick column is compared against the querying system's change
+window at iteration time (see Change detection below). The same filtering is
+available imperatively via `World::query_filtered::<Q, F>()` /
+`query_filtered_mut`.
 
 ## Component hooks
 
@@ -91,9 +95,12 @@ deliberately doesn't do.
 with no ECS knowledge (`moonfield-ecs` already depends on it, keeping the
 dependency directions acyclic). `ensure_global_transforms` and
 `propagate_transforms` run as normal param systems in `Update` and `PreRender`,
-wired by `moonfield_app::HierarchyPlugin`. A `PreRender` system that mutates
-`Transform` must run before `ensure_global_transforms`; the editor applies this
-ordering so camera extraction reads the same frame's `GlobalTransform`.
+wired by `moonfield_app::HierarchyPlugin`, and are change-driven: propagation
+visits only entities whose `Transform` or `ChildOf` changed since its previous
+run, so unchanged subtrees cost nothing (see Change detection). A `PreRender`
+system that mutates `Transform` must run before `ensure_global_transforms`;
+the editor applies this ordering so camera extraction reads the same frame's
+`GlobalTransform`.
 
 ## Messages
 
@@ -114,21 +121,55 @@ channel; `InputState` stays latched state with its own frame-scoped clearing.
 ## Change detection
 
 Every component records the tick at which it was added and the tick at which
-it was last mutably dereferenced, and the world advances a global change tick
-once per schedule run. `&mut T` query items mark the component's changed tick
-on the first mutable dereference; imperative access goes through
-`World::get_component_ref` / `get_component_mut`, which return the tick-aware
-wrappers `Ref<T>` / `Mut<T>` — they deref to the component and answer
-`is_added()` / `is_changed()` relative to the world's last two ticks. Ticks
-are wrapping `u32`s; comparisons clamp relative ages at `MAX_CHANGE_AGE`, so
-wraparound never reports a recent change as unchanged. There are no
-`Changed<T>`/`Added<T>` query filters. Resource aliasing is enforced at
+it was last mutably dereferenced. The world's change tick advances once per
+*system* run, so every run gets a distinct tick and a writer anywhere in a
+schedule pass is visible to every other system on its next run. Each `Query`
+system param carries a per-system `(last_run, this_run)` window in its
+`QueryState`, refreshed by the system runner before every fetch: a system
+observes exactly the changes made since its own previous run, and two systems
+running at different rates see different change sets. `&mut T` query items
+mark the component's changed tick on the first mutable dereference;
+imperative access goes through `World::get_component_ref` /
+`get_component_mut`, which return the tick-aware wrappers `Ref<T>` / `Mut<T>`
+answering `is_added()` / `is_changed()` against the world-global window
+`(last_change_tick, change_tick)`.
+
+`Added<T>` / `Changed<T>` are query filters over these windows. They compose
+with the rest of the filter machinery (`With`/`Without`/`Or`/tuples): the
+archetypal part (the archetype must contain `T`) is decided per archetype and
+is what the per-system archetype cache memorizes, while the per-row part
+compares the row's tick column against the system's window at iteration time
+— the cache never memorizes tick verdicts. `Query::get` applies the row
+predicate too, and the imperative `World::query_filtered` entries evaluate
+tick filters against the world-global window. Tick filters register a read on
+their component's tick column in the world's access registry, so
+`Query<&mut T, Changed<T>>` panics at fetch time like any other read/write
+conflict.
+
+Ticks are wrapping `u32`s; comparisons clamp relative ages at
+`MAX_CHANGE_AGE`, so wraparound never reports a recent change as unchanged.
+To keep the clamp sound, `World::check_change_ticks` runs a periodic rescan
+once the tick has advanced `CHECK_TICK_THRESHOLD` since the previous pass
+(polled at the start of every schedule run): every stored component tick and
+every system window held by the world's `Schedules` resource is clamped to at
+most `MAX_CHANGE_AGE` behind the present. Resource aliasing is enforced at
 runtime by `RefCell` borrows, component aliasing by archetype borrow counters
 — conflicting access panics. `Query` params additionally register their
 per-component read/write access in the world when fetched (unregistering on
 drop), so a read/write or write/write overlap between a system's params
 panics at fetch time rather than after query items have outlived their
 iterator's borrow flags.
+
+Transform propagation rides on the filters: `propagate_transforms` scans only
+the seeds — entities whose `Transform` or `ChildOf` changed since the
+propagation system's previous run — recomputes each seed's global (composed
+onto its parent's stored global for non-roots), and rewrites the seed's
+subtree; unchanged subtrees are never descended into, and a quiet frame is a
+no-op. Unlinking a `ChildOf` leaves no fresh tick on the entity, so the
+`ChildOf` discard hook marks the orphan's `Transform` changed to keep it
+reachable. `ensure_global_transforms` likewise backfills `GlobalTransform`
+only for freshly added `Transform`s. Both systems stay registered in `Update`
+and `PreRender`.
 
 ## Time
 

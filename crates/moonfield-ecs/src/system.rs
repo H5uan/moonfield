@@ -324,8 +324,9 @@ impl<T: Default + Send + Sync + 'static> SystemParam for Local<'_, T> {
 // ---------------------------------------------------------------------
 
 /// Component query as a system param, over the archetype [`WorldQuery`]
-/// machinery, with an optional archetype filter `F`
-/// ([`With`](crate::With)/[`Without`](crate::Without)/[`Or`](crate::Or)).
+/// machinery, with an optional filter `F`
+/// ([`With`](crate::With)/[`Without`](crate::Without)/[`Or`](crate::Or)/
+/// [`Added`](crate::Added)/[`Changed`](crate::Changed)).
 ///
 /// ```ignore
 /// fn integrate(mut query: Query<(&mut Position, &Velocity), Without<Frozen>>) {
@@ -337,14 +338,21 @@ impl<T: Default + Send + Sync + 'static> SystemParam for Local<'_, T> {
 ///
 /// The matching archetypes are cached in the param's per-system
 /// [`QueryState`] (validated at fetch time), so repeated `iter`/`iter_mut`
-/// calls do not re-scan the world's archetype list.
+/// calls do not re-scan the world's archetype list. The same state carries
+/// the system's change-detection window; tick filters
+/// ([`Added`](crate::Added)/[`Changed`](crate::Changed)) compare each row's
+/// component ticks against it at iteration time — the cache memorizes
+/// archetype matches only, never tick verdicts.
 ///
 /// Conflicting component access between two `Query` params of one system
 /// (e.g. `Query<&A>` together with `Query<&mut A>`) panics when the params
 /// are fetched: query items may outlive the iterator that produced them, so
-/// the conflict cannot wait for the archetype borrow flags. Two live
-/// iterators over the same mutable column *within* one param are still caught
-/// by the flags and panic, exactly like [`World::query_mut`].
+/// the conflict cannot wait for the archetype borrow flags. Tick filters
+/// register a read on their component's tick column, so
+/// `Query<&mut T, Changed<T>>` panics at fetch as a read/write conflict (no
+/// current caller needs that shape). Two live iterators over the same
+/// mutable column *within* one param are still caught by the flags and
+/// panic, exactly like [`World::query_mut`].
 pub struct Query<'w, 's, Q: WorldQuery, F: QueryFilter = ()> {
     world: &'w World,
     window: QueryWindow,
@@ -355,7 +363,9 @@ pub struct Query<'w, 's, Q: WorldQuery, F: QueryFilter = ()> {
 
 impl<Q: WorldQuery, F: QueryFilter> Drop for Query<'_, '_, Q, F> {
     fn drop(&mut self) {
-        Q::unregister_access(&mut self.world.access_registry.borrow_mut());
+        let mut registry = self.world.access_registry.borrow_mut();
+        Q::unregister_access(&mut registry);
+        F::unregister_access(&mut registry);
     }
 }
 
@@ -432,7 +442,7 @@ impl Default for QueryState {
 
 impl<Q: WorldQuery, F: QueryFilter> Query<'_, '_, Q, F> {
     /// Iterate all matching entities with shared access.
-    pub fn iter(&self) -> QueryIter<'_, Q> {
+    pub fn iter(&self) -> QueryIter<'_, Q, F> {
         QueryIter::new_shared_cached(
             self.world,
             self.matched,
@@ -442,7 +452,7 @@ impl<Q: WorldQuery, F: QueryFilter> Query<'_, '_, Q, F> {
     }
 
     /// Iterate all matching entities with mutable access.
-    pub fn iter_mut(&mut self) -> QueryIter<'_, Q> {
+    pub fn iter_mut(&mut self) -> QueryIter<'_, Q, F> {
         // SAFETY: the returned iterator and the items it yields borrow this
         // `Query` mutably, so no second mutable iterator can be created from
         // it while they are alive; the running system holds the world's only
@@ -459,15 +469,20 @@ impl<Q: WorldQuery, F: QueryFilter> Query<'_, '_, Q, F> {
     }
 
     /// Fetch the item for a single entity, if it matches the query *and* the
-    /// filter.
+    /// filter (including the filter's per-row part).
     ///
     /// Returns a [`QueryGetGuard`](crate::QueryGetGuard) holding the item
     /// and its column borrows for any query shape — tuples and `Option`
     /// compose exactly as in iteration. Mutable elements go through
     /// `DerefMut` and mark change ticks like iteration does.
     pub fn get(&self, entity: Entity) -> Option<QueryGetGuard<'_, Q>> {
-        let (arch_i, _) = self.world.locate_entity(entity)?;
-        if !archetype_matches::<F>(&self.world.raw_archetypes()[arch_i]) {
+        let (arch_i, row) = self.world.locate_entity(entity)?;
+        let archetype = &self.world.raw_archetypes()[arch_i];
+        if !archetype_matches::<F>(archetype) {
+            return None;
+        }
+        let row_state = F::build_row_state(archetype, self.window.last_run, self.window.this_run);
+        if !F::row_matches(&row_state, row) {
             return None;
         }
         Q::get_entity(
@@ -506,6 +521,7 @@ impl<Q: WorldQuery, F: QueryFilter> SystemParam for Query<'_, '_, Q, F> {
         let mut registry = world.access_registry.borrow_mut();
         let mut staged = registry.clone();
         Q::register_access(&mut staged);
+        F::register_access(&mut staged);
         *registry = staged;
         drop(registry);
         Query {

@@ -11,8 +11,12 @@
 //! `Option<Q>` matches every archetype and yields `None` rows where `Q`'s
 //! column is absent. The [`Query`](crate::Query) system param and
 //! [`World::query`] are thin entries over the same iterator; filters
-//! ([`With`](crate::With)/[`Without`](crate::Without)/[`Or`](crate::Or)) are
-//! applied as an archetype predicate alongside `matches`.
+//! ([`With`](crate::With)/[`Without`](crate::Without)/[`Or`](crate::Or)/
+//! [`Added`](crate::Added)/[`Changed`](crate::Changed)) narrow the match in
+//! two stages: the archetypal part is applied once per archetype (and is what
+//! the per-system [`QueryState`](crate::system::QueryState) cache memorizes),
+//! the per-row part ([`Added`](crate::Added)/[`Changed`](crate::Changed) tick
+//! comparisons) is evaluated per entity at iteration time.
 //!
 //! Items borrow the world for `'w` and may outlive the iterator that
 //! produced them — and with it the release of the column borrow flags.
@@ -28,12 +32,8 @@ use std::collections::{HashMap, HashSet};
 use crate::archetype::Archetype;
 use crate::change_detection::{Mut, Tick};
 use crate::entities::EntityMeta;
+use crate::filter::QueryFilter;
 use crate::{Component, Entity, World};
-
-/// Archetype-level predicate consulted when a query iterator is built:
-/// archetypes it rejects contribute no entities. This is how
-/// [`QueryFilter`](crate::QueryFilter) (`With`/`Without`/`Or`) is applied.
-pub(crate) type ArchetypeFilter<'f> = &'f dyn Fn(&Archetype) -> bool;
 
 /// The component access of the live [`Query`](crate::Query) system params of
 /// one world, keyed by component [`TypeId`].
@@ -57,7 +57,7 @@ pub struct AccessRegistry {
 }
 
 impl AccessRegistry {
-    fn register_read(&mut self, id: TypeId, name: &'static str) {
+    pub(crate) fn register_read(&mut self, id: TypeId, name: &'static str) {
         assert!(
             !self.writes.contains(&id),
             "conflicting `Query` params: `{name}` is read while another live param writes it"
@@ -65,7 +65,7 @@ impl AccessRegistry {
         *self.reads.entry(id).or_insert(0) += 1;
     }
 
-    fn register_write(&mut self, id: TypeId, name: &'static str) {
+    pub(crate) fn register_write(&mut self, id: TypeId, name: &'static str) {
         assert!(
             !self.reads.contains_key(&id),
             "conflicting `Query` params: `{name}` is written while another live param reads it"
@@ -76,7 +76,7 @@ impl AccessRegistry {
         );
     }
 
-    fn unregister_read(&mut self, id: TypeId) {
+    pub(crate) fn unregister_read(&mut self, id: TypeId) {
         if let Some(count) = self.reads.get_mut(&id) {
             *count -= 1;
             if *count == 0 {
@@ -85,7 +85,7 @@ impl AccessRegistry {
         }
     }
 
-    fn unregister_write(&mut self, id: TypeId) {
+    pub(crate) fn unregister_write(&mut self, id: TypeId) {
         self.writes.remove(&id);
     }
 }
@@ -497,31 +497,35 @@ smaller_tuples_too!(impl_world_query_tuple, Q0, Q1, Q2, Q3, Q4, Q5, Q6, Q7);
 // The generic iterator
 // ---------------------------------------------------------------------
 
-/// The one query iterator: walks every archetype the filter and `Q::matches`
-/// accept, holding each element's column borrows from construction to drop.
-pub struct QueryIter<'w, Q: WorldQuery + 'w> {
+/// The one query iterator: walks every archetype the filter's archetypal part
+/// and `Q::matches` accept, evaluating the filter's per-row part
+/// ([`QueryFilter::row_matches`]) on each entity and holding each element's
+/// column borrows from construction to drop.
+///
+/// `last_run`/`this_run` — captured at construction — are the window that
+/// tick filters compare against and that tick-aware items (`Mut`) report:
+/// the querying system's per-system window for [`Query`](crate::Query)
+/// params, the world's default window for the imperative `World::query*`
+/// entries.
+pub struct QueryIter<'w, Q: WorldQuery + 'w, F: QueryFilter + 'w = ()> {
     meta: &'w [EntityMeta],
     archetypes: &'w [Archetype],
-    /// (archetype index, fetch) of every matching archetype; the column
-    /// borrows taken by the fetches live until this iterator drops.
-    hits: Vec<(usize, Q::Fetch<'w>)>,
+    /// (archetype index, fetch, filter row state) of every matching
+    /// archetype; the column borrows taken by the fetches live until this
+    /// iterator drops.
+    hits: Vec<(usize, Q::Fetch<'w>, F::RowState<'w>)>,
     ai: usize,
     row: u32,
 }
 
-impl<'w, Q: WorldQuery + 'w> QueryIter<'w, Q> {
+impl<'w, Q: WorldQuery + 'w, F: QueryFilter + 'w> QueryIter<'w, Q, F> {
     /// Build a read-only iterator, rejecting queries that contain mutable
     /// access — those need the exclusive entries (`World::query_mut`,
     /// `Query::iter_mut`).
-    pub(crate) fn new_shared(
-        world: &'w World,
-        filter: ArchetypeFilter<'_>,
-        last_run: Tick,
-        this_run: Tick,
-    ) -> Self {
+    pub(crate) fn new_shared(world: &'w World, last_run: Tick, this_run: Tick) -> Self {
         assert_shared::<Q>();
         // SAFETY: `Q` is read-only, so the fetches take only shared flags.
-        unsafe { Self::new(world, filter, last_run, this_run) }
+        unsafe { Self::new(world, last_run, this_run) }
     }
 
     /// Build an iterator that may take unique column flags from a *shared*
@@ -538,20 +542,20 @@ impl<'w, Q: WorldQuery + 'w> QueryIter<'w, Q> {
     /// still alive — in practice, that an exclusive borrow gates every other
     /// access to the same columns (as `&mut World` and `Query::iter_mut`'s
     /// `&mut self` do).
-    pub(crate) unsafe fn new(
-        world: &'w World,
-        filter: ArchetypeFilter<'_>,
-        last_run: Tick,
-        this_run: Tick,
-    ) -> Self {
+    pub(crate) unsafe fn new(world: &'w World, last_run: Tick, this_run: Tick) -> Self {
         let archetypes = world.raw_archetypes();
         let meta = world.raw_entity_meta();
         let mut hits = Vec::new();
         for (i, a) in archetypes.iter().enumerate() {
-            if !filter(a) || !Q::matches(a) {
+            let matches = F::matches_component_set(&|t| a.has_in_runtime(t)) && Q::matches(a);
+            if !matches {
                 continue;
             }
-            hits.push((i, Q::borrow_fetch(a, last_run, this_run)));
+            hits.push((
+                i,
+                Q::borrow_fetch(a, last_run, this_run),
+                F::build_row_state(a, last_run, this_run),
+            ));
         }
         Self {
             meta,
@@ -579,9 +583,11 @@ impl<'w, Q: WorldQuery + 'w> QueryIter<'w, Q> {
     /// Build an iterator over a precomputed match list, possibly taking
     /// unique column flags from a *shared* world reference.
     ///
-    /// `matched` must be exactly the archetype indices the query and its
-    /// filter accept, in archetype-set order — the invariant
-    /// [`QueryState`](crate::system::QueryState) maintains.
+    /// `matched` must be exactly the archetype indices the query and the
+    /// filter's archetypal part accept, in archetype-set order — the
+    /// invariant [`QueryState`](crate::system::QueryState) maintains. The
+    /// filter's per-row part is *not* precomputed: its row state is built
+    /// fresh here against `(last_run, this_run)` and evaluated per entity.
     ///
     /// # Safety
     ///
@@ -597,7 +603,11 @@ impl<'w, Q: WorldQuery + 'w> QueryIter<'w, Q> {
         let mut hits = Vec::with_capacity(matched.len());
         for &i in matched {
             let a = &archetypes[i as usize];
-            hits.push((i as usize, Q::borrow_fetch(a, last_run, this_run)));
+            hits.push((
+                i as usize,
+                Q::borrow_fetch(a, last_run, this_run),
+                F::build_row_state(a, last_run, this_run),
+            ));
         }
         Self {
             meta,
@@ -609,31 +619,38 @@ impl<'w, Q: WorldQuery + 'w> QueryIter<'w, Q> {
     }
 }
 
-impl<Q: WorldQuery> Drop for QueryIter<'_, Q> {
+impl<Q: WorldQuery, F: QueryFilter> Drop for QueryIter<'_, Q, F> {
     fn drop(&mut self) {
-        for (i, fetch) in &self.hits {
+        for (i, fetch, _) in &self.hits {
             Q::release(fetch, &self.archetypes[*i]);
         }
     }
 }
 
-impl<'w, Q: WorldQuery + 'w> Iterator for QueryIter<'w, Q> {
+impl<'w, Q: WorldQuery + 'w, F: QueryFilter + 'w> Iterator for QueryIter<'w, Q, F> {
     type Item = (Entity, Q::Item<'w>);
 
     fn next(&mut self) -> Option<Self::Item> {
         loop {
-            let (arch_i, fetch) = self.hits.get(self.ai)?;
+            let (arch_i, fetch, row_state) = self.hits.get(self.ai)?;
             let arch = &self.archetypes[*arch_i];
             if self.row < arch.len() {
-                let raw = arch.entity_id(self.row);
+                let row = self.row;
+                self.row += 1;
+                // The filter's per-row part (tick comparisons for
+                // `Added`/`Changed`; unconditionally true for the archetypal
+                // filters, which inline this check away).
+                if !F::row_matches(row_state, row) {
+                    continue;
+                }
+                let raw = arch.entity_id(row);
                 let entity = Entity {
                     id: raw,
                     generation: self.meta[raw as usize].generation,
                 };
                 // SAFETY: `row` is within `arch`'s length and the column
                 // borrows are held by this iterator for 'w.
-                let item = unsafe { Q::fetch(fetch, arch, self.row) };
-                self.row += 1;
+                let item = unsafe { Q::fetch(fetch, arch, row) };
                 return Some((entity, item));
             }
             self.ai += 1;
