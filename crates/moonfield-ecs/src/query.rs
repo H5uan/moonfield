@@ -13,6 +13,17 @@
 //! [`World::query`] are thin entries over the same iterator; filters
 //! ([`With`](crate::With)/[`Without`](crate::Without)/[`Or`](crate::Or)) are
 //! applied as an archetype predicate alongside `matches`.
+//!
+//! Items borrow the world for `'w` and may outlive the iterator that
+//! produced them — and with it the release of the column borrow flags.
+//! Conflicting component access between sibling [`Query`](crate::Query)
+//! params therefore cannot wait for the flags: each `Query` registers its
+//! access in the world's [`AccessRegistry`] when fetched and unregisters on
+//! drop, so a read/write or write/write overlap between params panics at
+//! fetch time.
+
+use std::any::TypeId;
+use std::collections::{HashMap, HashSet};
 
 use crate::archetype::Archetype;
 use crate::change_detection::{Mut, Tick};
@@ -23,6 +34,61 @@ use crate::{Component, Entity, World};
 /// archetypes it rejects contribute no entities. This is how
 /// [`QueryFilter`](crate::QueryFilter) (`With`/`Without`/`Or`) is applied.
 pub(crate) type ArchetypeFilter<'f> = &'f dyn Fn(&Archetype) -> bool;
+
+/// The component access of the live [`Query`](crate::Query) system params of
+/// one world, keyed by component [`TypeId`].
+///
+/// A `Query` param registers its components when it is fetched
+/// ([`SystemParam::fetch`](crate::SystemParam::fetch)) and unregisters them
+/// when it drops, so the registry always reflects exactly the params alive
+/// right now. Registering read access over a live write — or write access
+/// over any live access — panics at fetch time, before any iteration: query
+/// items may outlive the iterator that produced them (and with it the column
+/// borrow flags), so a conflict between sibling params cannot wait for the
+/// flags to catch it. The type is public only because it appears in the
+/// [`WorldQuery`] protocol's signatures; it is not a usable API.
+#[doc(hidden)]
+#[derive(Clone, Default)]
+pub struct AccessRegistry {
+    /// Number of live read registrations per component.
+    reads: HashMap<TypeId, usize>,
+    /// Components with a live write registration (at most one each).
+    writes: HashSet<TypeId>,
+}
+
+impl AccessRegistry {
+    fn register_read(&mut self, id: TypeId, name: &'static str) {
+        assert!(
+            !self.writes.contains(&id),
+            "conflicting `Query` params: `{name}` is read while another live param writes it"
+        );
+        *self.reads.entry(id).or_insert(0) += 1;
+    }
+
+    fn register_write(&mut self, id: TypeId, name: &'static str) {
+        assert!(
+            !self.reads.contains_key(&id),
+            "conflicting `Query` params: `{name}` is written while another live param reads it"
+        );
+        assert!(
+            self.writes.insert(id),
+            "conflicting `Query` params: `{name}` is written by more than one live param"
+        );
+    }
+
+    fn unregister_read(&mut self, id: TypeId) {
+        if let Some(count) = self.reads.get_mut(&id) {
+            *count -= 1;
+            if *count == 0 {
+                self.reads.remove(&id);
+            }
+        }
+    }
+
+    fn unregister_write(&mut self, id: TypeId) {
+        self.writes.remove(&id);
+    }
+}
 
 /// A composable query element: the low-level query description, distinct
 /// from the [`Query`](crate::Query) system param that wraps it.
@@ -48,6 +114,19 @@ pub trait WorldQuery {
     /// `Query::iter_mut`).
     #[doc(hidden)]
     const READ_ONLY: bool;
+
+    /// Register this element's component access (read for `&T`, write for
+    /// `&mut T`) into `registry`, panicking on a conflict with already-live
+    /// access. Called once per `Query` param fetch; registration of one
+    /// element must not be observable if a later element of the same query
+    /// panics (the caller stages registrations in a scratch copy).
+    #[doc(hidden)]
+    fn register_access(registry: &mut AccessRegistry);
+
+    /// Undo one [`Self::register_access`] call. Called from `Query`'s `Drop`,
+    /// so it must not panic.
+    #[doc(hidden)]
+    fn unregister_access(registry: &mut AccessRegistry);
 
     /// Whether archetype `a` contributes entities to this query.
     #[doc(hidden)]
@@ -176,6 +255,14 @@ impl<T: Component> WorldQuery for &T {
 
     const READ_ONLY: bool = true;
 
+    fn register_access(registry: &mut AccessRegistry) {
+        registry.register_read(TypeId::of::<T>(), std::any::type_name::<T>());
+    }
+
+    fn unregister_access(registry: &mut AccessRegistry) {
+        registry.unregister_read(TypeId::of::<T>());
+    }
+
     fn matches(a: &Archetype) -> bool {
         a.get_state::<T>().is_some()
     }
@@ -224,6 +311,14 @@ impl<T: Component> WorldQuery for &mut T {
         Self: 'w;
 
     const READ_ONLY: bool = false;
+
+    fn register_access(registry: &mut AccessRegistry) {
+        registry.register_write(TypeId::of::<T>(), std::any::type_name::<T>());
+    }
+
+    fn unregister_access(registry: &mut AccessRegistry) {
+        registry.unregister_write(TypeId::of::<T>());
+    }
 
     fn matches(a: &Archetype) -> bool {
         a.get_state::<T>().is_some()
@@ -282,6 +377,14 @@ impl<Q: WorldQuery> WorldQuery for Option<Q> {
 
     const READ_ONLY: bool = Q::READ_ONLY;
 
+    fn register_access(registry: &mut AccessRegistry) {
+        Q::register_access(registry);
+    }
+
+    fn unregister_access(registry: &mut AccessRegistry) {
+        Q::unregister_access(registry);
+    }
+
     fn matches(_a: &Archetype) -> bool {
         true
     }
@@ -332,6 +435,16 @@ macro_rules! impl_world_query_tuple {
             type Fetch<'w> = ($($q::Fetch<'w>,)*) where Self: 'w;
 
             const READ_ONLY: bool = true $(&& $q::READ_ONLY)*;
+
+            #[allow(unused_variables)] // the empty-tuple expansion ignores it
+            fn register_access(registry: &mut AccessRegistry) {
+                $($q::register_access(registry);)*
+            }
+
+            #[allow(unused_variables)] // the empty-tuple expansion ignores it
+            fn unregister_access(registry: &mut AccessRegistry) {
+                $($q::unregister_access(registry);)*
+            }
 
             #[allow(unused_variables)] // the empty-tuple expansion ignores them
             fn matches(a: &Archetype) -> bool {

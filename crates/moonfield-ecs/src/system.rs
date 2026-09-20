@@ -96,8 +96,10 @@ pub trait IntoSystem<Marker>: Send + Sync + 'static {
 ///
 /// Params are fetched from a *shared* world borrow so that several params can
 /// coexist in one system; safety is enforced dynamically (resources via
-/// `RefCell`, component columns via archetype borrow flags), so conflicting
-/// params panic at runtime instead of failing to compile.
+/// `RefCell`, component columns via archetype borrow flags, and conflicting
+/// component access between `Query` params via the world's access registry at
+/// fetch time), so conflicting params panic at runtime instead of failing to
+/// compile.
 pub trait SystemParam: Sized {
     /// Per-system persistent state.
     type State: Send + Sync + 'static;
@@ -333,13 +335,22 @@ impl<T: Default + Send + Sync + 'static> SystemParam for Local<'_, T> {
 /// }
 /// ```
 ///
-/// Conflicting access (e.g. two live iterators over the same mutable column)
-/// is caught by the archetype borrow flags and panics, exactly like
-/// [`World::query_mut`].
+/// Conflicting component access between two `Query` params of one system
+/// (e.g. `Query<&A>` together with `Query<&mut A>`) panics when the params
+/// are fetched: query items may outlive the iterator that produced them, so
+/// the conflict cannot wait for the archetype borrow flags. Two live
+/// iterators over the same mutable column *within* one param are still caught
+/// by the flags and panic, exactly like [`World::query_mut`].
 pub struct Query<'w, Q: WorldQuery, F: QueryFilter = ()> {
     world: &'w World,
     window: QueryWindow,
     _marker: PhantomData<fn() -> (Q, F)>,
+}
+
+impl<Q: WorldQuery, F: QueryFilter> Drop for Query<'_, Q, F> {
+    fn drop(&mut self) {
+        Q::unregister_access(&mut self.world.access_registry.borrow_mut());
+    }
 }
 
 /// The change-detection window a [`Query`] param's state carries between
@@ -369,8 +380,8 @@ impl<'w, Q: WorldQuery, F: QueryFilter> Query<'w, Q, F> {
         // SAFETY: the returned iterator and the items it yields borrow this
         // `Query` mutably, so no second mutable iterator can be created from
         // it while they are alive; the running system holds the world's only
-        // access. Conflicting columns across *different* params are still
-        // caught by the archetype borrow flags.
+        // access. Conflicting access across *different* params is caught at
+        // fetch time by the world's access registry.
         unsafe {
             QueryIter::new(
                 self.world,
@@ -425,6 +436,15 @@ impl<Q: WorldQuery, F: QueryFilter> SystemParam for Query<'_, Q, F> {
     }
 
     fn fetch<'w, 's>(world: &'w World, state: &'s mut Self::State) -> Self::Item<'w, 's> {
+        // Stage the registration in a scratch copy: if one element of `Q`
+        // conflicts with another (e.g. `Query<(&A, &mut A)>`), the panic must
+        // not leave a partial registration behind — no `Query` is constructed
+        // on that path, so no `Drop` would undo it.
+        let mut registry = world.access_registry.borrow_mut();
+        let mut staged = registry.clone();
+        Q::register_access(&mut staged);
+        *registry = staged;
+        drop(registry);
         Query {
             world,
             window: *state,
@@ -792,5 +812,79 @@ mod tests {
             let pos = query.get(entity).expect("the entity was just spawned");
             assert!(!pos.is_changed()); // own write is not re-reported
         }
+    }
+
+    #[test]
+    #[should_panic(expected = "conflicting `Query` params")]
+    fn test_read_write_query_params_panic_at_fetch() {
+        fn aliasing(read: Query<&Position>, mut write: Query<&mut Position>) {
+            // The pattern the fetch-time check exists for: items outlive the
+            // iterator (and its flag release), so this would alias `&Position`
+            // with `&mut Position` if the params were allowed to coexist.
+            let _refs: Vec<&Position> = read.iter().map(|(_, p)| p).collect();
+            for (_, mut p) in write.iter_mut() {
+                p.x += 1.0;
+            }
+        }
+
+        let mut world = World::new();
+        world.spawn((Position { x: 0.0 },));
+        let mut system = IntoSystem::into_system(aliasing);
+        system.run(&mut world);
+    }
+
+    #[test]
+    #[should_panic(expected = "conflicting `Query` params")]
+    fn test_write_write_query_params_panic_at_fetch() {
+        fn bad(a: Query<&mut Position>, b: Query<&mut Position>) {
+            let _ = (a, b);
+        }
+
+        let mut world = World::new();
+        world.spawn((Position { x: 0.0 },));
+        let mut system = IntoSystem::into_system(bad);
+        system.run(&mut world);
+    }
+
+    #[test]
+    fn test_conflicting_components_within_one_query_panic_and_rollback() {
+        fn bad(q: Query<(&Position, &mut Position)>) {
+            let _ = q;
+        }
+        fn read_it(q: Query<&Position>) {
+            let _ = q.iter().count();
+        }
+
+        let mut world = World::new();
+        world.spawn((Position { x: 0.0 },));
+        let mut system = IntoSystem::into_system(bad);
+        let result =
+            std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| system.run(&mut world)));
+        assert!(result.is_err());
+        // The panicking fetch staged its registration in a scratch copy, so
+        // no partial registration survives to block a legitimate param.
+        IntoSystem::into_system(read_it).run(&mut world);
+    }
+
+    #[test]
+    fn test_query_access_registration_releases_on_drop() {
+        fn read_it(q: Query<&Position>) {
+            let _ = q.iter().count();
+        }
+        fn write_it(mut q: Query<&mut Position>) {
+            for (_, mut p) in q.iter_mut() {
+                p.x += 1.0;
+            }
+        }
+
+        let mut world = World::new();
+        world.spawn((Position { x: 0.0 },));
+        let mut read = IntoSystem::into_system(read_it);
+        let mut write = IntoSystem::into_system(write_it);
+        // The two shapes conflict while live together, but each system's
+        // params drop at the end of its run, so they can run in sequence.
+        read.run(&mut world);
+        write.run(&mut world);
+        read.run(&mut world);
     }
 }

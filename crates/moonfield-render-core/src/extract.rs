@@ -70,11 +70,12 @@ impl<'w, 's, T: SystemParam> SystemParam for Extract<'w, 's, T> {
                  (App::render parks the main world)"
             )
         });
-        // SAFETY: `main` holds the resource cell's shared borrow for as long
-        // as the returned item lives (the `_main` field), so the parked world
-        // cannot be replaced while `param` borrows into it; the pointer is
-        // valid for the schedule's duration by `MainWorld`'s contract.
-        let main_world: &'wi World = unsafe { main.world() };
+        // SAFETY: `_main` moves the resource cell's shared borrow into the
+        // returned item, so the `MainWorld` — and the parked world, per its
+        // parking contract — stays alive and unwritten for `'wi`.
+        // `MainWorld::world` ties its reference to the guard borrow, so the
+        // raw-pointer round trip re-expresses that lifetime as `'wi`.
+        let main_world: &'wi World = unsafe { &*(main.world() as *const World) };
         // The inner param's change window is measured on the main world's
         // clock: changes made there since this param last fetched — the
         // window an extractor means by "changed since last frame".

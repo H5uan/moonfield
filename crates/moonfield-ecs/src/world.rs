@@ -10,7 +10,7 @@ use crate::change_detection::{CHECK_TICK_THRESHOLD, Mut, Ref, Tick};
 use crate::commands::Command;
 use crate::entities::{AllocManyState, Entities, Location, NoSuchEntity, ReserveEntitiesIterator};
 use crate::hooks::{ComponentHooks, HookKind};
-use crate::query::QueryIter;
+use crate::query::{AccessRegistry, QueryIter};
 use crate::schedule::{IntoSystemConfigs, ScheduleLabel, Schedules};
 use crate::{Component, Entity, Resources, WorldQuery};
 use std::cell::{Cell, RefCell};
@@ -210,6 +210,10 @@ pub struct World {
     /// Lifecycle hooks registered per component type, keyed by [`TypeId`].
     pub(crate) component_hooks: HashMap<TypeId, ComponentHooks>,
 
+    /// Component access of the live [`Query`](crate::Query) system params;
+    /// conflicts panic at fetch time (see [`AccessRegistry`]).
+    pub(crate) access_registry: RefCell<AccessRegistry>,
+
     /// The world's current change-detection tick. Component writes record
     /// this value; each system run advances it once via
     /// [`Self::increment_change_tick`]. Interior-mutable so `SystemState`
@@ -244,6 +248,7 @@ impl World {
             resources: Resources::default(),
             command_queue: RefCell::new(Vec::new()),
             component_hooks: HashMap::new(),
+            access_registry: RefCell::new(AccessRegistry::default()),
             // The change clock starts at 1 so that a system's initial
             // `last_run` of 0 observes every component as new.
             change_tick: Cell::new(Tick::new(1)),
@@ -1151,6 +1156,9 @@ impl World {
 /// pointer's validity is a contract, not a type property: the parker
 /// ([`World::park_main_world`]'s caller) keeps the world alive and only
 /// reads it until [`World::unpark_main_world`] removes the resource.
+/// References derived from a `MainWorld` borrow are tied to that borrow, so
+/// one parked resource cannot mint overlapping world references with
+/// caller-chosen lifetimes.
 pub struct MainWorld(*const World);
 
 // SAFETY: the struct is a bare pointer; every dereference goes through
@@ -1164,15 +1172,28 @@ impl MainWorld {
         Self(world as *const World)
     }
 
-    /// The parked world.
+    /// The parked world, borrowed for as long as `self` is borrowed.
     ///
     /// # Safety
     ///
     /// The caller must uphold the parking contract: the parker keeps the
     /// world alive and hands out only `&World`-compatible access until the
     /// resource is removed.
-    pub unsafe fn world<'w>(&self) -> &'w World {
+    pub unsafe fn world(&self) -> &World {
         unsafe { &*self.0 }
+    }
+
+    /// The parked world, mutably. The `&mut self` receiver guarantees at
+    /// most one `&mut World` per `MainWorld` borrow.
+    ///
+    /// # Safety
+    ///
+    /// Beyond the parking contract of [`Self::world`], the caller must
+    /// guarantee that no reference previously derived from this `MainWorld`
+    /// is still live — `&self` borrows of the resource cannot overlap the
+    /// `&mut self` borrow statically, but raw copies of the pointer can.
+    pub unsafe fn world_mut(&mut self) -> &mut World {
+        unsafe { &mut *self.0.cast_mut() }
     }
 }
 
@@ -1204,5 +1225,25 @@ mod tests {
     fn test_iter_entities_empty_world() {
         let world = World::new();
         assert_eq!(world.iter_entities().count(), 0);
+    }
+
+    #[test]
+    fn test_parked_main_world_roundtrip() {
+        let mut main = World::new();
+        main.spawn_empty();
+        let mut render = World::new();
+
+        render.park_main_world(&main);
+        {
+            let parked = render.get_resource::<MainWorld>().unwrap();
+            // SAFETY: `main` outlives the borrow and nothing writes it.
+            let world = unsafe { parked.world() };
+            assert_eq!(world.iter_entities().count(), 1);
+            // Two overlapping shared borrows from the same resource are fine.
+            let again = unsafe { parked.world() };
+            assert!(std::ptr::eq(world, again));
+        }
+        assert!(render.unpark_main_world());
+        assert!(render.get_resource::<MainWorld>().is_none());
     }
 }
