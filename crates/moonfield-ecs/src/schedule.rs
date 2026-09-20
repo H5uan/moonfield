@@ -263,17 +263,52 @@ impl Schedule {
     /// [`IntoSystemConfigs::in_set`] gains anchor constraints: after its
     /// set's anchor and before the next anchor in the set chain.
     pub fn add_systems<M>(&mut self, systems: impl IntoSystemConfigs<M>) -> &mut Self {
-        for mut config in systems.into_configs() {
-            if let Some(set) = config.in_set {
-                config.after.push(set.to_string());
-                if let Some(next) = self.next_set_anchor(set) {
-                    config.before.push(next.to_string());
-                }
-            }
-            self.systems.push(config);
+        for config in systems.into_configs() {
+            self.push_config(config);
         }
         self.dirty = true;
         self
+    }
+
+    /// Append `config`, expanding `in_set` membership into anchor constraints
+    /// against this schedule's set chain (without duplicating constraints the
+    /// config already carries).
+    fn push_config(&mut self, mut config: SystemConfig) {
+        if let Some(set) = config.in_set {
+            if !config.after.iter().any(|label| label == set) {
+                config.after.push(set.to_string());
+            }
+            if let Some(next) = self.next_set_anchor(set)
+                && !config.before.iter().any(|label| label == &next)
+            {
+                config.before.push(next);
+            }
+        }
+        self.systems.push(config);
+    }
+
+    /// Absorb another schedule's systems and set chain into this one.
+    ///
+    /// [`World::run_schedule`](crate::World::run_schedule) uses this to fold
+    /// systems a running system registered into the schedule's own label back
+    /// into the running schedule: the registration lands in a fresh entry
+    /// (the running schedule is out of the resource), and a plain reinsert
+    /// would overwrite it. Ordering constraints come along unchanged; `in_set`
+    /// membership is re-expanded against this schedule's set chain, since the
+    /// source entry may not know it.
+    pub(crate) fn merge_from(&mut self, mut other: Schedule) {
+        let gained_systems = !other.systems.is_empty();
+        for config in other.systems.drain(..) {
+            self.push_config(config);
+        }
+        for label in other.set_chain.drain(..) {
+            if !self.set_chain.contains(&label) {
+                self.set_chain.push(label);
+            }
+        }
+        if gained_systems {
+            self.dirty = true;
+        }
     }
 
     /// Register an ordered chain of [`SystemSet`]s: one no-op anchor system
@@ -702,5 +737,28 @@ mod tests {
         world.add_systems(B, second);
         world.run_schedule(A);
         assert_eq!(world.get_resource::<Log>().unwrap().0, ["second"]);
+    }
+
+    #[test]
+    fn test_add_systems_to_own_running_schedule_survives() {
+        fn registrar(world: &mut World) {
+            // A's entry is out for the current run; registering into A here
+            // must be merged back, not overwritten when the run ends.
+            world.add_systems(A, second.after(&first));
+        }
+
+        let mut world = World::new();
+        world.insert_resource(Log::default());
+        world.add_systems(A, (first, registrar));
+        world.run_schedule(A);
+        assert_eq!(world.get_resource::<Log>().unwrap().0, ["first"]);
+        // The merged system runs on the next run, after `first` per its
+        // constraint. (`registrar` registers another copy; that one joins
+        // the run after.)
+        world.run_schedule(A);
+        assert_eq!(
+            world.get_resource::<Log>().unwrap().0,
+            ["first", "first", "second"]
+        );
     }
 }

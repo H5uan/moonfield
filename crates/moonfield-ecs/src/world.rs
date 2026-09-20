@@ -647,7 +647,12 @@ impl World {
     /// Only this schedule's entry is taken out of the [`Schedules`] resource
     /// for the run; the resource itself stays in the world, so a system inside
     /// the schedule can run *other* schedules. A rerun of the same label from
-    /// inside its own run finds the entry gone and is a no-op.
+    /// inside its own run finds the entry gone and is a no-op. Registering
+    /// into the running label ([`Self::add_systems`] / [`Self::add_sets`])
+    /// creates a fresh entry while the running schedule is out; when the run
+    /// ends, that entry's additions are merged into the schedule being put
+    /// back (see [`Schedule::merge_from`]), so the new systems run from the
+    /// next run on.
     pub fn run_schedule<L: ScheduleLabel>(&mut self, _label: L) {
         let label = TypeId::of::<L>();
         let Some(mut schedule) = self
@@ -657,11 +662,15 @@ impl World {
             return;
         };
         schedule.run(self);
-        self.get_resource_mut::<Schedules>()
-            .expect(
-                "the Schedules resource cannot be removed while one of its schedules is running",
-            )
-            .insert(label, schedule);
+        let mut schedules = self.get_resource_mut::<Schedules>().expect(
+            "the Schedules resource cannot be removed while one of its schedules is running",
+        );
+        // An entry for this label means a system registered into the running
+        // schedule during the run; merge rather than overwrite.
+        if let Some(added) = schedules.remove(&label) {
+            schedule.merge_from(added);
+        }
+        schedules.insert(label, schedule);
     }
 
     // ------------------------------------------------------------------
