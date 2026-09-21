@@ -38,5 +38,5 @@ arm using the same accessor.
   messages name components as `"<unknown>"`.
 - Adding another `debug_assertions`-gated field to `ComponentMeta` means
   extending the accessor, not adding call-site `cfg` arms.
-- The gate still builds no release target; release-only breakage remains
-  invisible to CI.
+- Release-only breakage is caught by the gate:
+  [CI checks the workspace without debug_assertions](../process/2026-09-21-ci-release-check.md).

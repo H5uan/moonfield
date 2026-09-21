@@ -36,5 +36,5 @@ profile 下运行，门禁里没有任何不启用 `debug_assertions` 的构建�
   名显示为 `"<unknown>"`。
 - 给 `ComponentMeta` 再加 `debug_assertions` 门控字段时，扩展访问器即可，
   不需要在调用点补 `cfg` 分支。
-- 门禁仍然不构建任何 release target；仅 release 可见的破坏对 CI 依然
-  不可见。
+- 仅 release 可见的破坏已由门禁兜住：
+  [CI 在不启用 debug_assertions 的情况下检查整个 workspace](../process/2026-09-21-ci-release-check.md)。

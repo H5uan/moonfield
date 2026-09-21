@@ -72,6 +72,39 @@ jobs:
       - name: Clippy
         run: cargo clippy --workspace --all-targets --locked -- -D warnings
 
+  release-check:
+    name: release check (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, windows-latest]
+    steps:
+      - uses: actions/checkout@v7
+
+      # rustup installs the pinned toolchain (+components) from rust-toolchain.toml.
+      - name: Install pinned toolchain
+        run: rustup show
+
+      # Same env as the clippy job: shader-slang-sys's build script needs
+      # SLANG_DIR and libclang (bindgen) even though check compiles nothing.
+      - name: Install libclang (Linux)
+        if: runner.os == 'Linux'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y libclang-dev
+
+      - name: Set LIBCLANG_PATH (Windows)
+        if: runner.os == 'Windows'
+        run: echo "LIBCLANG_PATH=C:\Program Files\LLVM\bin" >> "$env:GITHUB_ENV"
+
+      - uses: ./.github/actions/setup-slang
+
+      - uses: Swatinem/rust-cache@v2
+
+      - name: Check without debug_assertions
+        run: cargo check --release --workspace --all-targets --locked
+
   test:
     name: test (${{ matrix.os }})
     runs-on: ${{ matrix.os }}
@@ -127,7 +160,7 @@ jobs:
 
   ci-result:
     name: CI result
-    needs: [rust-analyzer, fmt, clippy, test, agent-docs, rhi-boundary]
+    needs: [rust-analyzer, fmt, clippy, release-check, test, agent-docs, rhi-boundary]
     if: always()
     runs-on: ubuntu-latest
     steps:
