@@ -157,6 +157,19 @@ impl ComponentMeta {
         &self.id
     }
 
+    /// The component's type name, or `"<unknown>"` when built without
+    /// `debug_assertions`.
+    pub(crate) fn type_name(&self) -> &'static str {
+        #[cfg(debug_assertions)]
+        {
+            self.type_name
+        }
+        #[cfg(not(debug_assertions))]
+        {
+            "<unknown>"
+        }
+    }
+
     /// Access the layout of the component type.
     pub fn layout(&self) -> &Layout {
         &self.layout
@@ -225,16 +238,10 @@ impl Archetype {
     fn assert_component_meta(metas: &[ComponentMeta]) {
         metas.windows(2).for_each(|x| match x[0].cmp(&x[1]) {
             core::cmp::Ordering::Less => (),
-            #[cfg(debug_assertions)]
             core::cmp::Ordering::Equal => panic!(
                 "attempted to allocate entity with duplicate {} components; \
                  each type must occur at most once!",
-                x[0].type_name
-            ),
-            #[cfg(not(debug_assertions))]
-            core::cmp::Ordering::Equal => panic!(
-                "attempted to allocate entity with duplicate components; \
-                 each type must occur at most once!"
+                x[0].type_name()
             ),
             core::cmp::Ordering::Greater => panic!("type info is unsorted"),
         });
@@ -425,7 +432,7 @@ impl Archetype {
         if !self.data[column].borrow_state.try_borrow() {
             panic!(
                 "Component {} is already borrowed",
-                self.metas[column].type_name
+                self.metas[column].type_name()
             );
         }
     }
@@ -443,7 +450,7 @@ impl Archetype {
         if !self.data[column].borrow_state.try_borrow() {
             panic!(
                 "Component {} is already borrowed",
-                self.metas[column].type_name
+                self.metas[column].type_name()
             );
         }
     }
@@ -459,7 +466,7 @@ impl Archetype {
         if !self.data[column].borrow_state.try_borrow_mut() {
             panic!(
                 "Component {} is already borrowed",
-                self.metas[column].type_name
+                self.metas[column].type_name()
             );
         }
     }
