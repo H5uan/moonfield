@@ -12,9 +12,10 @@ where `debug_assertions` is on. Code that only compiles with
 `#[cfg(debug_assertions)]`, fails `cargo build --release` while the gate stays
 green; that is how
 [the ComponentMeta type_name fix](../bug-fix/2026-09-21-componentmeta-debug-only-field-accessor.md)
-shipped. Compiling the workspace needs `SLANG_DIR` (shader-slang-sys's build
-script) and libclang (its bindgen), so any job that compiles it carries the
-same setup the clippy job has.
+shipped. Compiling the workspace needs libclang (shader-slang-rs-sys's
+bindgen) and the Slang package its build script downloads; jobs cache that
+download and set no `SLANG_DIR`
+([CI links the Slang version the bindings pin](../bug-fix/2026-09-21-ci-slang-version-single-source.md)).
 
 ## Decision
 

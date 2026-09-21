@@ -69,4 +69,6 @@ vocabulary:
 - Single-threaded ownership is simple and safe today but means GPU work and ECS
   updates cannot overlap; that is deferred until a command-queue handoff lands.
 - `shader-slang-sys` needs Slang at build and runtime (`SLANG_DIR` or
-  `VULKAN_SDK`); CI's `setup-slang` action pins the release.
+  `VULKAN_SDK`); its build script's pinned download is the version source,
+  and CI links exactly that
+  ([CI links the Slang version the bindings pin](../bug-fix/2026-09-21-ci-slang-version-single-source.md)).

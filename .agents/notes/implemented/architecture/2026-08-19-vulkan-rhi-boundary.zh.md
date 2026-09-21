@@ -29,4 +29,4 @@ Status: implemented
 
 - 切换后端(或无需 GPU 测试)都在 `types.rs` 之后进行,场景代码零改动。
 - 单线程所有权今天简单安全,但意味着 GPU 工作与 ECS 更新无法重叠;这一点推迟到命令队列交接落地之后。
-- `shader-slang-sys` 构建与运行时都需要 Slang(`SLANG_DIR` 或 `VULKAN_SDK`);CI 的 `setup-slang` action 固定版本。
+- `shader-slang-sys` 构建与运行时都需要 Slang(`SLANG_DIR` 或 `VULKAN_SDK`);其 build script 锁定的下载是版本源,CI 链接的正是它([CI 链接绑定所钉的 Slang 版本](../bug-fix/2026-09-21-ci-slang-version-single-source.md))。

@@ -11,9 +11,10 @@ CI 中两个编译 Rust 的作业——clippy 与 test——都在 dev profile �
 的代码（例如 panic 消息读取 `#[cfg(debug_assertions)]` 门控的字段）会让
 `cargo build --release` 失败，而门禁保持绿色；
 [ComponentMeta type_name 修复](../bug-fix/2026-09-21-componentmeta-debug-only-field-accessor.md)
-就是这样进来的。编译整个 workspace 需要 `SLANG_DIR`
-（shader-slang-sys 的 build script）和 libclang（其 bindgen），因此任何
-编译它的作业都要携带与 clippy 作业相同的前置。
+就是这样进来的。编译整个 workspace 需要 libclang
+（shader-slang-rs-sys 的 bindgen）与其 build script 下载的 Slang 包；各
+作业缓存该下载且不设置 `SLANG_DIR`
+（[CI 链接绑定所钉的 Slang 版本](../bug-fix/2026-09-21-ci-slang-version-single-source.md)）。
 
 ## Decision
 

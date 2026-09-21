@@ -82,8 +82,10 @@ Windows and Linux):
 - `rhi-boundary` — `python3 scripts/verify_rhi_boundary.py` (no backend types
   in the rhi public API).
 
-`.github/actions/setup-slang` downloads a pinned Slang release and exports
-`SLANG_DIR` plus the runtime library path.
+The `shader-slang-rs-sys` build script downloads the Slang release its own
+`SLANG_VERSION` pins into the cargo git checkout; CI caches that download
+and sets no `SLANG_DIR`, so the build script's pin is the only version
+source.
 
 ## Agent conventions
 
