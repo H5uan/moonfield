@@ -68,7 +68,7 @@ jobs:
       # The shader-slang-rs-sys build script downloads the Slang release its
       # own SLANG_VERSION pins (no SLANG_DIR override anywhere); cache the
       # download, keyed on the lockfile that pins the checkout revision.
-      - uses: actions/cache@v4
+      - uses: actions/cache@v6
         with:
           path: ~/.cargo/git/checkouts/shader-slang-rs-*
           key: slang-bin-${{ runner.os }}-${{ hashFiles('Cargo.lock') }}
@@ -104,7 +104,7 @@ jobs:
         if: runner.os == 'Windows'
         run: echo "LIBCLANG_PATH=C:\Program Files\LLVM\bin" >> "$env:GITHUB_ENV"
 
-      - uses: actions/cache@v4
+      - uses: actions/cache@v6
         with:
           path: ~/.cargo/git/checkouts/shader-slang-rs-*
           key: slang-bin-${{ runner.os }}-${{ hashFiles('Cargo.lock') }}
@@ -138,7 +138,7 @@ jobs:
         if: runner.os == 'Windows'
         run: echo "LIBCLANG_PATH=C:\Program Files\LLVM\bin" >> "$env:GITHUB_ENV"
 
-      - uses: actions/cache@v4
+      - uses: actions/cache@v6
         with:
           path: ~/.cargo/git/checkouts/shader-slang-rs-*
           key: slang-bin-${{ runner.os }}-${{ hashFiles('Cargo.lock') }}
