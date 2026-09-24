@@ -12,6 +12,10 @@
 // the host pushes one root blob per dispatch: pointer fields are 8-byte
 // GPU addresses, scalar fields are inline u32s. The host mirrors each
 // struct with a `#[repr(C)]` bytemuck POD type in the same field order.
+//
+// An entry-point module: compiled directly (never imported), so its symbols
+// can stay at the default `internal` visibility.
+module radix_sort;
 
 groupshared uint g_bins[256];
 groupshared uint g_chunk[256];

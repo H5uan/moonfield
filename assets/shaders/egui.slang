@@ -5,6 +5,11 @@
 // stage indexes the untyped `ResourceDescriptorHeap` /
 // `SamplerDescriptorHeap` with, plus this draw's index base — is pushed per
 // draw. Layout must match `EguiRoot` in egui_vk.rs.
+//
+// An entry-point module: compiled directly (never imported), so its symbols
+// can stay at the default `internal` visibility.
+module egui;
+
 struct EguiRoot
 {
     float2 screen_size_in_points;

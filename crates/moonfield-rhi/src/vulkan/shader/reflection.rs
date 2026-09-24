@@ -279,14 +279,16 @@ mod tests {
 
     /// `struct_rust_source` emits a `#[repr(C)]` struct matching the shader's
     /// reflected layout; `field_user_attributes` surfaces `[Attr(...)]` marks.
+    ///
+    /// The attributes are declared in `assets/shaders/editor_metadata.slang`
+    /// (Slang reflects only declared user attributes — `{Name}Attribute`
+    /// structs with `[__AttributeUsage(...)]`); the probe imports that module,
+    /// with the virtual module path placed next to it so the import resolves.
     #[test]
     fn codegen_and_user_attributes() {
-        // The attributes are declared in `assets/shaders/editor_metadata.slang`
-        // (Slang reflects only declared user attributes — `{Name}Attribute`
-        // structs with `[__AttributeUsage(...)]`).
-        const SOURCE: &str = concat!(
-            include_str!("../../../../../assets/shaders/editor_metadata.slang"),
-            r#"
+        const SOURCE: &str = r#"
+            import editor_metadata;
+
             struct DrawData
             {
                 column_major float4x4 mvp;
@@ -305,11 +307,14 @@ mod tests {
                 o.position = mul(root.mvp, float4(input.position, 1.0)) + root.tint * root.opacity;
                 return o;
             }
-        "#,
+        "#;
+        let module_path = concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/../../assets/shaders/__metadata_probe.slang"
         );
         let compiler = Compiler::new().expect("compiler");
         let refl = compiler
-            .compile_source_to_reflection("gen", SOURCE, "main")
+            .compile_source_to_reflection(module_path, SOURCE, "main")
             .expect("reflection");
 
         let src = refl.struct_rust_source("DrawData").expect("codegen");

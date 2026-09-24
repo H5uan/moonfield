@@ -3,6 +3,10 @@
 // `config` carries the hyperparameters and parameter count (written once at
 // `Adam::new`) plus the 1-based iteration counter the host advances every
 // step — bias correction depends on it.
+//
+// An entry-point module: compiled directly (never imported), so its symbols
+// can stay at the default `internal` visibility.
+module adam;
 
 struct AdamConfig
 {

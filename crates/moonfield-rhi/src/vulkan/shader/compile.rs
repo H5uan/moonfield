@@ -771,13 +771,14 @@ mod tests {
 
     /// A source-string module compiled under a real-path module name resolves
     /// same-directory `import`s: the probe's (virtual) file lives in
-    /// `assets/shaders/gs/` and imports the shared Gaussian math.
+    /// `assets/shaders/` and imports the shared Gaussian math — a multi-file
+    /// module whose primary file is the top-level `gaussian.slang`.
     #[test]
     fn source_import_resolves_through_module_name_path() {
         let compiler = Compiler::new().expect("compiler");
         let module_path = concat!(
             env!("CARGO_MANIFEST_DIR"),
-            "/../../assets/shaders/gs/__import_probe.slang"
+            "/../../assets/shaders/__import_probe.slang"
         );
         const PROBE: &str = r#"
             import gaussian;
@@ -816,5 +817,39 @@ mod tests {
             .compile_source_to_spirv(module_path, PROBE, "probe")
             .expect("import resolves through the module-name path hint");
         assert!(!shader.spirv.is_empty());
+    }
+
+    /// The module boundary enforces access control: `internal` symbols of an
+    /// imported module are not visible to the importer. `quat_rotation` is
+    /// internal to `gaussian` (its public entry is `cov3d`), so a probe that
+    /// reaches for it directly must fail to compile — proving the
+    /// `module`/`implementing` declarations are load-bearing, not decorative.
+    #[test]
+    fn internal_symbols_are_invisible_across_import() {
+        let compiler = Compiler::new().expect("compiler");
+        let module_path = concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/../../assets/shaders/__visibility_probe.slang"
+        );
+        const PROBE: &str = r#"
+            import gaussian;
+
+            [shader("compute")]
+            [numthreads(1, 1, 1)]
+            void probe(uint3 tid : SV_DispatchThreadID,
+                       Ptr<float, Access.ReadWrite> out_buf)
+            {
+                float3x3 r = quat_rotation(float4(1.0, 0.0, 0.0, 0.0));
+                out_buf[0] = r[0][0];
+            }
+        "#;
+        let error = compiler
+            .compile_source_to_spirv(module_path, PROBE, "probe")
+            .expect_err("internal symbol must not be visible to an importer");
+        let message = format!("{error}");
+        assert!(
+            message.contains("quat_rotation"),
+            "error should name the hidden symbol: {message}"
+        );
     }
 }

@@ -1,10 +1,10 @@
 //! GPU-vs-CPU verification of the shared Gaussian math
-//! (`assets/shaders/gs/gaussian.slang`): `cov3d`, `project`, and
-//! `eval_color` over 64 seeded Gaussians, compared per component against an
-//! independent glam reference. The wrapper kernel is a source string whose
-//! module name is a virtual path in `assets/shaders/gs/`; the `import
-//! gaussian` resolves through that path hint (see the rhi `compile_source`
-//! docs), so no fixture file exists on disk.
+//! (`assets/shaders/gaussian.slang`, the `gaussian` module's primary file):
+//! `cov3d`, `project`, and `eval_color` over 64 seeded Gaussians, compared
+//! per component against an independent glam reference. The wrapper kernel
+//! is a source string whose module name is a virtual path in
+//! `assets/shaders/`; the `import gaussian` resolves through that path hint
+//! (see the rhi `compile_source` docs), so no fixture file exists on disk.
 //!
 //! The one contract point between the sides: rotations are stored
 //! (w, x, y, z) — the `GaussianScene`/3DGS-reference layout — while glam's
@@ -330,11 +330,12 @@ fn gaussian_math_matches_glam_reference() {
     write_floats(&params, &params_cpu);
     write_floats(&view_buf, &view_cpu);
 
-    // The virtual module path places the wrapper next to gaussian.slang;
-    // the import resolves through it.
+    // The virtual module path places the wrapper next to gaussian.slang —
+    // the gaussian module's top-level primary file; the import resolves
+    // through it.
     let module_path = concat!(
         env!("CARGO_MANIFEST_DIR"),
-        "/../../assets/shaders/gs/__gs_math_test.slang"
+        "/../../assets/shaders/__gs_math_test.slang"
     );
     let cache = device.shader_cache();
     let compiled = cache

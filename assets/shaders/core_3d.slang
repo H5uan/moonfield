@@ -1,6 +1,10 @@
 // The core 3D mesh pipeline: one shared `DrawData` struct, compiled once,
 // with both stages in a single file. The vertex and fragment entries are
 // linked against the same type, so the two sides can never drift apart.
+//
+// An entry-point module: compiled directly (never imported), so its symbols
+// can stay at the default `internal` visibility.
+module core_3d;
 
 // Per-view constants, one record per pass: the view-projection and the view
 // position. Lights, time, and fog grow here.
