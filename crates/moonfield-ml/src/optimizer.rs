@@ -83,7 +83,7 @@ impl Adam {
     ) -> Result<Self> {
         let cache = device.shader_cache();
         let reflection =
-            cache.compile_source_reflection(shader.path(), shader.source(), "adam_step")?;
+            cache.compile_source_reflection(shader.path(), shader.source(), &["adam_step"])?;
 
         let binder = RootBinder::new(&reflection, "adam_step")?;
         let places = AdamPlaces {

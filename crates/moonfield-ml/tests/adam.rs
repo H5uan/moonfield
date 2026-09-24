@@ -7,8 +7,6 @@
 //! lr = 0.1, β1 = 0.9, β2 = 0.999, ε = 1e-8 the hand-computed parameters
 //! are 0.9 after step 1 and 0.806770 after step 2.
 
-use std::path::PathBuf;
-
 use moonfield_asset::{AssetServer, Assets};
 use moonfield_ml::optimizer::{Adam, AdamParams};
 use moonfield_rhi::{
@@ -84,7 +82,7 @@ fn two_steps_match_hand_computed_adam() {
     let mut server = AssetServer::default();
     server.register_loader(SlangLoader);
     let mut assets = Assets::<Shader>::default();
-    let path = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../assets/shaders/ml/adam.slang");
+    let path = moonfield_asset::assets_dir().join("shaders/ml/adam.slang");
     let handle = server
         .load(&mut assets, &path)
         .expect("load adam.slang through the asset server");

@@ -92,7 +92,7 @@ float4 main(PsInput input) : SV_TARGET
     // The vertex array's device address is delivered through push data; its
     // placement comes from the reflected entry point, not a hand-synced constant.
     let reflection = compiler
-        .compile_source_to_reflection("triangle_vs", vertex_source, "main")
+        .compile_source_to_reflection("triangle_vs", vertex_source, &["main"])
         .expect("vertex shader reflection");
     let binder = RootBinder::new(&reflection, "main").expect("root binder");
     let vertices_place = binder.pointer_param("vertices").expect("vertices place");

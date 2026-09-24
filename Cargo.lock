@@ -1268,6 +1268,7 @@ dependencies = [
  "ash-window",
  "bytemuck",
  "gpu-allocator",
+ "moonfield-asset",
  "moonfield-math",
  "raw-window-handle",
  "shader-slang-rs",

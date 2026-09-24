@@ -4,8 +4,6 @@
 //! Exact equality is possible because the sort is deterministic, so the
 //! comparison doubles as the determinism proof.
 
-use std::path::PathBuf;
-
 use moonfield_asset::{AssetServer, Assets};
 use moonfield_render_feature::gpu_util::RadixSort;
 use moonfield_rhi::{CommandBufferUsage, CommandPool, Device, GpuAllocation, Instance, Memory};
@@ -119,8 +117,7 @@ fn radix_sort_matches_stable_cpu_sort() {
     let mut server = AssetServer::default();
     server.register_loader(SlangLoader);
     let mut assets = Assets::<Shader>::default();
-    let path = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
-        .join("../../assets/shaders/util/radix_sort.slang");
+    let path = moonfield_asset::assets_dir().join("shaders/util/radix_sort.slang");
     let handle = server
         .load(&mut assets, &path)
         .expect("load radix_sort.slang through the asset server");

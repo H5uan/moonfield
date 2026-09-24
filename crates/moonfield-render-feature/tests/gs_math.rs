@@ -333,13 +333,13 @@ fn gaussian_math_matches_glam_reference() {
     // The virtual module path places the wrapper next to gaussian.slang —
     // the gaussian module's top-level primary file; the import resolves
     // through it.
-    let module_path = concat!(
-        env!("CARGO_MANIFEST_DIR"),
-        "/../../assets/shaders/__gs_math_test.slang"
-    );
+    let module_path = moonfield_asset::assets_dir()
+        .join("shaders/__gs_math_test.slang")
+        .display()
+        .to_string();
     let cache = device.shader_cache();
     let compiled = cache
-        .compile_source(module_path, WRAPPER, "eval", &[], &[])
+        .compile_source(&module_path, WRAPPER, "eval", &[], &[])
         .expect("compile the wrapper");
     let module = ShaderModule::from_compiled(&device, &compiled).expect("shader module");
     let pipeline = ComputePipeline::new(&device, &module).expect("compute pipeline");

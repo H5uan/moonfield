@@ -24,6 +24,25 @@ pub mod server;
 
 pub use server::{AssetError, AssetLoader, AssetServer};
 
+/// The repository's `assets/` directory.
+///
+/// Resolution order: the `MOONFIELD_ASSETS_DIR` environment variable when
+/// set (deployed binaries have no source checkout to fall back on), then the
+/// path compiled in from this crate's position in the workspace
+/// (`crates/moonfield-asset/../../assets`). One definition for every caller
+/// that needs a repository asset at runtime or in tests — the editor's
+/// pipeline-shader loads, its default scene mesh, and the test suites that
+/// load shaders through the asset server.
+///
+/// A runtime that ships without the source tree sets the variable; the
+/// compiled-in fallback is a known-debt until an embedded-asset path exists.
+pub fn assets_dir() -> std::path::PathBuf {
+    if let Some(dir) = std::env::var_os("MOONFIELD_ASSETS_DIR") {
+        return std::path::PathBuf::from(dir);
+    }
+    std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../assets")
+}
+
 /// Index + generation identifier of an asset inside an [`Assets<T>`] store.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord)]
 pub struct AssetId {
@@ -365,6 +384,18 @@ mod tests {
         assert_eq!(
             world.get_resource::<Assets<u32>>().unwrap().get(&handle),
             Some(&5)
+        );
+    }
+
+    #[test]
+    fn test_assets_dir_resolves_into_the_repository() {
+        // The compiled-in fallback lands inside the workspace checkout and
+        // contains the shader tree, regardless of the caller's cwd.
+        let dir = assets_dir();
+        assert!(
+            dir.join("shaders/core_3d.slang").is_file(),
+            "{}",
+            dir.display()
         );
     }
 }

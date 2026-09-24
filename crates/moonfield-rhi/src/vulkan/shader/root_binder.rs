@@ -262,7 +262,7 @@ mod tests {
 
         // `Ptr<DrawData> root` variant.
         let refl_ptr = compiler
-            .compile_source_to_reflection("ptr", VERTEX_SOURCE, "main")
+            .compile_source_to_reflection("ptr", VERTEX_SOURCE, &["main"])
             .expect("refl");
         let mut binder = RootBinder::new(&refl_ptr, "main").expect("binder");
         binder.set_pointer("root", 0xdecafbad).expect("set");
@@ -296,7 +296,7 @@ mod tests {
             }
         "#;
         let refl_uniform = compiler
-            .compile_source_to_reflection("uniform", UNIFORM_SOURCE, "main")
+            .compile_source_to_reflection("uniform", UNIFORM_SOURCE, &["main"])
             .expect("refl");
         let params = refl_uniform.root_parameters("main").expect("params");
         assert_eq!(params.len(), 1);
@@ -344,7 +344,7 @@ mod tests {
             }
         "#;
         let reflection = compiler
-            .compile_source_to_reflection("view_uniforms", SOURCE, "main")
+            .compile_source_to_reflection("view_uniforms", SOURCE, &["main"])
             .expect("reflection");
         // Two pointer roots, each an 8-byte address placement.
         let binder = RootBinder::new(&reflection, "main").expect("binder");
@@ -405,7 +405,7 @@ mod tests {
             }
         "#;
         let reflection = compiler
-            .compile_source_to_reflection("pulling", SOURCE, "main")
+            .compile_source_to_reflection("pulling", SOURCE, &["main"])
             .expect("reflection");
 
         let binder = RootBinder::new(&reflection, "main").expect("binder");

@@ -181,7 +181,7 @@ fn push_data_ranges_persist_across_writes() {
 
     let compiler = Compiler::new().expect("compiler creation");
     let reflection = compiler
-        .compile_source_to_reflection("scale_kernel", SCALE_KERNEL, "main")
+        .compile_source_to_reflection("scale_kernel", SCALE_KERNEL, &["main"])
         .expect("kernel reflection");
     let binder = RootBinder::new(&reflection, "main").expect("root binder");
     let input_place = binder.pointer_param("input").expect("input place");

@@ -413,8 +413,7 @@ mod tests {
     /// The repository's `core_3d.slang` source — the same file the editor
     /// loads through the asset server at startup.
     fn core_3d_source() -> String {
-        let path = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"))
-            .join("../../assets/shaders/core_3d.slang");
+        let path = moonfield_asset::assets_dir().join("shaders/core_3d.slang");
         std::fs::read_to_string(path).expect("core_3d.slang")
     }
 

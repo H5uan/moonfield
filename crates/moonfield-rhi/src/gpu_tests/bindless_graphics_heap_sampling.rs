@@ -124,13 +124,13 @@ fn fragment_heap_sampling_roundtrip() {
     // the fragment entry (whose signature carries the shared blob's leading
     // root, so `tint` sits behind the vertex pointer).
     let vs_reflection = compiler
-        .compile_source_to_reflection("fullscreen_vs", VERTEX_SHADER, "main")
+        .compile_source_to_reflection("fullscreen_vs", VERTEX_SHADER, &["main"])
         .expect("vertex shader reflection");
     let vs_binder = RootBinder::new(&vs_reflection, "main").expect("vertex root binder");
     let vertices_place = vs_binder.pointer_param("vertices").expect("vertices place");
     drop(vs_reflection);
     let fs_reflection = compiler
-        .compile_source_to_reflection("heap_sampler_fs", FRAGMENT_SHADER, "main")
+        .compile_source_to_reflection("heap_sampler_fs", FRAGMENT_SHADER, &["main"])
         .expect("fragment shader reflection");
     let fs_binder = RootBinder::new(&fs_reflection, "main").expect("fragment root binder");
     let tint_place = fs_binder.pointer_param("tint").expect("tint place");

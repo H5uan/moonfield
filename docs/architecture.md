@@ -475,12 +475,19 @@ time. A pipeline declares its shader needs as a `PipelineShader` request
 (the asset handle, the entry points with their capabilities, and the entry
 whose reflection drives root binding) in the main-world `PipelineShaders`
 resource, populated by whoever loads the shader assets — the editor loads
-`core_3d.slang` and `egui.slang` at startup. `extract_shader_assets` copies
+`core_3d.slang` and `egui.slang` (and, with the `splat` feature,
+`util/radix_sort.slang` for the splat sort pass) at startup, resolving the
+repository's asset root through `moonfield_asset::assets_dir` (one
+definition: a `MOONFIELD_ASSETS_DIR` override, then the compiled-in
+workspace path). `extract_shader_assets` copies
 the requested shaders (revision-matched, into `ExtractedShaders`) and the
 requests into the render world; `prepare_shaders` (`PrepareAssets`) compiles
 each request whose asset revision advanced, from the extracted source
 through the render-world `PreparedShaders` resource (which owns the shared
-`ShaderCache`). A failed compile is recorded for the new revision — broken
+`ShaderCache`). One linked program covers every declared entry point, so a
+single prepared reflection answers per-entry root-binding queries — the
+splat sort pass binds its three compute entries from it. A failed compile is
+recorded for the new revision — broken
 source is not retried every frame — and the pass keeps running the pipeline
 it already built. Passes (re)build their pipeline when their prepared
 shader's revision advances, and skip with a one-shot log while it isn't

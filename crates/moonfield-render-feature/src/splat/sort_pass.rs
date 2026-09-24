@@ -5,21 +5,62 @@
 //! schedule, ordered after the opaque pass, records GPU work into the
 //! frame command buffer — a new file plus one registration call, with no
 //! edits to render-feature core. The sort machinery is
-//! [`crate::gpu_util::RadixSort`]; the pairs are synthetic until splat
+//! [`crate::gpu_util::RadixSort`], built from the prepared
+//! `radix_sort.slang` asset like the graphics pipelines build from theirs
+//! (whoever wires the app registers the request through
+//! [`crate::shader::PipelineShaders`]); the pairs are synthetic until splat
 //! extraction produces real ones.
 
 #[cfg(test)]
 use std::sync::{Arc, Mutex};
 
 use moonfield_app::prelude::{App, IntoSystemConfigs, Render, World};
+use moonfield_asset::{AssetRevision, Handle};
+#[cfg(test)]
+use moonfield_asset::{AssetServer, Assets};
+use moonfield_log::error_once;
 use moonfield_render_core::RenderContext;
 use moonfield_render_core::schedule as render_sets;
 use moonfield_rhi::{GpuAllocation, Memory, RenderDevice};
 use moonfield_shader::Shader;
+#[cfg(test)]
+use moonfield_shader::SlangLoader;
 
 use crate::core_3d::Core3d;
 use crate::core_3d::pass::opaque_pass_3d;
 use crate::gpu_util::RadixSort;
+use crate::shader::{PipelineShader, PipelineShaders, PreparedShaders, ShaderEntry};
+
+/// The name keying the splat sort pass's shader in [`PipelineShaders`] and
+/// [`PreparedShaders`].
+pub const SPLAT_SORT_SHADER: &str = "splat_sort";
+
+/// The splat sort pass's shader request: `util/radix_sort.slang`, three
+/// compute entries, root binding reflected from `histogram` (the prepared
+/// reflection covers all three entries). The caller (the app wiring, the
+/// same as for the mesh pipeline's shaders) supplies the loaded asset
+/// handle.
+pub fn splat_sort_shader(shader: Handle<Shader>) -> PipelineShader {
+    PipelineShader {
+        pipeline: SPLAT_SORT_SHADER,
+        shader,
+        reflect_entry: "histogram",
+        entries: &[
+            ShaderEntry {
+                name: "histogram",
+                capabilities: &[],
+            },
+            ShaderEntry {
+                name: "scan",
+                capabilities: &[],
+            },
+            ShaderEntry {
+                name: "scatter",
+                capabilities: &[],
+            },
+        ],
+    }
+}
 
 /// The view's sort machinery: the radix pipelines and the pair buffers the
 /// pass sorts every frame.
@@ -30,31 +71,55 @@ pub struct SplatSortPass {
     keys_out: GpuAllocation,
     values_out: GpuAllocation,
     pairs: u32,
+    /// The shader asset the sort was built from.
+    shader: Handle<Shader>,
+    /// The prepared-shader revision the sort was built from.
+    shader_revision: AssetRevision,
 }
 
-/// `PrepareViews` set system: build the pass's pipelines and buffers once,
-/// when a render device exists. The shader source is embedded — the GS
-/// integration routes shaders through the asset pipeline like the mesh
-/// pipeline's.
+/// `PrepareViews` set system: build the pass's pipelines and buffers from
+/// the prepared `radix_sort.slang` asset, whenever the prepared shader's
+/// revision advances past the one the sort was built from (the
+/// rebuild-on-advance behavior of `prepare_core_3d_pipeline`).
 pub fn prepare_splat_sort(world: &mut World) {
-    if world.contains_resource::<SplatSortPass>() {
+    let Some(request) = world
+        .get_resource::<PipelineShaders>()
+        .and_then(|requests| requests.get(SPLAT_SORT_SHADER).copied())
+    else {
+        error_once!("no '{SPLAT_SORT_SHADER}' shader registered; skipping the splat sort pass");
         return;
-    }
+    };
     let Some(render_device) = world
         .get_resource::<RenderDevice>()
         .map(|device| (*device).clone())
     else {
         return;
     };
-    let device = render_device.device();
-    let shader = Shader::new(
-        include_str!("../../../../assets/shaders/util/radix_sort.slang").to_string(),
-        "assets/shaders/util/radix_sort.slang".to_string(),
-    );
+
     let pairs = 1024u32;
-    let Ok(sort) = RadixSort::new(device, &shader, pairs as usize) else {
-        return;
+    // The `Ref` guard is scoped here: the sort and the revision it yields
+    // outlive it, so the resource insert below borrows the world cleanly.
+    let (sort, shader_revision) = {
+        let prepared = world.get_resource::<PreparedShaders>();
+        let Some(prepared_shader) = prepared.as_ref().and_then(|p| p.get(SPLAT_SORT_SHADER)) else {
+            error_once!("the splat sort shader is not ready; skipping the splat sort pass");
+            return;
+        };
+        let stale = world.get_resource::<SplatSortPass>().is_none_or(|pass| {
+            pass.shader != request.shader || pass.shader_revision != prepared_shader.revision()
+        });
+        if !stale {
+            return;
+        }
+        let Ok(sort) =
+            RadixSort::from_prepared(render_device.device(), prepared_shader, pairs as usize)
+        else {
+            return;
+        };
+        (sort, prepared_shader.revision())
     };
+
+    let device = render_device.device();
     let bytes = (pairs as usize * std::mem::size_of::<u32>()) as u64;
     let (Ok(keys_in), Ok(values_in), Ok(keys_out), Ok(values_out)) = (
         GpuAllocation::new(device, bytes, Memory::Default),
@@ -71,6 +136,8 @@ pub fn prepare_splat_sort(world: &mut World) {
         keys_out,
         values_out,
         pairs,
+        shader: request.shader,
+        shader_revision,
     });
 }
 
@@ -166,6 +233,26 @@ mod tests {
         app.add_plugin(RenderFeaturePlugin);
         // The registration under test: new file plus this call.
         app.add_plugin(SplatSortPassPlugin);
+
+        // The app wiring this pass assumes: load `radix_sort.slang` through
+        // the asset server and register the pipeline request, the same shape
+        // the editor's `load_pipeline_shaders` gives the mesh pipelines.
+        let shader_path = moonfield_asset::assets_dir().join("shaders/util/radix_sort.slang");
+        let mut server = AssetServer::default();
+        server.register_loader(SlangLoader);
+        let handle = {
+            let mut assets = app
+                .world_mut()
+                .get_resource_mut::<Assets<Shader>>()
+                .expect("Assets<Shader> registered by RenderFeaturePlugin");
+            server
+                .load(&mut assets, &shader_path)
+                .expect("load radix_sort.slang through the asset server")
+        };
+        app.world_mut()
+            .get_resource_mut::<PipelineShaders>()
+            .expect("PipelineShaders registered by RenderFeaturePlugin")
+            .push(splat_sort_shader(handle));
 
         // Ordering probes: "before" precedes the opaque pass; "between"
         // runs after the opaque pass and before the sort. A clean frame

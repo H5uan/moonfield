@@ -234,23 +234,34 @@ impl ShaderCache {
     }
 
     /// Compile in-memory source and return its reflection, memoized by the
-    /// source text and entry point — the source-text counterpart of
+    /// source text and entry-point set — the source-text counterpart of
     /// [`compile_file_reflection`](Self::compile_file_reflection).
+    ///
+    /// The linked program includes every entry point in `entry_points`, so
+    /// the returned reflection answers per-entry queries
+    /// (`root_parameters`, thread-group sizes) for each of them; one
+    /// reflection serves a whole multi-entry pipeline. Entry-point names are
+    /// Slang identifiers (they cannot contain `','`), so the cache key joins
+    /// them with `','` losslessly.
     pub fn compile_source_reflection(
         &self,
         module_name: &str,
         source: &str,
-        entry_point: &str,
+        entry_points: &[&str],
     ) -> RenderResult<std::sync::Arc<Reflection>> {
         let key = ShaderCacheKey {
             module_name: module_name.to_string(),
             source: source.to_string(),
-            entry_point: entry_point.to_string(),
+            entry_point: entry_points.join(","),
             capabilities: Vec::new(),
             defines: Vec::new(),
         };
         self.get_or_reflect(key, |compiler, key| {
-            compiler.compile_source_to_reflection(&key.module_name, &key.source, &key.entry_point)
+            compiler.compile_source_to_reflection(
+                &key.module_name,
+                &key.source,
+                &key.entry_point.split(',').collect::<Vec<_>>(),
+            )
         })
     }
 
@@ -592,11 +603,17 @@ impl Compiler {
     /// [`compile_file_to_reflection`](Self::compile_file_to_reflection) but
     /// without a file on disk. `module_name` is used for diagnostics and as
     /// the module's logical name.
+    ///
+    /// The linked program is the composite of the module and every entry
+    /// point in `entry_points` — `ISession::createCompositeComponentType`
+    /// unions their entry points — so the reflection answers per-entry
+    /// queries for each listed name. A single-element slice reproduces the
+    /// historical single-entry link exactly.
     pub fn compile_source_to_reflection(
         &self,
         module_name: &str,
         source: &str,
-        entry_point: &str,
+        entry_points: &[&str],
     ) -> RenderResult<Reflection> {
         let options = shader_slang::CompilerOptions::default()
             .optimization(shader_slang::OptimizationLevel::High)
@@ -622,14 +639,19 @@ impl Compiler {
             .load_module_from_source_string(module_name, module_name, source)
             .map_err(map_slang_error)?;
 
-        let entry = module
-            .find_entry_point_by_name(entry_point)
-            .ok_or_else(|| {
-                RenderError::Backend(format!("entry point '{}' not found", entry_point))
-            })?;
+        let entries = entry_points
+            .iter()
+            .map(|entry_point| {
+                module.find_entry_point_by_name(entry_point).ok_or_else(|| {
+                    RenderError::Backend(format!("entry point '{entry_point}' not found"))
+                })
+            })
+            .collect::<std::result::Result<Vec<_>, _>>()?;
+        let mut components = vec![module.into()];
+        components.extend(entries.into_iter().map(Into::into));
 
         let program = session
-            .create_composite_component_type(&[module.into(), entry.into()])
+            .create_composite_component_type(&components)
             .map_err(map_slang_error)?;
 
         let linked = program.link().map_err(map_slang_error)?;
@@ -737,7 +759,7 @@ mod tests {
         let compiler = Compiler::new().expect("compiler");
         // Each entry links into its own program, so reflection is per entry.
         let vs_refl = compiler
-            .compile_source_to_reflection("multi", MULTI, "vs_main")
+            .compile_source_to_reflection("multi", MULTI, &["vs_main"])
             .expect("reflection");
         assert_eq!(
             vs_refl.compute_thread_group_size("vs_main").expect("vs"),
@@ -745,7 +767,7 @@ mod tests {
             "non-compute entry has no thread-group size"
         );
         let cull_refl = compiler
-            .compile_source_to_reflection("multi", MULTI, "cull_main")
+            .compile_source_to_reflection("multi", MULTI, &["cull_main"])
             .expect("reflection");
         assert_eq!(
             cull_refl
@@ -776,10 +798,10 @@ mod tests {
     #[test]
     fn source_import_resolves_through_module_name_path() {
         let compiler = Compiler::new().expect("compiler");
-        let module_path = concat!(
-            env!("CARGO_MANIFEST_DIR"),
-            "/../../assets/shaders/__import_probe.slang"
-        );
+        let module_path = moonfield_asset::assets_dir()
+            .join("shaders/__import_probe.slang")
+            .display()
+            .to_string();
         const PROBE: &str = r#"
             import gaussian;
 
@@ -814,7 +836,7 @@ mod tests {
             }
         "#;
         let shader = compiler
-            .compile_source_to_spirv(module_path, PROBE, "probe")
+            .compile_source_to_spirv(&module_path, PROBE, "probe")
             .expect("import resolves through the module-name path hint");
         assert!(!shader.spirv.is_empty());
     }
@@ -827,10 +849,10 @@ mod tests {
     #[test]
     fn internal_symbols_are_invisible_across_import() {
         let compiler = Compiler::new().expect("compiler");
-        let module_path = concat!(
-            env!("CARGO_MANIFEST_DIR"),
-            "/../../assets/shaders/__visibility_probe.slang"
-        );
+        let module_path = moonfield_asset::assets_dir()
+            .join("shaders/__visibility_probe.slang")
+            .display()
+            .to_string();
         const PROBE: &str = r#"
             import gaussian;
 
@@ -844,7 +866,7 @@ mod tests {
             }
         "#;
         let error = compiler
-            .compile_source_to_spirv(module_path, PROBE, "probe")
+            .compile_source_to_spirv(&module_path, PROBE, "probe")
             .expect_err("internal symbol must not be visible to an importer");
         let message = format!("{error}");
         assert!(

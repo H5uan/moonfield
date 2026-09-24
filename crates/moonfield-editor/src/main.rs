@@ -30,7 +30,7 @@ use moonfield_winit::{WinitPlugin, WinitSettings};
 use std::path::PathBuf;
 
 fn default_mesh_path() -> PathBuf {
-    PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../assets/models/teapot.glb")
+    moonfield_asset::assets_dir().join("models/teapot.glb")
 }
 
 fn main() -> std::process::ExitCode {

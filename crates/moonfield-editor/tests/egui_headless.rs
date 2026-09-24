@@ -46,8 +46,7 @@ fn egui_headless_frame_is_not_blank() {
     // path (Slang compilation needs no device) — the same asset the editor
     // loads through its asset server at startup.
     let mut shaders = Assets::<Shader>::default();
-    let shader_path = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"))
-        .join("../../assets/shaders/egui.slang");
+    let shader_path = moonfield_asset::assets_dir().join("shaders/egui.slang");
     let shader = shaders.add(Shader::new(
         std::fs::read_to_string(&shader_path).expect("egui.slang"),
         shader_path.display().to_string(),

@@ -8,10 +8,12 @@
 
 use moonfield_render_core::ComputeRecording;
 use moonfield_rhi::{
-    ComputePipeline, Device, GpuAllocation, Memory, Result, RootBinder, RootParamPlace,
-    ShaderModule,
+    CompiledShader, ComputePipeline, Device, GpuAllocation, Memory, Reflection, Result, RootBinder,
+    RootParamPlace, ShaderModule,
 };
 use moonfield_shader::Shader;
+
+use crate::shader::PreparedShader;
 
 /// Root blob for the histogram entry: mirrors `HistogramParams` in
 /// `radix_sort.slang` field-for-field. Pointer fields are GPU addresses;
@@ -82,6 +84,9 @@ pub struct RadixSort {
     tmp_values: [GpuAllocation; 2],
 }
 
+/// The radix sort's three entry points, in the order the pipelines build.
+const RADIX_SORT_ENTRIES: [&str; 3] = ["histogram", "scan", "scatter"];
+
 impl RadixSort {
     /// Builds the three pipelines from the `radix_sort.slang` asset and
     /// allocates scratch for up to `max_count` items.
@@ -91,23 +96,61 @@ impl RadixSort {
     /// API unchanged.
     pub fn new(device: &Device, shader: &Shader, max_count: usize) -> Result<Self> {
         let cache = device.shader_cache();
-        let build = |entry: &str| -> Result<(ComputePipeline, RootBinder)> {
-            let reflection =
-                cache.compile_source_reflection(shader.path(), shader.source(), entry)?;
-            let binder = RootBinder::new(&reflection, entry)?;
-            let compiled = cache.compile_source(shader.path(), shader.source(), entry, &[], &[])?;
-            let module = ShaderModule::from_compiled(device, &compiled)?;
-            let pipeline = ComputePipeline::new(device, &module)?;
-            Ok((pipeline, binder))
-        };
-        let (histogram, histogram_binder) = build("histogram")?;
-        let (scan, scan_binder) = build("scan")?;
-        let (scatter, scatter_binder) = build("scatter")?;
-        // Each entry takes a single `uniform Params` struct; reflect its one
-        // root placement and push it as one POD blob per dispatch.
-        let histogram_place = histogram_binder.uniform_param("params")?;
-        let scan_place = scan_binder.uniform_param("params")?;
-        let scatter_place = scatter_binder.uniform_param("params")?;
+        // One linked program covers all three entries, so one reflection
+        // drives every root binder.
+        let reflection =
+            cache.compile_source_reflection(shader.path(), shader.source(), &RADIX_SORT_ENTRIES)?;
+        let compiled = RADIX_SORT_ENTRIES
+            .iter()
+            .map(|&entry| cache.compile_source(shader.path(), shader.source(), entry, &[], &[]))
+            .collect::<Result<Vec<_>>>()?;
+        let artifacts: Vec<&CompiledShader> = compiled.iter().map(|arc| &**arc).collect();
+        Self::from_reflection(device, &reflection, &artifacts, max_count)
+    }
+
+    /// Builds the three pipelines from a prepared shader — the artifacts
+    /// [`crate::shader::PreparedShaders`] compiled from the extracted asset
+    /// — so the sort rides the same extract → prepare flow as the graphics
+    /// pipelines.
+    pub fn from_prepared(
+        device: &Device,
+        prepared: &PreparedShader,
+        max_count: usize,
+    ) -> Result<Self> {
+        let artifacts = RADIX_SORT_ENTRIES
+            .iter()
+            .map(|&entry| {
+                prepared.entry(entry).ok_or_else(|| {
+                    moonfield_rhi::Error::Backend(format!(
+                        "prepared radix sort shader is missing '{entry}'"
+                    ))
+                })
+            })
+            .collect::<Result<Vec<_>>>()?;
+        Self::from_reflection(device, prepared.reflection(), &artifacts, max_count)
+    }
+
+    /// Shared builder: the pipelines and root placements from one
+    /// multi-entry reflection plus the per-entry compiled artifacts.
+    fn from_reflection(
+        device: &Device,
+        reflection: &Reflection,
+        artifacts: &[&CompiledShader],
+        max_count: usize,
+    ) -> Result<Self> {
+        let build =
+            |entry: &str, artifact: &CompiledShader| -> Result<(ComputePipeline, RootParamPlace)> {
+                let binder = RootBinder::new(reflection, entry)?;
+                // Each entry takes a single `uniform Params` struct; reflect its
+                // one root placement and push it as one POD blob per dispatch.
+                let place = binder.uniform_param("params")?;
+                let module = ShaderModule::from_compiled(device, artifact)?;
+                let pipeline = ComputePipeline::new(device, &module)?;
+                Ok((pipeline, place))
+            };
+        let (histogram, histogram_place) = build("histogram", artifacts[0])?;
+        let (scan, scan_place) = build("scan", artifacts[1])?;
+        let (scatter, scatter_place) = build("scatter", artifacts[2])?;
 
         let max_groups = max_count.div_ceil(256);
         let hist_bytes = (max_groups * 256 * size_of::<u32>()) as u64;
@@ -230,7 +273,12 @@ mod tests {
     use super::*;
     use std::mem::{offset_of, size_of};
 
-    const RADIX_SORT_SOURCE: &str = include_str!("../../../assets/shaders/util/radix_sort.slang");
+    /// The repository's `radix_sort.slang` source — the same file the sort
+    /// pass loads through the asset server.
+    fn radix_sort_source() -> String {
+        let path = moonfield_asset::assets_dir().join("shaders/util/radix_sort.slang");
+        std::fs::read_to_string(path).expect("radix_sort.slang")
+    }
 
     /// The Rust mirror structs must exactly match the root blobs the three
     /// entry points actually push: same total size and same per-field byte
@@ -289,7 +337,11 @@ mod tests {
             let rust_size = case.rust_size;
             let fields = case.fields;
             let reflection = compiler
-                .compile_source_to_reflection("radix_sort_blob_layout", RADIX_SORT_SOURCE, entry)
+                .compile_source_to_reflection(
+                    "radix_sort_blob_layout",
+                    &radix_sort_source(),
+                    &[entry],
+                )
                 .expect(entry);
             let binder = RootBinder::new(&reflection, entry).expect("root binder");
             let place = binder.uniform_param("params").expect("params placement");
@@ -322,7 +374,11 @@ mod tests {
         let compiler = moonfield_rhi::Compiler::new().expect("slang compiler");
         for entry in ["histogram", "scan", "scatter"] {
             let reflection = compiler
-                .compile_source_to_reflection("radix_sort_blob_layout", RADIX_SORT_SOURCE, entry)
+                .compile_source_to_reflection(
+                    "radix_sort_blob_layout",
+                    &radix_sort_source(),
+                    &[entry],
+                )
                 .expect(entry);
             let params = reflection.root_parameters(entry).expect("root params");
             assert_eq!(

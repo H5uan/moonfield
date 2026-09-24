@@ -308,13 +308,13 @@ mod tests {
                 return o;
             }
         "#;
-        let module_path = concat!(
-            env!("CARGO_MANIFEST_DIR"),
-            "/../../assets/shaders/__metadata_probe.slang"
-        );
+        let module_path = moonfield_asset::assets_dir()
+            .join("shaders/__metadata_probe.slang")
+            .display()
+            .to_string();
         let compiler = Compiler::new().expect("compiler");
         let refl = compiler
-            .compile_source_to_reflection(module_path, SOURCE, "main")
+            .compile_source_to_reflection(&module_path, SOURCE, &["main"])
             .expect("reflection");
 
         let src = refl.struct_rust_source("DrawData").expect("codegen");

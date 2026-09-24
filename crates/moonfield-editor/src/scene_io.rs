@@ -94,16 +94,17 @@ pub fn editor_asset_server() -> AssetServer {
 }
 
 /// Eagerly load the built-in pipelines' shaders (`core_3d.slang`,
-/// `egui.slang`) through the asset server and register their pipeline
-/// requests, so the passes find prepared shaders from the first frame —
-/// matching the previous compile-at-pipeline-creation behavior. Loading is
-/// synchronous; failures are logged and the affected pass skips until its
-/// shader prepares.
+/// `egui.slang`, and — with the `splat` feature — `util/radix_sort.slang`)
+/// through the asset server and register their pipeline requests, so the
+/// passes find prepared shaders from the first frame — matching the previous
+/// compile-at-pipeline-creation behavior. Loading is synchronous; failures
+/// are logged and the affected pass skips until its shader prepares.
 ///
-/// The shader directory resolves through `CARGO_MANIFEST_DIR`, the same
-/// convention as the editor's default-scene mesh (`main.rs`'s
-/// `default_mesh_path`): path selection belongs to the app wiring, not to
-/// the pipelines.
+/// The shader directory resolves through [`moonfield_asset::assets_dir`],
+/// the one definition of the repository's asset root (`MOONFIELD_ASSETS_DIR`
+/// override, then the compiled-in workspace path) — the same convention as
+/// the editor's default-scene mesh (`main.rs`'s `default_mesh_path`): path
+/// selection belongs to the app wiring, not to the pipelines.
 pub fn load_pipeline_shaders(world: &mut World) {
     if !world.contains_resource::<AssetServer>() {
         world.insert_resource(editor_asset_server());
@@ -114,9 +115,18 @@ pub fn load_pipeline_shaders(world: &mut World) {
     if !world.contains_resource::<PipelineShaders>() {
         world.insert_resource(PipelineShaders::default());
     }
-    let shader_dir = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../assets/shaders");
+    let shader_dir = moonfield_asset::assets_dir().join("shaders");
     load_pipeline_shader(world, &shader_dir.join("core_3d.slang"), core_3d_shader);
     load_pipeline_shader(world, &shader_dir.join("egui.slang"), egui_shader);
+    #[cfg(feature = "splat")]
+    {
+        use moonfield_render_feature::splat::sort_pass::splat_sort_shader;
+        load_pipeline_shader(
+            world,
+            &shader_dir.join("util/radix_sort.slang"),
+            splat_sort_shader,
+        );
+    }
 }
 
 /// Load one pipeline shader through the asset server and register its

@@ -8,8 +8,6 @@
 //! nondeterministically, so runs are not bit-reproducible — the roadmap's
 //! standing decision for training loops.
 
-use std::path::PathBuf;
-
 use moonfield_asset::{AssetServer, Assets};
 use moonfield_ml::optimizer::{Adam, AdamParams};
 use moonfield_ml::trainer::{Trainer, TrainingMethod};
@@ -375,7 +373,7 @@ fn gaussian_fit_converges_through_trainer() {
     let mut server = AssetServer::default();
     server.register_loader(SlangLoader);
     let mut assets = Assets::<Shader>::default();
-    let path = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../assets/shaders/ml/adam.slang");
+    let path = moonfield_asset::assets_dir().join("shaders/ml/adam.slang");
     let handle = server
         .load(&mut assets, &path)
         .expect("load adam.slang through the asset server");

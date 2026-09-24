@@ -41,7 +41,9 @@ pub struct PipelineShader {
     pub pipeline: &'static str,
     /// The shader asset to compile from.
     pub shader: Handle<Shader>,
-    /// The entry whose reflection resolves the pipeline's root parameters.
+    /// The entry whose reflection the pipeline's root binding resolves
+    /// through. The prepared reflection covers every declared entry (see
+    /// [`PreparedShaders::compile`]); this names the primary one.
     pub reflect_entry: &'static str,
     /// The entry points to compile.
     pub entries: &'static [ShaderEntry],
@@ -220,20 +222,28 @@ impl PreparedShaders {
         let shader = &extracted.shader;
         let (module, source) = (shader.path(), shader.source());
         let cache = self.cache()?;
+        // One linked program covers every declared entry point (plus the
+        // reflect entry when a request leaves it outside `entries`), so the
+        // single reflection answers per-entry root-binding queries for them
+        // all — the radix-sort pipeline binds three compute entries from it.
+        let mut entries: Vec<&str> = request.entries.iter().map(|entry| entry.name).collect();
+        if !entries.contains(&request.reflect_entry) {
+            entries.push(request.reflect_entry);
+        }
         let reflection = cache
-            .compile_source_reflection(module, source, request.reflect_entry)
+            .compile_source_reflection(module, source, &entries)
             .map_err(|e| e.to_string())?;
-        let mut entries = Vec::with_capacity(request.entries.len());
+        let mut compiled = Vec::with_capacity(request.entries.len());
         for entry in request.entries {
-            let compiled = cache
+            let artifact = cache
                 .compile_source(module, source, entry.name, entry.capabilities, &[])
                 .map_err(|e| e.to_string())?;
-            entries.push((entry.name, compiled));
+            compiled.push((entry.name, artifact));
         }
         Ok(PreparedShader {
             revision: extracted.revision,
             reflection,
-            entries,
+            entries: compiled,
         })
     }
 
