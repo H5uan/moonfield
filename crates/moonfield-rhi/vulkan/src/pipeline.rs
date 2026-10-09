@@ -1,10 +1,11 @@
 //! Vulkan pipeline abstractions (graphics and compute).
 
+use crate::device::{Device, DeviceContext};
 use crate::error::{Error, Result};
+use crate::formats::ToVk;
 use crate::retire::RetireAction;
+use crate::shader_module::ShaderModule;
 use crate::types::Format;
-use crate::vulkan::device::{Device, DeviceContext};
-use crate::vulkan::shader_module::ShaderModule;
 use ash::vk;
 use ash::vk::Handle as _;
 use ash::vk::TaggedStructure as _;

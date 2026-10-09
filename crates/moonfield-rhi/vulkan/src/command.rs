@@ -1,14 +1,15 @@
 //! Vulkan command pool and command buffer abstractions.
 
+use crate::device::{Device, DeviceContext};
 use crate::error::{Error, Result};
+use crate::formats::ToVk;
+use crate::memory::GpuPtr;
+use crate::sync::{Access, Stage, TimestampQueryPool};
 use crate::types::{
     AttachmentLayout, ClearValue, CommandBufferUsage, CompareOp, CullMode, FrontFace, LoadOp,
     Rect2d, StoreOp, Viewport,
 };
-use crate::vulkan::device::{Device, DeviceContext};
-use crate::vulkan::memory::GpuPtr;
-use crate::vulkan::sync::{Access, Stage, TimestampQueryPool};
-use crate::vulkan::view::TextureView;
+use crate::view::TextureView;
 use crate::{BlendMode, ComputePipeline, GraphicsPipeline};
 use ash::vk;
 

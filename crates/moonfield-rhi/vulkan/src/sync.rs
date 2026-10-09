@@ -1,7 +1,7 @@
 //! Vulkan synchronization primitives.
 
+use crate::device::{Device, DeviceContext};
 use crate::error::{Error, Result};
-use crate::vulkan::device::{Device, DeviceContext};
 use ash::vk::{self, TaggedStructure as _};
 
 /// A Vulkan semaphore.

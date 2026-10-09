@@ -1,15 +1,13 @@
-//! Vulkan indirect-draw/dispatch argument layouts.
+//! Indirect-draw/dispatch argument layouts.
 //!
 //! These `#[repr(C)]` structs mirror Vulkan's command structs
 //! (`vk::DrawIndirectCommand`, etc.), so a buffer populated via
 //! `bytemuck::bytes_of` can be submitted directly. The RHI does not expose raw
 //! transmutation to Vulkan types — callers write these structs into a
-//! [`GpuAllocation`](crate::vulkan::memory::GpuAllocation) (whose address
-//! carrier always carries `INDIRECT_BUFFER` usage) and pass its
-//! [`GpuPtr`](crate::vulkan::memory::GpuPtr) to the command buffer's
-//! indirect draw/dispatch methods, which consume device addresses directly
-//! (`VK_KHR_device_address_commands`, optional — see
-//! [`Device::device_address_commands`](crate::Device::device_address_commands)).
+//! `GpuAllocation` (whose address carrier always carries `INDIRECT_BUFFER`
+//! usage) and pass its `GpuPtr` to the command buffer's indirect
+//! draw/dispatch methods, which consume device addresses directly
+//! (`VK_KHR_device_address_commands`, optional).
 
 /// Argument buffer layout for non-indexed `draw_indirect` commands.
 ///

@@ -1,8 +1,8 @@
 //! Vulkan shader module abstraction.
 
 use super::shader::CompiledShader;
+use crate::device::{Device, DeviceContext};
 use crate::error::{Error, Result};
-use crate::vulkan::device::{Device, DeviceContext};
 use ash::vk;
 
 /// A Vulkan shader module created from SPIR-V bytecode.

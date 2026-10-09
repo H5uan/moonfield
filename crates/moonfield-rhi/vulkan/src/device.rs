@@ -1,11 +1,11 @@
 //! Vulkan logical device abstraction.
 
 use crate::error::{Error, Result};
+use crate::instance::{Instance, InstanceShared};
 use crate::retire::RetirementRing;
-use crate::vulkan::instance::{Instance, InstanceShared};
-use crate::vulkan::shader::ShaderCache;
-use crate::vulkan::swapchain::Surface;
-use crate::vulkan::sync::Semaphore;
+use crate::shader::ShaderCache;
+use crate::swapchain::Surface;
+use crate::sync::Semaphore;
 use crate::{DESCRIPTOR_HEAP_IMAGE_CAPACITY, DESCRIPTOR_HEAP_SAMPLER_CAPACITY, DescriptorHeap};
 use crate::{FrameUploader, UPLOAD_ARENA_SIZE};
 use ash::vk::{self, TaggedStructure as _};
@@ -184,7 +184,7 @@ pub(crate) struct DeviceShared {
     /// once at device creation. Command buffers reach them through
     /// [`DeviceContext`] — no per-command-buffer copies of the
     /// function-pointer tables.
-    extension_fns: crate::vulkan::DeviceExtensionFunctions,
+    extension_fns: crate::DeviceExtensionFunctions,
     /// Deferred GPU resource teardown, keyed by frame slot. Not lazy: every
     /// resource's `Drop` enqueues into it, so it exists from construction.
     retirement_ring: RetirementRing,
@@ -207,7 +207,7 @@ impl DeviceShared {
     }
 
     /// The shared aggregated device-extension loaders.
-    pub(crate) fn extension_fns(&self) -> &crate::vulkan::DeviceExtensionFunctions {
+    pub(crate) fn extension_fns(&self) -> &crate::DeviceExtensionFunctions {
         &self.extension_fns
     }
 
@@ -664,7 +664,7 @@ impl Device {
         let graphics_queue = unsafe { device.get_device_queue(queue_family_indices.graphics, 0) };
         let present_queue = unsafe { device.get_device_queue(queue_family_indices.present, 0) };
 
-        let extension_fns = crate::vulkan::DeviceExtensionFunctions {
+        let extension_fns = crate::DeviceExtensionFunctions {
             extended_dynamic_state3: ash::ext::extended_dynamic_state3::Device::load(
                 instance.raw(),
                 &device,
@@ -759,10 +759,10 @@ impl Device {
     }
 
     /// The shared aggregated device-extension loaders (see
-    /// [`DeviceExtensionFunctions`](crate::vulkan::DeviceExtensionFunctions)).
+    /// [`DeviceExtensionFunctions`](crate::DeviceExtensionFunctions)).
     /// Command buffers reach them through their [`DeviceContext`], never by
     /// copying the function-pointer tables.
-    pub(crate) fn extension_fns(&self) -> &crate::vulkan::DeviceExtensionFunctions {
+    pub(crate) fn extension_fns(&self) -> &crate::DeviceExtensionFunctions {
         self.shared.extension_fns()
     }
 

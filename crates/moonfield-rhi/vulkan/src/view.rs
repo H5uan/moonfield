@@ -3,7 +3,7 @@
 //! [`TextureView`] is the crate's vocabulary for an `vk::ImageView`: a
 //! borrowed handle owned by a texture, offscreen target, or swapchain.
 
-use crate::vulkan::device::DeviceContext;
+use crate::device::DeviceContext;
 use ash::vk;
 
 /// A Vulkan image view wrapped for the RHI's resource vocabulary.

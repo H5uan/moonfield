@@ -16,7 +16,7 @@ moonfield-ecs = { workspace = true }
 moonfield-log = { workspace = true }
 moonfield-math = { workspace = true }
 moonfield-reflect = { workspace = true }
-moonfield-rhi = { workspace = true }
+moonfield-rhi = { workspace = true, features = ["vulkan"] }
 moonfield-render-core = { workspace = true }
 moonfield-render-feature = { workspace = true, features = ["mesh"] }
 moonfield-scene = { workspace = true }

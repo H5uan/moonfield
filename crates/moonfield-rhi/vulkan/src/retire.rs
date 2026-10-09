@@ -9,7 +9,7 @@
 //! remains once the last device referent is gone and the GPU is idle.
 //!
 
-use crate::vulkan::descriptor_heap::{SlotAllocator, TextureHandle};
+use crate::descriptor_heap::{SlotAllocator, TextureHandle};
 use ash::vk;
 use gpu_allocator::vulkan::{Allocation, Allocator};
 use std::sync::{Arc, Mutex};

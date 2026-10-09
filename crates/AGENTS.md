@@ -9,7 +9,7 @@ runtime mechanisms.
 - `snake_case` for modules, functions, and variables; `PascalCase` for types and
   enums.
 - Module files mirror their logical grouping (e.g. `device.rs`, `swapchain.rs`,
-  `pipeline.rs` in `moonfield-rhi`).
+  `pipeline.rs` in the `moonfield-rhi-vulkan` backend).
 - The workspace math single entry is `moonfield-math` (glam re-export + domain
   types); other crates import math from it, not from glam directly. Exception:
   `moonfield-reflect` depends on glam directly to avoid a math↔reflect cycle

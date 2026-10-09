@@ -1,10 +1,11 @@
 use ash::vk;
 
 use crate::CommandBufferUsage;
+use crate::device::DeviceContext;
 use crate::error::{Error, Result};
-use crate::vulkan::device::DeviceContext;
-use crate::vulkan::memory::GpuAllocation;
-use crate::{CommandBuffer, CommandPool, GpuBumpAllocator, Semaphore, vulkan::Device};
+use crate::formats::from_vk;
+use crate::memory::GpuAllocation;
+use crate::{CommandBuffer, CommandPool, Device, GpuBumpAllocator, Semaphore};
 pub const UPLOAD_FRAME_RING: usize = 2;
 
 pub const UPLOAD_ARENA_SIZE: u64 = 4 * 1024 * 1024;
@@ -268,7 +269,7 @@ impl FrameUploader {
                     std::slice::from_ref(&submit_info),
                     vk::Fence::null(),
                 )
-                .map_err(Error::from_vk)?;
+                .map_err(from_vk)?;
         }
         self.next_frame += 1;
         self.recording = false;

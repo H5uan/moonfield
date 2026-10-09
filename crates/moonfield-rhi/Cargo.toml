@@ -4,21 +4,15 @@ version.workspace = true
 edition.workspace = true
 
 [features]
-# Enables the Khronos validation layer on the Vulkan instance. Requires the
-# Vulkan SDK to be installed at runtime; intended for development builds only.
-validation = []
+# Exactly one backend feature is active in a build; the editor is the
+# selection point. `default` only affects standalone builds of this crate —
+# the workspace dependency carries `default-features = false`.
+default = ["vulkan"]
+vulkan = ["dep:moonfield-rhi-vulkan"]
+# Development-build convenience: forwards to the Vulkan backend's validation
+# layer (see moonfield-rhi-vulkan).
+validation = ["vulkan", "moonfield-rhi-vulkan/validation"]
 
 [dependencies]
-moonfield-math = { workspace = true }
-ash = "0.38.0"
-ash-window = "0.13.0"
-bytemuck = { version = "1.23", features = ["derive"] }
-gpu-allocator = "0.28.0"
-raw-window-handle = "0.6.2"
-tracing = { version = "0.1", default-features = false, features = ["std"] }
-shader-slang = { package = "shader-slang-rs", git = "https://github.com/H5uan/shader-slang-rs" }
-
-# Test-only: the shader tests' probe module names resolve imports against the
-# repository's shader tree through the shared asset-root helper.
-[dev-dependencies]
-moonfield-asset = { workspace = true }
+moonfield-rhi-core = { path = "core" }
+moonfield-rhi-vulkan = { path = "vulkan", optional = true }

@@ -6,8 +6,8 @@
 //! optimally-tiled, GPU-only 2D image with an exclusive-sharing full-range
 //! view — the only shape the RHI creates today.
 
+use crate::device::DeviceContext;
 use crate::error::{Error, Result};
-use crate::vulkan::device::DeviceContext;
 use ash::vk;
 use gpu_allocator::MemoryLocation;
 use gpu_allocator::vulkan::{Allocation, AllocationCreateDesc, AllocationScheme};

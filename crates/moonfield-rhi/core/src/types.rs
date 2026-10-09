@@ -1,7 +1,7 @@
-//! Public resource descriptions shared by Moonfield's Vulkan renderer.
+//! Public resource descriptions shared by Moonfield's renderers.
 //!
-//! The descriptions remain independent of raw Vulkan handles so higher-level
-//! renderer code does not need to construct ash types directly.
+//! The descriptions remain independent of raw backend handles so higher-level
+//! renderer code does not need to construct backend types directly.
 
 /// Pixel/color formats supported by the engine. Grow as needed.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord)]
@@ -19,18 +19,8 @@ pub enum Format {
 }
 
 impl Format {
-    /// Convert to the equivalent Vulkan format.
-    pub(crate) fn to_vk(self) -> ash::vk::Format {
-        match self {
-            Self::B8G8R8A8Unorm => ash::vk::Format::B8G8R8A8_UNORM,
-            Self::R8G8B8A8Unorm => ash::vk::Format::R8G8B8A8_UNORM,
-            Self::R16G16B16A16Sfloat => ash::vk::Format::R16G16B16A16_SFLOAT,
-            Self::D32Sfloat => ash::vk::Format::D32_SFLOAT,
-        }
-    }
-
     /// Bytes per pixel of a tightly packed row.
-    pub(crate) fn bytes_per_pixel(self) -> usize {
+    pub fn bytes_per_pixel(self) -> usize {
         match self {
             Self::B8G8R8A8Unorm | Self::R8G8B8A8Unorm | Self::D32Sfloat => 4,
             Self::R16G16B16A16Sfloat => 8,
@@ -42,8 +32,9 @@ impl Format {
 // Pass-recording vocabulary
 //
 // The types below are the crate's own vocabulary for recording render passes,
-// so feature crates (meshes, UI) never construct raw `ash` types. Each maps
-// onto exactly one Vulkan concept via a `pub(crate) to_vk`.
+// so feature crates (meshes, UI) never construct backend types. Each backend
+// maps them onto its own concepts (the Vulkan backend's mappings live in
+// `moonfield-rhi-vulkan/src/formats.rs`).
 // ===========================================================================
 
 /// A 2D extent in physical pixels.
@@ -58,15 +49,6 @@ pub struct Extent2d {
 impl From<(u32, u32)> for Extent2d {
     fn from((width, height): (u32, u32)) -> Self {
         Self { width, height }
-    }
-}
-
-impl Extent2d {
-    pub(crate) fn to_vk(self) -> ash::vk::Extent2D {
-        ash::vk::Extent2D {
-            width: self.width,
-            height: self.height,
-        }
     }
 }
 
@@ -94,16 +76,6 @@ impl Rect2d {
         Self {
             offset: Offset2d::default(),
             extent: Extent2d { width, height },
-        }
-    }
-
-    pub(crate) fn to_vk(self) -> ash::vk::Rect2D {
-        ash::vk::Rect2D {
-            offset: ash::vk::Offset2D {
-                x: self.offset.x,
-                y: self.offset.y,
-            },
-            extent: self.extent.to_vk(),
         }
     }
 }
@@ -141,17 +113,6 @@ impl Viewport {
             max_depth: 1.0,
         }
     }
-
-    pub(crate) fn to_vk(self) -> ash::vk::Viewport {
-        ash::vk::Viewport {
-            x: self.x,
-            y: self.y,
-            width: self.width,
-            height: self.height,
-            min_depth: self.min_depth,
-            max_depth: self.max_depth,
-        }
-    }
 }
 
 /// Depth/stencil comparison function.
@@ -175,21 +136,6 @@ pub enum CompareOp {
     Always,
 }
 
-impl CompareOp {
-    pub(crate) fn to_vk(self) -> ash::vk::CompareOp {
-        match self {
-            Self::Never => ash::vk::CompareOp::NEVER,
-            Self::Less => ash::vk::CompareOp::LESS,
-            Self::Equal => ash::vk::CompareOp::EQUAL,
-            Self::LessOrEqual => ash::vk::CompareOp::LESS_OR_EQUAL,
-            Self::Greater => ash::vk::CompareOp::GREATER,
-            Self::NotEqual => ash::vk::CompareOp::NOT_EQUAL,
-            Self::GreaterOrEqual => ash::vk::CompareOp::GREATER_OR_EQUAL,
-            Self::Always => ash::vk::CompareOp::ALWAYS,
-        }
-    }
-}
-
 /// Triangle culling mode.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum CullMode {
@@ -201,16 +147,6 @@ pub enum CullMode {
     Back,
 }
 
-impl CullMode {
-    pub(crate) fn to_vk(self) -> ash::vk::CullModeFlags {
-        match self {
-            Self::None => ash::vk::CullModeFlags::NONE,
-            Self::Front => ash::vk::CullModeFlags::FRONT,
-            Self::Back => ash::vk::CullModeFlags::BACK,
-        }
-    }
-}
-
 /// The winding order considered front-facing.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum FrontFace {
@@ -218,15 +154,6 @@ pub enum FrontFace {
     Clockwise,
     /// Counter-clockwise.
     CounterClockwise,
-}
-
-impl FrontFace {
-    pub(crate) fn to_vk(self) -> ash::vk::FrontFace {
-        match self {
-            Self::Clockwise => ash::vk::FrontFace::CLOCKWISE,
-            Self::CounterClockwise => ash::vk::FrontFace::COUNTER_CLOCKWISE,
-        }
-    }
 }
 
 /// What to do with an attachment's contents when a pass begins.
@@ -261,19 +188,6 @@ pub enum ClearValue {
     },
 }
 
-impl ClearValue {
-    pub(crate) fn to_vk(self) -> ash::vk::ClearValue {
-        match self {
-            Self::Color(float32) => ash::vk::ClearValue {
-                color: ash::vk::ClearColorValue { float32 },
-            },
-            Self::DepthStencil { depth, stencil } => ash::vk::ClearValue {
-                depth_stencil: ash::vk::ClearDepthStencilValue { depth, stencil },
-            },
-        }
-    }
-}
-
 /// The image layout an attachment is in during a pass (and stays in — the
 /// engine does not transition layouts across passes yet).
 ///
@@ -296,15 +210,6 @@ pub enum AttachmentLayout {
     DepthStencil,
 }
 
-impl AttachmentLayout {
-    pub(crate) fn to_vk(self) -> ash::vk::ImageLayout {
-        match self {
-            Self::Present => ash::vk::ImageLayout::PRESENT_SRC_KHR, // still need this layout
-            Self::ShaderRead | Self::DepthStencil => ash::vk::ImageLayout::GENERAL,
-        }
-    }
-}
-
 /// Command buffer usage flags. Const-fn combinable, no external deps.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct CommandBufferUsage(u32);
@@ -313,12 +218,9 @@ impl CommandBufferUsage {
     /// The buffer is submitted once and re-recorded.
     pub const ONE_TIME_SUBMIT: Self = Self(1);
 
-    pub(crate) fn to_vk(self) -> ash::vk::CommandBufferUsageFlags {
-        let mut flags = ash::vk::CommandBufferUsageFlags::empty();
-        if self.0 & Self::ONE_TIME_SUBMIT.0 != 0 {
-            flags |= ash::vk::CommandBufferUsageFlags::ONE_TIME_SUBMIT;
-        }
-        flags
+    /// Whether `other`'s bits are set.
+    pub fn contains(self, other: Self) -> bool {
+        self.0 & other.0 != 0
     }
 }
 
@@ -331,15 +233,6 @@ pub enum Filter {
     Linear,
 }
 
-impl Filter {
-    pub(crate) fn to_vk(self) -> ash::vk::Filter {
-        match self {
-            Self::Nearest => ash::vk::Filter::NEAREST,
-            Self::Linear => ash::vk::Filter::LINEAR,
-        }
-    }
-}
-
 /// Texture wrap mode.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum WrapMode {
@@ -349,16 +242,6 @@ pub enum WrapMode {
     Repeat,
     /// Repeat, mirroring every other tile.
     MirroredRepeat,
-}
-
-impl WrapMode {
-    pub(crate) fn to_vk(self) -> ash::vk::SamplerAddressMode {
-        match self {
-            Self::ClampToEdge => ash::vk::SamplerAddressMode::CLAMP_TO_EDGE,
-            Self::Repeat => ash::vk::SamplerAddressMode::REPEAT,
-            Self::MirroredRepeat => ash::vk::SamplerAddressMode::MIRRORED_REPEAT,
-        }
-    }
 }
 
 /// Sampler creation parameters.

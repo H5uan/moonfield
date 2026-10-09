@@ -8,11 +8,12 @@
 
 use std::sync::Arc;
 
+use crate::device::{Device, DeviceContext};
 use crate::error::{Error, Result};
+use crate::formats::ToVk;
+use crate::image::Image2d;
+use crate::retire::RetireAction;
 use crate::types::Format;
-use crate::vulkan::device::{Device, DeviceContext};
-use crate::vulkan::image::Image2d;
-use crate::vulkan::retire::RetireAction;
 use crate::{DescriptorHeap, FrameUploader, TextureHandle};
 use ash::vk;
 use gpu_allocator::vulkan::Allocation;
@@ -132,7 +133,7 @@ impl Texture {
         heap.write_resource_descriptors(&[
             (
                 storage_handle,
-                crate::vulkan::descriptor_heap::TextureSlotDesc::new(
+                crate::descriptor_heap::TextureSlotDesc::new(
                     &image.view_create_info,
                     vk::ImageLayout::GENERAL,
                 )
@@ -140,7 +141,7 @@ impl Texture {
             ),
             (
                 sampled_handle,
-                crate::vulkan::descriptor_heap::TextureSlotDesc::new(
+                crate::descriptor_heap::TextureSlotDesc::new(
                     &image.view_create_info,
                     vk::ImageLayout::GENERAL,
                 ),
@@ -194,7 +195,7 @@ impl Texture {
         let handle = heap.alloc_image_slot()?;
         heap.write_resource_descriptors(&[(
             handle,
-            crate::vulkan::descriptor_heap::TextureSlotDesc::new(
+            crate::descriptor_heap::TextureSlotDesc::new(
                 &image.view_create_info,
                 vk::ImageLayout::GENERAL,
             ),
@@ -235,8 +236,8 @@ impl Texture {
 
     /// Borrow the image view as a backend-neutral [`TextureView`]; it must not
     /// outlive the texture.
-    pub fn view(&self) -> crate::vulkan::view::TextureView {
-        crate::vulkan::view::TextureView::borrow_raw(self.image_view, self.ctx.clone())
+    pub fn view(&self) -> crate::view::TextureView {
+        crate::view::TextureView::borrow_raw(self.image_view, self.ctx.clone())
     }
 
     /// The `(width, height)` of the texture.

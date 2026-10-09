@@ -1,0 +1,7 @@
+[package]
+name = "moonfield-rhi-core"
+version.workspace = true
+edition.workspace = true
+
+[dependencies]
+bytemuck = { version = "1.23", features = ["derive"] }

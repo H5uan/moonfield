@@ -12,8 +12,8 @@ use gpu_allocator::{
     vulkan::{Allocation, AllocationCreateDesc, AllocationScheme},
 };
 
+use crate::device::{Device, DeviceContext};
 use crate::retire::RetireAction;
-use crate::vulkan::device::{Device, DeviceContext};
 use crate::{Error, Result};
 
 /// GPU memory classes for allocations.

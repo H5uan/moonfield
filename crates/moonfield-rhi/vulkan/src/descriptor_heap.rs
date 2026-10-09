@@ -18,10 +18,11 @@
 //! description cache ([`DescriptorHeap::sampler_for`]) and never freed.
 
 use crate::CommandBuffer;
+use crate::device::{DescriptorHeapProperties, Device};
 use crate::error::{Error, Result};
+use crate::formats::{ToVk, from_vk};
+use crate::memory::{GpuAllocation, GpuPtr};
 use crate::types::{Filter, SamplerDesc};
-use crate::vulkan::device::{DescriptorHeapProperties, Device};
-use crate::vulkan::memory::{GpuAllocation, GpuPtr};
 use ash::vk;
 use moonfield_math::gpu::align_up;
 use std::collections::HashMap;
@@ -352,7 +353,7 @@ impl DescriptorHeap {
         unsafe {
             self.ext
                 .write_resource_descriptors(&resources, &ranges)
-                .map_err(Error::from_vk)?;
+                .map_err(from_vk)?;
         }
         Ok(())
     }
@@ -404,7 +405,7 @@ impl DescriptorHeap {
         unsafe {
             self.ext
                 .write_resource_descriptors(&resources, &ranges)
-                .map_err(Error::from_vk)?;
+                .map_err(from_vk)?;
         }
         Ok(())
     }
@@ -439,7 +440,7 @@ impl DescriptorHeap {
         unsafe {
             self.ext
                 .write_sampler_descriptors(&create_infos, &ranges)
-                .map_err(Error::from_vk)?;
+                .map_err(from_vk)?;
         }
         Ok(())
     }

@@ -1,15 +1,15 @@
 //! Vulkan instance abstraction.
 
+use crate::device::Device;
 use crate::error::{Error, Result};
-use crate::vulkan::device::Device;
-use crate::vulkan::swapchain::Surface;
+use crate::swapchain::Surface;
 use ash::vk;
 use std::ffi::{CStr, c_char};
 use std::sync::Arc;
 
 /// The teardown-critical instance state, shared by `Arc`.
 ///
-/// Every `Device` ([`DeviceShared`](crate::vulkan::device::DeviceShared)) and
+/// Every `Device` ([`DeviceShared`](crate::device::DeviceShared)) and
 /// every `Surface` holds an `Arc<InstanceShared>`, so the Vulkan instance
 /// outlives everything created from it by construction — no device or surface
 /// can ever reference a destroyed instance, and the instance is destroyed

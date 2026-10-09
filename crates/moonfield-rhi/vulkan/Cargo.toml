@@ -1,0 +1,27 @@
+[package]
+name = "moonfield-rhi-vulkan"
+version.workspace = true
+edition.workspace = true
+
+[features]
+# Enables the Khronos validation layer on the Vulkan instance. Requires the
+# Vulkan SDK to be installed at runtime; intended for development builds only.
+validation = []
+
+[dependencies]
+moonfield-rhi-core = { path = "../core" }
+moonfield-math = { workspace = true }
+ash = "0.38.0"
+ash-window = "0.13.0"
+bytemuck = { version = "1.23", features = ["derive"] }
+# gpu-allocator is the shared allocation substrate across backends; each
+# backend sub-crate declares its own feature slice (this one: `vulkan`).
+gpu-allocator = { version = "0.28.0", default-features = false, features = ["std", "vulkan"] }
+raw-window-handle = "0.6.2"
+tracing = { version = "0.1", default-features = false, features = ["std"] }
+shader-slang = { package = "shader-slang-rs", git = "https://github.com/H5uan/shader-slang-rs" }
+
+# Test-only: the shader tests' probe module names resolve imports against the
+# repository's shader tree through the shared asset-root helper.
+[dev-dependencies]
+moonfield-asset = { workspace = true }

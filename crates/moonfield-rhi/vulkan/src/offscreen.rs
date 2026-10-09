@@ -12,12 +12,13 @@
 //! [`OffscreenTarget::new_with_depth`] adds a `D32Sfloat` depth attachment for
 //! depth-tested scene rendering (reverse-Z: the depth clear value is 0.0).
 
+use crate::device::{Device, DeviceContext};
 use crate::error::{Error, Result};
+use crate::formats::ToVk;
+use crate::image::Image2d;
+use crate::memory::{GpuAllocation, Memory};
+use crate::retire::RetireAction;
 use crate::types::{Filter, Format, SamplerDesc, WrapMode};
-use crate::vulkan::device::{Device, DeviceContext};
-use crate::vulkan::image::Image2d;
-use crate::vulkan::memory::{GpuAllocation, Memory};
-use crate::vulkan::retire::RetireAction;
 use crate::{CommandPool, DescriptorHeap, SamplerHandle, TextureHandle};
 use ash::vk;
 use gpu_allocator::vulkan::Allocation;
@@ -49,7 +50,7 @@ impl HeapSlots {
         let texture = heap.alloc_image_slot()?;
         heap.write_resource_descriptors(&[(
             texture,
-            crate::vulkan::descriptor_heap::TextureSlotDesc::new(
+            crate::descriptor_heap::TextureSlotDesc::new(
                 &view_create_info,
                 vk::ImageLayout::GENERAL,
             ),
@@ -226,15 +227,15 @@ impl OffscreenTarget {
     ///
     /// The returned view borrows this target's underlying `vk::ImageView`; it
     /// does not own it and must not outlive the target.
-    pub fn view(&self) -> crate::vulkan::view::TextureView {
-        crate::vulkan::view::TextureView::borrow_raw(self.image_view, self.ctx.clone())
+    pub fn view(&self) -> crate::view::TextureView {
+        crate::view::TextureView::borrow_raw(self.image_view, self.ctx.clone())
     }
 
     /// Borrow the depth image view, if present (for the depth attachment of a
     /// [`RenderPassDesc`](crate::RenderPassDesc)).
-    pub fn depth_view(&self) -> Option<crate::vulkan::view::TextureView> {
+    pub fn depth_view(&self) -> Option<crate::view::TextureView> {
         self.depth_image_view
-            .map(|view| crate::vulkan::view::TextureView::borrow_raw(view, self.ctx.clone()))
+            .map(|view| crate::view::TextureView::borrow_raw(view, self.ctx.clone()))
     }
 
     /// The color attachment format of this target.
@@ -439,8 +440,8 @@ impl DepthBuffer {
     /// Borrow the depth image view (for the depth attachment of a
     /// [`RenderPassDesc`](crate::RenderPassDesc)). The view borrows this
     /// buffer's; it must not outlive the buffer.
-    pub fn view(&self) -> crate::vulkan::view::TextureView {
-        crate::vulkan::view::TextureView::borrow_raw(self.image_view, self.ctx.clone())
+    pub fn view(&self) -> crate::view::TextureView {
+        crate::view::TextureView::borrow_raw(self.image_view, self.ctx.clone())
     }
 
     /// The `(width, height)` of the buffer.

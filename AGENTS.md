@@ -29,7 +29,9 @@ moonfield-ml/       # ML training runtime on the RHI (Trainer, Adam, dataset, ch
                     # kernels compiled to SPIR-V, no external ML framework
 moonfield-reflect/  # Mini reflection for the editor: named fields, dynamic read/write, nesting
 moonfield-reflect-derive/ # #[derive(Reflect)] proc-macro (the one sanctioned proc-macro crate)
-moonfield-rhi/   # Lunar Mare — Vulkan-only rendering RHI (ash); see crates/moonfield-rhi/AGENTS.md
+moonfield-rhi/   # Lunar Mare — the rendering RHI: facade crate over backend sub-crates;
+                    # core/ (shared vocabulary), vulkan/ (moonfield-rhi-vulkan, ash).
+                    # See crates/moonfield-rhi/AGENTS.md
 moonfield-render-core/ # Selene — the render engine layer (extraction, view targets, window frame loop, RenderPlugin)
 moonfield-render-feature/ # Lunaris — high-level render features (mesh/splat/rt/gi) and Core3d phases;
                     # Mesh + SplatCloud assets, glTF import (incl. KHR_gaussian_splatting)
@@ -57,9 +59,9 @@ together**. The egui→Vulkan backend is in-house
 | `cargo test` | Run all unit and integration tests across the workspace. |
 | `cargo clippy` | Lint the codebase with Clippy. |
 | `cargo fmt` | Format all Rust source files. |
-| `cargo test -p moonfield-rhi gpu_tests::headless_triangle` | Vulkan headless smoke test. |
+| `cargo test -p moonfield-rhi-vulkan gpu_tests::headless_triangle` | Vulkan headless smoke test. |
 | `python3 scripts/verify_agents.py` | Verify Agent Notes format, classification, and bilingual pairs. |
-| `python3 scripts/verify_rhi_boundary.py` | Verify the rhi public API exposes no backend (ash/vk) types. |
+| `python3 scripts/verify_rhi_boundary.py` | Verify the rhi public API exposes no backend (ash/vk/objc2/MTL) types. |
 
 ## Continuous integration
 

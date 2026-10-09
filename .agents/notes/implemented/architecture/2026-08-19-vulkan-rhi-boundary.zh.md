@@ -10,18 +10,18 @@ Status: implemented
 
 ## Decision
 
-`moonfield-rhi` 是唯一链接 `ash` 的 crate,所有 Vulkan 专属代码位于 `src/vulkan/`(device、swapchain、pipeline、command、sync、offscreen、shader)。它暴露的表面使用自己的词汇:
+`moonfield-rhi-vulkan` 后端子 crate 是唯一链接 `ash` 的 crate,所有 Vulkan 专属代码位于 `vulkan/src/`(device、swapchain、pipeline、command、sync、offscreen、shader);crate 布局由[后端子 crate 笔记](2026-10-09-rhi-backend-subcrates.zh.md)持有。它暴露的表面使用自己的词汇:
 
-- 公开资源描述——`Format`、`BufferUsage`、`VertexBufferLayout`——声明在 `src/types.rs`,绝不使用裸 `ash` 类型。
-- 引擎 clip 约定是 **Y-up + reverse-Z**;任何 Vulkan viewport 调整发生在这条边界(`vulkan::*`),而不是场景或渲染器代码。
+- 公开资源描述——`Format`、`BufferUsage`、`VertexBufferLayout`——声明在 `core/src/types.rs`,绝不使用裸 `ash` 类型。
+- 引擎 clip 约定是 **Y-up + reverse-Z**;任何 Vulkan viewport 调整发生在这条边界(`vulkan/src/*`),而不是场景或渲染器代码。
 - 所有 Vulkan 对象住在主线程;目前没有任何东西跨线程 `Send`。对象按创建逆序、显式 drop 顺序销毁。
-- Shader:后端在运行时编译 Slang→SPIR-V(`vulkan/shader.rs`),`ShaderModule::from_spirv` 直接加载字节码;一次离线 `slangc -target spirv` 编译也可通过 `include_bytes!` 产出内嵌字节。
-- `cargo test -p moonfield-rhi --test headless_triangle` 在 lavapipe 上无头运行;无法创建 Vulkan 实例时(无可用驱动的机器)优雅跳过。
+- Shader:后端在运行时编译 Slang→SPIR-V(`vulkan/src/shader/`),`ShaderModule::from_spirv` 直接加载字节码;一次离线 `slangc -target spirv` 编译也可通过 `include_bytes!` 产出内嵌字节。
+- `cargo test -p moonfield-rhi-vulkan gpu_tests::headless_triangle` 在 lavapipe 上无头运行;无法创建 Vulkan 实例时(无可用驱动的机器)优雅跳过。
 
 ## Alternatives considered
 
 - **跨 crate 暴露裸 `ash` 类型。** 拒绝:每个消费方都会依赖 `ash` 和 Vulkan 生命周期规则;`types.rs` 让表面可测试、可替换。
-- **给每个 Vulkan 对象包一层完整对象模型。** 拒绝:逐对象抽象层只增加层次,不增加安全性;只导出资源描述词汇,其余都留在 `vulkan/` 之后。
+- **给每个 Vulkan 对象包一层完整对象模型。** 拒绝:逐对象抽象层只增加层次,不增加安全性;只导出资源描述词汇,其余都留在后端子 crate 之后。
 - **让 clip 空间改用 Vulkan 原生(Y-down)。** 拒绝:引擎数学层(reverse-Z、Y-up)与相机/渲染代码一致;在边界一处调整 viewport 比到处翻转约定便宜。
 - **每个 shader 都离线编译。** 拒绝:运行时编译满足迭代,也让后端拥有工具链;离线内嵌保留给交付。
 

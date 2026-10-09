@@ -1,10 +1,11 @@
 //! Vulkan surface and swapchain abstraction.
 
+use crate::device::{Device, DeviceContext};
 use crate::error::{Error, Result};
+use crate::formats::from_vk;
+use crate::instance::{Instance, InstanceShared};
+use crate::sync::Semaphore;
 use crate::types::{Extent2d, Format};
-use crate::vulkan::device::{Device, DeviceContext};
-use crate::vulkan::instance::{Instance, InstanceShared};
-use crate::vulkan::sync::Semaphore;
 use ash::vk;
 use raw_window_handle::{DisplayHandle, HasDisplayHandle, HasWindowHandle, WindowHandle};
 use std::sync::Arc;
@@ -331,11 +332,8 @@ impl Swapchain {
 
     /// Borrow the image view of swapchain image `index` (valid only between
     /// acquire and present of that image).
-    pub fn image_view(&self, index: u32) -> crate::vulkan::view::TextureView {
-        crate::vulkan::view::TextureView::borrow_raw(
-            self.image_views[index as usize],
-            self.ctx.clone(),
-        )
+    pub fn image_view(&self, index: u32) -> crate::view::TextureView {
+        crate::view::TextureView::borrow_raw(self.image_views[index as usize], self.ctx.clone())
     }
 
     /// Access the swapchain extent, in the crate's vocabulary.
@@ -368,7 +366,7 @@ impl Swapchain {
         }
         .map_err(|result| match result {
             vk::Result::ERROR_OUT_OF_DATE_KHR => Error::SurfaceOutOfDate,
-            other => Error::from_vk(other),
+            other => from_vk(other),
         })
     }
 
@@ -397,7 +395,7 @@ impl Swapchain {
         }
         .map_err(|result| match result {
             vk::Result::ERROR_OUT_OF_DATE_KHR => Error::SurfaceOutOfDate,
-            other => Error::from_vk(other),
+            other => from_vk(other),
         })
     }
 

@@ -2,9 +2,11 @@
 """Verify that moonfield-rhi's public API exposes no backend types.
 
 The RHI boundary rule (crates/moonfield-rhi/AGENTS.md): nothing public may
-mention `ash`, `vk::`, or `gpu_allocator` — capabilities must be exposed
-through first-class crate-vocabulary APIs instead. Enforced by CI
-(boundary job) and runnable locally:
+mention `ash`, `vk::`, `gpu_allocator`, `objc2`, or `MTL*` — capabilities
+must be exposed through first-class crate-vocabulary APIs instead. The rule
+covers the facade (`src/`), the shared vocabulary (`core/src/`), and every
+backend sub-crate (`vulkan/src/`, ...). Enforced by CI (boundary job) and
+runnable locally:
 
     python3 scripts/verify_rhi_boundary.py
 
@@ -15,24 +17,28 @@ import re
 import sys
 
 ROOT = pathlib.Path(__file__).resolve().parent.parent
-RHI_SRC = ROOT / "crates" / "moonfield-rhi" / "src"
+RHI = ROOT / "crates" / "moonfield-rhi"
+# Facade, shared vocabulary, and backend sub-crates all carry the rule.
+RHI_SRC_DIRS = [
+    RHI / "src",
+    RHI / "core" / "src",
+    RHI / "vulkan" / "src",
+]
 # In-crate test modules may touch internals freely.
 EXEMPT_DIRS = {"gpu_tests"}
-FORBIDDEN = re.compile(r"\bash::|\bvk::|\bgpu_allocator\b")
+FORBIDDEN = re.compile(r"\bash::|\bvk::|\bgpu_allocator\b|\bobjc2\b|\bMTL[0-9A-Z]")
 # A restricted-visibility opener (pub(crate), pub(super), pub(self)) is not
 # public API, hence the negative lookahead for `(`.
 PUB_ITEM_RE = re.compile(r"^\s*pub\s+(?!\()(?:unsafe\s+)?(?:fn|struct|enum|type|const|static|use|trait)\b")
 PUB_FIELD_RE = re.compile(r"^\s*pub\s+[a-zA-Z_][a-zA-Z0-9_]*\s*:")
 IMPL_FROM_RE = re.compile(r"^\s*impl.*\bFrom\s*<")
 
-errors: list[str] = []
-
 
 def strip_comment(line: str) -> str:
     return line.split("//", 1)[0]
 
 
-def check_file(path: pathlib.Path) -> None:
+def check_file(path: pathlib.Path, errors: list[str]) -> None:
     lines = path.read_text(encoding="utf-8").splitlines()
     i = 0
     while i < len(lines):
@@ -66,19 +72,20 @@ def check_file(path: pathlib.Path) -> None:
 
 
 def main() -> int:
-    if not RHI_SRC.exists():
-        print(f"skip: {RHI_SRC} does not exist")
-        return 0
-    for path in sorted(RHI_SRC.rglob("*.rs")):
-        if any(part in EXEMPT_DIRS for part in path.relative_to(RHI_SRC).parts[:-1]):
+    errors: list[str] = []
+    for src_dir in RHI_SRC_DIRS:
+        if not src_dir.exists():
             continue
-        check_file(path)
+        for path in sorted(src_dir.rglob("*.rs")):
+            if any(part in EXEMPT_DIRS for part in path.relative_to(src_dir).parts[:-1]):
+                continue
+            check_file(path, errors)
     if errors:
         print(f"FAIL: {len(errors)} public API leak(s) in moonfield-rhi")
         for e in errors:
             print(f"  - {e}")
         return 1
-    print("ok: moonfield-rhi public API exposes no ash/vk/gpu_allocator types")
+    print("ok: moonfield-rhi public API exposes no ash/vk/gpu_allocator/objc2/MTL types")
     return 0
 
 

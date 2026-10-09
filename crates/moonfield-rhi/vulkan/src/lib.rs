@@ -1,13 +1,18 @@
 //! Vulkan rendering backend.
 //!
-//! Vulkan RHI implemented on top of `ash`. This module exposes a safe Rust API
-//! surface over instance, physical device, logical device, and swapchain
-//! creation.
+//! Vulkan RHI implemented on top of `ash`. Exposes a safe Rust API surface
+//! over instance, physical device, logical device, and swapchain creation.
+//! The backend-agnostic vocabulary (`Format`, `Viewport`, error types, ...) is
+//! re-exported from `moonfield-rhi-core` at the crate root, so in-crate
+//! `crate::types`-style paths resolve.
+
+pub use moonfield_rhi_core::*;
 
 pub mod bump;
 pub mod command;
 pub mod descriptor_heap;
 pub mod device;
+pub(crate) mod formats;
 pub mod image;
 pub mod instance;
 pub mod memory;
@@ -22,6 +27,9 @@ pub mod sync;
 pub mod texture;
 pub mod upload;
 pub mod view;
+
+#[cfg(test)]
+mod gpu_tests;
 
 /// Aggregated device-extension loaders, built once at device creation and
 /// shared through [`DeviceContext`](device::DeviceContext) — the same shape

@@ -42,11 +42,3 @@ impl fmt::Display for Error {
 }
 
 impl std::error::Error for Error {}
-
-impl Error {
-    /// Convert an ash result code. Crate-internal: keeps `ash` types out of
-    /// the public API.
-    pub(crate) fn from_vk(result: ash::vk::Result) -> Self {
-        Error::Backend(format!("{:?}", result))
-    }
-}

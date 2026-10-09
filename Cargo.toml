@@ -1,5 +1,11 @@
 [workspace]
-members = ["crates/*"]
+members = [
+    "crates/*",
+    # moonfield-rhi's backend sub-crates; the glob cannot be used here because
+    # crates/moonfield-rhi/src is a source directory, not a package.
+    "crates/moonfield-rhi/core",
+    "crates/moonfield-rhi/vulkan",
+]
 default-members = ["crates/moonfield-editor"]
 resolver = "2"
 

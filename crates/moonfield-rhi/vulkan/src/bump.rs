@@ -8,9 +8,9 @@
 //! (memcpy source) and the buffer device address (copy source) — with the
 //! owning buffer handle, so the translation from allocation to (cpu, gpu,
 //! vk::Buffer) happens exactly once per block.
+use crate::device::{Device, DeviceContext};
 use crate::error::{Error, Result};
-use crate::vulkan::device::{Device, DeviceContext};
-use crate::vulkan::memory::{GpuAllocation, GpuPtr, HostPtr, Memory};
+use crate::memory::{GpuAllocation, GpuPtr, HostPtr, Memory};
 use ash::vk;
 use moonfield_math::gpu::align_up;
 

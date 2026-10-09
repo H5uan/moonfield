@@ -15,37 +15,39 @@ handles and coordinate flips leak into scene code and become unfixable later.
 
 ## Decision
 
-`moonfield-rhi` is the only crate that links `ash`, and all Vulkan-specific
-code lives in `src/vulkan/` (device, swapchain, pipeline, command, sync,
-offscreen, texture, shader). The surface it exposes is its own
+The `moonfield-rhi-vulkan` backend sub-crate is the only crate that links
+`ash`, and all Vulkan-specific code lives in `vulkan/src/` (device,
+swapchain, pipeline, command, sync, offscreen, texture, shader); the crate
+layout is owned by [the backend sub-crates
+note](2026-10-09-rhi-backend-subcrates.md). The surface it exposes is its own
 vocabulary:
 
 - Public resource descriptions — `Format`, `BufferUsage`, `VertexBufferLayout` —
-  are declared in `src/types.rs`, never raw `ash` types. The pass-recording
+  are declared in `core/src/types.rs`, never raw `ash` types. The pass-recording
   surface follows the same rule: `RenderAttachment`/`RenderPassDesc`,
   `LoadOp`/`StoreOp`/`ClearValue`/`AttachmentLayout`, `Viewport`/`Rect2d`/
   `Extent2d`, `CompareOp`/`CullMode`/`FrontFace`, `ShaderStages`/
   `PushConstantRange`, `CommandBufferUsage`, and `SamplerDesc` are crate
   vocabulary, so feature crates and the editor record passes without linking
-  `ash` (raw handles remain available through `.raw()`/`.raw_vk()` escape
-  hatches and the compute/bindless/indirect command family).
+  `ash` (there are no `raw()`/`.raw_vk()` escape hatches; the
+  compute/bindless/indirect command family is first-class API).
 - `Texture` (sampled image + upload) and `OffscreenTarget::read_pixels` cover
   texture upload and readback; `Device::submit_and_wait` covers blocking
   one-shot submission outside the window frame loop.
 - The engine clip convention is **Y-up with reverse-Z**; any Vulkan viewport
-  adjustment happens at this boundary (`vulkan::*`), not in scene or renderer
+  adjustment happens at this boundary (`vulkan/src/*`), not in scene or renderer
   code.
 - All Vulkan objects live on the main thread; nothing is `Send` across threads
   yet. Objects are destroyed in reverse creation order with explicit drop order
   (render-world resources drop LIFO — see
   [no renderer objects](2026-08-25-no-renderer-objects.md)).
 - Shaders: the backend compiles Slang→SPIR-V at runtime
-  (`vulkan/shader.rs`), `ShaderModule::from_spirv` loads bytecode directly, and
-  one offline `slangc -target spirv` compile can also produce embedded bytes via
-  `include_bytes!`.
-- `cargo test -p moonfield-rhi --test headless_triangle` runs headless on
-  lavapipe; it skips when no Vulkan instance can be created (machines without
-  a usable driver).
+  (`vulkan/src/shader/`), `ShaderModule::from_spirv` loads bytecode directly,
+  and one offline `slangc -target spirv` compile can also produce embedded
+  bytes via `include_bytes!`.
+- `cargo test -p moonfield-rhi-vulkan gpu_tests::headless_triangle` runs
+  headless on lavapipe; it skips when no Vulkan instance can be created
+  (machines without a usable driver).
 
 ## Alternatives considered
 
@@ -54,7 +56,8 @@ vocabulary:
   testable and replaceable.
 - **Wrap every Vulkan object in a full object model.** Rejected: a per-object
   abstraction layer adds hierarchy without extra safety; only the resource
-  description vocabulary is exported, everything else stays behind `vulkan/`.
+  description vocabulary is exported, everything else stays behind the
+  backend sub-crate.
 - **Make clip space Vulkan-native (Y-down).** Rejected: the engine's math layer
   (reverse-Z, Y-up) matches the camera/rendering code; adjusting the viewport in
   one place at the boundary is cheaper than flipping the convention everywhere.
