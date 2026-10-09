@@ -23,6 +23,7 @@ RHI_SRC_DIRS = [
     RHI / "src",
     RHI / "core" / "src",
     RHI / "vulkan" / "src",
+    RHI / "metal" / "src",
 ]
 # In-crate test modules may touch internals freely.
 EXEMPT_DIRS = {"gpu_tests"}

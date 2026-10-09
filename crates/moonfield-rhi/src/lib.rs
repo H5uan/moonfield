@@ -16,6 +16,12 @@ pub use moonfield_rhi_core::types::{
 };
 pub use moonfield_rhi_core::{error, indirect, types};
 
+#[cfg(all(feature = "vulkan", feature = "metal"))]
+compile_error!(
+    "moonfield-rhi: the `vulkan` and `metal` backend features are mutually exclusive — \
+     enable exactly one (the editor is the selection point)"
+);
+
 #[cfg(feature = "vulkan")]
 pub use moonfield_rhi_vulkan::{
     Access, BlendMode, BufferRange, BumpAlloc, CommandBuffer, CommandPool, CompiledShader,
@@ -27,4 +33,10 @@ pub use moonfield_rhi_vulkan::{
     RootParamKind, RootParamPlace, SamplerHandle, Semaphore, ShaderCache, ShaderModule,
     ShaderStageDesc, Stage, Surface, Swapchain, Texture, TextureHandle, TextureView,
     TimestampQueryPool, UPLOAD_ARENA_SIZE, UPLOAD_FRAME_RING, UserAttributeArg, UserAttributeRef,
+};
+
+#[cfg(feature = "metal")]
+pub use moonfield_rhi_metal::{
+    CommandBuffer, CommandPool, Device, GpuAllocation, GpuPtr, GraphicsPipeline, Instance, Memory,
+    RenderAttachment, RenderPassDesc, ShaderModule, Texture, TextureView,
 };

@@ -5,6 +5,7 @@ members = [
     # crates/moonfield-rhi/src is a source directory, not a package.
     "crates/moonfield-rhi/core",
     "crates/moonfield-rhi/vulkan",
+    "crates/moonfield-rhi/metal",
 ]
 default-members = ["crates/moonfield-editor"]
 resolver = "2"

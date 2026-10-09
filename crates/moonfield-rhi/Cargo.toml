@@ -9,6 +9,7 @@ edition.workspace = true
 # the workspace dependency carries `default-features = false`.
 default = ["vulkan"]
 vulkan = ["dep:moonfield-rhi-vulkan"]
+metal = ["dep:moonfield-rhi-metal"]
 # Development-build convenience: forwards to the Vulkan backend's validation
 # layer (see moonfield-rhi-vulkan).
 validation = ["vulkan", "moonfield-rhi-vulkan/validation"]
@@ -16,3 +17,4 @@ validation = ["vulkan", "moonfield-rhi-vulkan/validation"]
 [dependencies]
 moonfield-rhi-core = { path = "core" }
 moonfield-rhi-vulkan = { path = "vulkan", optional = true }
+moonfield-rhi-metal = { path = "metal", optional = true }

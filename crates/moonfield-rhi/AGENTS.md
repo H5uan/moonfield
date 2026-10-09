@@ -17,6 +17,7 @@ directory:
   (`types.rs`, `error.rs`, `indirect.rs`). Nothing in `core` may mention a
   backend.
 - `vulkan/` — `moonfield-rhi-vulkan`, the Vulkan backend (`ash`).
+- `metal/` — `moonfield-rhi-metal`, the Metal 4 backend (`objc2-metal`).
 
 Dependency direction: `moonfield-rhi` → backend sub-crates → `core`. The
 backend is selected by cargo feature; exactly one backend feature is active

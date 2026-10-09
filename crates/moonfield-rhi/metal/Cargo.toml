@@ -1,0 +1,12 @@
+[package]
+name = "moonfield-rhi-metal"
+version.workspace = true
+edition.workspace = true
+
+[dependencies]
+moonfield-rhi-core = { path = "../core" }
+bytemuck = { version = "1.23", features = ["derive"] }
+objc2 = "0.6.4"
+objc2-foundation = { version = "0.3", default-features = false, features = ["NSString", "NSError"] }
+objc2-metal = "0.3.2"
+tracing = { version = "0.1", default-features = false, features = ["std"] }
