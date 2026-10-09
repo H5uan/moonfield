@@ -275,6 +275,25 @@ impl FrameUploader {
         Ok(())
     }
 
+    /// Abandon the in-progress batch after a failed [`end_frame`](Self::end_frame):
+    /// the slot's command buffer (ended, or still recording when `end` itself
+    /// failed) is reset, its staged arena bytes are freed, and the uploader
+    /// returns to the idle state — the next frame stages a fresh batch. The
+    /// frame counter stays: the failed batch's timeline value was never
+    /// signaled, so the retried batch signals it. The abandoned copies are
+    /// lost; the render-side caches that staged them do not re-stage (see the
+    /// note `2026-10-08-abort-failed-frame-submits`).
+    pub fn abort_frame(&mut self) -> Result<()> {
+        if !self.recording {
+            return Ok(());
+        }
+        let slot = ((self.next_frame - 1) % UPLOAD_FRAME_RING as u64) as usize;
+        self.cb[slot].reset()?;
+        self.arenas[slot].free_all();
+        self.recording = false;
+        Ok(())
+    }
+
     pub fn wait_idle(&mut self) -> Result<()> {
         if self.next_frame > 1 {
             self.timeline.wait(self.next_frame - 1, u64::MAX)?;

@@ -172,6 +172,26 @@ impl CommandBuffer {
         Ok(())
     }
 
+    /// Reset this command buffer to the initial state.
+    ///
+    /// For the failed-frame path: a failed `end` can leave the buffer in the
+    /// recording state, which `begin` does not accept, and a failed submit
+    /// leaves it executable; the reset covers both so the next `begin` starts
+    /// clean.
+    pub fn reset(&mut self) -> Result<()> {
+        // SAFETY: the buffer is not pending execution — callers reset a
+        // buffer whose submission failed, or whose frame slot the frame loop
+        // waited on — and the pool was created with RESET_COMMAND_BUFFER.
+        unsafe {
+            self.ctx
+                .raw()
+                .reset_command_buffer(self.buffer, vk::CommandBufferResetFlags::empty())
+                .map_err(|e| Error::Backend(format!("failed to reset command buffer: {:?}", e)))?;
+        }
+        self.recording = false;
+        Ok(())
+    }
+
     /// Begin a render pass.
     ///
     /// Also sets the viewport and scissor to the pass's render area —

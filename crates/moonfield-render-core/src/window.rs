@@ -20,7 +20,9 @@
 //!   shared uploader, and submits to the graphics queue once — the submit
 //!   waits on the uploader's latest batch so upload writes are visible to
 //!   the frame's shader reads — then presents every acquired window and
-//!   advances the frame slot.
+//!   advances the frame slot. A failed submit aborts the frame: the command
+//!   buffer slot is reset and acquired windows release their images for
+//!   next-tick swapchain recreation.
 //!
 //! The frame exists every `Render` tick a device exists — offscreen passes
 //! need no window. Everything that records into the frame goes through the
@@ -274,7 +276,9 @@ impl FrameContext {
     /// the uploader's latest submitted batch (the memory dependency that
     /// makes this frame's upload writes visible to shader reads), signaling
     /// `signals` (their `render_finished`) plus the timeline with the frame
-    /// number. An offscreen-only frame passes empty slices.
+    /// number. An offscreen-only frame passes empty slices. On failure
+    /// nothing was submitted; the caller aborts the frame
+    /// ([`Self::abort_frame`]).
     fn end_frame(&mut self, waits: &[&Semaphore], signals: &[&Semaphore]) -> Result<()> {
         let (slot, signal) = self.sequencer.take_for_submit();
         self.command_buffers[slot].end()?;
@@ -300,6 +304,27 @@ impl FrameContext {
         // timeline semaphores).
         self.sequencer.finish_submit();
         Ok(())
+    }
+
+    /// Abort the frame after [`end_frame`](Self::end_frame) failed: reset
+    /// the slot's command buffer and abandon the uploader's un-submitted
+    /// batch, leaving the frame context beginnable for the next tick. The
+    /// frame number and slot stay — the timeline value was never signaled,
+    /// so the retried frame signals it.
+    fn abort_frame(&mut self) {
+        debug_assert!(
+            !self.sequencer.frame_in_progress(),
+            "end_frame consumes the frame before its submit can fail"
+        );
+        let slot = self.sequencer.current_slot();
+        if let Err(e) = self.command_buffers[slot].reset() {
+            error!("failed to reset the aborted frame's command buffer: {e}");
+        }
+        let uploader = self.device.uploader();
+        let mut uploader = uploader.lock().unwrap_or_else(|e| e.into_inner());
+        if let Err(e) = uploader.abort_frame() {
+            error!("failed to abort the frame uploader's batch: {e}");
+        }
     }
 
     /// Whether a frame has been begun and is open for recording.
@@ -502,6 +527,27 @@ impl WindowSurfaceData {
             }
         }
         Ok(())
+    }
+
+    /// Abort the in-progress frame after the frame submit failed: the
+    /// acquired image can no longer be presented (the submit that would have
+    /// consumed `image_available` was not enqueued), so drop the acquisition
+    /// bookkeeping and flag the swapchain for recreation — the retired
+    /// swapchain's deferred destruction releases the image. The acquire left
+    /// `image_available[slot]` signaled with no consumer, so that one
+    /// semaphore is rebuilt (its signal completed when the acquire returned,
+    /// nothing waits on it, and binary semaphores cannot be unsignaled). The
+    /// other slot's semaphore may still be waited on by the in-flight
+    /// previous frame and is left alone.
+    fn abort_frame(&mut self, slot: usize) {
+        if self.current_image.take().is_none() {
+            return;
+        }
+        match Semaphore::new(&self.device) {
+            Ok(semaphore) => self.image_available[slot] = semaphore,
+            Err(e) => error!("failed to rebuild the aborted frame's acquire semaphore: {e}"),
+        }
+        self.needs_recreate = true;
     }
 
     /// Recreate the swapchain for a new window size, without idling the
@@ -835,7 +881,10 @@ pub fn acquire_window_frames(world: &mut World) {
             continue;
         }
         if data.frame_in_progress() {
-            error!("window frame acquired while a frame is still in progress");
+            // The failed-submit path aborts acquired frames, so no window
+            // holds an image here; the guard keeps a regression from
+            // double-acquiring a window.
+            error!("a window still holds an acquired image at acquire time; skipping it");
             continue;
         }
         // A suboptimal acquire still yields a usable image: present it and
@@ -855,7 +904,12 @@ pub fn acquire_window_frames(world: &mut World) {
 /// acquired window's `image_available` and on the uploader's latest
 /// submitted batch, signaling every acquired window's `render_finished` plus
 /// the frame timeline — and present each acquired window. A frame with no
-/// acquired window (offscreen-only) submits timeline-only.
+/// acquired window (offscreen-only) submits timeline-only. A failed submit
+/// aborts the frame instead of presenting: the command buffer slot is
+/// reset, the uploader's un-submitted batch is abandoned, and every
+/// acquired window releases its image — its acquire semaphore is rebuilt,
+/// its swapchain recreated at the next tick's start
+/// ([`create_window_surfaces`]).
 pub fn submit_window_frames(world: &mut World) {
     // Passes are done recording; drop the recording state machine with the
     // frame.
@@ -881,6 +935,18 @@ pub fn submit_window_frames(world: &mut World) {
         .unwrap_or_default();
     if let Err(e) = frame.end_frame(&waits, &signals) {
         error!("failed to submit frame: {e}");
+        // The submission was not enqueued, so the acquired images can no
+        // longer be presented: abort the frame and every window holding an
+        // image — releasing the acquisition and flagging the swapchain for
+        // recreation — instead of stranding them.
+        frame.abort_frame();
+        if let Some(surfaces) = surfaces.as_deref_mut() {
+            for data in surfaces.surfaces.values_mut() {
+                if data.frame_in_progress() {
+                    data.abort_frame(slot);
+                }
+            }
+        }
         return;
     }
     let Some(surfaces) = surfaces.as_deref_mut() else {
@@ -968,6 +1034,35 @@ mod tests {
         seq.finish_submit();
         assert_eq!(seq.current_slot(), 1);
         assert_eq!(seq.presented_frames(), 1);
+    }
+
+    /// The abort path: after a failed `end_frame` the context must be
+    /// beginnable again, reuse the same slot and frame number (the timeline
+    /// value was never signaled), and submit the retried frame. GPU test —
+    /// skips on machines without a Vulkan driver.
+    #[test]
+    fn test_abort_frame_returns_the_context_to_a_beginnable_state() {
+        let render_device = match RenderDevice::new() {
+            Ok(render_device) => render_device,
+            Err(e) => {
+                eprintln!("skipping: no Vulkan device available ({e})");
+                return;
+            }
+        };
+        let mut frame = FrameContext::new(render_device.device()).expect("frame context");
+
+        let slot = frame.begin_frame().expect("begin");
+        assert!(frame.frame_in_progress());
+        frame.abort_frame();
+        assert!(!frame.frame_in_progress());
+        // Nothing was submitted: the slot and frame counters are unchanged.
+        assert_eq!(frame.current_slot(), slot);
+        assert_eq!(frame.presented_frames(), 0);
+
+        // The retried frame records the same slot and submits timeline-only.
+        assert_eq!(frame.begin_frame().expect("retry begin"), slot);
+        frame.end_frame(&[], &[]).expect("retry submit");
+        assert_eq!(frame.presented_frames(), 1);
     }
 
     /// A main entity with the given low-32-bits id (generation 1), for

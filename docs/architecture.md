@@ -292,7 +292,12 @@ uploader's latest submitted batch (same-queue submission order sequences the
 batches but creates no memory dependency, so the timeline wait is what makes
 upload writes visible to shader reads), signaling every
 `render_finished` plus the timeline with the frame number — then presents
-each acquired window. Windows are acquire/present targets of the frame, not
+each acquired window. A failed submit aborts the frame instead of
+presenting: the command buffer slot is reset, the uploader's un-submitted
+batch is abandoned, and every acquired window drops its image bookkeeping,
+rebuilds that slot's acquire semaphore, and flags its swapchain for
+next-tick recreation — a transient submit error costs a dropped frame, not
+a frozen window. Windows are acquire/present targets of the frame, not
 its owner, so offscreen passes record whether or not any window frame exists;
 a frame with no acquired window submits timeline-only.
 

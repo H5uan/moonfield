@@ -124,3 +124,42 @@ fn cross_frame_reuse_does_not_clobber() {
         assert_eq!(readback(&device, dst, data.len()), *data, "frame data");
     }
 }
+
+/// Aborting the in-progress batch returns the uploader to the idle state:
+/// the immediate flush submits nothing, and the next frame stages a fresh
+/// batch that delivers.
+#[test]
+fn abort_frame_discards_the_batch_and_restarts_clean() {
+    let Some((_instance, device)) = setup() else {
+        return;
+    };
+    let mut uploader = FrameUploader::new(&device, 1 << 20).expect("uploader");
+
+    let n = 512usize;
+    let dst = GpuAllocation::new(&device, n as u64, Memory::Gpu).expect("destination");
+    let abandoned = pattern(n, 1);
+    let retried = pattern(n, 2);
+
+    // Stage, then abort before the flush: the batch is abandoned.
+    uploader.begin_frame().expect("begin");
+    uploader
+        .upload_alloc(&dst, abandoned.as_slice())
+        .expect("stage");
+    uploader.abort_frame().expect("abort");
+
+    // Idle again: a flush with nothing staged submits nothing.
+    uploader.end_frame().expect("flush after abort");
+
+    // The next batch stages fresh and delivers.
+    uploader.begin_frame().expect("begin");
+    uploader
+        .upload_alloc(&dst, retried.as_slice())
+        .expect("stage");
+    uploader.end_frame().expect("flush");
+    uploader.wait_idle().expect("wait");
+    assert_eq!(
+        readback(&device, &dst, n),
+        retried,
+        "retried upload after abort"
+    );
+}
