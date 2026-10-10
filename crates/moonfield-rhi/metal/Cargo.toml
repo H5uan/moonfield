@@ -8,6 +8,10 @@ moonfield-rhi-core = { path = "../core" }
 bytemuck = { version = "1.23", features = ["derive"] }
 objc2 = "0.6.4"
 dispatch2 = { version = "0.3", default-features = false, features = ["block2"] }
-objc2-foundation = { version = "0.3", default-features = false, features = ["NSString", "NSError"] }
+objc2-foundation = { version = "0.3", default-features = false, features = ["NSString", "NSError", "NSGeometry"] }
 objc2-metal = { version = "0.3.2", features = ["dispatch2"] }
 tracing = { version = "0.1", default-features = false, features = ["std"] }
+objc2-quartz-core = { version = "0.3.2", features = ["CAMetalLayer"] }
+objc2-core-foundation = { version = "0.3.2", default-features = false, features = ["objc2"] }
+objc2-app-kit = { version = "0.3.2", features = ["NSView"] }
+raw-window-handle = "0.6.2"

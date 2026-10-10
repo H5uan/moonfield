@@ -42,6 +42,15 @@ macOS 没有 GPU 路径：Vulkan 后端的设备表无法被 MoltenVK 满足，A
 - 门面增加 `metal` feature，并以 `compile_error!` 拒绝两个后端 feature
   同时启用的构建；metal 再导出清单是 Vulkan 表面已实现的子集。
   `verify_rhi_boundary.py` 与其余源码树一起扫描 `metal/src`。
+- 展示：`Surface` 持有 `CAMetalLayer` —— 供离屏测试/渲染的独立可读回层
+  （`new_layer`），或经 raw-window-handle 挂到窗口视图（`from_window`，
+  AppKit `NSView`）。`Swapchain` 获取 layer 的下一个 drawable（阻塞；
+  序号恒为 0），以 `TextureView` 暴露，并在队列 `signalDrawable` 把展示
+  排到已提交工作之后后 present。`Semaphore` 对齐 Vulkan 表面形状（Metal
+  的顺序就是队列提交序 —— 模块文档记录了该模型），`RenderDevice` 为引擎
+  层插件配对门控后的 instance 与 device。`swapchain` GPU 测试从离屏 layer
+  获取 drawable、经 swapchain 视图渲染、校验 BGRA 像素并在 Metal 4 硬件
+  上 present。
 
 GPU 测试 `metal/src/gpu_tests/offscreen_triangle.rs` 渲染一个顶点拉取的
 三角形（位置数据经 argument-table 槽位 0）到 64×64 目标，提交后在
@@ -70,5 +79,6 @@ Apple silicon 有了本地开发和 CI 的 GPU 路径：后端可编译、冒烟
 Metal 4 设备上运行。下游 crate 不变 —— 所有平台仍然选择 `vulkan`；`metal`
 feature 只再导出已实现的子集，消费方拿不到未实现的名字。骨架的 render
 pass 只取单个 color attachment、忽略 depth attachment；
-`AttachmentLayout` 是角色标记，没有 Metal 图像布局语义。剩余阶段
-（`CAMetalLayer` swapchain、能力门控特性、egui 移植）仍由提案笔记持有。
+`AttachmentLayout` 是角色标记，没有 Metal 图像布局语义。到编辑器真正跑起来
+的剩余差距是引擎层的资源机制（Metal 侧的 uploader、bump 分配器、bindless
+堆）与 egui 移植；两者都由提案笔记跟踪。

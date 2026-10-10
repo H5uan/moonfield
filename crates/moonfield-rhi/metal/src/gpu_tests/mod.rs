@@ -3,3 +3,4 @@
 
 mod offscreen_triangle;
 mod slang_metallib;
+mod swapchain;

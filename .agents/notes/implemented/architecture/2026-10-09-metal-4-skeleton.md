@@ -49,6 +49,17 @@ argument table, and a pixel-verified draw — on real hardware.
   builds with both backend features enabled; the metal re-export list is the
   implemented subset of the Vulkan surface. `verify_rhi_boundary.py` scans
   `metal/src` with the rest.
+- Presentation: `Surface` owns a `CAMetalLayer` — standalone and
+  readback-capable for headless tests/offscreen (`new_layer`), or attached to
+  a window's view via raw-window-handle (`from_window`, AppKit `NSView`).
+  `Swapchain` acquires the layer's next drawable (blocking; index 0),
+  exposes it as a `TextureView`, and presents after `signalDrawable` on the
+  queue orders the presentation behind committed work. `Semaphore` matches
+  the Vulkan surface shape (Metal's ordering is queue submission order —
+  the module doc records the model), and `RenderDevice` pairs the gated
+  instance and device for the engine layer's plugin. The `swapchain` GPU
+  test acquires from a headless layer, renders through the swapchain's view,
+  verifies BGRA pixels, and presents on Metal 4 hardware.
 
 The GPU test `metal/src/gpu_tests/offscreen_triangle.rs` renders a
 vertex-pulled triangle (positions through argument-table slot 0) into a
@@ -81,6 +92,7 @@ are unchanged — every platform still selects `vulkan`; the `metal` feature
 re-exports the implemented subset only, so consumers cannot reach for
 unimplemented names. The skeleton's render pass takes a single color
 attachment and ignores the depth attachment; `AttachmentLayout` is a
-role marker with no Metal image-layout semantics. The remaining phases
-(`CAMetalLayer` swapchain, capability-gated features, the egui port) stay
-with the proposal note.
+role marker with no Metal image-layout semantics. The remaining gap to a
+running editor is the engine layer's resource machinery (uploader, bump
+allocators, the bindless heap on the Metal side) and the egui port; the
+proposal note tracks both.

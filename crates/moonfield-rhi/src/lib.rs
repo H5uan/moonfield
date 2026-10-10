@@ -39,5 +39,6 @@ pub use moonfield_rhi_vulkan::{
 #[cfg(feature = "metal")]
 pub use moonfield_rhi_metal::{
     CommandBuffer, CommandPool, Device, GpuAllocation, GpuPtr, GraphicsPipeline, Instance, Memory,
-    RenderAttachment, RenderPassDesc, ShaderModule, Texture, TextureView,
+    RenderAttachment, RenderDevice, RenderPassDesc, Semaphore, ShaderModule, Surface, Swapchain,
+    Texture, TextureView,
 };
