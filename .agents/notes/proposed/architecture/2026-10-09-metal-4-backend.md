@@ -110,6 +110,18 @@ manual tracking, a different backend for the same amount of work.
   ray-query and autodiff kernels compiling to `metallib` is unverified until
   phase 2/4 prove it. Fallback: keep rt and ml feature-gated off on macOS
   until verified, as capability-gated features.
+- **`ResourceDescriptorHeap[]` — the Vulkan bindless heap syntax — does not
+  compile for the Metal target** (measured: "unavailable features in entry
+  point ... for 'metal' compilation target"). The Metal bindless channel is
+  the array-of-resources parameter: Slang emits
+  `array<texture2d<float>, N>` / `array<sampler, N>` entry-point parameters
+  plus the root blob (`EntryPointParams` at `[[buffer(0)]]`, measured).
+  Shader sources that index `ResourceDescriptorHeap` need a Metal variant
+  (the arrays are declared as `uniform Texture2D g_textures[N]` in Slang,
+  one source with target-gated sections, or a small Metal-specific module);
+  how the array parameter maps onto `MTL4ArgumentTable` slots
+  (`setResource_atBufferIndex` / `setTexture_atIndex`) is the next measured
+  step before the `DescriptorHeap` equivalent is designed.
 - **`objc2-metal` MTL4 coverage** may lag the headers the backend needs;
   gaps get local `extern_class!` declarations until upstream ships them.
 - **Argument-table slot budget** (Metal 4 caps buffer bind counts) differs

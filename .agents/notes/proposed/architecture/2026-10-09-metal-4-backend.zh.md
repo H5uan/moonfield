@@ -97,6 +97,16 @@ barrier 模型正是与 RHI 的 bindless/同步词汇对应的 Metal 4 面；瞄
   task、mesh 阶段列为支持；引擎自身的 ray-query 与 autodiff kernel 能否编译
   成 `metallib` 要等第 2/4 阶段验证。兜底：在验证之前把 rt 与 ml 在 macOS
   上保持能力门控关闭。
+- **`ResourceDescriptorHeap[]` —— Vulkan 的 bindless 堆语法 —— 无法为
+  Metal 目标编译**（实测："unavailable features in entry point ... for
+  'metal' compilation target"）。Metal 的 bindless 通道是资源数组参数：
+  Slang 产出 `array<texture2d<float>, N>` / `array<sampler, N>` 入口参数
+  加 root blob（`EntryPointParams` 在 `[[buffer(0)]]`，实测）。索引
+  `ResourceDescriptorHeap` 的 shader 源需要 Metal 变体（Slang 里声明
+  `uniform Texture2D g_textures[N]`，单一源按目标分段，或一个小的
+  Metal 专用模块）；数组参数到 `MTL4ArgumentTable` 槽位的映射
+  （`setResource_atBufferIndex` / `setTexture_atIndex`）是
+  `DescriptorHeap` 等价物设计前的下一个实测步骤。
 - **`objc2-metal` 的 MTL4 覆盖**可能落后于后端需要的头文件；缺口用本地
   `extern_class!` 声明补齐，直到上游发布。
 - **argument table 的槽位预算**（Metal 4 限制 buffer bind 数量）与 descriptor
