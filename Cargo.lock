@@ -436,6 +436,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "1e0e367e4e7da84520dedcac1901e4da967309406d1e51017ae1abfb97adbd38"
 dependencies = [
  "bitflags 2.13.1",
+ "block2 0.6.2",
  "objc2 0.6.4",
 ]
 
@@ -1279,6 +1280,8 @@ name = "moonfield-rhi-core"
 version = "0.1.0"
 dependencies = [
  "bytemuck",
+ "moonfield-asset",
+ "shader-slang-rs",
 ]
 
 [[package]]
@@ -1286,6 +1289,7 @@ name = "moonfield-rhi-metal"
 version = "0.1.0"
 dependencies = [
  "bytemuck",
+ "dispatch2",
  "moonfield-rhi-core",
  "objc2 0.6.4",
  "objc2-foundation 0.3.2",
@@ -1301,7 +1305,6 @@ dependencies = [
  "ash-window",
  "bytemuck",
  "gpu-allocator",
- "moonfield-asset",
  "moonfield-math",
  "moonfield-rhi-core",
  "raw-window-handle",

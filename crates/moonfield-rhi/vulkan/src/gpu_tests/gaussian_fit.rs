@@ -9,7 +9,7 @@
 use super::common;
 use crate::{
     Access, CommandBuffer, CommandBufferUsage, CommandPool, Compiler, ComputePipeline, Device,
-    GpuAllocation, GpuPtr, Instance, Memory, ShaderModule, Stage,
+    GpuAllocation, GpuPtr, Instance, Memory, ShaderModule, ShaderTarget, Stage,
 };
 
 /// Number of Gaussians in the mixture.
@@ -282,7 +282,7 @@ fn gaussian_fit_converges() {
     let mut pipelines = Vec::new();
     for entry in ["forward", "backward", "reduce", "adam"] {
         let spirv = compiler
-            .compile_source_to_spirv("gaussian_fit", SLANG_SOURCE, entry)
+            .compile_source("gaussian_fit", SLANG_SOURCE, entry, ShaderTarget::Spirv)
             .unwrap_or_else(|e| panic!("Slang compilation of '{entry}' failed: {e}"));
         let module = ShaderModule::from_compiled(&device, &spirv).expect("shader module");
         pipelines.push(ComputePipeline::new(&device, &module).expect("compute pipeline"));

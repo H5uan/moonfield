@@ -10,6 +10,7 @@
 
 pub use moonfield_rhi_core::error::{Error, Result};
 pub use moonfield_rhi_core::indirect::{DispatchIndirectArgs, DrawIndirectArgs};
+pub use moonfield_rhi_core::shader::ShaderTarget;
 pub use moonfield_rhi_core::types::{
     AttachmentLayout, ClearValue, CommandBufferUsage, CompareOp, CullMode, Extent2d, Filter,
     Format, FrontFace, LoadOp, Offset2d, Rect2d, SamplerDesc, StoreOp, Viewport, WrapMode,

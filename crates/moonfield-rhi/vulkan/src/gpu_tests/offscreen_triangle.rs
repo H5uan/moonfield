@@ -7,7 +7,7 @@
 use crate::{
     AttachmentLayout, ClearValue, CommandBufferUsage, CommandPool, Compiler, Device, Format,
     GpuAllocation, GraphicsPipeline, Instance, LoadOp, Memory, OffscreenTarget, Rect2d,
-    RenderAttachment, RenderPassDesc, RootBinder, ShaderModule, StoreOp,
+    RenderAttachment, RenderPassDesc, RootBinder, ShaderModule, ShaderTarget, StoreOp,
 };
 use ash::vk;
 
@@ -83,16 +83,16 @@ float4 main(PsInput input) : SV_TARGET
 "#;
 
     let vertex_spirv = compiler
-        .compile_source_to_spirv("triangle_vs", vertex_source, "main")
+        .compile_source("triangle_vs", vertex_source, "main", ShaderTarget::Spirv)
         .expect("vertex shader");
     let fragment_spirv = compiler
-        .compile_source_to_spirv("triangle_fs", fragment_source, "main")
+        .compile_source("triangle_fs", fragment_source, "main", ShaderTarget::Spirv)
         .expect("fragment shader");
 
     // The vertex array's device address is delivered through push data; its
     // placement comes from the reflected entry point, not a hand-synced constant.
     let reflection = compiler
-        .compile_source_to_reflection("triangle_vs", vertex_source, &["main"])
+        .compile_source_to_reflection("triangle_vs", vertex_source, &["main"], ShaderTarget::Spirv)
         .expect("vertex shader reflection");
     let binder = RootBinder::new(&reflection, "main").expect("root binder");
     let vertices_place = binder.pointer_param("vertices").expect("vertices place");

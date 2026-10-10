@@ -26,11 +26,13 @@ directory:
   surface. The `error`, `indirect`, and `types` module paths are re-exported
   so `moonfield_rhi::types::WrapMode` keeps resolving.
 - `crates/moonfield-rhi/core` — `moonfield-rhi-core`, the backend-agnostic
-  vocabulary (`types.rs`, `error.rs`, `indirect.rs`). Nothing in `core`
-  mentions a backend: the Vulkan conversions that used to sit as `to_vk`
-  methods next to each type moved to `vulkan/src/formats.rs` behind the
-  `ToVk` extension trait, and result-code conversion became the free function
-  `from_vk`.
+  layer: the vocabulary (`types.rs`, `error.rs`, `indirect.rs`) and the
+  shared Slang compiler (`shader/`: `Compiler`/`ShaderCache` with a
+  `ShaderTarget` selecting Spirv or MetalLib, `Reflection`, `RootParam`).
+  Nothing in `core` mentions a backend: the Vulkan conversions that used
+  to sit as `to_vk` methods next to each type live in
+  `vulkan/src/formats.rs` behind the `ToVk` extension trait, and
+  result-code conversion is the free function `from_vk`.
 - `crates/moonfield-rhi/vulkan` — `moonfield-rhi-vulkan`, the Vulkan backend:
   all of `ash`, `ash-window`, `gpu-allocator`, `shader-slang`, and the GPU
   tests that verify `pub(crate)` internals.

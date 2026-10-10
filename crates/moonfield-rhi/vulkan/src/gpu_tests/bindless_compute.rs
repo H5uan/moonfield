@@ -8,7 +8,7 @@
 use super::common;
 use crate::{
     CommandBufferUsage, CommandPool, Compiler, ComputePipeline, Device, GpuAllocation, Instance,
-    Memory, ShaderModule,
+    Memory, ShaderModule, ShaderTarget,
 };
 
 /// `+1` kernel: out[tid] = in[tid] + 1. Root data is two 64-bit addresses
@@ -49,7 +49,7 @@ fn bindless_compute_roundtrip() {
 
     let compiler = Compiler::new().expect("compiler creation");
     let spirv = compiler
-        .compile_source_to_spirv("plus_one", PLUS_ONE_KERNEL, "main")
+        .compile_source("plus_one", PLUS_ONE_KERNEL, "main", ShaderTarget::Spirv)
         .expect("kernel compilation");
     let module = ShaderModule::from_compiled(&device, &spirv).expect("shader module");
     let pipeline = ComputePipeline::new(&device, &module).expect("compute pipeline");

@@ -12,8 +12,8 @@ use super::common;
 use crate::{
     AttachmentLayout, BufferRange, ClearValue, CommandBufferUsage, CommandPool, Compiler, Device,
     Format, FrameUploader, GpuAllocation, GraphicsPipeline, Instance, LoadOp, Memory,
-    OffscreenTarget, Rect2d, RenderAttachment, RenderPassDesc, ShaderModule, StoreOp, Texture,
-    UPLOAD_ARENA_SIZE,
+    OffscreenTarget, Rect2d, RenderAttachment, RenderPassDesc, ShaderModule, ShaderTarget, StoreOp,
+    Texture, UPLOAD_ARENA_SIZE,
 };
 
 const VERTEX: &str = r#"
@@ -74,14 +74,16 @@ fn graphics_heap_sampling_roundtrip() {
 
     let compiler = Compiler::new().expect("compiler");
     let vertex_spirv = compiler
-        .compile_source_to_spirv("vs", VERTEX, "main")
+        .compile_source("vs", VERTEX, "main", ShaderTarget::Spirv)
         .expect("vertex shader");
     let fragment_spirv = compiler
-        .compile_source_to_spirv_with_capabilities(
+        .compile_source_with_options(
             "fs",
             FRAGMENT,
             "main",
+            ShaderTarget::Spirv,
             &["spvDescriptorHeapEXT"],
+            &[],
         )
         .expect("fragment shader");
     let vertex_shader = ShaderModule::from_compiled(&device, &vertex_spirv).expect("vs module");
@@ -197,14 +199,16 @@ float4 main() : SV_TARGET
 
     let compiler = Compiler::new().expect("compiler");
     let vertex_spirv = compiler
-        .compile_source_to_spirv("vs", VERTEX, "main")
+        .compile_source("vs", VERTEX, "main", ShaderTarget::Spirv)
         .expect("vertex shader");
     let fragment_spirv = compiler
-        .compile_source_to_spirv_with_capabilities(
+        .compile_source_with_options(
             "fs",
             FRAGMENT,
             "main",
+            ShaderTarget::Spirv,
             &["spvDescriptorHeapEXT"],
+            &[],
         )
         .expect("fragment shader");
     let vertex_shader = ShaderModule::from_compiled(&device, &vertex_spirv).expect("vs module");

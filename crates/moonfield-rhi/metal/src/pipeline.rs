@@ -16,7 +16,7 @@ pub struct GraphicsPipeline {
 }
 
 impl GraphicsPipeline {
-    /// Build a vertex+fragment pipeline rendering into `format`.
+    /// Build a vertex+fragment pipeline from one library.
     pub fn new(
         device: &Device,
         module: &ShaderModule,
@@ -24,8 +24,21 @@ impl GraphicsPipeline {
         fragment_entry: &str,
         format: Format,
     ) -> Result<Self> {
-        let vertex = module.function(vertex_entry)?;
-        let fragment = module.function(fragment_entry)?;
+        Self::from_modules(device, module, vertex_entry, module, fragment_entry, format)
+    }
+
+    /// Build a vertex+fragment pipeline from two libraries — the shape Slang
+    /// compiles into (one `.metallib` per entry point).
+    pub fn from_modules(
+        device: &Device,
+        vertex: &ShaderModule,
+        vertex_entry: &str,
+        fragment: &ShaderModule,
+        fragment_entry: &str,
+        format: Format,
+    ) -> Result<Self> {
+        let vertex = vertex.function(vertex_entry)?;
+        let fragment = fragment.function(fragment_entry)?;
         let descriptor = MTLRenderPipelineDescriptor::new();
         descriptor.setVertexFunction(Some(vertex.as_ref()));
         descriptor.setFragmentFunction(Some(fragment.as_ref()));

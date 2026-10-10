@@ -314,7 +314,12 @@ mod tests {
             .to_string();
         let compiler = Compiler::new().expect("compiler");
         let refl = compiler
-            .compile_source_to_reflection(&module_path, SOURCE, &["main"])
+            .compile_source_to_reflection(
+                &module_path,
+                SOURCE,
+                &["main"],
+                crate::ShaderTarget::Spirv,
+            )
             .expect("reflection");
 
         let src = refl.struct_rust_source("DrawData").expect("codegen");
@@ -345,5 +350,98 @@ mod tests {
                 args: vec![UserAttributeArg::Int(0), UserAttributeArg::Int(1)],
             }]
         );
+    }
+}
+
+/// How a root parameter is delivered to the shader: inline bytes (a `uniform`
+/// parameter) or a GPU address (a `Ptr<T>` root — a buffer binding on
+/// backends without descriptor-push, a device address where they have one).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum RootParamKind {
+    /// The parameter's value is stored inline in the root blob (a `uniform`
+    /// parameter — push-constant storage).
+    Uniform,
+    /// The parameter holds a GPU address (a `Ptr<T>` root — buffer device
+    /// address).
+    Pointer,
+}
+
+/// One root (non-varying) parameter of an entry point, with its placement in
+/// the root blob the backend's push-data command receives.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RootParam {
+    /// The parameter name, e.g. `root`.
+    pub name: String,
+    /// Whether the parameter is inline data or a GPU address.
+    pub kind: RootParamKind,
+    /// Byte offset of the parameter within the root blob.
+    pub offset: usize,
+    /// Byte size of the parameter's storage in the blob.
+    pub size: usize,
+}
+
+impl Reflection {
+    /// Enumerate the root parameters of `entry_name` — every non-varying
+    /// parameter — with their placement in the push-data blob.
+    ///
+    /// Root parameters are the entry point's remaining parameters after
+    /// varying inputs (vertex attributes) and outputs: `Ptr<T>` roots
+    /// (pointer category) and `uniform` roots (push-constant category). A
+    /// backend writes the entire root blob through its push-data command;
+    /// this describes where each parameter lives in it.
+    pub fn root_parameters(&self, entry_name: &str) -> RenderResult<Vec<RootParam>> {
+        let reflection = unsafe { &*self.reflection };
+        let entry = reflection
+            .find_entry_point_by_name(entry_name)
+            .map_err(map_slang_error)?
+            .ok_or_else(|| RenderError::Backend(format!("entry point '{entry_name}' not found")))?;
+
+        let mut params = Vec::new();
+        for param in entry.parameters() {
+            let cat = param.category();
+            let is_varying = cat == Some(shader_slang::ParameterCategory::VaryingInput)
+                || cat == Some(shader_slang::ParameterCategory::VaryingOutput);
+            if is_varying {
+                continue;
+            }
+            let Some(layout) = param.type_layout() else {
+                continue;
+            };
+            let name = param.name().unwrap_or("<unnamed>").to_string();
+
+            // Uniform roots and pointer roots live in different categories;
+            // take the largest span across the categories Slang reports so we
+            // are robust to target differences. The parameter's own offset is
+            // per-category (`VariableLayout::offset`), its size comes from the
+            // type layout (`TypeLayout::size`).
+            let mut offset = usize::MAX;
+            let mut size = 0usize;
+            for ci in 0..layout.category_count() {
+                let c = layout.category_by_index(ci);
+                let off = param.offset(c);
+                let sz = layout.size(c);
+                offset = offset.min(off);
+                size = size.max(off + sz);
+            }
+            if size == 0 {
+                continue;
+            }
+            // `Ptr<T>` roots reflect as 8-byte uniform-category payloads holding a
+            // GPU address; the type (not the category) decides the delivery
+            // kind. Everything else inline is a `uniform` root.
+            let ty_kind = layout.ty().map(|t| t.kind());
+            let kind = if ty_kind == Some(shader_slang::TypeKind::Pointer) {
+                RootParamKind::Pointer
+            } else {
+                RootParamKind::Uniform
+            };
+            params.push(RootParam {
+                name,
+                kind,
+                offset,
+                size: size - offset,
+            });
+        }
+        Ok(params)
     }
 }

@@ -10,7 +10,7 @@ use super::common;
 
 use crate::{
     CommandBufferUsage, CommandPool, Compiler, ComputePipeline, Device, GpuAllocation, Instance,
-    Memory, RootBinder, ShaderModule,
+    Memory, RootBinder, ShaderModule, ShaderTarget,
 };
 
 #[test]
@@ -83,7 +83,12 @@ fn push_data_feeds_root_pointers() {
 
     let compiler = Compiler::new().expect("compiler creation");
     let spirv = compiler
-        .compile_source_to_spirv("plus_one_push_data", PLUS_ONE_KERNEL, "main")
+        .compile_source(
+            "plus_one_push_data",
+            PLUS_ONE_KERNEL,
+            "main",
+            ShaderTarget::Spirv,
+        )
         .expect("kernel compilation");
     let module = ShaderModule::from_compiled(&device, &spirv).expect("shader module");
     let pipeline = ComputePipeline::new(&device, &module).expect("compute pipeline");
@@ -181,7 +186,7 @@ fn push_data_ranges_persist_across_writes() {
 
     let compiler = Compiler::new().expect("compiler creation");
     let reflection = compiler
-        .compile_source_to_reflection("scale_kernel", SCALE_KERNEL, &["main"])
+        .compile_source_to_reflection("scale_kernel", SCALE_KERNEL, &["main"], ShaderTarget::Spirv)
         .expect("kernel reflection");
     let binder = RootBinder::new(&reflection, "main").expect("root binder");
     let input_place = binder.pointer_param("input").expect("input place");
@@ -190,7 +195,7 @@ fn push_data_ranges_persist_across_writes() {
     drop(reflection);
 
     let spirv = compiler
-        .compile_source_to_spirv("scale_kernel", SCALE_KERNEL, "main")
+        .compile_source("scale_kernel", SCALE_KERNEL, "main", ShaderTarget::Spirv)
         .expect("kernel compilation");
     let module = ShaderModule::from_compiled(&device, &spirv).expect("shader module");
     let pipeline = ComputePipeline::new(&device, &module).expect("compute pipeline");

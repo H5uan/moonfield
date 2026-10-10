@@ -14,7 +14,7 @@
 use super::common;
 use crate::{
     Access, CommandBufferUsage, CommandPool, Compiler, ComputePipeline, Device, Format,
-    FrameUploader, GpuAllocation, Instance, Memory, ShaderModule, Stage, Texture,
+    FrameUploader, GpuAllocation, Instance, Memory, ShaderModule, ShaderTarget, Stage, Texture,
     UPLOAD_ARENA_SIZE,
 };
 
@@ -90,19 +90,23 @@ fn rgba16f_storage_image_roundtrip() {
     let write_source = WRITE_KERNEL.replace("{0}", &storage_slot.to_string());
     let check_source = CHECK_KERNEL.replace("{1}", &sampled_slot.to_string());
     let write_spirv = compiler
-        .compile_source_to_spirv_with_capabilities(
+        .compile_source_with_options(
             "write",
             &write_source,
             "main",
+            ShaderTarget::Spirv,
             &["spvDescriptorHeapEXT"],
+            &[],
         )
         .expect("write kernel compilation");
     let check_spirv = compiler
-        .compile_source_to_spirv_with_capabilities(
+        .compile_source_with_options(
             "check",
             &check_source,
             "main",
+            ShaderTarget::Spirv,
             &["spvDescriptorHeapEXT"],
+            &[],
         )
         .expect("check kernel compilation");
     let write_module = ShaderModule::from_compiled(&device, &write_spirv).expect("write module");

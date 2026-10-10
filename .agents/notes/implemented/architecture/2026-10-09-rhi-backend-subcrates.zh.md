@@ -22,10 +22,13 @@ trait 层意味着改写所有这些签名。
 - `crates/moonfield-rhi/src` —— 门面。`src/lib.rs` 按后端 feature 携带显式的
   再导出清单；这些清单就是 RHI 的全部公共面。`error`、`indirect`、`types`
   模块路径也被再导出，因此 `moonfield_rhi::types::WrapMode` 依然可解析。
-- `crates/moonfield-rhi/core` —— `moonfield-rhi-core`，后端无关的词汇表
-  （`types.rs`、`error.rs`、`indirect.rs`）。`core` 中不允许出现任何后端：
-  原先放在各类型旁边的 `to_vk` 方法迁移到 `vulkan/src/formats.rs`，收敛在
-  `ToVk` extension trait 之后；结果码转换变成了自由函数 `from_vk`。
+- `crates/moonfield-rhi/core` —— `moonfield-rhi-core`，后端无关层：词汇表
+  （`types.rs`、`error.rs`、`indirect.rs`）与共享的 Slang 编译层
+  （`shader/`：带 `ShaderTarget`（Spirv / MetalLib）的
+  `Compiler`/`ShaderCache`、`Reflection`、`RootParam`）。`core` 中不允许
+  出现任何后端：原先放在各类型旁边的 `to_vk` 方法收敛在
+  `vulkan/src/formats.rs` 的 `ToVk` extension trait 之后；结果码转换是
+  自由函数 `from_vk`。
 - `crates/moonfield-rhi/vulkan` —— `moonfield-rhi-vulkan`，Vulkan 后端：
   全部 `ash`、`ash-window`、`gpu-allocator`、`shader-slang`，以及验证
   `pub(crate)` 内部实现的 GPU 测试。

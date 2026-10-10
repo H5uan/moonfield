@@ -11,7 +11,8 @@ use super::common;
 use crate::{
     AttachmentLayout, ClearValue, CommandBufferUsage, CommandPool, Compiler, Device, Format,
     GpuAllocation, GraphicsPipeline, Instance, LoadOp, Memory, OffscreenTarget, Rect2d,
-    RenderAttachment, RenderPassDesc, RootBinder, SamplerDesc, ShaderModule, StoreOp, Texture,
+    RenderAttachment, RenderPassDesc, RootBinder, SamplerDesc, ShaderModule, ShaderTarget, StoreOp,
+    Texture,
 };
 
 const SIZE: u32 = 64;
@@ -124,26 +125,38 @@ fn fragment_heap_sampling_roundtrip() {
     // the fragment entry (whose signature carries the shared blob's leading
     // root, so `tint` sits behind the vertex pointer).
     let vs_reflection = compiler
-        .compile_source_to_reflection("fullscreen_vs", VERTEX_SHADER, &["main"])
+        .compile_source_to_reflection(
+            "fullscreen_vs",
+            VERTEX_SHADER,
+            &["main"],
+            ShaderTarget::Spirv,
+        )
         .expect("vertex shader reflection");
     let vs_binder = RootBinder::new(&vs_reflection, "main").expect("vertex root binder");
     let vertices_place = vs_binder.pointer_param("vertices").expect("vertices place");
     drop(vs_reflection);
     let fs_reflection = compiler
-        .compile_source_to_reflection("heap_sampler_fs", FRAGMENT_SHADER, &["main"])
+        .compile_source_to_reflection(
+            "heap_sampler_fs",
+            FRAGMENT_SHADER,
+            &["main"],
+            ShaderTarget::Spirv,
+        )
         .expect("fragment shader reflection");
     let fs_binder = RootBinder::new(&fs_reflection, "main").expect("fragment root binder");
     let tint_place = fs_binder.pointer_param("tint").expect("tint place");
     drop(fs_reflection);
     let vertex_spirv = compiler
-        .compile_source_to_spirv("fullscreen_vs", VERTEX_SHADER, "main")
+        .compile_source("fullscreen_vs", VERTEX_SHADER, "main", ShaderTarget::Spirv)
         .expect("vertex shader");
     let fragment_spirv = compiler
-        .compile_source_to_spirv_with_capabilities(
+        .compile_source_with_options(
             "heap_sampler_fs",
             FRAGMENT_SHADER,
             "main",
+            ShaderTarget::Spirv,
             &["spvDescriptorHeapEXT"],
+            &[],
         )
         .expect("fragment shader");
     let vertex_shader = ShaderModule::from_compiled(&device, &vertex_spirv).expect("vs module");

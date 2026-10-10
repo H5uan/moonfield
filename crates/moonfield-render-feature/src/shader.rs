@@ -249,7 +249,9 @@ impl PreparedShaders {
 
     fn cache(&mut self) -> Result<&ShaderCache, String> {
         if self.cache.is_none() {
-            self.cache = Some(ShaderCache::new().map_err(|e| e.to_string())?);
+            self.cache = Some(
+                ShaderCache::new(moonfield_rhi::ShaderTarget::Spirv).map_err(|e| e.to_string())?,
+            );
         }
         Ok(self.cache.as_ref().expect("cache was just ensured"))
     }

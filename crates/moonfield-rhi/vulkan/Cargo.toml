@@ -20,8 +20,3 @@ gpu-allocator = { version = "0.28.0", default-features = false, features = ["std
 raw-window-handle = "0.6.2"
 tracing = { version = "0.1", default-features = false, features = ["std"] }
 shader-slang = { package = "shader-slang-rs", git = "https://github.com/H5uan/shader-slang-rs" }
-
-# Test-only: the shader tests' probe module names resolve imports against the
-# repository's shader tree through the shared asset-root helper.
-[dev-dependencies]
-moonfield-asset = { workspace = true }

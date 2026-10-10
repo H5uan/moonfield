@@ -5,3 +5,9 @@ edition.workspace = true
 
 [dependencies]
 bytemuck = { version = "1.23", features = ["derive"] }
+shader-slang = { package = "shader-slang-rs", git = "https://github.com/H5uan/shader-slang-rs" }
+
+# Test-only: the shader tests' probe module names resolve imports against the
+# repository's shader tree through the shared asset-root helper.
+[dev-dependencies]
+moonfield-asset = { workspace = true }

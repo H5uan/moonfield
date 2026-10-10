@@ -70,7 +70,7 @@ pub use plugin::RenderDevice;
 pub use retire::RETIRE_RING;
 pub use shader::{
     CompiledShader, Compiler, Reflection, RootBinder, RootParam, RootParamKind, RootParamPlace,
-    ShaderCache, UserAttributeArg, UserAttributeRef,
+    ShaderCache, ShaderTarget, UserAttributeArg, UserAttributeRef,
 };
 pub use shader_module::ShaderModule;
 pub use swapchain::{Surface, Swapchain};

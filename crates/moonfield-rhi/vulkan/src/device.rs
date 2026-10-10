@@ -967,7 +967,10 @@ impl Device {
     pub fn shader_cache(&self) -> Arc<ShaderCache> {
         self.shader_cache
             .get_or_init(|| {
-                Arc::new(ShaderCache::new().expect("failed to create the shared shader cache"))
+                Arc::new(
+                    ShaderCache::new(moonfield_rhi_core::ShaderTarget::Spirv)
+                        .expect("failed to create the shared shader cache"),
+                )
             })
             .clone()
     }

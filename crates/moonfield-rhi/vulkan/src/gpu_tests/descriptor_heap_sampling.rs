@@ -10,7 +10,7 @@ use super::common;
 
 use crate::{
     CommandBufferUsage, CommandPool, Compiler, ComputePipeline, Device, Format, GpuAllocation,
-    Instance, Memory, SamplerDesc, ShaderModule, Texture,
+    Instance, Memory, SamplerDesc, ShaderModule, ShaderTarget, Texture,
 };
 
 /// Sample one pixel per thread from the heap texture (thread i samples column
@@ -78,11 +78,13 @@ fn heap_texture_sampling_roundtrip() {
     eprintln!("MARK: texture ok");
     let compiler = Compiler::new().expect("compiler");
     let spirv = compiler
-        .compile_source_to_spirv_with_capabilities(
+        .compile_source_with_options(
             "heap_sampler",
             SAMPLER_KERNEL,
             "main",
+            ShaderTarget::Spirv,
             &["spvDescriptorHeapEXT"],
+            &[],
         )
         .expect("shader compilation");
     eprintln!("MARK: compiled");

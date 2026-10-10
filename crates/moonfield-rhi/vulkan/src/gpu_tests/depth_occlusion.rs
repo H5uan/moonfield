@@ -12,7 +12,7 @@ use crate::{
     AttachmentLayout, ClearValue, CommandBufferUsage, CommandPool, CompareOp, Compiler, CullMode,
     CullState, DepthState, Device, Format, FrontFace, GpuAllocation, GraphicsPipeline, Instance,
     LoadOp, Memory, OffscreenTarget, Rect2d, RenderAttachment, RenderPassDesc, RootBinder,
-    ShaderModule, StoreOp,
+    ShaderModule, ShaderTarget, StoreOp,
 };
 use ash::vk;
 
@@ -107,16 +107,16 @@ float4 main(PsInput input) : SV_TARGET
 "#;
 
     let vertex_spirv = compiler
-        .compile_source_to_spirv("quad_vs", vertex_source, "main")
+        .compile_source("quad_vs", vertex_source, "main", ShaderTarget::Spirv)
         .expect("vertex shader");
     let fragment_spirv = compiler
-        .compile_source_to_spirv("quad_fs", fragment_source, "main")
+        .compile_source("quad_fs", fragment_source, "main", ShaderTarget::Spirv)
         .expect("fragment shader");
 
     // The vertex array's device address is delivered through push data; its
     // placement comes from the reflected entry point, not a hand-synced constant.
     let reflection = compiler
-        .compile_source_to_reflection("quad_vs", vertex_source, &["main"])
+        .compile_source_to_reflection("quad_vs", vertex_source, &["main"], ShaderTarget::Spirv)
         .expect("vertex shader reflection");
     let binder = RootBinder::new(&reflection, "main").expect("root binder");
     let vertices_place = binder.pointer_param("vertices").expect("vertices place");

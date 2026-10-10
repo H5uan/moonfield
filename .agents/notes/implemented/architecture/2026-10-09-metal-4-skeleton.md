@@ -36,9 +36,15 @@ argument table, and a pixel-verified draw — on real hardware.
   (`RenderAttachment`/`RenderPassDesc`) and the first color attachment.
 - `Memory` is a shared-storage `MTLBuffer` (unified memory: CPU writes via
   `contents`, GPU address via `gpuAddress`); `Texture` is a render-target +
-  shader-read 2D image with CPU readback; `ShaderModule::from_msl` compiles
-  MSL at runtime; `GraphicsPipeline` is vertex+fragment with one color
-  format.
+  shader-read 2D image with CPU readback; `GraphicsPipeline` is vertex+fragment
+  with one color format.
+- `ShaderModule` loads either runtime-compiled MSL (`from_msl`) or a
+  `.metallib` archive from the shared Slang compiler (`from_metallib`,
+  `from_compiled`); `GraphicsPipeline::from_modules` builds a pipeline from
+  the per-entry-point libraries Slang emits. The `slang_metallib` GPU test
+  compiles the Vulkan backend's vertex-pull shader shape (`SV_VertexID` +
+  `Ptr<T>`) with `ShaderTarget::MetalLib` and renders it through
+  argument-table slot 0 — one Slang source serves both backends.
 - The facade gains the `metal` feature and a `compile_error!` rejecting
   builds with both backend features enabled; the metal re-export list is the
   implemented subset of the Vulkan surface. `verify_rhi_boundary.py` scans
@@ -75,6 +81,6 @@ are unchanged — every platform still selects `vulkan`; the `metal` feature
 re-exports the implemented subset only, so consumers cannot reach for
 unimplemented names. The skeleton's render pass takes a single color
 attachment and ignores the depth attachment; `AttachmentLayout` is a
-role marker with no Metal image-layout semantics. Remaining phases
-(Slang `metallib`, `CAMetalLayer` swapchain, capability-gated features,
-the egui port) stay with the proposal note.
+role marker with no Metal image-layout semantics. The remaining phases
+(`CAMetalLayer` swapchain, capability-gated features, the egui port) stay
+with the proposal note.

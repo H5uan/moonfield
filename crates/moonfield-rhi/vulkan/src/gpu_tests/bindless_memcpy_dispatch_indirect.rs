@@ -10,7 +10,7 @@ use super::common;
 use crate::indirect::DispatchIndirectArgs;
 use crate::{
     Access, CommandBufferUsage, CommandPool, Compiler, ComputePipeline, Device, GpuAllocation,
-    Instance, Memory, ShaderModule, Stage,
+    Instance, Memory, ShaderModule, ShaderTarget, Stage,
 };
 use std::sync::Mutex;
 
@@ -135,7 +135,7 @@ fn bindless_dispatch_indirect_roundtrip() {
 
     let compiler = Compiler::new().expect("compiler");
     let spirv = compiler
-        .compile_source_to_spirv("plus_one", PLUS_ONE_KERNEL, "main")
+        .compile_source("plus_one", PLUS_ONE_KERNEL, "main", ShaderTarget::Spirv)
         .expect("kernel compilation");
     let module = ShaderModule::from_compiled(&device, &spirv).expect("shader module");
     let pipeline = ComputePipeline::new(&device, &module).expect("compute pipeline");

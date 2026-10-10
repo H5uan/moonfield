@@ -7,7 +7,7 @@
 
 use super::common;
 
-use crate::{Compiler, ComputePipeline, Device, Instance, ShaderModule};
+use crate::{Compiler, ComputePipeline, Device, Instance, ShaderModule, ShaderTarget};
 
 const NOOP_KERNEL: &str = r#"
 [shader("compute")]
@@ -48,7 +48,7 @@ fn dropped_pipelines_retire_through_the_ring() {
 
     let compiler = Compiler::new().expect("compiler creation");
     let spirv = compiler
-        .compile_source_to_spirv("noop", NOOP_KERNEL, "main")
+        .compile_source("noop", NOOP_KERNEL, "main", ShaderTarget::Spirv)
         .expect("kernel compilation");
     let module = ShaderModule::from_compiled(&device, &spirv).expect("shader module");
 

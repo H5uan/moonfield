@@ -7,7 +7,7 @@
 
 use crate::{
     CommandBufferUsage, CommandPool, Compiler, Device, Format, GpuAllocation, GraphicsPipeline,
-    Instance, Memory, RootBinder, ShaderModule,
+    Instance, Memory, RootBinder, ShaderModule, ShaderTarget,
 };
 
 use super::common;
@@ -90,16 +90,16 @@ PsOutput main(PsInput input)
 "#;
 
     let vertex_spirv = compiler
-        .compile_source_to_spirv("triangle_vs", vertex_source, "main")
+        .compile_source("triangle_vs", vertex_source, "main", ShaderTarget::Spirv)
         .expect("vertex shader compilation");
     let fragment_spirv = compiler
-        .compile_source_to_spirv("triangle_fs", fragment_source, "main")
+        .compile_source("triangle_fs", fragment_source, "main", ShaderTarget::Spirv)
         .expect("fragment shader compilation");
 
     // The vertex array's device address is delivered through push data; its
     // placement comes from the reflected entry point, not a hand-synced constant.
     let reflection = compiler
-        .compile_source_to_reflection("triangle_vs", vertex_source, &["main"])
+        .compile_source_to_reflection("triangle_vs", vertex_source, &["main"], ShaderTarget::Spirv)
         .expect("vertex shader reflection");
     let binder = RootBinder::new(&reflection, "main").expect("root binder");
     let vertices_place = binder.pointer_param("vertices").expect("vertices place");

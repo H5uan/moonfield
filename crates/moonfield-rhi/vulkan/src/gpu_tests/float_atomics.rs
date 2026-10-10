@@ -11,7 +11,7 @@
 use super::common;
 use crate::{
     CommandBufferUsage, CommandPool, Compiler, ComputePipeline, Device, GpuAllocation, Instance,
-    Memory, ShaderModule,
+    Memory, ShaderModule, ShaderTarget,
 };
 
 /// 256 threads: slot 0 gains 1.0 per thread, slot 1 gains `float(tid.x)`.
@@ -55,7 +55,12 @@ fn atomic_add_sums_correctly() {
 
     let compiler = Compiler::new().expect("compiler creation");
     let spirv = compiler
-        .compile_source_to_spirv("float_atomics", SLANG_SOURCE, "float_atomic_add")
+        .compile_source(
+            "float_atomics",
+            SLANG_SOURCE,
+            "float_atomic_add",
+            ShaderTarget::Spirv,
+        )
         .unwrap_or_else(|e| panic!("Slang compilation failed: {e}"));
     let module = ShaderModule::from_compiled(&device, &spirv).expect("shader module");
     let pipeline = ComputePipeline::new(&device, &module).expect("compute pipeline");

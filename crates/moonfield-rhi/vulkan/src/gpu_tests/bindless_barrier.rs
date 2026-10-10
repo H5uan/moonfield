@@ -11,7 +11,7 @@
 use super::common;
 use crate::{
     Access, CommandBufferUsage, CommandPool, Compiler, ComputePipeline, Device, GpuAllocation,
-    Instance, Memory, ShaderModule, Stage,
+    Instance, Memory, ShaderModule, ShaderTarget, Stage,
 };
 
 /// Dispatch A: write all ones into `payload`.
@@ -71,10 +71,10 @@ fn setup() -> Option<(Instance, Device)> {
 fn run_pair(device: &Device, after_access: Access) -> u32 {
     let compiler = Compiler::new().expect("compiler creation");
     let write_spirv = compiler
-        .compile_source_to_spirv("write", WRITE_KERNEL, "main")
+        .compile_source("write", WRITE_KERNEL, "main", ShaderTarget::Spirv)
         .expect("write kernel compilation");
     let check_spirv = compiler
-        .compile_source_to_spirv("check", CHECK_KERNEL, "main")
+        .compile_source("check", CHECK_KERNEL, "main", ShaderTarget::Spirv)
         .expect("check kernel compilation");
     let write_module = ShaderModule::from_compiled(device, &write_spirv).expect("write module");
     let check_module = ShaderModule::from_compiled(device, &check_spirv).expect("check module");

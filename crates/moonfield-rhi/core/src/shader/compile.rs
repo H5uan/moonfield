@@ -1,28 +1,56 @@
-//! Slang compilation: source text or files in, SPIR-V and reflections out.
+//! Slang compilation: source text or files in, target bytecode and
+//! reflections out.
 
 use super::map_slang_error;
 use super::reflection::Reflection;
 use crate::error::{Error as RenderError, Result as RenderResult};
-use ash::vk;
 
-/// A compiled shader: SPIR-V bytecode plus the Vulkan stage Slang resolved for
-/// its entry point.
+/// The backend a compilation targets. Selects the emitted code format and
+/// the Slang profile; both backends compile the same Slang sources.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum ShaderTarget {
+    /// SPIR-V bytecode for the Vulkan backend.
+    Spirv,
+    /// A Metal library (`.metallib`) for the Metal backend.
+    MetalLib,
+}
+
+impl ShaderTarget {
+    fn slang_target(self) -> shader_slang::CompileTarget {
+        match self {
+            Self::Spirv => shader_slang::CompileTarget::Spirv,
+            Self::MetalLib => shader_slang::CompileTarget::MetalLib,
+        }
+    }
+
+    /// The Slang profile for bytecode emission; `None` uses the target's
+    /// default (the Metal backend has no profile to select).
+    fn profile_name(self) -> Option<&'static str> {
+        match self {
+            Self::Spirv => Some("spirv_1_5"),
+            Self::MetalLib => None,
+        }
+    }
+}
+
+/// A compiled shader: target bytecode plus the stage Slang resolved for its
+/// entry point.
 ///
 /// The stage comes from the entry point's `[shader("...")]` annotation via
 /// Slang reflection (`Shader::entry_points()`); the Rust side never guesses
-/// it.
-/// Pipeline construction validates a module's stage against the slot it is
-/// handed to (`VERTEX` slot × vertex module, etc.), so a shader compiled with
-/// the wrong annotation fails loudly instead of silently misbinding.
+/// it. Each backend maps the stage onto its own pipeline vocabulary when
+/// constructing pipelines, so a shader compiled with the wrong annotation
+/// fails loudly instead of silently misbinding.
 #[derive(Debug, Clone)]
 pub struct CompiledShader {
-    /// SPIR-V bytecode, ready for `vkCreateShaderModule`.
-    pub(crate) spirv: Vec<u8>,
-    /// The Vulkan stage of the compiled entry point.
-    pub(crate) stage: vk::ShaderStageFlags,
-    /// The entry point name as it appears in the emitted SPIR-V (Slang may
-    /// rename it, e.g. to `main`); the pipeline must name this exact string.
-    pub(crate) entry: String,
+    /// Target bytecode (SPIR-V words or a Metal library archive).
+    pub code: Vec<u8>,
+    /// The stage of the compiled entry point (Slang's own vocabulary).
+    pub stage: shader_slang::Stage,
+    /// The entry point name the emitted code actually names — Slang renames
+    /// entry points for some targets (e.g. SPIR-V emits `main` regardless of
+    /// the source-level name); the backend must load this exact string.
+    pub entry: String,
 }
 
 /// Extract the name of the (single) `OpEntryPoint` from SPIR-V bytecode.
@@ -68,36 +96,6 @@ fn spirv_entry_name(bytecode: &[u8]) -> Option<String> {
     None
 }
 
-/// Map a Slang reflection stage to its Vulkan `VkShaderStageFlagBits` value.
-///
-/// Only stages a pipeline can name today are mapped; unknown stages (e.g.
-/// `Dispatch`/`Node`, which have no pipeline representation yet) error out.
-fn to_vk_stage(stage: shader_slang::Stage) -> RenderResult<vk::ShaderStageFlags> {
-    use shader_slang::Stage::*;
-    Ok(match stage {
-        Vertex => vk::ShaderStageFlags::VERTEX,
-        Hull => vk::ShaderStageFlags::TESSELLATION_CONTROL,
-        Domain => vk::ShaderStageFlags::TESSELLATION_EVALUATION,
-        Geometry => vk::ShaderStageFlags::GEOMETRY,
-        Fragment => vk::ShaderStageFlags::FRAGMENT,
-        Compute => vk::ShaderStageFlags::COMPUTE,
-        RayGeneration => vk::ShaderStageFlags::RAYGEN_KHR,
-        Intersection => vk::ShaderStageFlags::INTERSECTION_KHR,
-        AnyHit => vk::ShaderStageFlags::ANY_HIT_KHR,
-        ClosestHit => vk::ShaderStageFlags::CLOSEST_HIT_KHR,
-        Miss => vk::ShaderStageFlags::MISS_KHR,
-        Callable => vk::ShaderStageFlags::CALLABLE_KHR,
-        Mesh => vk::ShaderStageFlags::MESH_EXT,
-        Amplification => vk::ShaderStageFlags::TASK_EXT,
-        _ => {
-            return Err(RenderError::Unsupported(format!(
-                "shader stage has no pipeline representation: {:?}",
-                stage
-            )));
-        }
-    })
-}
-
 /// Slang compiler session wrapper.
 pub struct Compiler {
     global_session: shader_slang::GlobalSession,
@@ -106,15 +104,18 @@ pub struct Compiler {
 /// Compile-once cache of [`CompiledShader`]s, keyed by the compile inputs.
 ///
 /// Every pipeline today compiles its shaders itself (`Compiler::new()`, then
-/// `compile_file_to_spirv`), so an N-pipeline app compiles the same file N
-/// times. This cache memoizes by `(file, source, entry, capabilities)`; the
-/// caller still creates `vk::ShaderModule`s (they are device-bound) via
-/// [`ShaderModule::from_compiled`], which is cheap.
+/// `compile_source`), so an N-pipeline app compiles the same file N times.
+/// This cache memoizes by `(file, source, entry, capabilities)`; the caller
+/// still creates backend shader modules (they are device-bound) via e.g.
+/// the Vulkan `ShaderModule::from_compiled`, which is cheap.
+///
+/// One cache serves one [`ShaderTarget`]; backends create their own.
 ///
 /// Slang sessions are not thread-safe, so compilation happens under a mutex;
 /// the cache itself is `Sync` for shared use from a render-world resource.
 pub struct ShaderCache {
     compiler: Compiler,
+    target: ShaderTarget,
     cache:
         std::sync::Mutex<std::collections::HashMap<ShaderCacheKey, std::sync::Arc<CompiledShader>>>,
     reflections:
@@ -144,10 +145,11 @@ struct ShaderCacheKey {
 }
 
 impl ShaderCache {
-    /// Create an empty cache with its own compiler session.
-    pub fn new() -> RenderResult<Self> {
+    /// Create an empty cache with its own compiler session, serving `target`.
+    pub fn new(target: ShaderTarget) -> RenderResult<Self> {
         Ok(Self {
             compiler: Compiler::new()?,
+            target,
             cache: std::sync::Mutex::new(std::collections::HashMap::new()),
             reflections: std::sync::Mutex::new(std::collections::HashMap::new()),
         })
@@ -173,11 +175,19 @@ impl ShaderCache {
                 .collect(),
         };
         self.get_or_compile(key, |compiler, key| {
-            compiler.with_caps(
+            let caps: Vec<&str> = key.capabilities.iter().map(String::as_str).collect();
+            let defs: Vec<(&str, &str)> = key
+                .defines
+                .iter()
+                .map(|(k, v)| (k.as_str(), v.as_str()))
+                .collect();
+            compiler.compile_with_options(
                 &key.module_name,
+                None,
                 &key.entry_point,
-                &key.capabilities,
-                &key.defines,
+                self.target,
+                &caps,
+                &defs,
             )
         })
     }
@@ -203,12 +213,19 @@ impl ShaderCache {
                 .collect(),
         };
         self.get_or_compile(key, |compiler, key| {
-            compiler.with_caps_source(
+            let caps: Vec<&str> = key.capabilities.iter().map(String::as_str).collect();
+            let defs: Vec<(&str, &str)> = key
+                .defines
+                .iter()
+                .map(|(k, v)| (k.as_str(), v.as_str()))
+                .collect();
+            compiler.compile_with_options(
                 &key.module_name,
-                &key.source,
+                Some(&key.source),
                 &key.entry_point,
-                &key.capabilities,
-                &key.defines,
+                self.target,
+                &caps,
+                &defs,
             )
         })
     }
@@ -229,7 +246,7 @@ impl ShaderCache {
             defines: Vec::new(),
         };
         self.get_or_reflect(key, |compiler, key| {
-            compiler.compile_file_to_reflection(&key.module_name, &key.entry_point)
+            compiler.compile_file_to_reflection(&key.module_name, &key.entry_point, self.target)
         })
     }
 
@@ -261,6 +278,7 @@ impl ShaderCache {
                 &key.module_name,
                 &key.source,
                 &key.entry_point.split(',').collect::<Vec<_>>(),
+                self.target,
             )
         })
     }
@@ -303,53 +321,34 @@ impl Compiler {
         Ok(Self { global_session })
     }
 
-    /// Compile a file, forwarding extra capabilities and macro definitions.
-    /// Shared by [`ShaderCache`], which stores them in its key.
-    pub(crate) fn with_caps(
+    /// Compile a Slang file for the given entry point.
+    pub fn compile_file(
         &self,
         path: &str,
         entry_point: &str,
-        capabilities: &[String],
-        defines: &[(String, String)],
+        target: ShaderTarget,
     ) -> RenderResult<CompiledShader> {
-        let caps: Vec<&str> = capabilities.iter().map(String::as_str).collect();
-        let defs: Vec<(&str, &str)> = defines
-            .iter()
-            .map(|(k, v)| (k.as_str(), v.as_str()))
-            .collect();
-        if caps.is_empty() && defs.is_empty() {
-            self.compile_file_to_spirv(path, entry_point)
-        } else {
-            self.compile_file_to_spirv_with_options(path, entry_point, &caps, &defs)
-        }
+        self.compile_with_options(path, None, entry_point, target, &[], &[])
     }
 
-    /// Compile in-memory source, forwarding extra capabilities and macro
+    /// Compile a Slang file with extra capabilities and preprocessor macro
     /// definitions.
-    pub(crate) fn with_caps_source(
+    ///
+    /// Capability names are Slang capability atoms (e.g. `spvDescriptorHeapEXT`
+    /// for the `VK_EXT_descriptor_heap` shader path — `ResourceDescriptorHeap[]`
+    /// then lowers to untyped pointer heap access without descriptor bindings).
+    /// Unknown names are ignored so callers can pass driver-dependent lists.
+    /// Macros select shader variants (feature toggles, material flags) without
+    /// duplicating source files.
+    pub fn compile_file_with_options(
         &self,
-        module_name: &str,
-        source: &str,
+        path: &str,
         entry_point: &str,
-        capabilities: &[String],
-        defines: &[(String, String)],
+        target: ShaderTarget,
+        capabilities: &[&str],
+        defines: &[(&str, &str)],
     ) -> RenderResult<CompiledShader> {
-        let caps: Vec<&str> = capabilities.iter().map(String::as_str).collect();
-        let defs: Vec<(&str, &str)> = defines
-            .iter()
-            .map(|(k, v)| (k.as_str(), v.as_str()))
-            .collect();
-        if caps.is_empty() && defs.is_empty() {
-            self.compile_source_to_spirv(module_name, source, entry_point)
-        } else {
-            self.compile_source_to_spirv_with_options(
-                module_name,
-                source,
-                entry_point,
-                &caps,
-                &defs,
-            )
-        }
+        self.compile_with_options(path, None, entry_point, target, capabilities, defines)
     }
 
     /// Compile Slang source code for the given entry point.
@@ -359,109 +358,64 @@ impl Compiler {
     /// source import sibling modules from that file's directory (the asset
     /// layer passes the asset's path); a plain name leaves imports
     /// resolving against the process working directory.
-    pub fn compile_source_to_spirv(
+    pub fn compile_source(
         &self,
         module_name: &str,
         source: &str,
         entry_point: &str,
+        target: ShaderTarget,
     ) -> RenderResult<CompiledShader> {
-        self.compile_source_to_spirv_impl(module_name, source, entry_point, &[], &[])
+        self.compile_with_options(module_name, Some(source), entry_point, target, &[], &[])
     }
 
-    /// Compile a Slang file for the given entry point.
-    pub fn compile_file_to_spirv(
-        &self,
-        path: &str,
-        entry_point: &str,
-    ) -> RenderResult<CompiledShader> {
-        self.compile_file_to_spirv_impl(path, entry_point, &[], &[])
-    }
-
-    /// Compile a Slang file with extra SPIR-V capabilities enabled.
-    ///
-    /// Capability names are Slang capability atoms (e.g. `spvDescriptorHeapEXT`
-    /// for the `VK_EXT_descriptor_heap` shader path — `ResourceDescriptorHeap[]`
-    /// then lowers to untyped pointer heap access without descriptor bindings).
-    /// Unknown names are ignored so callers can pass driver-dependent lists.
-    pub fn compile_file_to_spirv_with_capabilities(
-        &self,
-        path: &str,
-        entry_point: &str,
-        capabilities: &[&str],
-    ) -> RenderResult<CompiledShader> {
-        self.compile_file_to_spirv_impl(path, entry_point, capabilities, &[])
-    }
-
-    /// Compile a Slang file with extra capabilities and preprocessor macro
-    /// definitions. Macros select shader variants (feature toggles, material
-    /// flags) without duplicating source files.
-    pub fn compile_file_to_spirv_with_options(
-        &self,
-        path: &str,
-        entry_point: &str,
-        capabilities: &[&str],
-        defines: &[(&str, &str)],
-    ) -> RenderResult<CompiledShader> {
-        self.compile_file_to_spirv_impl(path, entry_point, capabilities, defines)
-    }
-
-    /// Compile Slang source with extra capabilities (see
-    /// [`compile_file_to_spirv_with_capabilities`]).
-    pub fn compile_source_to_spirv_with_capabilities(
+    /// Compile Slang source with extra capabilities and macro definitions
+    /// (see [`compile_file_with_options`](Self::compile_file_with_options)).
+    pub fn compile_source_with_options(
         &self,
         module_name: &str,
         source: &str,
         entry_point: &str,
+        target: ShaderTarget,
         capabilities: &[&str],
+        defines: &[(&str, &str)],
     ) -> RenderResult<CompiledShader> {
-        self.compile_source_to_spirv_impl(module_name, source, entry_point, capabilities, &[])
+        self.compile_with_options(
+            module_name,
+            Some(source),
+            entry_point,
+            target,
+            capabilities,
+            defines,
+        )
     }
 
-    /// Compile Slang source with extra capabilities and macro definitions.
-    pub fn compile_source_to_spirv_with_options(
+    /// The unified compile path: `source: None` compiles the file at
+    /// `module_name`, `Some` compiles in-memory source. Shared by
+    /// [`ShaderCache`], which forwards its cached capabilities and defines.
+    pub(crate) fn compile_with_options(
         &self,
         module_name: &str,
-        source: &str,
+        source: Option<&str>,
         entry_point: &str,
+        target: ShaderTarget,
         capabilities: &[&str],
         defines: &[(&str, &str)],
     ) -> RenderResult<CompiledShader> {
-        self.compile_source_to_spirv_impl(module_name, source, entry_point, capabilities, defines)
+        let session = self.create_session(target, capabilities, defines)?;
+        let module = match source {
+            Some(source) => session
+                .load_module_from_source_string(module_name, module_name, source)
+                .map_err(map_slang_error)?,
+            None => session.load_module(module_name).map_err(map_slang_error)?,
+        };
+        self.finish_compile(&session, module, entry_point, target)
     }
 
-    fn compile_file_to_spirv_impl(
-        &self,
-        path: &str,
-        entry_point: &str,
-        capabilities: &[&str],
-        defines: &[(&str, &str)],
-    ) -> RenderResult<CompiledShader> {
-        let session = self.create_session(capabilities, defines)?;
-        let module = session.load_module(path).map_err(map_slang_error)?;
-        self.finish_compile(&session, module, entry_point)
-    }
-
-    /// Compile in-memory Slang source to SPIR-V. Shared with
-    /// [`compile_source_to_spirv`], which supplies no capabilities.
-    fn compile_source_to_spirv_impl(
-        &self,
-        module_name: &str,
-        source: &str,
-        entry_point: &str,
-        capabilities: &[&str],
-        defines: &[(&str, &str)],
-    ) -> RenderResult<CompiledShader> {
-        let session = self.create_session(capabilities, defines)?;
-        let module = session
-            .load_module_from_source_string(module_name, module_name, source)
-            .map_err(map_slang_error)?;
-        self.finish_compile(&session, module, entry_point)
-    }
-
-    /// Create a Slang session targeting SPIR-V with the given capabilities
+    /// Create a Slang session targeting `target` with the given capabilities
     /// and preprocessor macro definitions.
     fn create_session(
         &self,
+        target: ShaderTarget,
         capabilities: &[&str],
         defines: &[(&str, &str)],
     ) -> RenderResult<shader_slang::Session> {
@@ -478,11 +432,12 @@ impl Compiler {
             options = options.macro_define(key, value).map_err(map_slang_error)?;
         }
 
-        let profile = self.global_session.find_profile("spirv_1_5");
-        let target_desc = shader_slang::TargetDesc::default()
-            .format(shader_slang::CompileTarget::Spirv)
-            .profile(profile)
+        let mut target_desc = shader_slang::TargetDesc::default()
+            .format(target.slang_target())
             .options(&options);
+        if let Some(profile) = target.profile_name() {
+            target_desc = target_desc.profile(self.global_session.find_profile(profile));
+        }
         let targets = [target_desc];
 
         let session_desc = shader_slang::SessionDesc::default()
@@ -502,6 +457,7 @@ impl Compiler {
         session: &shader_slang::Session,
         module: shader_slang::Module,
         entry_point: &str,
+        target: ShaderTarget,
     ) -> RenderResult<CompiledShader> {
         let entry = module
             .find_entry_point_by_name(entry_point)
@@ -529,19 +485,51 @@ impl Compiler {
                     entry_point
                 ))
             })?;
-        let stage = to_vk_stage(reflected_entry.stage())?;
-        // The pipeline must name the entry point exactly as it appears in the
-        // emitted SPIR-V (Slang emits `main` regardless of the source name);
-        // reflection `name_override` only report s source-level overrides.
-        let entry = spirv_entry_name(bytecode.as_slice()).ok_or_else(|| {
-            RenderError::Backend("emitted SPIR-V has no OpEntryPoint".to_string())
-        })?;
+        let stage = reflected_entry.stage();
+        // The backend must name the entry point exactly as the emitted code
+        // names it. SPIR-V renames every entry point to `main` (the binary is
+        // the only authority — reflection reports source-level names); Metal
+        // libraries keep the source-level name.
+        let entry = match target {
+            ShaderTarget::Spirv => spirv_entry_name(bytecode.as_slice()).ok_or_else(|| {
+                RenderError::Backend("emitted SPIR-V has no OpEntryPoint".to_string())
+            })?,
+            ShaderTarget::MetalLib => entry_point.to_string(),
+        };
 
         Ok(CompiledShader {
-            spirv: bytecode.as_slice().to_vec(),
+            code: bytecode.as_slice().to_vec(),
             stage,
             entry,
         })
+    }
+
+    /// A Slang session for reflection-only compiles. Reflection layouts are
+    /// target- and profile-dependent, so this stays separate from the
+    /// bytecode session (SPIR-V reflection compiles use `spirv_1_4`).
+    fn create_reflection_session(
+        &self,
+        target: ShaderTarget,
+    ) -> RenderResult<shader_slang::Session> {
+        let options = shader_slang::CompilerOptions::default()
+            .optimization(shader_slang::OptimizationLevel::High)
+            .matrix_layout_row(true);
+
+        let mut target_desc = shader_slang::TargetDesc::default()
+            .format(target.slang_target())
+            .options(&options);
+        if target == ShaderTarget::Spirv {
+            target_desc = target_desc.profile(self.global_session.find_profile("spirv_1_4"));
+        }
+        let targets = [target_desc];
+
+        let session_desc = shader_slang::SessionDesc::default()
+            .targets(&targets)
+            .options(&options);
+
+        self.global_session
+            .create_session(&session_desc)
+            .ok_or_else(|| RenderError::Backend("failed to create Slang session".to_string()))
     }
 
     /// Compile a Slang file and return a reflection object that computes struct
@@ -552,26 +540,9 @@ impl Compiler {
         &self,
         path: &str,
         entry_point: &str,
+        target: ShaderTarget,
     ) -> RenderResult<Reflection> {
-        let options = shader_slang::CompilerOptions::default()
-            .optimization(shader_slang::OptimizationLevel::High)
-            .matrix_layout_row(true);
-
-        let profile = self.global_session.find_profile("spirv_1_4");
-        let target_desc = shader_slang::TargetDesc::default()
-            .format(shader_slang::CompileTarget::Spirv)
-            .profile(profile)
-            .options(&options);
-        let targets = [target_desc];
-
-        let session_desc = shader_slang::SessionDesc::default()
-            .targets(&targets)
-            .options(&options);
-
-        let session = self
-            .global_session
-            .create_session(&session_desc)
-            .ok_or_else(|| RenderError::Backend("failed to create Slang session".to_string()))?;
+        let session = self.create_reflection_session(target)?;
 
         let module = session.load_module(path).map_err(map_slang_error)?;
 
@@ -614,26 +585,9 @@ impl Compiler {
         module_name: &str,
         source: &str,
         entry_points: &[&str],
+        target: ShaderTarget,
     ) -> RenderResult<Reflection> {
-        let options = shader_slang::CompilerOptions::default()
-            .optimization(shader_slang::OptimizationLevel::High)
-            .matrix_layout_row(true);
-
-        let profile = self.global_session.find_profile("spirv_1_4");
-        let target_desc = shader_slang::TargetDesc::default()
-            .format(shader_slang::CompileTarget::Spirv)
-            .profile(profile)
-            .options(&options);
-        let targets = [target_desc];
-
-        let session_desc = shader_slang::SessionDesc::default()
-            .targets(&targets)
-            .options(&options);
-
-        let session = self
-            .global_session
-            .create_session(&session_desc)
-            .ok_or_else(|| RenderError::Backend("failed to create Slang session".to_string()))?;
+        let session = self.create_reflection_session(target)?;
 
         let module = session
             .load_module_from_source_string(module_name, module_name, source)
@@ -697,7 +651,7 @@ mod tests {
     /// different one when the key differs — without recompiling.
     #[test]
     fn shader_cache_memoizes_by_key() {
-        let cache = ShaderCache::new().expect("cache");
+        let cache = ShaderCache::new(ShaderTarget::Spirv).expect("cache");
         let first = cache
             .compile_source("memo", KERNEL, "main", &[], &[])
             .expect("compile");
@@ -708,7 +662,7 @@ mod tests {
             std::sync::Arc::ptr_eq(&first, &second),
             "same key must share the artifact"
         );
-        assert_eq!(first.stage, vk::ShaderStageFlags::COMPUTE);
+        assert_eq!(first.stage, shader_slang::Stage::Compute);
         assert_eq!(first.entry, "main");
         // Different entry point → different key → new artifact.
         let other = cache
@@ -759,7 +713,7 @@ mod tests {
         let compiler = Compiler::new().expect("compiler");
         // Each entry links into its own program, so reflection is per entry.
         let vs_refl = compiler
-            .compile_source_to_reflection("multi", MULTI, &["vs_main"])
+            .compile_source_to_reflection("multi", MULTI, &["vs_main"], ShaderTarget::Spirv)
             .expect("reflection");
         assert_eq!(
             vs_refl.compute_thread_group_size("vs_main").expect("vs"),
@@ -767,7 +721,7 @@ mod tests {
             "non-compute entry has no thread-group size"
         );
         let cull_refl = compiler
-            .compile_source_to_reflection("multi", MULTI, &["cull_main"])
+            .compile_source_to_reflection("multi", MULTI, &["cull_main"], ShaderTarget::Spirv)
             .expect("reflection");
         assert_eq!(
             cull_refl
@@ -778,17 +732,17 @@ mod tests {
         );
         // Both entries compile from the same module; each names its own stage.
         let cull = compiler
-            .compile_source_to_spirv("multi", MULTI, "cull_main")
+            .compile_source("multi", MULTI, "cull_main", ShaderTarget::Spirv)
             .expect("cull compile");
         let vs = compiler
-            .compile_source_to_spirv("multi", MULTI, "vs_main")
+            .compile_source("multi", MULTI, "vs_main", ShaderTarget::Spirv)
             .expect("vs compile");
-        assert_eq!(cull.stage, vk::ShaderStageFlags::COMPUTE);
+        assert_eq!(cull.stage, shader_slang::Stage::Compute);
         assert_eq!(
             cull.entry, "main",
             "SPIR-V emits `main` for the compute entry regardless of source name"
         );
-        assert_eq!(vs.stage, vk::ShaderStageFlags::VERTEX);
+        assert_eq!(vs.stage, shader_slang::Stage::Vertex);
     }
 
     /// A source-string module compiled under a real-path module name resolves
@@ -836,9 +790,9 @@ mod tests {
             }
         "#;
         let shader = compiler
-            .compile_source_to_spirv(&module_path, PROBE, "probe")
+            .compile_source(&module_path, PROBE, "probe", ShaderTarget::Spirv)
             .expect("import resolves through the module-name path hint");
-        assert!(!shader.spirv.is_empty());
+        assert!(!shader.code.is_empty());
     }
 
     /// The module boundary enforces access control: `internal` symbols of an
@@ -866,7 +820,7 @@ mod tests {
             }
         "#;
         let error = compiler
-            .compile_source_to_spirv(&module_path, PROBE, "probe")
+            .compile_source(&module_path, PROBE, "probe", ShaderTarget::Spirv)
             .expect_err("internal symbol must not be visible to an importer");
         let message = format!("{error}");
         assert!(

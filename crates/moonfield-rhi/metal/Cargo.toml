@@ -7,6 +7,7 @@ edition.workspace = true
 moonfield-rhi-core = { path = "../core" }
 bytemuck = { version = "1.23", features = ["derive"] }
 objc2 = "0.6.4"
+dispatch2 = { version = "0.3", default-features = false, features = ["block2"] }
 objc2-foundation = { version = "0.3", default-features = false, features = ["NSString", "NSError"] }
-objc2-metal = "0.3.2"
+objc2-metal = { version = "0.3.2", features = ["dispatch2"] }
 tracing = { version = "0.1", default-features = false, features = ["std"] }

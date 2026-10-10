@@ -341,6 +341,7 @@ mod tests {
                     "radix_sort_blob_layout",
                     &radix_sort_source(),
                     &[entry],
+                    moonfield_rhi::ShaderTarget::Spirv,
                 )
                 .expect(entry);
             let binder = RootBinder::new(&reflection, entry).expect("root binder");
@@ -378,6 +379,7 @@ mod tests {
                     "radix_sort_blob_layout",
                     &radix_sort_source(),
                     &[entry],
+                    moonfield_rhi::ShaderTarget::Spirv,
                 )
                 .expect(entry);
             let params = reflection.root_parameters(entry).expect("root params");

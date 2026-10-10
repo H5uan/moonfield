@@ -13,9 +13,11 @@ directory:
 
 - `src/` — the facade. The re-export lists in `src/lib.rs` are the RHI's
   entire public surface; anything not re-exported there is not public API.
-- `core/` — `moonfield-rhi-core`, the backend-agnostic vocabulary
-  (`types.rs`, `error.rs`, `indirect.rs`). Nothing in `core` may mention a
-  backend.
+- `core/` — `moonfield-rhi-core`, the backend-agnostic layer: the
+  vocabulary (`types.rs`, `error.rs`, `indirect.rs`) and the shared Slang
+  compiler (`shader/` — `Compiler`/`ShaderCache`/`CompiledShader` with a
+  `ShaderTarget` (Spirv / MetalLib), `Reflection`, `RootParam`). Nothing
+  in `core` may mention a backend.
 - `vulkan/` — `moonfield-rhi-vulkan`, the Vulkan backend (`ash`).
 - `metal/` — `moonfield-rhi-metal`, the Metal 4 backend (`objc2-metal`).
 
@@ -69,11 +71,17 @@ backend types enables the feature explicitly.
 
 ## Shaders
 
-- Runtime Slang→SPIR-V compilation is provided by the `vulkan/src/shader/`
-  module (`compile.rs` — `Compiler`/`CompiledShader`/`ShaderCache`,
-  `reflection.rs` — the self-referential `Reflection` wrapper and `Layout`,
-  `root_binder.rs` — `RootParam*`/`RootBinder`); `ShaderModule::from_spirv`
-  loads SPIR-V bytecode directly.
+- Slang compilation is target-agnostic and lives in `core/src/shader/`:
+  `compile.rs` — `Compiler`/`CompiledShader`/`ShaderCache` with a
+  `ShaderTarget` (`Spirv` for this backend, `MetalLib` for Metal);
+  `reflection.rs` — the self-referential `Reflection` wrapper, `Layout`,
+  `RootParam`, and the user-attribute types. The Vulkan-specific binding
+  vocabulary stays here: `vulkan/src/shader/root_binder.rs` —
+  `RootBinder`/`RootParamPlace`, turning reflection results into push-data
+  blobs; `ShaderModule::from_spirv` loads SPIR-V bytecode directly and
+  `ShaderModule::from_compiled` maps the shared stage onto Vulkan's stage
+  flags. The Metal backend loads `.metallib` archives through
+  `metal/src/shader_module.rs` (`from_metallib`/`from_compiled`).
 - One offline Slang compile (`slangc -target spirv`) can also produce embedded
   shader bytes with `include_bytes!`.
 - Native deps: **Slang** (`shader-slang-sys` links it dynamically — set

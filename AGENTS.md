@@ -30,7 +30,8 @@ moonfield-ml/       # ML training runtime on the RHI (Trainer, Adam, dataset, ch
 moonfield-reflect/  # Mini reflection for the editor: named fields, dynamic read/write, nesting
 moonfield-reflect-derive/ # #[derive(Reflect)] proc-macro (the one sanctioned proc-macro crate)
 moonfield-rhi/   # Lunar Mare — the rendering RHI: facade crate over backend sub-crates;
-                    # core/ (shared vocabulary), vulkan/ (moonfield-rhi-vulkan, ash).
+                    # core/ (vocabulary + shared Slang compiler with Spirv/MetalLib targets),
+                    # vulkan/ (moonfield-rhi-vulkan, ash), metal/ (moonfield-rhi-metal, Metal 4).
                     # See crates/moonfield-rhi/AGENTS.md
 moonfield-render-core/ # Selene — the render engine layer (extraction, view targets, window frame loop, RenderPlugin)
 moonfield-render-feature/ # Lunaris — high-level render features (mesh/splat/rt/gi) and Core3d phases;

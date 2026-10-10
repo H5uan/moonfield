@@ -5,6 +5,36 @@ use crate::device::{Device, DeviceContext};
 use crate::error::{Error, Result};
 use ash::vk;
 
+/// Map a Slang reflection stage to its Vulkan `VkShaderStageFlagBits` value.
+///
+/// Only stages a pipeline can name today are mapped; unknown stages (e.g.
+/// `Dispatch`/`Node`, which have no pipeline representation yet) error out.
+fn to_vk_stage(stage: shader_slang::Stage) -> Result<vk::ShaderStageFlags> {
+    use shader_slang::Stage::*;
+    Ok(match stage {
+        Vertex => vk::ShaderStageFlags::VERTEX,
+        Hull => vk::ShaderStageFlags::TESSELLATION_CONTROL,
+        Domain => vk::ShaderStageFlags::TESSELLATION_EVALUATION,
+        Geometry => vk::ShaderStageFlags::GEOMETRY,
+        Fragment => vk::ShaderStageFlags::FRAGMENT,
+        Compute => vk::ShaderStageFlags::COMPUTE,
+        RayGeneration => vk::ShaderStageFlags::RAYGEN_KHR,
+        Intersection => vk::ShaderStageFlags::INTERSECTION_KHR,
+        AnyHit => vk::ShaderStageFlags::ANY_HIT_KHR,
+        ClosestHit => vk::ShaderStageFlags::CLOSEST_HIT_KHR,
+        Miss => vk::ShaderStageFlags::MISS_KHR,
+        Callable => vk::ShaderStageFlags::CALLABLE_KHR,
+        Mesh => vk::ShaderStageFlags::MESH_EXT,
+        Amplification => vk::ShaderStageFlags::TASK_EXT,
+        _ => {
+            return Err(Error::Unsupported(format!(
+                "shader stage has no pipeline representation: {:?}",
+                stage
+            )));
+        }
+    })
+}
+
 /// A Vulkan shader module created from SPIR-V bytecode.
 ///
 /// Carries the [`CompiledShader`] stage it was built from (when created via
@@ -58,8 +88,8 @@ impl ShaderModule {
     /// Create a shader module from a [`CompiledShader`], recording its stage
     /// and emitted entry-point name.
     pub fn from_compiled(device: &Device, compiled: &CompiledShader) -> Result<Self> {
-        let mut module = Self::from_spirv(device, &compiled.spirv)?;
-        module.stage = Some(compiled.stage);
+        let mut module = Self::from_spirv(device, &compiled.code)?;
+        module.stage = Some(to_vk_stage(compiled.stage)?);
         module.entry = Some(compiled.entry.clone());
         Ok(module)
     }

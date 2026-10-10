@@ -32,8 +32,13 @@ macOS 没有 GPU 路径：Vulkan 后端的设备表无法被 MoltenVK 满足，A
   color attachment。
 - `Memory` 是共享存储的 `MTLBuffer`（统一内存：CPU 经 `contents` 写、GPU
   地址经 `gpuAddress`）；`Texture` 是渲染目标 + shader 可读的 2D 图像，
-  带 CPU 读回；`ShaderModule::from_msl` 运行时编译 MSL；
-  `GraphicsPipeline` 是顶点+片元、单 color format。
+  带 CPU 读回；`GraphicsPipeline` 是顶点+片元、单 color format。
+- `ShaderModule` 既可加载运行时编译的 MSL（`from_msl`），也可加载共享
+  Slang 编译器产出的 `.metallib` 归档（`from_metallib`、`from_compiled`）；
+  `GraphicsPipeline::from_modules` 用 Slang 按入口点生成的库构建管线。
+  `slang_metallib` GPU 测试把 Vulkan 后端的顶点拉取 shader 形态
+  （`SV_VertexID` + `Ptr<T>`）以 `ShaderTarget::MetalLib` 编译并经
+  argument-table 槽位 0 渲染 —— 一份 Slang 源服务两个后端。
 - 门面增加 `metal` feature，并以 `compile_error!` 拒绝两个后端 feature
   同时启用的构建；metal 再导出清单是 Vulkan 表面已实现的子集。
   `verify_rhi_boundary.py` 与其余源码树一起扫描 `metal/src`。
@@ -66,5 +71,4 @@ Metal 4 设备上运行。下游 crate 不变 —— 所有平台仍然选择 `v
 feature 只再导出已实现的子集，消费方拿不到未实现的名字。骨架的 render
 pass 只取单个 color attachment、忽略 depth attachment；
 `AttachmentLayout` 是角色标记，没有 Metal 图像布局语义。剩余阶段
-（Slang `metallib`、`CAMetalLayer` swapchain、能力门控特性、egui 移植）
-仍由提案笔记持有。
+（`CAMetalLayer` swapchain、能力门控特性、egui 移植）仍由提案笔记持有。

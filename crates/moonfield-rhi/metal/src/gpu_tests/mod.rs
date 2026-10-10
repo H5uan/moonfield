@@ -2,3 +2,4 @@
 //! machines without a Metal 4 device.
 
 mod offscreen_triangle;
+mod slang_metallib;
