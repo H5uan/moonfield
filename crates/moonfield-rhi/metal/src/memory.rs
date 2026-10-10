@@ -6,12 +6,45 @@ use objc2_metal::{MTLBuffer, MTLDevice, MTLResourceOptions};
 
 use crate::device::Device;
 
+/// A host pointer into CPU-visible GPU memory (shared storage): one
+/// allocation, two views — this CPU view and the [`GpuPtr`] GPU view of the
+/// same bytes.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct HostPtr {
+    ptr: *mut u8,
+}
+
+impl HostPtr {
+    /// Wrap a host pointer into shared GPU memory.
+    pub(crate) fn new(ptr: *mut u8) -> Self {
+        Self { ptr }
+    }
+
+    /// Get the pointer reinterpreted for a given CPU type.
+    pub fn typed<T>(&self) -> *mut T {
+        self.ptr.cast()
+    }
+}
+
+// Safety: a `HostPtr` is only created for an allocation that remains valid
+// for the pointer's whole lifetime, and the allocation's bytes are owned by
+// that one pointer — no other thread can write them. Sharing a `&HostPtr`
+// across threads is read-only, so `Sync` holds under the same
+// single-writer contract.
+unsafe impl Send for HostPtr {}
+unsafe impl Sync for HostPtr {}
+
 /// A GPU device address, in bytes (the Metal counterpart of the Vulkan
 /// backend's buffer-device-address carrier).
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct GpuPtr(u64);
 
 impl GpuPtr {
+    /// Wrap a raw device address.
+    pub(crate) fn new(address: u64) -> Self {
+        Self(address)
+    }
+
     /// The raw device address value.
     pub fn as_raw(self) -> u64 {
         self.0
@@ -70,6 +103,12 @@ impl Memory {
     /// The buffer's base device address.
     pub fn gpu_ptr(&self) -> GpuPtr {
         GpuPtr(self.buffer.gpuAddress())
+    }
+
+    /// A raw host pointer to the buffer's bytes (shared storage — the same
+    /// bytes the GPU sees through [`gpu_ptr`](Self::gpu_ptr)).
+    pub(crate) fn host_ptr(&self) -> *mut u8 {
+        self.buffer.contents().as_ptr().cast()
     }
 
     /// Size in bytes.

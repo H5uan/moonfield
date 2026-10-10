@@ -60,6 +60,26 @@ argument table, and a pixel-verified draw — on real hardware.
   instance and device for the engine layer's plugin. The `swapchain` GPU
   test acquires from a headless layer, renders through the swapchain's view,
   verifies BGRA pixels, and presents on Metal 4 hardware.
+- Compute and scratch: `CommandBuffer` records compute passes
+  (`begin_compute`/`set_compute_pipeline`/`dispatch`/`end_compute`) with the
+  pipeline's threads-per-threadgroup; `ComputePipeline` builds from a
+  `.metallib` (or MSL) entry. `GpuBumpAllocator`/`BumpAlloc`/`HostPtr`
+  match the Vulkan surface — unified memory makes the bump a CPU/GPU
+  pointer pair into one shared `MTLBuffer`, with no upload pass.
+- The metal binding model, measured by the `compute` GPU tests:
+  - Graphics entries (vertex-pull) bind a `Ptr<T>` root directly at
+    argument-table slot 0 (`slang_metallib` binds the vertex array and
+    renders).
+  - Compute entries wrap root parameters in an `EntryPointParams` struct at
+    slot 0 — the root-blob layout the Vulkan `RootBinder` builds; binding
+    the blob (pointer fields carrying GPU addresses) is the metal
+    counterpart of `push_data`.
+  - A `main` entry point is renamed `main_0` in the emitted library; other
+    names are kept.
+  The `autodiff_fwd_numeric` GPU test compiles `[Differentiable]` code with
+  `fwd_diff` to metallib, dispatches it through a root blob, and checks the
+  forward derivative against the analytic one — the ml path's compilation
+  target on this backend.
 
 The GPU test `metal/src/gpu_tests/offscreen_triangle.rs` renders a
 vertex-pulled triangle (positions through argument-table slot 0) into a

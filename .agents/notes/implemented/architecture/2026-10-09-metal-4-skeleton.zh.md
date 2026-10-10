@@ -51,6 +51,22 @@ macOS 没有 GPU 路径：Vulkan 后端的设备表无法被 MoltenVK 满足，A
   层插件配对门控后的 instance 与 device。`swapchain` GPU 测试从离屏 layer
   获取 drawable、经 swapchain 视图渲染、校验 BGRA 像素并在 Metal 4 硬件
   上 present。
+- 计算与暂存：`CommandBuffer` 录制 compute pass
+  （`begin_compute`/`set_compute_pipeline`/`dispatch`/`end_compute`），
+  threads-per-threadgroup 取自管线；`ComputePipeline` 从 `.metallib`（或
+  MSL）入口构建。`GpuBumpAllocator`/`BumpAlloc`/`HostPtr` 对齐 Vulkan
+  表面 —— 统一内存下 bump 就是指向同一共享 `MTLBuffer` 的 CPU/GPU 指针
+  对，无需上传通道。
+- Metal 绑定模型（由 `compute` GPU 测试实测得出）：
+  - Graphics 入口（顶点拉取）把 `Ptr<T>` root 直接绑在 argument-table
+    槽位 0（`slang_metallib` 直绑顶点数组并渲染）。
+  - Compute 入口把 root 参数打包成槽位 0 的 `EntryPointParams` 结构体 ——
+    即 Vulkan `RootBinder` 构造的 root-blob 布局；绑定 blob（指针字段携带
+    GPU 地址）就是 `push_data` 的 Metal 对应物。
+  - `main` 入口在产出的库中被改名为 `main_0`；其他名字保留。
+  `autodiff_fwd_numeric` GPU 测试把 `[Differentiable]` 代码以 `fwd_diff`
+  编译到 metallib、经 root blob 派发并对照解析导数校验前向导数 —— 即
+  ml 路径在该后端的编译目标。
 
 GPU 测试 `metal/src/gpu_tests/offscreen_triangle.rs` 渲染一个顶点拉取的
 三角形（位置数据经 argument-table 槽位 0）到 64×64 目标，提交后在

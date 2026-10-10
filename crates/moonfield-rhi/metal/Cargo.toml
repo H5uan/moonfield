@@ -5,6 +5,7 @@ edition.workspace = true
 
 [dependencies]
 moonfield-rhi-core = { path = "../core" }
+moonfield-math = { workspace = true }
 bytemuck = { version = "1.23", features = ["derive"] }
 objc2 = "0.6.4"
 dispatch2 = { version = "0.3", default-features = false, features = ["block2"] }

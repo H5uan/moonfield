@@ -7,6 +7,7 @@
 
 pub use moonfield_rhi_core::*;
 
+pub mod bump;
 pub mod command;
 pub mod device;
 pub mod formats;
@@ -23,11 +24,12 @@ pub mod view;
 #[cfg(test)]
 mod gpu_tests;
 
+pub use bump::{BumpAlloc, GpuBumpAllocator};
 pub use command::{CommandBuffer, CommandPool, RenderAttachment, RenderPassDesc};
 pub use device::Device;
 pub use instance::Instance;
-pub use memory::{GpuAllocation, GpuPtr, Memory};
-pub use pipeline::GraphicsPipeline;
+pub use memory::{GpuAllocation, GpuPtr, HostPtr, Memory};
+pub use pipeline::{ComputePipeline, GraphicsPipeline};
 pub use plugin::RenderDevice;
 pub use shader_module::ShaderModule;
 pub use swapchain::{Surface, Swapchain};

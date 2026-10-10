@@ -6,14 +6,14 @@ use objc2::rc::Retained;
 use objc2::runtime::ProtocolObject;
 use objc2_metal::{
     MTL4ArgumentTable, MTL4ArgumentTableDescriptor, MTL4CommandBuffer, MTL4CommandEncoder,
-    MTL4RenderCommandEncoder, MTL4RenderPassDescriptor, MTLDevice, MTLPrimitiveType,
-    MTLRenderStages, MTLViewport,
+    MTL4ComputeCommandEncoder, MTL4RenderCommandEncoder, MTL4RenderPassDescriptor, MTLDevice,
+    MTLPrimitiveType, MTLRenderStages, MTLSize, MTLViewport,
 };
 
 use crate::device::{Device, DeviceContext};
 use crate::formats::ToMetal;
 use crate::memory::GpuAllocation;
-use crate::pipeline::GraphicsPipeline;
+use crate::pipeline::{ComputePipeline, GraphicsPipeline};
 use crate::view::TextureView;
 
 /// One color/depth attachment of a render pass (the Metal counterpart of the
@@ -76,6 +76,8 @@ impl CommandPool {
             cmdbuf,
             argument_table,
             encoder: None,
+            compute_encoder: None,
+            threads_per_group: None,
             ended: false,
         }
     }
@@ -86,6 +88,9 @@ pub struct CommandBuffer {
     cmdbuf: Retained<ProtocolObject<dyn MTL4CommandBuffer>>,
     argument_table: Retained<ProtocolObject<dyn MTL4ArgumentTable>>,
     encoder: Option<Retained<ProtocolObject<dyn MTL4RenderCommandEncoder>>>,
+    compute_encoder: Option<Retained<ProtocolObject<dyn MTL4ComputeCommandEncoder>>>,
+    /// Threads per threadgroup recorded by the last `set_compute_pipeline`.
+    threads_per_group: Option<MTLSize>,
     ended: bool,
 }
 
@@ -170,6 +175,60 @@ impl CommandBuffer {
             .encoder
             .take()
             .expect("end_render_pass requires a begun render pass");
+        encoder.endEncoding();
+    }
+
+    /// Begin a compute pass: create the compute encoder and attach the
+    /// argument table.
+    pub fn begin_compute(&mut self) {
+        assert!(
+            self.encoder.is_none() && self.compute_encoder.is_none(),
+            "a pass is already begun"
+        );
+        let encoder = self
+            .cmdbuf
+            .computeCommandEncoder()
+            .expect("computeCommandEncoder failed");
+        encoder.setArgumentTable(Some(&*self.argument_table));
+        self.compute_encoder = Some(encoder);
+    }
+
+    /// Set the compute pipeline for the current compute pass.
+    pub fn set_compute_pipeline(&mut self, pipeline: &ComputePipeline) {
+        let encoder = self
+            .compute_encoder
+            .as_ref()
+            .expect("set_compute_pipeline requires a begun compute pass");
+        encoder.setComputePipelineState(pipeline.pso());
+        self.threads_per_group = Some(pipeline.threads_per_group());
+    }
+
+    /// Dispatch `group_x`×`group_y`×`group_z` threadgroups with the
+    /// pipeline's threads-per-threadgroup.
+    pub fn dispatch(&mut self, group_x: u32, group_y: u32, group_z: u32) {
+        let encoder = self
+            .compute_encoder
+            .as_ref()
+            .expect("dispatch requires a begun compute pass");
+        let threads = self
+            .threads_per_group
+            .expect("dispatch requires a set compute pipeline");
+        encoder.dispatchThreadgroups_threadsPerThreadgroup(
+            MTLSize {
+                width: group_x as usize,
+                height: group_y as usize,
+                depth: group_z as usize,
+            },
+            threads,
+        );
+    }
+
+    /// End the current compute pass.
+    pub fn end_compute(&mut self) {
+        let encoder = self
+            .compute_encoder
+            .take()
+            .expect("end_compute requires a begun compute pass");
         encoder.endEncoding();
     }
 

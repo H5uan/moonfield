@@ -11,6 +11,9 @@ use crate::error::{Error as RenderError, Result as RenderResult};
 pub enum ShaderTarget {
     /// SPIR-V bytecode for the Vulkan backend.
     Spirv,
+    /// MSL source text (Metal Shading Language) — a debug window into the
+    /// Metal codegen (binding indices, entry naming).
+    Metal,
     /// A Metal library (`.metallib`) for the Metal backend.
     MetalLib,
 }
@@ -19,16 +22,17 @@ impl ShaderTarget {
     fn slang_target(self) -> shader_slang::CompileTarget {
         match self {
             Self::Spirv => shader_slang::CompileTarget::Spirv,
+            Self::Metal => shader_slang::CompileTarget::Metal,
             Self::MetalLib => shader_slang::CompileTarget::MetalLib,
         }
     }
 
     /// The Slang profile for bytecode emission; `None` uses the target's
-    /// default (the Metal backend has no profile to select).
+    /// default (the Metal targets have no profile to select).
     fn profile_name(self) -> Option<&'static str> {
         match self {
             Self::Spirv => Some("spirv_1_5"),
-            Self::MetalLib => None,
+            Self::Metal | Self::MetalLib => None,
         }
     }
 }
@@ -494,7 +498,10 @@ impl Compiler {
             ShaderTarget::Spirv => spirv_entry_name(bytecode.as_slice()).ok_or_else(|| {
                 RenderError::Backend("emitted SPIR-V has no OpEntryPoint".to_string())
             })?,
-            ShaderTarget::MetalLib => entry_point.to_string(),
+            // Metal targets keep the source-level entry name — except
+            // `main`, which Metal renames (`main_0`): prefer non-`main`
+            // entry names in Metal-bound sources.
+            ShaderTarget::Metal | ShaderTarget::MetalLib => entry_point.to_string(),
         };
 
         Ok(CompiledShader {
