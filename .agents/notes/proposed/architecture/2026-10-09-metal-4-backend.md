@@ -112,16 +112,18 @@ manual tracking, a different backend for the same amount of work.
   until verified, as capability-gated features.
 - **`ResourceDescriptorHeap[]` — the Vulkan bindless heap syntax — does not
   compile for the Metal target** (measured: "unavailable features in entry
-  point ... for 'metal' compilation target"). The Metal bindless channel is
-  the array-of-resources parameter: Slang emits
-  `array<texture2d<float>, N>` / `array<sampler, N>` entry-point parameters
-  plus the root blob (`EntryPointParams` at `[[buffer(0)]]`, measured).
-  Shader sources that index `ResourceDescriptorHeap` need a Metal variant
-  (the arrays are declared as `uniform Texture2D g_textures[N]` in Slang,
-  one source with target-gated sections, or a small Metal-specific module);
-  how the array parameter maps onto `MTL4ArgumentTable` slots
-  (`setResource_atBufferIndex` / `setTexture_atIndex`) is the next measured
-  step before the `DescriptorHeap` equivalent is designed.
+  point ... for 'metal' compilation target"). The cross-target channel is
+  Slang's built-in `DescriptorHandle<T>` (measured): it lowers to a heap
+  index on Vulkan and to **inline `texture2d`/`sampler` fields inside the
+  root blob struct** (`EntryPointParams` at `[[buffer(0)]]`) on Metal, so
+  one shader source serves both backends. The RHI's handle values follow:
+  a Metal texture/sampler handle is its `gpuResourceID`, a buffer handle is
+  its `gpuAddress` — plain `u64`s written into the root blob's field
+  offsets, which the metal `push_data` snapshot machinery already carries.
+  `setResource_atBufferIndex` on `MTL4ArgumentTable` is the API-side
+  counterpart for writing resource IDs. Shader sources that index
+  `ResourceDescriptorHeap` (egui.slang, core_3d.slang) migrate to
+  `DescriptorHandle<T>` fields in their root structs.
 - **`objc2-metal` MTL4 coverage** may lag the headers the backend needs;
   gaps get local `extern_class!` declarations until upstream ships them.
 - **Argument-table slot budget** (Metal 4 caps buffer bind counts) differs
