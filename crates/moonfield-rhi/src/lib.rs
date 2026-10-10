@@ -38,8 +38,8 @@ pub use moonfield_rhi_vulkan::{
 
 #[cfg(feature = "metal")]
 pub use moonfield_rhi_metal::{
-    BumpAlloc, CommandBuffer, CommandPool, ComputePipeline, Device, GpuAllocation,
-    GpuBumpAllocator, GpuPtr, GraphicsPipeline, HostPtr, Instance, Memory, RenderAttachment,
-    RenderDevice, RenderPassDesc, Semaphore, ShaderModule, Surface, Swapchain, Texture,
-    TextureView,
+    Access, BlendMode, BumpAlloc, CommandBuffer, CommandPool, ComputePipeline, CullState,
+    DepthState, Device, GpuAllocation, GpuBumpAllocator, GpuPtr, GraphicsPipeline, HostPtr,
+    Instance, Memory, RenderAttachment, RenderDevice, RenderPassDesc, Semaphore, ShaderModule,
+    Stage, Surface, Swapchain, Texture, TextureView,
 };

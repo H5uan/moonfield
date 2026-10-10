@@ -1,4 +1,5 @@
-//! Graphics pipeline: vertex + fragment functions with a color target.
+//! Graphics pipeline: vertex + fragment functions with a color target, and
+//! the blend-mode vocabulary the dynamic blend state sets.
 
 use objc2::rc::Retained;
 use objc2::runtime::ProtocolObject;
@@ -11,6 +12,19 @@ use crate::device::Device;
 use crate::formats::ToMetal;
 use crate::shader_module::ShaderModule;
 use moonfield_rhi_core::{Error, Format, Result};
+
+/// The blend mode a pipeline or dynamic state selects. Blend is pipeline
+/// state on Metal; `set_blend_state` records intent and the egui port
+/// brings blended pipelines.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub enum BlendMode {
+    /// Blending disabled; the fragment color overwrites the target.
+    #[default]
+    Off,
+    /// Premultiplied-alpha blending: color `One, OneMinusSrcAlpha, Add`;
+    /// alpha `OneMinusDstAlpha, One, Add`. What egui expects.
+    PremultipliedAlpha,
+}
 
 /// A rasterization pipeline (vertex + fragment functions, one color format).
 #[derive(Clone)]

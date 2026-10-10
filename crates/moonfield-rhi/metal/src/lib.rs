@@ -25,14 +25,16 @@ pub mod view;
 mod gpu_tests;
 
 pub use bump::{BumpAlloc, GpuBumpAllocator};
-pub use command::{CommandBuffer, CommandPool, RenderAttachment, RenderPassDesc};
+pub use command::{
+    CommandBuffer, CommandPool, CullState, DepthState, RenderAttachment, RenderPassDesc,
+};
 pub use device::Device;
 pub use instance::Instance;
 pub use memory::{GpuAllocation, GpuPtr, HostPtr, Memory};
-pub use pipeline::{ComputePipeline, GraphicsPipeline};
+pub use pipeline::{BlendMode, ComputePipeline, GraphicsPipeline};
 pub use plugin::RenderDevice;
 pub use shader_module::ShaderModule;
 pub use swapchain::{Surface, Swapchain};
-pub use sync::Semaphore;
+pub use sync::{Access, Semaphore, Stage};
 pub use texture::Texture;
 pub use view::TextureView;

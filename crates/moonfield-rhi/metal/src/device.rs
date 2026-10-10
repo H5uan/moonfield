@@ -16,6 +16,7 @@ use objc2_metal::{
 
 use crate::command::CommandBuffer;
 use crate::instance::Instance;
+use crate::sync::Semaphore;
 
 /// Teardown-critical device state, shared by every GPU object through
 /// [`DeviceContext`] (the same shared-ownership shape as the Vulkan
@@ -80,6 +81,12 @@ pub(crate) struct DeviceContext {
 impl DeviceContext {
     pub(crate) fn shared(&self) -> &DeviceShared {
         &self.shared
+    }
+
+    /// The `Device` handle for this context (crate-internal convenience:
+    /// resource constructors that only hold a context can create `Memory`).
+    pub(crate) fn device(&self) -> Device {
+        Device { ctx: self.clone() }
     }
 }
 
@@ -164,5 +171,45 @@ impl Device {
         } else {
             Err(Error::Backend("timed out waiting for GPU work".into()))
         }
+    }
+
+    /// Submit one command buffer with the engine layer's frame-timeline
+    /// shape. Waits and signals carry through the device's shared-event
+    /// timeline (queue-level `waitForEvent`/`signalEvent`); binary
+    /// semaphores match the Vulkan surface and carry no GPU signal on this
+    /// backend (queue submission order is the ordering).
+    pub fn submit_frame_timeline(
+        &self,
+        buffer: &CommandBuffer,
+        _wait_semaphores: &[&Semaphore],
+        _signal_semaphores: &[&Semaphore],
+        timeline_waits: &[(&Semaphore, u64)],
+        _timeline: &Semaphore,
+        signal_value: u64,
+    ) -> Result<()> {
+        let shared = self.ctx.shared();
+        // Block until the required timeline values are reached: the frame
+        // loop waits on in-flight slots before their buffers re-record.
+        for (_, value) in timeline_waits {
+            if !shared
+                .event()
+                .waitUntilSignaledValue_timeoutMS(*value, 10_000)
+            {
+                return Err(Error::Backend(
+                    "timed out waiting for frame timeline".into(),
+                ));
+            }
+        }
+        let buffers = [buffer.raw()];
+        // SAFETY: as in `submit_and_wait`.
+        unsafe {
+            shared
+                .queue()
+                .commit_count(NonNull::from(&buffers).cast(), 1);
+        }
+        // Signal the frame timeline after the committed work.
+        let event: &ProtocolObject<dyn MTLEvent> = ProtocolObject::from_ref(shared.event());
+        shared.queue().signalEvent_value(event, signal_value);
+        Ok(())
     }
 }

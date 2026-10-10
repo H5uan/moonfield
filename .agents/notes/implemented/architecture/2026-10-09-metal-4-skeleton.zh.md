@@ -67,6 +67,21 @@ macOS 没有 GPU 路径：Vulkan 后端的设备表无法被 MoltenVK 满足，A
   `autodiff_fwd_numeric` GPU 测试把 `[Differentiable]` 代码以 `fwd_diff`
   编译到 metallib、经 root blob 派发并对照解析导数校验前向导数 —— 即
   ml 路径在该后端的编译目标。
+- 引擎层录制表面：`begin_rendering`/`end_rendering`、`draw`、动态
+  `set_viewport`（Y 翻转与 reverse-Z 的适配就在这里）、`set_scissor`、
+  `set_cull_state`、`set_depth_state`（depth attachment 落地前记录意图）、
+  `set_blend_state`（混合管线随 egui 移植带来）、
+  `bind_graphics_pipeline`/`bind_pipeline`、`barrier`（`Stage`/`Access`
+  镜像 Vulkan 词汇；Metal 4 的 encoder barrier 是 stage 到 stage）、
+  `set_bindless_root` 与 `push_data`。
+- `push_data` 快照：encoder 在首次使用时固化其 argument table —— 对同一
+  table 重新 `setAddress`、甚至用新 table `setArgumentTable` 都无法在
+  draw 之间重绑（实测）。因此每次 push 把 root blob 写进私有 ring、绑到
+  新建的 argument table，且当活动 encoder 已编码过命令时重建 encoder：
+  compute encoder 重绑管线；render encoder 以 `Load` 重建 pass（保留已
+  渲染内容）并重放 viewport 与管线。
+  `push_data_snapshots_between_dispatches` GPU 测试钉住该语义：两次
+  push、两次 dispatch，各读各的值。
 
 GPU 测试 `metal/src/gpu_tests/offscreen_triangle.rs` 渲染一个顶点拉取的
 三角形（位置数据经 argument-table 槽位 0）到 64×64 目标，提交后在

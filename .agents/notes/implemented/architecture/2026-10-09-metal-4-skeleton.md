@@ -80,6 +80,23 @@ argument table, and a pixel-verified draw — on real hardware.
   `fwd_diff` to metallib, dispatches it through a root blob, and checks the
   forward derivative against the analytic one — the ml path's compilation
   target on this backend.
+- The engine-layer recording surface: `begin_rendering`/`end_rendering`,
+  `draw`, dynamic `set_viewport` (the Y-flip and reverse-Z adaptations live
+  here), `set_scissor`, `set_cull_state`, `set_depth_state` (intent until
+  depth attachments), `set_blend_state` (intent until blended pipelines),
+  `bind_graphics_pipeline`/`bind_pipeline`, `barrier` (`Stage`/`Access`
+  mirror the Vulkan vocabulary; Metal 4 encoder barriers are
+  stage-to-stage), `set_bindless_root`, and `push_data`.
+- `push_data` snapshots: an encoder fixes its argument table on first use —
+  re-`setAddress` on the table or even `setArgumentTable` with a fresh
+  table cannot rebind between draws (measured). So each push writes the
+  root blob into a private ring, binds it on a fresh argument table, and,
+  when the active encoder already encoded commands, rebuilds the encoder:
+  the compute encoder re-binds its pipeline; the render encoder reloads
+  its pass (`Load` — what has been rendered is preserved) and replays
+  viewport and pipeline. The `push_data_snapshots_between_dispatches` GPU
+  test pins the semantics: two pushes, two dispatches, each reads its own
+  value.
 
 The GPU test `metal/src/gpu_tests/offscreen_triangle.rs` renders a
 vertex-pulled triangle (positions through argument-table slot 0) into a

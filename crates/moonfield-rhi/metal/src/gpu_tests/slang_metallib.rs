@@ -116,7 +116,7 @@ float4 fs_main(PsInput input) : SV_TARGET
 
     let pool = CommandPool::new(&device);
     let mut cmd = pool.allocate();
-    cmd.begin_render_pass(&RenderPassDesc {
+    cmd.begin_rendering(&RenderPassDesc {
         render_area: Rect2d::full(SIZE, SIZE),
         color_attachments: &[RenderAttachment {
             view: target.view(),
@@ -127,10 +127,10 @@ float4 fs_main(PsInput input) : SV_TARGET
         }],
         depth_attachment: None,
     });
-    cmd.set_pipeline(&pipeline);
+    cmd.bind_graphics_pipeline(&pipeline);
     cmd.set_buffer(0, &memory.allocation());
-    cmd.draw(3);
-    cmd.end_render_pass();
+    cmd.draw(3, 1, 0, 0);
+    cmd.end_rendering();
 
     device.submit_and_wait(cmd).expect("submit");
 

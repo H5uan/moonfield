@@ -67,7 +67,7 @@ kernel void plus_one_msl(device uint* out [[buffer(0)]], uint tid [[thread_posit
         let pool = CommandPool::new(&device);
         let mut cmd = pool.allocate();
         cmd.begin_compute();
-        cmd.set_compute_pipeline(&control_pipeline);
+        cmd.bind_pipeline(&control_pipeline);
         cmd.set_buffer(0, &memory.allocation());
         cmd.dispatch(8, 1, 1);
         cmd.end_compute();
@@ -101,7 +101,7 @@ kernel void plus_one_msl(device uint* out [[buffer(0)]], uint tid [[thread_posit
     let pool = CommandPool::new(&device);
     let mut cmd = pool.allocate();
     cmd.begin_compute();
-    cmd.set_compute_pipeline(&pipeline);
+    cmd.bind_pipeline(&pipeline);
     cmd.set_buffer(0, &root_blob.allocation());
     cmd.dispatch(8, 1, 1);
     cmd.end_compute();
@@ -129,6 +129,71 @@ void fwd(uint3 tid : SV_DispatchThreadID, Ptr<float> xs, Ptr<float> ds)
     ds[tid.x] = yp.d;
 }
 "#;
+
+const PUSH_SCALE: &str = r#"
+[shader("compute")]
+void scale(uint3 tid : SV_DispatchThreadID, uniform float factor, Ptr<float> data)
+{
+    data[tid.x] = data[tid.x] * factor;
+}
+"#;
+
+/// `push_data` snapshots: two pushes with different uniform values, one
+/// dispatch each — the second dispatch must read the second value even
+/// though both share argument-table slot 0's root blob.
+#[test]
+fn push_data_snapshots_between_dispatches() {
+    let Some(device) = metal4_device() else {
+        return;
+    };
+
+    let compiler = Compiler::new().expect("compiler");
+    let compiled = compiler
+        .compile_source("push_scale", PUSH_SCALE, "scale", ShaderTarget::MetalLib)
+        .expect("compile to metallib");
+    let module = ShaderModule::from_compiled(&device, &compiled).expect("load metallib");
+    let pipeline = ComputePipeline::new(&device, &module, &compiled.entry).expect("pipeline");
+
+    const COUNT: usize = 16;
+    let data = Memory::new(&device, (COUNT * 4) as u64);
+    let values: *mut f32 = data.host_ptr() as _;
+    // SAFETY: shared storage; single-writer frame contract.
+    unsafe {
+        for i in 0..COUNT {
+            *values.add(i) = i as f32;
+        }
+    }
+
+    let pool = CommandPool::new(&device);
+    let mut cmd = pool.allocate();
+    cmd.begin_compute();
+    cmd.bind_pipeline(&pipeline);
+    cmd.set_buffer(0, &data.allocation());
+    // Root blob: uniform `factor` at offset 0, `Ptr<float> data` at 8.
+    fn push_root(cmd: &mut crate::CommandBuffer, factor: f32, data: &Memory) {
+        let mut blob = [0u8; 16];
+        blob[0..4].copy_from_slice(&factor.to_le_bytes());
+        blob[8..16].copy_from_slice(&data.gpu_ptr().as_raw().to_le_bytes());
+        cmd.push_data(0, &blob);
+    }
+    push_root(&mut cmd, 2.0, &data);
+    cmd.dispatch(1, 1, 1);
+    push_root(&mut cmd, 3.0, &data);
+    cmd.dispatch(1, 1, 1);
+    cmd.end_compute();
+    device.submit_and_wait(cmd).expect("submit");
+
+    for i in 0..COUNT {
+        // i × 2 (first push) × 3 (second push).
+        let expected = i as f32 * 6.0;
+        // SAFETY: GPU work has completed.
+        let got = unsafe { *values.add(i) };
+        assert!(
+            (got - expected).abs() < 1e-4,
+            "value {i}: {got}, expected {expected}"
+        );
+    }
+}
 
 #[test]
 fn autodiff_fwd_numeric() {
@@ -164,7 +229,7 @@ fn autodiff_fwd_numeric() {
     let pool = CommandPool::new(&device);
     let mut cmd = pool.allocate();
     cmd.begin_compute();
-    cmd.set_compute_pipeline(&pipeline);
+    cmd.bind_pipeline(&pipeline);
     cmd.set_buffer(0, &root_blob.allocation());
     cmd.dispatch(2, 1, 1);
     cmd.end_compute();
