@@ -15,3 +15,4 @@ module gaussian;
 __include "gs/types.slang";
 __include "gs/projection.slang";
 __include "gs/color.slang";
+__include "gs/forward.slang";

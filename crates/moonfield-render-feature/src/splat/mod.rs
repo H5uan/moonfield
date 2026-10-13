@@ -3,6 +3,7 @@
 //! Domain types only; training lives in `moonfield-ml` (see its `gs` method).
 
 pub mod cloud;
+pub mod forward;
 pub mod io;
 pub mod rasterize;
 pub mod scene;
