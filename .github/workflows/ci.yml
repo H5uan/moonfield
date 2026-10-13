@@ -1,0 +1,183 @@
+name: CI
+
+on:
+  push:
+    branches: [master]
+  pull_request:
+  workflow_dispatch:
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  CARGO_TERM_COLOR: always
+  CARGO_NET_RETRY: "10"
+
+jobs:
+  rust-analyzer:
+    name: rust-analyzer
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+
+      # rustup installs the pinned toolchain (+components) from rust-toolchain.toml.
+      - name: Install pinned toolchain
+        run: rustup show
+
+      - name: Verify rust-analyzer
+        run: rust-analyzer --version
+
+  fmt:
+    name: rustfmt
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+
+      # rustup installs the pinned toolchain (+components) from rust-toolchain.toml.
+      - name: Install pinned toolchain
+        run: rustup show
+
+      - name: Check formatting
+        run: cargo fmt --all -- --check
+
+  clippy:
+    name: clippy (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, windows-latest]
+    steps:
+      - uses: actions/checkout@v7
+
+      # rustup installs the pinned toolchain (+components) from rust-toolchain.toml.
+      - name: Install pinned toolchain
+        run: rustup show
+
+      - name: Install libclang (Linux)
+        if: runner.os == 'Linux'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y libclang-dev
+
+      - name: Set LIBCLANG_PATH (Windows)
+        if: runner.os == 'Windows'
+        run: echo "LIBCLANG_PATH=C:\Program Files\LLVM\bin" >> "$env:GITHUB_ENV"
+
+      # The shader-slang-rs-sys build script downloads the Slang release its
+      # own SLANG_VERSION pins (no SLANG_DIR override anywhere); cache the
+      # download, keyed on the lockfile that pins the checkout revision.
+      - uses: actions/cache@v4
+        with:
+          path: ~/.cargo/git/checkouts/shader-slang-rs-*
+          key: slang-bin-${{ runner.os }}-${{ hashFiles('Cargo.lock') }}
+
+      - uses: Swatinem/rust-cache@v2
+
+      - name: Clippy
+        run: cargo clippy --workspace --all-targets --locked -- -D warnings
+
+  release-check:
+    name: release check (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, windows-latest]
+    steps:
+      - uses: actions/checkout@v7
+
+      # rustup installs the pinned toolchain (+components) from rust-toolchain.toml.
+      - name: Install pinned toolchain
+        run: rustup show
+
+      # bindgen in shader-slang-rs-sys's build script runs during check, so
+      # this job needs libclang and the cached Slang download too.
+      - name: Install libclang (Linux)
+        if: runner.os == 'Linux'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y libclang-dev
+
+      - name: Set LIBCLANG_PATH (Windows)
+        if: runner.os == 'Windows'
+        run: echo "LIBCLANG_PATH=C:\Program Files\LLVM\bin" >> "$env:GITHUB_ENV"
+
+      - uses: actions/cache@v4
+        with:
+          path: ~/.cargo/git/checkouts/shader-slang-rs-*
+          key: slang-bin-${{ runner.os }}-${{ hashFiles('Cargo.lock') }}
+
+      - uses: Swatinem/rust-cache@v2
+
+      - name: Check without debug_assertions
+        run: cargo check --release --workspace --all-targets --locked
+
+  test:
+    name: test (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, windows-latest]
+    steps:
+      - uses: actions/checkout@v7
+
+      # rustup installs the pinned toolchain (+components) from rust-toolchain.toml.
+      - name: Install pinned toolchain
+        run: rustup show
+
+      - name: Install Linux dependencies
+        if: runner.os == 'Linux'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y libclang-dev libvulkan1 mesa-vulkan-drivers vulkan-tools
+
+      - name: Set LIBCLANG_PATH (Windows)
+        if: runner.os == 'Windows'
+        run: echo "LIBCLANG_PATH=C:\Program Files\LLVM\bin" >> "$env:GITHUB_ENV"
+
+      - uses: actions/cache@v4
+        with:
+          path: ~/.cargo/git/checkouts/shader-slang-rs-*
+          key: slang-bin-${{ runner.os }}-${{ hashFiles('Cargo.lock') }}
+
+      - uses: Swatinem/rust-cache@v2
+
+      - name: Vulkan driver info (Linux)
+        if: runner.os == 'Linux'
+        run: vulkaninfo --summary || true
+
+      - name: Run tests
+        run: cargo test --workspace --locked
+
+  agent-docs:
+    name: Agent notes gate
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+
+      - name: Verify Agent Notes
+        run: python3 scripts/verify_agents.py
+
+  rhi-boundary:
+    name: RHI boundary gate
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+
+      - name: Verify no backend types in the rhi public API
+        run: python3 scripts/verify_rhi_boundary.py
+
+  ci-result:
+    name: CI result
+    needs: [rust-analyzer, fmt, clippy, release-check, test, agent-docs, rhi-boundary]
+    if: always()
+    runs-on: ubuntu-latest
+    steps:
+      - name: Verify all jobs succeeded
+        env:
+          NEEDS: ${{ toJSON(needs) }}
+        run: |
+          echo "$NEEDS" | jq -e 'to_entries | all(.value.result == "success")' > /dev/null

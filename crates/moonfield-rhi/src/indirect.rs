@@ -1,0 +1,42 @@
+//! Indirect-draw/dispatch argument layouts.
+//!
+//! These `#[repr(C)]` structs mirror Vulkan's command structs
+//! (`vk::DrawIndirectCommand`, etc.), so a buffer populated via
+//! `bytemuck::bytes_of` can be submitted directly. The RHI does not expose raw
+//! transmutation to Vulkan types — callers write these structs into a
+//! `GpuAllocation` (whose address carrier always carries `INDIRECT_BUFFER`
+//! usage) and pass its `GpuPtr` to the command buffer's indirect
+//! draw/dispatch methods, which consume device addresses directly
+//! (`VK_KHR_device_address_commands`, optional).
+
+/// Argument buffer layout for non-indexed `draw_indirect` commands.
+///
+/// 16 bytes; matches `vk::DrawIndirectCommand`.
+#[repr(C)]
+#[derive(Clone, Copy, Debug, Default, bytemuck::Pod, bytemuck::Zeroable)]
+pub struct DrawIndirectArgs {
+    /// The number of vertices to draw.
+    pub vertex_count: u32,
+    /// The number of instances to draw.
+    pub instance_count: u32,
+    /// The index of the first vertex to draw.
+    pub first_vertex: u32,
+    /// The instance ID of the first instance. Must be 0 unless the backend's
+    /// `INDIRECT_FIRST_INSTANCE` capability is enabled.
+    pub first_instance: u32,
+}
+
+/// Argument buffer layout for `dispatch_workgroups_indirect` commands.
+///
+/// 12 bytes; matches `vk::DispatchIndirectCommand`. Consumed by
+/// [`CommandBuffer::dispatch_indirect`](crate::CommandBuffer::dispatch_indirect).
+#[repr(C)]
+#[derive(Clone, Copy, Debug, Default, bytemuck::Pod, bytemuck::Zeroable)]
+pub struct DispatchIndirectArgs {
+    /// The number of work groups in the X dimension.
+    pub x: u32,
+    /// The number of work groups in the Y dimension.
+    pub y: u32,
+    /// The number of work groups in the Z dimension.
+    pub z: u32,
+}

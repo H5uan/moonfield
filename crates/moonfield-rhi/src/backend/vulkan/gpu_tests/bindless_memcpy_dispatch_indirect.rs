@@ -1,0 +1,158 @@
+//! Headless smoke tests for the bindless copy and indirect-dispatch paths.
+//!
+//! Verifies two command-level operations on `GpuAllocation`s:
+//! 1. `cmd_memcpy` copies GPU-side data from a source allocation to a
+//!    destination allocation through `vkCmdCopyBuffer2` (sync2).
+//! 2. `dispatch_indirect` launches a compute kernel whose workgroup counts
+//!    are read from a GPU-memory `DispatchIndirectArgs` struct.
+
+use super::common;
+use crate::indirect::DispatchIndirectArgs;
+use crate::{
+    CommandBufferUsage, Compiler, ComputePipeline, Device, GpuAllocation, Instance,
+    MemoryResidency, ShaderModule, ShaderTarget, Stage,
+};
+use std::sync::Mutex;
+
+/// Serializes the tests in this binary. Each test creates its own Vulkan
+/// instance, device, and allocator; doing so concurrently on one GPU
+/// access-violates on some Windows drivers, and the crate confines Vulkan
+/// objects to a single thread by rule.
+static DEVICE_LOCK: Mutex<()> = Mutex::new(());
+
+/// `+1` kernel: out[tid] = in[tid] + 1. Root data is two 64-bit addresses
+/// (input @ offset 0, output @ offset 8) pushed as one push-constant struct.
+const PLUS_ONE_KERNEL: &str = r#"
+[shader("compute")]
+[numthreads(8, 1, 1)]
+void main(uint3 tid : SV_DispatchThreadID,
+          Ptr<uint32_t, Access.Read> input,
+          Ptr<uint32_t, Access.ReadWrite> output)
+{
+    output[tid.x] = input[tid.x] + 1;
+}
+"#;
+
+#[test]
+fn bindless_memcpy_roundtrip() {
+    let _guard = DEVICE_LOCK.lock().unwrap();
+    let instance = match Instance::new_headless() {
+        Ok(instance) => instance,
+        Err(err) => {
+            eprintln!("skipping: no Vulkan instance available ({err})");
+            return;
+        }
+    };
+    if common::skip_if_descriptor_heap_missing(&instance) {
+        return;
+    }
+    let device = match Device::new(&instance, None) {
+        Ok(device) => device,
+        Err(err) => {
+            eprintln!("skipping: no Vulkan device available ({err})");
+            return;
+        }
+    };
+    if !device.device_address_commands() {
+        eprintln!("skipping: VK_KHR_device_address_commands is not supported by this driver");
+        return;
+    }
+
+    const N: usize = 8;
+    const SIZE: u64 = (N * 4) as u64;
+    let src =
+        GpuAllocation::new(&device, SIZE, MemoryResidency::CpuWriteOnly).expect("src allocation");
+    let dst =
+        GpuAllocation::new(&device, SIZE, MemoryResidency::CpuWriteOnly).expect("dst allocation");
+
+    let src_host = src.host().expect("src host view");
+    for i in 0..N {
+        unsafe {
+            *src_host.typed::<u32>().add(i) = i as u32;
+        }
+    }
+
+    let cmd = device
+        .command_buffer(CommandBufferUsage::ONE_TIME_SUBMIT)
+        .expect("cmd");
+    cmd.cmd_memcpy(dst.gpu_ptr(), src.gpu_ptr(), SIZE);
+    // Make the copied data visible after the copy (transfer -> all stages).
+    cmd.barrier(Stage::TRANSFER, Stage::ALL);
+
+    device.submit_and_wait(&[&cmd]).expect("submit");
+
+    let dst_host = dst.host().expect("dst host view");
+    for i in 0..N {
+        let value = unsafe { *dst_host.typed::<u32>().add(i) };
+        assert_eq!(value, i as u32, "dst[{i}] = {value}");
+    }
+}
+
+#[test]
+fn bindless_dispatch_indirect_roundtrip() {
+    let _guard = DEVICE_LOCK.lock().unwrap();
+    let instance = match Instance::new_headless() {
+        Ok(instance) => instance,
+        Err(err) => {
+            eprintln!("skipping: no Vulkan instance available ({err})");
+            return;
+        }
+    };
+    if common::skip_if_descriptor_heap_missing(&instance) {
+        return;
+    }
+    let device = match Device::new(&instance, None) {
+        Ok(device) => device,
+        Err(err) => {
+            eprintln!("skipping: no Vulkan device available ({err})");
+            return;
+        }
+    };
+    if !device.device_address_commands() {
+        eprintln!("skipping: VK_KHR_device_address_commands is not supported by this driver");
+        return;
+    }
+
+    let compiler = Compiler::new().expect("compiler");
+    let spirv = compiler
+        .compile_source("plus_one", PLUS_ONE_KERNEL, "main", ShaderTarget::Spirv)
+        .expect("kernel compilation");
+    let module = ShaderModule::from_compiled(&device, &spirv).expect("shader module");
+    let pipeline = ComputePipeline::new(&device, &module).expect("compute pipeline");
+
+    let input =
+        GpuAllocation::new(&device, 64, MemoryResidency::CpuWriteOnly).expect("input allocation");
+    let output =
+        GpuAllocation::new(&device, 64, MemoryResidency::CpuWriteOnly).expect("output allocation");
+    let args =
+        GpuAllocation::new(&device, 32, MemoryResidency::CpuWriteOnly).expect("args allocation");
+
+    let input_host = input.host().expect("input host view");
+    for i in 0..8u32 {
+        unsafe {
+            *input_host.typed::<u32>().add(i as usize) = i;
+        }
+    }
+
+    // Write the indirect arguments: one workgroup (8 threads).
+    let args_host = args.host().expect("args host view");
+    let args_val = DispatchIndirectArgs { x: 1, y: 1, z: 1 };
+    unsafe {
+        *args_host.typed::<DispatchIndirectArgs>() = args_val;
+    }
+
+    let cmd = device
+        .command_buffer(CommandBufferUsage::ONE_TIME_SUBMIT)
+        .expect("cmd");
+    cmd.bind_compute_pipeline(&pipeline);
+    cmd.set_bindless_root(input.gpu_ptr(), output.gpu_ptr());
+    cmd.dispatch_indirect(args.gpu_ptr());
+
+    device.submit_and_wait(&[&cmd]).expect("submit");
+
+    let output_host = output.host().expect("output host view");
+    for i in 0..8u32 {
+        let value = unsafe { *output_host.typed::<u32>().add(i as usize) };
+        assert_eq!(value, i + 1, "output[{i}] = {value}");
+    }
+}

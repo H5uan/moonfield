@@ -1,0 +1,18 @@
+[package]
+name = "moonfield-math"
+version.workspace = true
+edition.workspace = true
+
+[dependencies]
+glam = { workspace = true, features = ["libm"] }
+bytemuck = { workspace = true }
+moonfield-reflect = { workspace = true, optional = true }
+
+[features]
+default = ["std"]
+std = ["glam/std", "moonfield-reflect"]
+# Pod/bytemuck support for GPU uploads (on by default via std, but exposed explicitly for future no_std GPU targets)
+gpu = []
+
+[package.metadata.docs.rs]
+all-features = true

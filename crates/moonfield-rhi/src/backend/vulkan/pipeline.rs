@@ -1,0 +1,395 @@
+//! Vulkan pipeline abstractions (graphics and compute).
+
+use super::device::{Device, DeviceContext};
+use super::formats::ToVk;
+use super::retire::RetireAction;
+use super::shader_module::ShaderModule;
+use crate::error::{Error, Result};
+use crate::types::Format;
+use ash::vk;
+use ash::vk::Handle as _;
+use ash::vk::TaggedStructure as _;
+
+/// How the pipeline's single color attachment blends with existing pixels.
+///
+/// Blend is now a dynamic state: [`CommandBuffer::set_blend_state`] applies
+/// it per draw, so this type only names the preset used by the caller.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum BlendMode {
+    /// Blending disabled; the fragment color overwrites the target.
+    #[default]
+    Off,
+    /// Premultiplied-alpha blending: color `One, OneMinusSrcAlpha, Add`;
+    /// alpha `OneMinusDstAlpha, One, Add`. What egui expects.
+    PremultipliedAlpha,
+}
+
+/// One pipeline stage: a compiled shader module bound to a stage slot.
+///
+/// The stage and entry-point name come from the module itself (recorded by
+/// [`ShaderModule::from_compiled`]), so a stage is described by pointing at a
+/// compiled module — the caller never names `VERTEX`/`FRAGMENT` by hand and
+/// cannot mislabel a shader. Two modules compiled from the same file (e.g.
+/// `egui.slang`'s `vs_main` and `fs_gamma`) are two entries of this type.
+pub struct ShaderStageDesc<'a> {
+    /// The compiled module.
+    pub module: &'a ShaderModule,
+}
+
+/// A Vulkan graphics pipeline.
+pub struct GraphicsPipeline {
+    pipeline: vk::Pipeline,
+    /// Keeps the device alive; its retirement ring takes the deferred
+    /// teardown in `Drop` (in-flight frames may still bind the pipeline).
+    ctx: DeviceContext,
+}
+
+impl GraphicsPipeline {
+    /// Create a basic graphics pipeline targeting a single color attachment.
+    ///
+    /// The pipeline uses the provided vertex/fragment shaders. Viewport,
+    /// scissor, blend, cull, and depth state are all dynamic — they are set
+    /// per draw through the command buffer (see
+    /// [`CommandBuffer::begin_rendering`](crate::CommandBuffer::begin_rendering)),
+    /// so the pipeline is independent of the target extent. Attachment
+    /// formats are baked into the pipeline (they affect shader microcode);
+    /// `color_format` declares the single color target.
+    ///
+    /// The pipeline has no vertex input: vertex shaders pull geometry
+    /// through root-data pointers (`SV_VertexID` is the only stage input).
+    pub fn new(
+        device: &Device,
+        color_format: Format,
+        vertex_shader: &ShaderModule,
+        fragment_shader: &ShaderModule,
+    ) -> Result<Self> {
+        Self::new_with_options(
+            device,
+            &[color_format],
+            None,
+            vertex_shader,
+            fragment_shader,
+        )
+    }
+
+    /// Create a graphics pipeline with explicit attachment formats.
+    ///
+    /// `color_formats` are the color attachment formats the pipeline will be
+    /// used against (typically one; multiple for MRT); `depth_format` is the
+    /// optional depth attachment format (reverse-Z `D32Sfloat`). These feed
+    /// `VkPipelineRenderingCreateInfo`, the dynamic-rendering replacement for
+    /// a compatible render pass.
+    #[allow(clippy::too_many_arguments)]
+    pub fn new_with_options(
+        device: &Device,
+        color_formats: &[Format],
+        depth_format: Option<Format>,
+        vertex_shader: &ShaderModule,
+        fragment_shader: &ShaderModule,
+    ) -> Result<Self> {
+        Self::new_with_stages(
+            device,
+            color_formats,
+            depth_format,
+            &[
+                ShaderStageDesc {
+                    module: vertex_shader,
+                },
+                ShaderStageDesc {
+                    module: fragment_shader,
+                },
+            ],
+        )
+    }
+
+    /// Create a graphics pipeline from an explicit stage list.
+    ///
+    /// Every module's stage (from its `[shader("...")]` compilation) and
+    /// emitted entry-point name are read off the module; the pipeline names
+    /// exactly those stages. This is the general form — the two-stage
+    /// `new_with_options` is a special case, and mesh-shader or tessellation
+    /// pipelines are just longer stage lists. Modules without stage
+    /// information (raw `from_spirv`) are rejected: slot guessing is exactly
+    /// the bug this API removes.
+    pub fn new_with_stages(
+        device: &Device,
+        color_formats: &[Format],
+        depth_format: Option<Format>,
+        stages: &[ShaderStageDesc<'_>],
+    ) -> Result<Self> {
+        // Entry names and the create infos that point at them must live for the
+        // whole pipeline construction; collect the names first so the infos
+        // can borrow them safely.
+        let entries: Result<Vec<_>> = stages
+            .iter()
+            .map(|desc| {
+                std::ffi::CString::new(desc.module.entry().ok_or_else(|| {
+                    Error::Validation(
+                        "shader module has no entry-point name; compile through \
+                             `Compiler` + `ShaderModule::from_compiled`"
+                            .to_string(),
+                    )
+                })?)
+                .map_err(|e| Error::Validation(format!("entry point name is not valid C: {e}")))
+            })
+            .collect();
+        let entries = entries?;
+        let shader_stages: Result<Vec<_>> = stages
+            .iter()
+            .zip(&entries)
+            .map(|(desc, entry)| {
+                let stage = desc.module.stage().ok_or_else(|| {
+                    Error::Validation(
+                        "shader module has no stage information; compile through \
+                         `Compiler` + `ShaderModule::from_compiled`"
+                            .to_string(),
+                    )
+                })?;
+                Ok(vk::PipelineShaderStageCreateInfo::default()
+                    .stage(stage)
+                    .module(desc.module.raw())
+                    .name(entry))
+            })
+            .collect();
+        let shader_stages = shader_stages?;
+
+        // Vertex input: none — vertex shaders pull geometry through
+        // root-data pointers (`SV_VertexID` is the only stage input), the
+        // shape mesh-shader pipelines use.
+        let vertex_input_info = vk::PipelineVertexInputStateCreateInfo::default();
+
+        let input_assembly = vk::PipelineInputAssemblyStateCreateInfo::default()
+            .topology(vk::PrimitiveTopology::TRIANGLE_LIST)
+            .primitive_restart_enable(false);
+
+        // Viewport, scissor, cull, blend, and depth state are dynamic;
+        // only their attachment counts are fixed here. Dynamic states that
+        // are merely resets (topology stays TRIANGLE_LIST) can be omitted.
+        let viewport_state = vk::PipelineViewportStateCreateInfo::default()
+            .viewport_count(1)
+            .scissor_count(1);
+
+        let dynamic_states = [
+            vk::DynamicState::VIEWPORT,
+            vk::DynamicState::SCISSOR,
+            vk::DynamicState::CULL_MODE,
+            vk::DynamicState::FRONT_FACE,
+            vk::DynamicState::DEPTH_TEST_ENABLE,
+            vk::DynamicState::DEPTH_WRITE_ENABLE,
+            vk::DynamicState::DEPTH_COMPARE_OP,
+            vk::DynamicState::COLOR_BLEND_ENABLE_EXT,
+            vk::DynamicState::COLOR_BLEND_EQUATION_EXT,
+            vk::DynamicState::COLOR_WRITE_MASK_EXT,
+        ];
+        let dynamic_state =
+            vk::PipelineDynamicStateCreateInfo::default().dynamic_states(&dynamic_states);
+
+        // Rasterizer state is entirely dynamic; the values in the create info
+        // are ignored for the marked states (kept at sane defaults).
+        let rasterizer = vk::PipelineRasterizationStateCreateInfo::default()
+            .depth_clamp_enable(false)
+            .rasterizer_discard_enable(false)
+            .polygon_mode(vk::PolygonMode::FILL)
+            .line_width(1.0)
+            .cull_mode(vk::CullModeFlags::NONE)
+            .front_face(vk::FrontFace::COUNTER_CLOCKWISE)
+            .depth_bias_enable(false);
+
+        let multisampling = vk::PipelineMultisampleStateCreateInfo::default()
+            .sample_shading_enable(false)
+            .rasterization_samples(vk::SampleCountFlags::TYPE_1);
+
+        // Depth state is dynamic; the static values are ignored, so depth is
+        // left disabled here to make depth-less pipelines valid.
+        let depth_stencil = vk::PipelineDepthStencilStateCreateInfo::default()
+            .depth_test_enable(false)
+            .depth_write_enable(false)
+            .depth_compare_op(vk::CompareOp::GREATER_OR_EQUAL)
+            .depth_bounds_test_enable(false)
+            .stencil_test_enable(false);
+
+        // Blend state is dynamic; the per-attachment array still declares the
+        // attachment count (one entry per color format) with inert values.
+        let color_blend_attachments: Vec<_> = color_formats
+            .iter()
+            .map(|_| {
+                vk::PipelineColorBlendAttachmentState::default()
+                    .color_write_mask(vk::ColorComponentFlags::RGBA)
+            })
+            .collect();
+        let color_blending = vk::PipelineColorBlendStateCreateInfo::default()
+            .logic_op_enable(false)
+            .attachments(&color_blend_attachments);
+
+        // Descriptor-heap pipelines have no pipeline layout at all (per the
+        // extension: the layout must be NULL when the flag is set).
+        let layout = vk::PipelineLayout::null();
+
+        // Dynamic rendering replaces the compatible render pass: formats are
+        // baked in through VkPipelineRenderingCreateInfo, and the pipeline
+        // names no VkRenderPass (render_pass = VK_NULL_HANDLE, subpass 0).
+        let color_formats_vk: Vec<vk::Format> = color_formats.iter().map(|f| f.to_vk()).collect();
+        let mut rendering_info = vk::PipelineRenderingCreateInfo::default()
+            .color_attachment_formats(&color_formats_vk)
+            .depth_attachment_format(depth_format.map_or(vk::Format::UNDEFINED, |f| f.to_vk()));
+
+        // Pipelines are flagged through the flags2 struct
+        // (VK_KHR_maintenance5), chained next to the rendering info.
+        let mut flags2_info = vk::PipelineCreateFlags2CreateInfo::default()
+            .flags(vk::PipelineCreateFlags2::DESCRIPTOR_HEAP_EXT);
+
+        let pipeline_info = vk::GraphicsPipelineCreateInfo::default()
+            .stages(&shader_stages)
+            .vertex_input_state(&vertex_input_info)
+            .input_assembly_state(&input_assembly)
+            .viewport_state(&viewport_state)
+            .rasterization_state(&rasterizer)
+            .multisample_state(&multisampling)
+            .depth_stencil_state(&depth_stencil)
+            .color_blend_state(&color_blending)
+            .dynamic_state(&dynamic_state)
+            .layout(layout)
+            .subpass(0)
+            .render_pass(vk::RenderPass::null())
+            .push(&mut rendering_info)
+            .push(&mut flags2_info);
+
+        // SAFETY: the device and pipeline cache are valid, and every structure
+        // chained into the create info (stages, entry names, rendering info,
+        // flags2) outlives the call; the shader modules are live.
+        let pipelines = unsafe {
+            device
+                .raw()
+                .create_graphics_pipelines(
+                    device.pipeline_cache(),
+                    std::slice::from_ref(&pipeline_info),
+                    None,
+                )
+                .map_err(|e| {
+                    Error::Backend(format!("failed to create graphics pipeline: {:?}", e))
+                })?
+        };
+
+        Ok(Self {
+            pipeline: pipelines[0],
+            ctx: device.context(),
+        })
+    }
+
+    /// Access the raw `vk::Pipeline` handle. Crate-internal: command recording
+    /// binds through it; callers bind via
+    /// [`CommandBuffer::bind_graphics_pipeline`](crate::CommandBuffer::bind_graphics_pipeline).
+    pub(crate) fn raw(&self) -> vk::Pipeline {
+        self.pipeline
+    }
+
+    /// A stable identity for this pipeline, unique among live pipelines.
+    ///
+    /// Pipelines are immutable resources while a render pass records, so the
+    /// raw Vulkan handle is the deduplication key render-layer bind tracking
+    /// uses.
+    pub fn id(&self) -> u64 {
+        self.pipeline.as_raw()
+    }
+}
+
+impl Drop for GraphicsPipeline {
+    fn drop(&mut self) {
+        // Teardown is deferred: in-flight frames may still execute draws
+        // bound to this pipeline (a hot-reload rebuild replaces it while the
+        // retired copy's frames drain). The ring drains RETIRE_RING frames
+        // later; the action carries the raw device handle, so it stays valid
+        // whenever the ring drains (the device outlives every context holder,
+        // and the drain happens no later than device teardown).
+        self.ctx.ring().push(RetireAction::Pipeline {
+            device: self.ctx.raw().clone(),
+            pipeline: self.pipeline,
+        });
+    }
+}
+
+/// A Vulkan compute pipeline.
+///
+/// Like its graphics counterpart, the pipeline is a descriptor-heap pipeline
+/// with a null layout: root data is delivered through push data
+/// ([`CommandBuffer::push_data`](crate::CommandBuffer::push_data)) as the
+/// entry point's GPU pointers (two 64-bit addresses: input @ offset 0,
+/// output @ offset 8), matching the Slang `EntryPointParams_std430` layout of
+/// a kernel with two pointer parameters.
+pub struct ComputePipeline {
+    pipeline: vk::Pipeline,
+    /// Keeps the device alive; its retirement ring takes the deferred
+    /// teardown in `Drop` (in-flight frames may still bind the pipeline).
+    ctx: DeviceContext,
+}
+
+impl ComputePipeline {
+    /// Create a compute pipeline from a compiled compute shader module.
+    pub fn new(device: &Device, shader: &ShaderModule) -> Result<Self> {
+        let stage = shader.stage().ok_or_else(|| {
+            Error::Validation(
+                "compute shader module has no stage information; compile through \
+                 `Compiler` + `ShaderModule::from_compiled`"
+                    .to_string(),
+            )
+        })?;
+        if stage != vk::ShaderStageFlags::COMPUTE {
+            return Err(Error::Validation(format!(
+                "compute pipeline received a {stage:?} shader module"
+            )));
+        }
+        let entry = std::ffi::CString::new(shader.entry().ok_or_else(|| {
+            Error::Validation(
+                "compute shader module has no entry-point name; compile through \
+                 `Compiler` + `ShaderModule::from_compiled`"
+                    .to_string(),
+            )
+        })?)
+        .map_err(|e| Error::Validation(format!("entry point name is not valid C: {e}")))?;
+        let stage = vk::PipelineShaderStageCreateInfo::default()
+            .stage(vk::ShaderStageFlags::COMPUTE)
+            .module(shader.raw())
+            .name(&entry);
+        // Descriptor-heap pipelines have no pipeline layout at all (per the
+        // extension: the layout must be NULL when the flag is set).
+        let layout = vk::PipelineLayout::null();
+        let mut flags2_info = vk::PipelineCreateFlags2CreateInfo::default()
+            .flags(vk::PipelineCreateFlags2::DESCRIPTOR_HEAP_EXT);
+        let pipeline_info = vk::ComputePipelineCreateInfo::default()
+            .stage(stage)
+            .layout(layout)
+            .push(&mut flags2_info);
+        // SAFETY: the device and pipeline cache are valid; the stage's module
+        // and entry name outlive the call, as does the chained flags2 struct.
+        let pipelines = unsafe {
+            device.raw().create_compute_pipelines(
+                device.pipeline_cache(),
+                std::slice::from_ref(&pipeline_info),
+                None,
+            )
+        }
+        .map_err(|e| Error::Backend(format!("failed to create compute pipeline: {:?}", e)))?;
+        Ok(Self {
+            pipeline: pipelines[0],
+            ctx: device.context(),
+        })
+    }
+
+    /// Access the raw `vk::Pipeline` handle. Crate-internal: command recording
+    /// binds through it; callers bind via
+    /// [`CommandBuffer::bind_compute_pipeline`](crate::CommandBuffer::bind_compute_pipeline).
+    pub(crate) fn raw(&self) -> vk::Pipeline {
+        self.pipeline
+    }
+}
+
+impl Drop for ComputePipeline {
+    fn drop(&mut self) {
+        // Teardown is deferred, as `GraphicsPipeline`'s: in-flight frames may
+        // still execute dispatches bound to this pipeline.
+        self.ctx.ring().push(RetireAction::Pipeline {
+            device: self.ctx.raw().clone(),
+            pipeline: self.pipeline,
+        });
+    }
+}

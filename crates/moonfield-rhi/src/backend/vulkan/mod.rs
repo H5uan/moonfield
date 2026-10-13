@@ -1,0 +1,69 @@
+//! Vulkan rendering backend (a private module of the facade).
+//!
+//! Vulkan RHI implemented on top of `ash`. Exposes a safe Rust API surface
+//! over instance, physical device, logical device, and swapchain creation.
+//! The backend-agnostic vocabulary lives at the facade root (`crate::types`
+//! and siblings), so in-module `crate::types`-style paths resolve.
+
+pub mod bump;
+pub mod command;
+pub mod descriptor_heap;
+pub mod device;
+pub(crate) mod formats;
+pub mod image;
+pub mod instance;
+pub mod memory;
+pub mod offscreen;
+pub mod pipeline;
+pub mod plugin;
+pub mod retire;
+pub mod shader_module;
+pub mod swapchain;
+pub mod sync;
+pub mod texture;
+pub mod upload;
+pub mod view;
+
+#[cfg(test)]
+mod gpu_tests;
+
+/// Aggregated device-extension loaders, built once at device creation and
+/// shared through [`DeviceContext`](device::DeviceContext) — the same shape
+/// `wgpu_hal::vulkan::DeviceExtensionFunctions` has inside
+/// `Arc<DeviceShared>`. A loader is a function-pointer table; every command
+/// buffer reaches the one copy in `DeviceShared` instead of cloning tables.
+pub(crate) struct DeviceExtensionFunctions {
+    /// `VK_EXT_extended_dynamic_state3` per-draw blend commands. Loaders are
+    /// plain function-pointer tables, not promoted core features; the RHI
+    /// keeps them here so extension entry points are loaded once and shared
+    /// with every command buffer through the `Arc`.
+    pub(crate) extended_dynamic_state3: ash::ext::extended_dynamic_state3::Device,
+    /// `VK_EXT_descriptor_heap` CPU-visible descriptor heap writes and binding.
+    /// Loaded at device creation, consumed by `DescriptorHeap`.
+    pub(crate) descriptor_heap: ash::ext::descriptor_heap::Device,
+    /// `VK_KHR_device_address_commands` address-based commands (indirect
+    /// draw/dispatch, memory copies, query-pool resolves to GPU addresses).
+    /// `None` when the device does not expose the extension; the address
+    /// command methods then panic with a clear message, and callers gate on
+    /// [`Device::device_address_commands`].
+    pub(crate) device_address_commands: Option<ash::khr::device_address_commands::Device>,
+}
+
+pub use bump::{BumpAlloc, GpuBumpAllocator};
+pub use command::{CommandBuffer, CullState, DepthState, RenderAttachment, RenderPassDesc};
+pub use descriptor_heap::{
+    BufferRange, DESCRIPTOR_HEAP_IMAGE_CAPACITY, DESCRIPTOR_HEAP_SAMPLER_CAPACITY, DescriptorHeap,
+    SamplerHandle, TextureHandle,
+};
+pub use device::{DescriptorHeapProperties, Device};
+pub use instance::Instance;
+pub use memory::{GpuAllocation, GpuPtr, HostPtr};
+pub use offscreen::{DepthBuffer, OffscreenTarget};
+pub use pipeline::{BlendMode, ComputePipeline, GraphicsPipeline, ShaderStageDesc};
+pub use plugin::RenderDevice;
+pub use shader_module::ShaderModule;
+pub use swapchain::{AcquiredImage, Surface, Swapchain};
+pub use sync::Timeline;
+pub use texture::Texture;
+pub use upload::{FrameUploader, UPLOAD_ARENA_SIZE, UPLOAD_FRAME_RING};
+pub use view::TextureView;

@@ -1,0 +1,9 @@
+[package]
+name = "moonfield-asset"
+version.workspace = true
+edition.workspace = true
+
+[dependencies]
+
+[dev-dependencies]
+moonfield-ecs = { workspace = true }

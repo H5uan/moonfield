@@ -1,0 +1,12 @@
+[package]
+name = "moonfield-app"
+version.workspace = true
+edition.workspace = true
+
+[dependencies]
+moonfield-ecs = { workspace = true }
+moonfield-time = { workspace = true }
+thiserror = { workspace = true }
+
+[dev-dependencies]
+moonfield-math = { workspace = true }

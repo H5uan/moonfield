@@ -1,0 +1,690 @@
+//! The core 3D opaque pass: a per-view system, not a renderer object.
+//!
+//! Bevy-style, the pass owns nothing. Persistent GPU state lives in
+//! render-world resources — [`Core3dPipelines`] (the flat-lit mesh pipeline,
+//! one variant per target color format) and the pooled offscreen
+//! [`ViewTargets`] — and the frame's command buffer comes through the
+//! [`RenderContext`] doors between `acquire_window_frames` and
+//! `submit_window_frames`.
+//!
+//! `prepare_view_targets` and `prepare_core_3d_pipeline` run in the
+//! `PrepareViews` set (the pool's ensure before render-core's
+//! `prepare_view_attachments`; the frame draw arena is core's); the camera
+//! driver then runs [`opaque_pass_3d`] once per extracted view (the `Core3d`
+//! schedule), recording through the view's [`ViewAttachments`] component —
+//! resolved per view by render-core, so this pass matches no target enum. Offscreen
+//! views (the editor viewport) draw into their camera's target ending in
+//! `ShaderRead`; a window view draws into the swapchain image (ending in
+//! `Present`), depth-tested against the surface's depth buffer.
+
+use moonfield_app::prelude::World;
+use moonfield_asset::{AssetRevision, Handle};
+use moonfield_camera::RenderTarget;
+use moonfield_log::{error, error_once};
+use moonfield_render_core::{
+    CurrentView, DrawFunctions, ExtractedView, FrameDrawArena, MainEntity, PhaseItem,
+    RenderContext, RenderPhase, RenderTargetSizes, TrackedRenderPass, ViewAttachments, ViewTargets,
+    WindowSurfaces,
+};
+use moonfield_rhi::{
+    CompareOp, CullMode, CullState, DepthState, Format, FrontFace, GraphicsPipeline, Rect2d,
+    RenderDevice, RenderPassDesc, Result, RootBinder, RootParamPlace, ShaderModule, Viewport,
+};
+use moonfield_shader::Shader;
+use std::collections::HashMap;
+
+use crate::render_phase::{Opaque3d, ViewUniforms};
+use crate::shader::{
+    PipelineShader, PipelineShaders, PreparedShader, PreparedShaders, ShaderEntry,
+};
+
+/// Initial offscreen target size; consumers (e.g. the editor's viewport
+/// panel) report real sizes through [`RenderTargetSizes`].
+pub(crate) const INITIAL_WIDTH: u32 = 1280;
+pub(crate) const INITIAL_HEIGHT: u32 = 720;
+
+/// The name keying the core 3D pipeline's shader in [`PipelineShaders`] and
+/// [`PreparedShaders`].
+pub const CORE_3D_SHADER: &str = "core_3d";
+
+/// The core 3D pipeline's shader request: `core_3d.slang`, a vertex and a
+/// fragment entry, root binding reflected from `vs_main`. The caller (the
+/// editor, at startup) supplies the loaded asset handle.
+pub fn core_3d_shader(shader: Handle<Shader>) -> PipelineShader {
+    PipelineShader {
+        pipeline: CORE_3D_SHADER,
+        shader,
+        reflect_entry: "vs_main",
+        entries: &[
+            ShaderEntry {
+                name: "vs_main",
+                capabilities: &[],
+            },
+            ShaderEntry {
+                name: "fs_main",
+                capabilities: &[],
+            },
+        ],
+    }
+}
+
+/// The flat-lit mesh pipeline of the core 3D pass, as a render-world
+/// resource. [`prepare_core_3d_pipeline`] (re)builds it from
+/// [`PreparedShaders`] whenever the prepared shader's revision advances
+/// past the one the pipeline was built from.
+pub struct Core3dPipeline {
+    pipeline: GraphicsPipeline,
+    /// The `Ptr<DrawData>` root's reflected placement. A draw encodes the
+    /// arena address on the stack and pushes it at the place's offset —
+    /// no per-draw allocation, no name lookup.
+    root: RootParamPlace,
+    /// The `Ptr<ViewUniforms>` root's reflected placement; the pass pushes
+    /// its address once per pass.
+    view: RootParamPlace,
+    /// The shader asset the pipeline was built from.
+    shader: Handle<Shader>,
+    /// The prepared-shader revision the pipeline was built from.
+    shader_revision: AssetRevision,
+}
+
+impl Core3dPipeline {
+    /// Build the pipeline variant for `color_format` from a prepared shader
+    /// (compiled from the extracted asset by `prepare_shaders`).
+    pub fn new(
+        render_device: &RenderDevice,
+        shader: Handle<Shader>,
+        prepared: &PreparedShader,
+        color_format: Format,
+    ) -> Result<Self> {
+        let device = render_device.device();
+        let binder = RootBinder::new(prepared.reflection(), "vs_main")?;
+        let root = binder.pointer_param("root")?;
+        let view = binder.pointer_param("view")?;
+        let entry = |name: &str| {
+            prepared.entry(name).ok_or_else(|| {
+                moonfield_rhi::Error::Backend(format!(
+                    "prepared core 3d shader is missing '{name}'"
+                ))
+            })
+        };
+        let vertex_shader = ShaderModule::from_compiled(device, entry("vs_main")?)?;
+        let fragment_shader = ShaderModule::from_compiled(device, entry("fs_main")?)?;
+        // Descriptor-heap pipeline: per-draw root pointers go through `push_data`.
+        let pipeline = GraphicsPipeline::new_with_options(
+            device,
+            &[color_format],
+            Some(Format::D32Sfloat),
+            &vertex_shader,
+            &fragment_shader,
+        )?;
+        Ok(Self {
+            pipeline,
+            root,
+            view,
+            shader,
+            shader_revision: prepared.revision(),
+        })
+    }
+
+    /// The graphics pipeline for per-draw binding.
+    pub fn pipeline(&self) -> &GraphicsPipeline {
+        &self.pipeline
+    }
+
+    /// The `Ptr<DrawData>` root placement for per-draw encoding.
+    pub fn root(&self) -> RootParamPlace {
+        self.root
+    }
+
+    /// The `Ptr<ViewUniforms>` root placement for the per-pass push.
+    pub fn view(&self) -> RootParamPlace {
+        self.view
+    }
+}
+
+/// The color format of offscreen view targets.
+pub const VIEW_TARGET_FORMAT: Format = Format::B8G8R8A8Unorm;
+
+/// `PrepareViews` system (before render-core's `prepare_view_attachments`):
+/// ensure every viewport camera's pooled offscreen target exists at the
+/// requested size, and retire the targets of cameras with no view.
+pub fn prepare_view_targets(world: &mut World) {
+    let claimed: Vec<MainEntity> = world
+        .query::<&ExtractedView>()
+        .map(|(_, view)| (view.main_entity, view.target))
+        .filter(|(_, target)| target.0 == RenderTarget::Viewport)
+        .map(|(main, _)| main)
+        .collect();
+    if claimed.is_empty() {
+        return;
+    }
+    let Some(render_device) = world.get_resource::<RenderDevice>().map(|d| (*d).clone()) else {
+        return;
+    };
+    if !world.contains_resource::<ViewTargets>() {
+        world.insert_resource(ViewTargets::default());
+    }
+    let sizes = world.get_resource::<RenderTargetSizes>();
+    let mut targets = world
+        .get_resource_mut::<ViewTargets>()
+        .expect("ViewTargets was just ensured");
+    for main in &claimed {
+        let (width, height) = sizes
+            .as_deref()
+            .and_then(|sizes| sizes.0.get(main))
+            .copied()
+            .unwrap_or((INITIAL_WIDTH, INITIAL_HEIGHT));
+        targets.ensure(*main, width, height, VIEW_TARGET_FORMAT, &render_device);
+    }
+    targets.retain_cameras(|main| claimed.contains(&main));
+}
+
+/// The core 3D pipelines, keyed by the color format they render into. The
+/// offscreen target and swapchains can disagree (e.g. an sRGB swapchain), so
+/// one variant per format is built in `PrepareViews`; a swapchain whose
+/// format matches the offscreen target shares its entry.
+#[derive(Default)]
+pub struct Core3dPipelines {
+    pipelines: HashMap<Format, Core3dPipeline>,
+}
+
+impl Core3dPipelines {
+    /// The pipeline variant for `format`, if built.
+    pub fn get(&self, format: Format) -> Option<&Core3dPipeline> {
+        self.pipelines.get(&format)
+    }
+}
+
+/// `PrepareViews` system: (re)build the core 3D pipeline variants when the
+/// prepared shader advanced past the one they were built from, one per color
+/// format the frame's views resolve to. While the shader is not ready (never
+/// compiled, or the latest compile failed) the pass keeps the pipelines it
+/// has, or skips with a one-shot log.
+pub fn prepare_core_3d_pipeline(world: &mut World) {
+    let request = world
+        .get_resource::<PipelineShaders>()
+        .and_then(|requests| requests.get(CORE_3D_SHADER).copied());
+    let Some(request) = request else {
+        error_once!("no '{CORE_3D_SHADER}' shader registered; skipping the core 3d pass");
+        return;
+    };
+
+    // The formats this frame's views resolve to: the offscreen target format
+    // for viewport views, the primary surface's format for window views.
+    let mut formats: Vec<Format> = Vec::new();
+    if world
+        .query::<&ExtractedView>()
+        .any(|(_, view)| view.target.0 == RenderTarget::Viewport)
+    {
+        formats.push(VIEW_TARGET_FORMAT);
+    }
+    if let Some(format) = world.get_resource::<WindowSurfaces>().and_then(|surfaces| {
+        let data = surfaces.primary()?;
+        data.format().ok().map(|(format, _)| format)
+    }) {
+        formats.push(format);
+    }
+    formats.sort();
+    formats.dedup();
+    if formats.is_empty() {
+        return;
+    }
+
+    if !world.contains_resource::<Core3dPipelines>() {
+        world.insert_resource(Core3dPipelines::default());
+    }
+    let prepared = world.get_resource::<PreparedShaders>();
+    let Some(shader) = prepared.as_ref().and_then(|p| p.get(CORE_3D_SHADER)) else {
+        error_once!("the core 3d shader is not ready; skipping the core 3d pass");
+        return;
+    };
+    let Some(render_device) = world.get_resource::<RenderDevice>().map(|d| (*d).clone()) else {
+        return;
+    };
+    let mut pipelines = world
+        .get_resource_mut::<Core3dPipelines>()
+        .expect("Core3dPipelines was just ensured");
+    for format in formats {
+        let stale = pipelines.pipelines.get(&format).is_none_or(|pipeline| {
+            pipeline.shader != request.shader || pipeline.shader_revision != shader.revision()
+        });
+        if !stale {
+            continue;
+        }
+        match Core3dPipeline::new(&render_device, request.shader, shader, format) {
+            Ok(pipeline) => {
+                pipelines.pipelines.insert(format, pipeline);
+            }
+            Err(e) => {
+                error!("failed to build core 3d pipeline for {format:?}: {e}");
+            }
+        }
+    }
+}
+
+/// The pass's render-pass description from the view's resolved attachments.
+fn view_pass_desc(attachments: &ViewAttachments) -> RenderPassDesc<'_> {
+    RenderPassDesc {
+        render_area: Rect2d::full(attachments.extent.0, attachments.extent.1),
+        color_attachments: std::slice::from_ref(&attachments.color),
+        depth_attachment: attachments.depth.clone(),
+    }
+}
+
+/// Record one view's opaque pass through the [`RenderContext`] raster door:
+/// clear color and depth per the view's [`ViewAttachments`], then dispatch
+/// every queued [`Opaque3d`] item to its registered draw command through a
+/// [`TrackedRenderPass`]. `world` reaches the arena, the pipelines, and the
+/// commands' prepared data.
+pub fn record_view_pass(
+    world: &World,
+    view: &ExtractedView,
+    phase: &RenderPhase<Opaque3d>,
+    attachments: &ViewAttachments,
+    draw_functions: &mut DrawFunctions<Opaque3d>,
+    ctx: &mut RenderContext,
+) {
+    let Some(mut pass) = ctx.begin_rendering(&view_pass_desc(attachments)) else {
+        return;
+    };
+    record_view_items(world, view, phase, attachments, draw_functions, &mut pass);
+    pass.end_rendering();
+}
+
+/// The began pass's body: set the pass's dynamic states (Y-flip viewport,
+/// reverse-Z depth, cull state), push the view uniforms, then dispatch the
+/// phase's items. Split from [`record_view_pass`] so tests that own their
+/// command buffer drive the same path.
+pub fn record_view_items(
+    world: &World,
+    view: &ExtractedView,
+    phase: &RenderPhase<Opaque3d>,
+    attachments: &ViewAttachments,
+    draw_functions: &mut DrawFunctions<Opaque3d>,
+    pass: &mut TrackedRenderPass,
+) {
+    let (width, height) = attachments.extent;
+    // The engine's projection is Y-up NDC; Vulkan framebuffers are
+    // top-left origin. The negative-height viewport performs the flip
+    // at the Vulkan boundary (see AGENTS.md clip-space note).
+    pass.set_viewport(Viewport::y_flipped(width, height));
+    // Reverse-Z depth state with the flipped viewport. Faces are not culled
+    // (`CullMode::None` — both sides of every triangle rasterize); the
+    // clockwise front face only matters if culling is ever enabled.
+    pass.set_depth_state(DepthState {
+        test_enable: true,
+        write_enable: true,
+        compare_op: CompareOp::GreaterOrEqual,
+    });
+    pass.set_cull_state(CullState {
+        cull_mode: CullMode::None,
+        front_face: FrontFace::Clockwise,
+    });
+    // Per-pass view uniforms: one arena record, its address pushed
+    // once. The aspect comes from the target's real extent.
+    let translation = view.world_from_view.affine().translation;
+    let uniforms = ViewUniforms {
+        view_proj: view
+            .clip_from_world(width as f32 / height.max(1) as f32)
+            .to_cols_array(),
+        view_pos: [translation.x, translation.y, translation.z],
+        _pad0: 0.0,
+    };
+    let recorded = (|| -> Option<()> {
+        let arena = world.get_resource::<FrameDrawArena>()?;
+        let pipelines = world.get_resource::<Core3dPipelines>()?;
+        let pipeline = pipelines.get(attachments.color_format)?;
+        let record = arena.alloc::<ViewUniforms>().ok()?;
+        unsafe {
+            *record.cpu.typed::<ViewUniforms>() = uniforms;
+        }
+        let place = pipeline.view();
+        let bytes = place.pointer_bytes(record.gpu.as_raw()).ok()?;
+        pass.push_data(place.offset as u32, &bytes);
+        Some(())
+    })();
+    if recorded.is_none() {
+        error!("failed to record view uniforms; skipping view items");
+        return;
+    }
+    for item in phase.items() {
+        let Some(draw) = draw_functions.get_mut(item.draw_function()) else {
+            continue;
+        };
+        draw.draw(world, item, pass);
+    }
+}
+
+/// `Core3d` system: record the current view's opaque pass through the
+/// [`RenderContext`] doors, drawing into the view's resolved
+/// [`ViewAttachments`]. Exclusive — the draw functions read prepared data
+/// from the world. No-ops when there is nothing to record into (no device, no
+/// in-progress frame, no resolvable target) or the view's phase is missing.
+pub fn opaque_pass_3d(world: &mut World) {
+    let Some(view_entity) = world.get_resource::<CurrentView>().map(|view| view.0) else {
+        return;
+    };
+    let Some(view) = world.get_component::<ExtractedView>(view_entity).copied() else {
+        return;
+    };
+    let Some(phase) = world.get_component::<RenderPhase<Opaque3d>>(view_entity) else {
+        return;
+    };
+    let Some(attachments) = world.get_component::<ViewAttachments>(view_entity) else {
+        return;
+    };
+    let Some(mut draw_functions) = world.get_resource_mut::<DrawFunctions<Opaque3d>>() else {
+        return;
+    };
+    let mut ctx = RenderContext::get(world);
+    record_view_pass(
+        world,
+        &view,
+        phase,
+        attachments,
+        &mut draw_functions,
+        &mut ctx,
+    );
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::mesh::{Mesh, MeshHandle, MeshRenderer};
+    use crate::shader::PipelineShaders;
+    use moonfield_app::{App, ExtractSchedule};
+    use moonfield_asset::Assets;
+    use moonfield_camera::{Camera, PrimaryCamera};
+    use moonfield_math::{GlobalTransform, Transform, Vec3};
+    use moonfield_rhi::{
+        AttachmentLayout, ClearValue, CommandBufferUsage, LoadOp, OffscreenTarget,
+        RenderAttachment, StoreOp,
+    };
+
+    const TEST_QUAD_VERTICES: &[[f32; 3]] = &[
+        [-0.5, -0.5, 0.0],
+        [0.5, -0.5, 0.0],
+        [0.5, 0.5, 0.0],
+        [-0.5, 0.5, 0.0],
+    ];
+    const TEST_QUAD_INDICES: &[u32] = &[0, 3, 2, 2, 1, 0];
+
+    /// The repository's `core_3d.slang` source — the same file the editor
+    /// loads through the asset server at startup.
+    fn core_3d_source() -> String {
+        let path = moonfield_asset::assets_dir().join("shaders/core_3d.slang");
+        std::fs::read_to_string(path).expect("core_3d.slang")
+    }
+
+    /// A headless Vulkan device, or `None` (test skips) when no driver is
+    /// available. GPU tests hold `GPU_LOCK` for their whole body.
+    fn headless_device() -> Option<RenderDevice> {
+        match RenderDevice::new() {
+            Ok(device) => Some(device),
+            Err(err) => {
+                eprintln!("skipping: no Vulkan device available ({err})");
+                None
+            }
+        }
+    }
+
+    /// A camera plus one test quad per `(color, transform)`, drawn in slice
+    /// order.
+    fn mesh_world(render_device: &RenderDevice, meshes_to_spawn: &[([f32; 4], Transform)]) -> App {
+        let mut app = App::new();
+        // Device first (the real plugin order), so resources LIFO-drop
+        // before it and the device's teardown guard stays on the clean path.
+        app.render_world_mut()
+            .insert_resource(render_device.clone());
+        app.add_plugin(crate::RenderFeaturePlugin);
+        // The pass builds the pipeline during `render()` from the prepared
+        // shader: register the shader asset and the pipeline's request in
+        // the main world, like the editor's startup load does.
+        let shader = app
+            .world()
+            .get_resource_mut::<Assets<Shader>>()
+            .expect("Assets<Shader> registered by RenderFeaturePlugin")
+            .add(Shader::new(core_3d_source(), "core_3d.slang".into()));
+        app.world()
+            .get_resource_mut::<PipelineShaders>()
+            .expect("PipelineShaders registered by RenderFeaturePlugin")
+            .push(core_3d_shader(shader));
+        // The draw function allocates per-draw root data from this arena; the
+        // test drives slot 0 manually (no window frame loop in headless mode).
+        app.render_world_mut()
+            .insert_resource(FrameDrawArena::new(render_device.device()).expect("arena"));
+        app.add_render_systems(ExtractSchedule, moonfield_render_core::extract_cameras);
+        app.world_mut().spawn((
+            Camera::default(),
+            PrimaryCamera,
+            GlobalTransform::from(
+                Transform::from_xyz(0.0, 2.5, 6.0).looking_at(Vec3::new(0.0, 0.5, 0.0), Vec3::Y),
+            ),
+        ));
+        let mut meshes = Assets::<Mesh>::default();
+        let mesh = MeshHandle(meshes.add(Mesh::new(
+            TEST_QUAD_VERTICES.to_vec(),
+            TEST_QUAD_INDICES.to_vec(),
+            None,
+        )));
+        app.world_mut().insert_resource(meshes);
+        for &(color, transform) in meshes_to_spawn {
+            app.world_mut().spawn((
+                MeshRenderer::new(mesh, color),
+                GlobalTransform::from(transform),
+            ));
+        }
+        app.render();
+        app
+    }
+
+    /// Record the opaque pass into a fresh target and read its BGRA pixels
+    /// back. A second, empty render pass follows in the same command buffer —
+    /// the editor's UI-pass pattern — to cover pass-to-pass state resets.
+    fn record_and_readback(app: &App, render_device: &RenderDevice) -> ((u32, u32), Vec<u8>) {
+        let device = render_device.device();
+        // The mesh uploads recorded during preparation ride the shared
+        // uploader; flush it ahead of this command buffer (the frame loop
+        // does the same at submit).
+        device
+            .uploader()
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .end_frame()
+            .expect("flush uploads");
+        let target = OffscreenTarget::new_with_depth(
+            device,
+            INITIAL_WIDTH,
+            INITIAL_HEIGHT,
+            VIEW_TARGET_FORMAT,
+        )
+        .expect("target");
+
+        let world = app.render_world();
+        let view_entity = world
+            .query::<&ExtractedView>()
+            .next()
+            .map(|(entity, _)| entity)
+            .expect("extracted view");
+        let view = world
+            .get_component::<ExtractedView>(view_entity)
+            .copied()
+            .expect("ExtractedView");
+        let phase = world
+            .get_component::<RenderPhase<Opaque3d>>(view_entity)
+            .expect("opaque phase");
+        let mut draw_functions = world
+            .get_resource_mut::<DrawFunctions<Opaque3d>>()
+            .expect("DrawFunctions<Opaque3d>");
+        assert!(
+            world
+                .get_resource::<Core3dPipelines>()
+                .is_some_and(|pipelines| pipelines.get(VIEW_TARGET_FORMAT).is_some()),
+            "pipeline built during render"
+        );
+
+        // Headless tests drive the arena's slot 0 directly (the window frame
+        // loop that would reset/advance it does not run here); single slot,
+        // submitted and waited below, needs no ring.
+        world
+            .get_resource::<FrameDrawArena>()
+            .expect("FrameDrawArena inserted by mesh_world")
+            .begin_frame(0);
+
+        let command_buffer = device
+            .command_buffer(CommandBufferUsage::ONE_TIME_SUBMIT)
+            .expect("cmd");
+        let attachments = ViewAttachments {
+            color: RenderAttachment {
+                view: target.view(),
+                layout: moonfield_rhi::AttachmentLayout::ShaderRead,
+                load: moonfield_rhi::LoadOp::Clear,
+                store: moonfield_rhi::StoreOp::Store,
+                clear: ClearValue::Color(view.camera.clear_color),
+            },
+            depth: target.depth_view().map(|view| RenderAttachment {
+                view,
+                layout: moonfield_rhi::AttachmentLayout::DepthStencil,
+                load: moonfield_rhi::LoadOp::Clear,
+                store: moonfield_rhi::StoreOp::Discard,
+                clear: ClearValue::DepthStencil {
+                    depth: 0.0,
+                    stencil: 0,
+                },
+            }),
+            extent: target.extent(),
+            color_format: VIEW_TARGET_FORMAT,
+        };
+        let mut pass = TrackedRenderPass::new(&command_buffer);
+        pass.begin_rendering(&view_pass_desc(&attachments));
+        record_view_items(
+            world,
+            &view,
+            phase,
+            &attachments,
+            &mut draw_functions,
+            &mut pass,
+        );
+
+        // The trailing UI-pass pattern: another pass in the same buffer.
+        // (The submit below ends the recording.)
+        let ui_target =
+            OffscreenTarget::new(device, 64, 64, Format::B8G8R8A8Unorm).expect("ui target");
+        let ui_color = RenderAttachment {
+            view: ui_target.view(),
+            layout: AttachmentLayout::ShaderRead,
+            load: LoadOp::Clear,
+            store: StoreOp::Store,
+            clear: ClearValue::Color([0.0, 0.0, 0.0, 1.0]),
+        };
+        command_buffer.begin_rendering(&RenderPassDesc {
+            render_area: Rect2d::full(64, 64),
+            color_attachments: std::slice::from_ref(&ui_color),
+            depth_attachment: None,
+        });
+        command_buffer.end_rendering();
+
+        // The targets' layout transitions recorded into the shared uploader
+        // after the mesh-upload flush above; flush again so both batches land
+        // ahead of this command buffer (`submit_and_wait` waits on the
+        // uploader's latest batch).
+        device
+            .uploader()
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .end_frame()
+            .expect("flush target transitions");
+        device
+            .submit_and_wait(&[&command_buffer])
+            .expect("submit and wait");
+
+        (
+            target.extent(),
+            target.read_pixels(device).expect("readback"),
+        )
+    }
+
+    /// The opaque pass must rasterize a mesh in front of the primary camera.
+    #[test]
+    fn test_opaque_pass_draws_mesh() {
+        let _gpu = crate::test_util::GPU_LOCK.lock().unwrap();
+        let Some(render_device) = headless_device() else {
+            return;
+        };
+        let app = mesh_world(
+            &render_device,
+            &[([1.0, 0.0, 0.0, 1.0], Transform::from_xyz(-0.75, 0.0, 0.0))],
+        );
+        let ((width, height), pixels) = record_and_readback(&app, &render_device);
+
+        if std::env::var_os("MOONFIELD_DEBUG_SCENE").is_some() {
+            std::fs::create_dir_all("../../target/tmp").unwrap();
+            std::fs::write(
+                format!("../../target/tmp/scene_test_{width}x{height}.raw"),
+                &pixels,
+            )
+            .unwrap();
+        }
+        // Compare against the clear color with rounding tolerance (the GPU
+        // rounds unorm values, `(x * 255.0) as u8` truncates).
+        let clear = Camera::default().clear_color;
+        let is_clear = |px: &[u8]| {
+            let (b, g, r, a) = (px[0] as i32, px[1] as i32, px[2] as i32, px[3]);
+            (b - (clear[2] * 255.0).round() as i32).abs() <= 1
+                && (g - (clear[1] * 255.0).round() as i32).abs() <= 1
+                && (r - (clear[0] * 255.0).round() as i32).abs() <= 1
+                && a == 255
+        };
+        let non_clear = pixels
+            .as_chunks::<4>()
+            .0
+            .iter()
+            .filter(|px| !is_clear(px.as_slice()))
+            .count();
+        assert!(
+            non_clear > 1000,
+            "mesh did not rasterize: only {non_clear} non-clear pixels"
+        );
+    }
+
+    /// Depth direction: near red and far blue quads overlap at screen center;
+    /// the center pixel must be red even though the blue mesh is drawn second.
+    #[test]
+    fn test_opaque_pass_depth_occludes() {
+        let _gpu = crate::test_util::GPU_LOCK.lock().unwrap();
+        let Some(render_device) = headless_device() else {
+            return;
+        };
+        let app = mesh_world(
+            &render_device,
+            &[
+                (
+                    [1.0, 0.0, 0.0, 1.0],
+                    Transform {
+                        translation: Vec3::new(0.0, 0.5, 2.0),
+                        scale: Vec3::splat(4.0),
+                        ..Transform::IDENTITY
+                    },
+                ),
+                (
+                    [0.0, 0.0, 1.0, 1.0],
+                    Transform {
+                        translation: Vec3::new(0.0, 0.5, -3.0),
+                        scale: Vec3::splat(4.0),
+                        ..Transform::IDENTITY
+                    },
+                ),
+            ],
+        );
+        let ((width, height), pixels) = record_and_readback(&app, &render_device);
+
+        let center = ((height / 2) * width + width / 2) as usize;
+        let px = &pixels[center * 4..center * 4 + 4];
+        // BGRA: the near red mesh wins; the flat shading dims but never
+        // swaps channels (red shade ≥ 0.35 → r ≥ 89).
+        assert!(
+            px[2] > 80 && px[0] < 40 && px[1] < 40,
+            "center pixel must be red (near mesh occludes), got BGRA {px:?}"
+        );
+    }
+}

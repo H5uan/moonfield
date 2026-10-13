@@ -1,0 +1,261 @@
+//! Minimal repro: heap sampling from a *graphics* pipeline.
+//!
+//! The compute sibling (`descriptor_heap_sampling`) passes on the real
+//! driver; the same heap read in a fragment shader must too. A fullscreen
+//! triangle with no vertex inputs, no push data, and no sampler — the
+//! fragment stage reads texel (0,0) of heap slot 0 through the untyped
+//! `ResourceDescriptorHeap` path (no bindings, no mappings). Deliberately
+//! independent of the editor/egui machinery.
+
+use super::common;
+
+use crate::{
+    AttachmentLayout, BufferRange, ClearValue, CommandBufferUsage, Compiler, Device, Format,
+    FrameUploader, GpuAllocation, GraphicsPipeline, Instance, LoadOp, MemoryResidency,
+    OffscreenTarget, Rect2d, RenderAttachment, RenderPassDesc, ShaderModule, ShaderTarget, StoreOp,
+    Texture, UPLOAD_ARENA_SIZE,
+};
+
+const VERTEX: &str = r#"
+struct VsOutput { float4 position : SV_POSITION; };
+[shader("vertex")]
+VsOutput main(uint vid : SV_VertexID)
+{
+    VsOutput o;
+    float2 p = float2(float((vid << 1) & 2u), float(vid & 2u));
+    o.position = float4(p * 2.0 - 1.0, 0.0, 1.0);
+    return o;
+}
+"#;
+
+const FRAGMENT: &str = r#"
+[shader("fragment")]
+float4 main() : SV_TARGET
+{
+    Texture2D tex = ResourceDescriptorHeap[NonUniformResourceIndex(0)];
+    return tex.Load(int3(int2(0, 0), 0));
+}
+"#;
+
+#[test]
+// AMD 26.8.1 (RX 9070 XT) lost the device on any graphics-stage heap
+// descriptor read; 26.9.1 fixed it (cargo run + these tests pass), so the
+// pair now runs unignored and doubles as the driver regression guard.
+fn graphics_heap_sampling_roundtrip() {
+    let instance = match Instance::new_headless() {
+        Ok(instance) => instance,
+        Err(err) => {
+            eprintln!("skipping: no Vulkan instance available ({err})");
+            return;
+        }
+    };
+    if common::skip_if_descriptor_heap_missing(&instance) {
+        return;
+    }
+    let device = match Device::new(&instance, None) {
+        Ok(device) => device,
+        Err(err) => {
+            eprintln!("skipping: no Vulkan device available ({err})");
+            return;
+        }
+    };
+
+    // Slot 0: a 4x4 solid-red texture (created before the render target so it
+    // claims heap slot 0).
+    let mut pixels = Vec::with_capacity(4 * 4 * 4);
+    for _ in 0..4 * 4 {
+        pixels.extend_from_slice(&[255, 0, 0, 255]);
+    }
+    let mut uploader = FrameUploader::new(&device, UPLOAD_ARENA_SIZE).expect("uploader");
+    let texture = Texture::bindless(&device, &mut uploader, 4, 4, Format::R8G8B8A8Unorm, &pixels)
+        .expect("bindless texture");
+    assert_eq!(texture.handle(), Some(crate::TextureHandle(0)));
+    uploader.end_frame().expect("submit uploads");
+
+    let compiler = Compiler::new().expect("compiler");
+    let vertex_spirv = compiler
+        .compile_source("vs", VERTEX, "main", ShaderTarget::Spirv)
+        .expect("vertex shader");
+    let fragment_spirv = compiler
+        .compile_source_with_options(
+            "fs",
+            FRAGMENT,
+            "main",
+            ShaderTarget::Spirv,
+            &["spvDescriptorHeapEXT"],
+            &[],
+        )
+        .expect("fragment shader");
+    let vertex_shader = ShaderModule::from_compiled(&device, &vertex_spirv).expect("vs module");
+    let fragment_shader = ShaderModule::from_compiled(&device, &fragment_spirv).expect("fs module");
+
+    // The fragment reads heap slot 0 through the untyped
+    // `ResourceDescriptorHeap` path; the pipeline needs no bindings at all.
+    // The vertex stage has no root data either — the fullscreen triangle is
+    // synthesized from SV_VertexID, so nothing is pushed before the draw.
+    let pipeline = GraphicsPipeline::new_with_options(
+        &device,
+        &[Format::B8G8R8A8Unorm],
+        None,
+        &vertex_shader,
+        &fragment_shader,
+    )
+    .expect("pipeline");
+
+    let target = OffscreenTarget::new(&device, 64, 64, Format::B8G8R8A8Unorm).expect("target");
+    let heap = device.descriptor_heap();
+    // The target's layout transition records into the shared uploader; flush
+    // it ahead of the command buffer below (the frame loop does this at
+    // submit). `submit_and_wait` waits on the uploader's latest batch.
+    device
+        .uploader()
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+        .end_frame()
+        .expect("flush target transition");
+
+    let cmd = device
+        .command_buffer(CommandBufferUsage::ONE_TIME_SUBMIT)
+        .expect("cmd");
+    heap.cmd_bind(&cmd).expect("bind heaps");
+    let color = RenderAttachment {
+        view: target.view(),
+        layout: AttachmentLayout::ShaderRead,
+        load: LoadOp::Clear,
+        store: StoreOp::Store,
+        clear: ClearValue::Color([0.0, 0.0, 0.0, 1.0]),
+    };
+    cmd.begin_rendering(&RenderPassDesc {
+        render_area: Rect2d::full(64, 64),
+        color_attachments: std::slice::from_ref(&color),
+        depth_attachment: None,
+    });
+    cmd.bind_graphics_pipeline(&pipeline);
+    cmd.draw(3, 1, 0, 0);
+    cmd.end_rendering();
+    device.submit_and_wait(&[&cmd]).expect("submit and wait");
+
+    let readback = target.read_pixels(&device).expect("readback");
+    let px = &readback[0..4];
+    // BGRA: solid red = (0, 0, 255, 255), within unorm rounding.
+    assert!(
+        px[2] > 200 && px[0] < 60 && px[1] < 60,
+        "heap-sampled texel must be red, got BGRA {px:?}"
+    );
+}
+
+/// The same heap read, but the slot holds a *storage buffer* descriptor and
+/// the fragment shader reads it through the untyped heap path. Isolates
+/// image-descriptor reads from buffer-descriptor reads in the graphics stage.
+#[test]
+// Same graphics-stage heap-read path as `graphics_heap_sampling_roundtrip`,
+// but the slot holds a storage-buffer descriptor instead of an image one.
+fn graphics_heap_buffer_descriptor_read() {
+    let instance = match Instance::new_headless() {
+        Ok(instance) => instance,
+        Err(err) => {
+            eprintln!("skipping: no Vulkan instance available ({err})");
+            return;
+        }
+    };
+    if common::skip_if_descriptor_heap_missing(&instance) {
+        return;
+    }
+    let device = match Device::new(&instance, None) {
+        Ok(device) => device,
+        Err(err) => {
+            eprintln!("skipping: no Vulkan device available ({err})");
+            return;
+        }
+    };
+
+    // Slot 0: a 16-byte storage buffer holding one red float4.
+    let heap = device.descriptor_heap();
+    let slot = heap.alloc_image_slot().expect("slot");
+    let buffer = GpuAllocation::new(&device, 16, MemoryResidency::CpuWriteOnly).expect("buffer");
+    unsafe {
+        *buffer.host().expect("host-visible").typed::<[f32; 4]>() = [1.0, 0.0, 0.0, 1.0];
+    }
+    heap.write_buffer_descriptors(&[(
+        slot,
+        BufferRange {
+            address: buffer.gpu_ptr(),
+            size: 16,
+        },
+    )])
+    .expect("write buffer descriptor");
+
+    const FRAGMENT: &str = r#"
+[shader("fragment")]
+float4 main() : SV_TARGET
+{
+    StructuredBuffer<float4> buf = ResourceDescriptorHeap[NonUniformResourceIndex(0)];
+    return buf[0];
+}
+"#;
+
+    let compiler = Compiler::new().expect("compiler");
+    let vertex_spirv = compiler
+        .compile_source("vs", VERTEX, "main", ShaderTarget::Spirv)
+        .expect("vertex shader");
+    let fragment_spirv = compiler
+        .compile_source_with_options(
+            "fs",
+            FRAGMENT,
+            "main",
+            ShaderTarget::Spirv,
+            &["spvDescriptorHeapEXT"],
+            &[],
+        )
+        .expect("fragment shader");
+    let vertex_shader = ShaderModule::from_compiled(&device, &vertex_spirv).expect("vs module");
+    let fragment_shader = ShaderModule::from_compiled(&device, &fragment_spirv).expect("fs module");
+
+    let pipeline = GraphicsPipeline::new_with_options(
+        &device,
+        &[Format::B8G8R8A8Unorm],
+        None,
+        &vertex_shader,
+        &fragment_shader,
+    )
+    .expect("pipeline");
+
+    let target = OffscreenTarget::new(&device, 64, 64, Format::B8G8R8A8Unorm).expect("target");
+    // The target's layout transition records into the shared uploader; flush
+    // it ahead of the command buffer below (the frame loop does this at
+    // submit). `submit_and_wait` waits on the uploader's latest batch.
+    device
+        .uploader()
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+        .end_frame()
+        .expect("flush target transition");
+
+    let cmd = device
+        .command_buffer(CommandBufferUsage::ONE_TIME_SUBMIT)
+        .expect("cmd");
+    heap.cmd_bind(&cmd).expect("bind heaps");
+    let color = RenderAttachment {
+        view: target.view(),
+        layout: AttachmentLayout::ShaderRead,
+        load: LoadOp::Clear,
+        store: StoreOp::Store,
+        clear: ClearValue::Color([0.0, 0.0, 0.0, 1.0]),
+    };
+    cmd.begin_rendering(&RenderPassDesc {
+        render_area: Rect2d::full(64, 64),
+        color_attachments: std::slice::from_ref(&color),
+        depth_attachment: None,
+    });
+    cmd.bind_graphics_pipeline(&pipeline);
+    cmd.draw(3, 1, 0, 0);
+    cmd.end_rendering();
+    device.submit_and_wait(&[&cmd]).expect("submit and wait");
+
+    let readback = target.read_pixels(&device).expect("readback");
+    let px = &readback[0..4];
+    assert!(
+        px[2] > 200 && px[0] < 60 && px[1] < 60,
+        "heap buffer read must be red, got BGRA {px:?}"
+    );
+}

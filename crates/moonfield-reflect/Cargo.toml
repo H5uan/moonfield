@@ -1,0 +1,8 @@
+[package]
+name = "moonfield-reflect"
+version.workspace = true
+edition.workspace = true
+
+[dependencies]
+moonfield-reflect-derive = { workspace = true }
+glam = { workspace = true, features = ["std"] }

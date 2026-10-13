@@ -1,0 +1,27 @@
+[package]
+name = "moonfield-rhi"
+version.workspace = true
+edition.workspace = true
+
+[features]
+# Development-build convenience: the Vulkan validation layer. Requires the
+# Vulkan SDK at runtime.
+validation = []
+
+[dependencies]
+moonfield-math = { workspace = true }
+bytemuck = { version = "1.23", features = ["derive"] }
+tracing = { version = "0.1", default-features = false, features = ["std"] }
+raw-window-handle = "0.6.2"
+shader-slang = { package = "shader-slang-rs", git = "https://github.com/H5uan/shader-slang-rs" }
+
+# The Vulkan backend's native stack.
+ash = "0.38.0"
+ash-window = "0.13.0"
+# The allocation substrate of the Vulkan backend.
+gpu-allocator = { version = "0.28.0", default-features = false, features = ["std", "vulkan"] }
+
+# Test-only: the shader tests' probe module names resolve imports against
+# the repository's shader tree through the shared asset-root helper.
+[dev-dependencies]
+moonfield-asset = { workspace = true }

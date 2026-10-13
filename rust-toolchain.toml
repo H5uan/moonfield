@@ -1,0 +1,6 @@
+[toolchain]
+# Pinned dated nightly (rustc 1.100.0-nightly c656540d6). CI reads this file
+# via dtolnay/rust-toolchain@master; .github/workflows/nightly-bump.yml rolls
+# the date forward weekly via PR.
+channel = "nightly-2026-08-22"
+components = ["rustfmt", "clippy", "rust-analyzer", "rust-src"]

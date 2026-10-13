@@ -1,0 +1,17 @@
+[package]
+name = "moonfield-ml"
+version.workspace = true
+edition.workspace = true
+
+[dependencies]
+moonfield-render-feature = { workspace = true, features = ["splat"] }
+moonfield-rhi = { workspace = true }
+moonfield-shader = { workspace = true }
+tracing = "0.1.44"
+
+
+[dev-dependencies]
+moonfield-asset = { workspace = true }
+
+# The RHI backend is Vulkan (the pivot API); see
+# .agents/notes/implemented/architecture/2026-10-13-rhi-vulkan-pivot.md.

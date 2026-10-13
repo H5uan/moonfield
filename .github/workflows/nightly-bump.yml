@@ -1,0 +1,41 @@
+name: Nightly toolchain bump
+
+# Rolls the pinned nightly in rust-toolchain.toml forward once a week by
+# opening a PR; CI on that PR validates the new toolchain on all platforms.
+# Dependabot does not manage rust-toolchain.toml — this workflow fills the gap.
+
+on:
+  schedule:
+    - cron: "17 2 * * 1"
+  workflow_dispatch:
+
+permissions:
+  contents: write
+  pull-requests: write
+
+jobs:
+  bump:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+
+      - name: Resolve latest nightly date
+        id: nightly
+        run: |
+          DATE=$(curl -sSf https://static.rust-lang.org/dist/channel-rust-nightly.toml | grep -m1 '^date = ' | cut -d'"' -f2)
+          echo "date=$DATE" >> "$GITHUB_OUTPUT"
+
+      - name: Update rust-toolchain.toml
+        run: sed -i "s/^channel = .*/channel = \"nightly-${{ steps.nightly.outputs.date }}\"/" rust-toolchain.toml
+
+      - name: Open bump PR
+        uses: peter-evans/create-pull-request@v8
+        with:
+          branch: chore/nightly-bump
+          commit-message: "chore: bump pinned nightly to ${{ steps.nightly.outputs.date }}"
+          title: "chore: bump pinned nightly to ${{ steps.nightly.outputs.date }}"
+          body: |
+            Automated bump of `rust-toolchain.toml` to the latest dated nightly.
+            CI on this PR validates the new toolchain on all platforms; merge
+            when green, close to skip a bad nightly.
+          labels: dependencies

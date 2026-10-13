@@ -1,0 +1,230 @@
+//! Headless smoke test for the egui Vulkan backend (`egui_vk`).
+//!
+//! Renders egui primitives — a text label (managed font texture) and a
+//! `ui.image` of a user-registered texture — into an offscreen target, reads
+//! the pixels back, and asserts the output is not blank and the user texture
+//! sampled through. The second frame exercises the editor's resize flow: the
+//! source image is resized, which allocates new heap slots, and the
+//! registration refreshes with the new handles. Skips gracefully on machines
+//! without a Vulkan driver.
+
+use moonfield_asset::Assets;
+use moonfield_editor::egui_vk::{
+    EGUI_SHADER, EguiFrameResources, EguiOptions, EguiPipeline, EguiTextures, egui_shader,
+    record_egui,
+};
+use moonfield_render_feature::shader::{ExtractedShader, PreparedShaders};
+use moonfield_rhi::{
+    AttachmentLayout, ClearValue, CommandBufferUsage, Format, LoadOp, OffscreenTarget, Rect2d,
+    RenderAttachment, RenderDevice, RenderPassDesc, StoreOp,
+};
+use moonfield_shader::Shader;
+
+const WIDTH: u32 = 256;
+const HEIGHT: u32 = 256;
+const CLEAR: [u8; 4] = [0, 0, 0, 255];
+
+#[test]
+fn egui_headless_frame_is_not_blank() {
+    let render_device = match RenderDevice::new() {
+        Ok(render_device) => render_device,
+        Err(err) => {
+            eprintln!("skipping: no Vulkan device available ({err})");
+            return;
+        }
+    };
+    let device = render_device.device().clone();
+
+    let target =
+        OffscreenTarget::new(&device, WIDTH, HEIGHT, Format::B8G8R8A8Unorm).expect("target");
+    // The user-texture source image (the editor viewport's offscreen target
+    // analogue), cleared to opaque red each frame.
+    let mut user_image =
+        OffscreenTarget::new(&device, 8, 8, Format::B8G8R8A8Unorm).expect("user image");
+
+    // Compile the repository's `egui.slang` through the prepared-shader
+    // path (Slang compilation needs no device) — the same asset the editor
+    // loads through its asset server at startup.
+    let mut shaders = Assets::<Shader>::default();
+    let shader_path = moonfield_asset::assets_dir().join("shaders/egui.slang");
+    let shader = shaders.add(Shader::new(
+        std::fs::read_to_string(&shader_path).expect("egui.slang"),
+        shader_path.display().to_string(),
+    ));
+    let revision = shaders.revision(&shader).expect("shader revision");
+    let mut prepared = PreparedShaders::default();
+    prepared.compile(
+        &egui_shader(shader),
+        &ExtractedShader {
+            revision,
+            shader: shaders.get(&shader).expect("shader").clone(),
+        },
+    );
+    let prepared_shader = prepared.get(EGUI_SHADER).unwrap_or_else(|| {
+        panic!(
+            "egui shader failed to compile: {}",
+            prepared.error(EGUI_SHADER).unwrap_or("no record")
+        )
+    });
+    let pipeline = EguiPipeline::new(
+        &device,
+        shader,
+        prepared_shader,
+        Format::B8G8R8A8Unorm,
+        false,
+        EguiOptions::default(),
+    )
+    .expect("egui pipeline");
+    let mut textures = EguiTextures::new(&render_device).expect("egui textures");
+    let mut frames = EguiFrameResources::new(&device, 1).expect("egui frame resources");
+
+    let mut user_texture =
+        textures.register_native_texture(user_image.texture_handle(), user_image.sampler_handle());
+
+    let ctx = egui::Context::default();
+
+    // Frame 1: fresh registration. Frame 2: the source image was resized —
+    // new heap slots — and the registration refreshes with the new handles
+    // (the editor's viewport-resize flow).
+    for frame in 0..2 {
+        if frame == 1 {
+            user_image
+                .resize(&device, 16, 16)
+                .expect("resize user image");
+            let old = user_texture;
+            user_texture = textures
+                .register_native_texture(user_image.texture_handle(), user_image.sampler_handle());
+            textures.free_texture(&old);
+        }
+
+        let raw_input = egui::RawInput {
+            screen_rect: Some(egui::Rect::from_min_size(
+                egui::Pos2::ZERO,
+                egui::vec2(WIDTH as f32, HEIGHT as f32),
+            )),
+            ..Default::default()
+        };
+        let full_output = ctx.run_ui(raw_input, |ui| {
+            ui.heading("egui_vk smoke test");
+            ui.image((user_texture, egui::vec2(64.0, 64.0)));
+        });
+        let egui::FullOutput {
+            mut textures_delta,
+            shapes,
+            ..
+        } = full_output;
+
+        // Draining marks the delta as applied; epaint 0.36 debug-asserts
+        // that a dropped `TexturesDelta` is empty. The two-frame test never
+        // frees a texture, so `free` is discarded here.
+        for (id, deltas) in textures_delta.set.drain() {
+            for delta in deltas {
+                textures
+                    .update_texture(&device, &pipeline, id, &delta)
+                    .expect("texture upload");
+            }
+        }
+        textures_delta.free.clear();
+        // The shared uploader flushes explicitly here (the editor's frame
+        // loop flushes it at submit); same-queue submission order runs the
+        // uploads ahead of the command buffer below.
+        device
+            .uploader()
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .end_frame()
+            .expect("flush uploads");
+        let pixels_per_point = 1.0;
+        let primitives = ctx.tessellate(shapes, pixels_per_point);
+        assert!(!primitives.is_empty(), "egui produced no primitives");
+        frames
+            .update(&device, 0, &primitives)
+            .expect("buffer upload");
+
+        let command_buffer = device
+            .command_buffer(CommandBufferUsage::ONE_TIME_SUBMIT)
+            .expect("command buffer");
+        // The command buffer's owner binds the descriptor heaps (the frame
+        // loop does it at acquire for the editor).
+        device
+            .descriptor_heap()
+            .cmd_bind(&command_buffer)
+            .expect("bind descriptor heaps");
+
+        // Clear the user-texture source to opaque red.
+        clear_to_red(&command_buffer, &user_image);
+
+        // The egui pass into the readback target.
+        let color_attachment = RenderAttachment {
+            view: target.view(),
+            layout: AttachmentLayout::ShaderRead,
+            load: LoadOp::Clear,
+            store: StoreOp::Store,
+            clear: ClearValue::Color([0.0, 0.0, 0.0, 1.0]),
+        };
+        command_buffer.begin_rendering(&RenderPassDesc {
+            render_area: Rect2d::full(WIDTH, HEIGHT),
+            color_attachments: std::slice::from_ref(&color_attachment),
+            depth_attachment: None,
+        });
+        let mut pass = moonfield_render_core::TrackedRenderPass::new(&command_buffer);
+        record_egui(
+            &mut pass,
+            &pipeline,
+            &textures,
+            &frames,
+            0,
+            (WIDTH, HEIGHT),
+            pixels_per_point,
+            &primitives,
+        );
+        command_buffer.end_rendering();
+
+        device
+            .submit_and_wait(&[&command_buffer])
+            .expect("submit and wait");
+    }
+
+    // Read back the second frame and verify.
+    let pixels = target.read_pixels(&device).expect("readback");
+    let non_clear = pixels
+        .as_chunks::<4>()
+        .0
+        .iter()
+        .filter(|px| **px != CLEAR)
+        .count();
+    assert!(
+        non_clear > 0,
+        "egui frame read back as uniform clear color — nothing was drawn"
+    );
+    // The user-texture image is opaque red; the `ui.image` quad must show up
+    // as red pixels (BGRA byte order) after the resize + rebind.
+    let red = pixels
+        .as_chunks::<4>()
+        .0
+        .iter()
+        .filter(|px| px[2] > 200 && px[0] < 60 && px[1] < 60 && px[3] == 255)
+        .count();
+    assert!(
+        red > 1000,
+        "user texture did not sample through: only {red} red pixels"
+    );
+}
+
+/// Record a clear-only rendering pass filling the image with opaque red.
+fn clear_to_red(command_buffer: &moonfield_rhi::CommandBuffer, image: &OffscreenTarget) {
+    let (width, height) = image.extent();
+    let color_attachment = RenderAttachment {
+        view: image.view(),
+        layout: AttachmentLayout::ShaderRead,
+        load: LoadOp::Clear,
+        store: StoreOp::Store,
+        clear: ClearValue::Color([1.0, 0.0, 0.0, 1.0]),
+    };
+    command_buffer.begin_rendering(&RenderPassDesc {
+        render_area: Rect2d::full(width, height),
+        color_attachments: std::slice::from_ref(&color_attachment),
+        depth_attachment: None,
+    });
+    command_buffer.end_rendering();
+}
