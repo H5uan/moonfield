@@ -27,6 +27,55 @@ pub struct Gaussian3D {
     _pad3: f32,
 }
 
+impl Gaussian3D {
+    /// One record from the `GaussianScene` attribute conventions (log-space
+    /// scales, logit opacity, (w, x, y, z) rotation); padding zeroed.
+    pub fn new(
+        mean: [f32; 3],
+        log_scale: [f32; 3],
+        rotation: [f32; 4],
+        logit_opacity: f32,
+        sh_dc: [f32; 3],
+    ) -> Self {
+        Self {
+            mean,
+            _pad0: 0.0,
+            log_scale,
+            _pad1: 0.0,
+            rotation,
+            logit_opacity,
+            _pad2: [0.0; 3],
+            sh_dc,
+            _pad3: 0.0,
+        }
+    }
+
+    /// World-space center.
+    pub fn mean(&self) -> [f32; 3] {
+        self.mean
+    }
+
+    /// Log-space per-axis scales.
+    pub fn log_scale(&self) -> [f32; 3] {
+        self.log_scale
+    }
+
+    /// Rotation quaternion (w, x, y, z).
+    pub fn rotation(&self) -> [f32; 4] {
+        self.rotation
+    }
+
+    /// Logit-space opacity.
+    pub fn logit_opacity(&self) -> f32 {
+        self.logit_opacity
+    }
+
+    /// Degree-0 (DC) spherical-harmonics color, RGB.
+    pub fn sh_dc(&self) -> [f32; 3] {
+        self.sh_dc
+    }
+}
+
 /// The `SplatView` camera record: mirrors `SplatView` in `gs/types.slang`.
 /// `w` is the world→view rotation's three rows at a 16-byte stride.
 #[repr(C)]

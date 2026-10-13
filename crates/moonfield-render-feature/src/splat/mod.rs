@@ -5,6 +5,7 @@
 pub mod cloud;
 pub mod forward;
 pub mod io;
+pub mod prepare;
 pub mod rasterize;
 pub mod scene;
 pub mod sort_pass;
