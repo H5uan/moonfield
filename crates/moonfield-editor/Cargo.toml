@@ -4,7 +4,7 @@ version.workspace = true
 edition.workspace = true
 
 [features]
-default = ["mesh"]
+default = ["mesh", "splat"]
 mesh = []
 splat = ["moonfield-render-feature/splat"]
 

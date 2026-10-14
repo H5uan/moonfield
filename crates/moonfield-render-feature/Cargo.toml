@@ -23,4 +23,10 @@ moonfield-shader = { workspace = true }
 serde_json = { workspace = true }
 thiserror = { workspace = true }
 
+# The synthetic splat reference asset's generator (M3 acceptance); needs the
+# splat modules for the loader round-trip.
+[[example]]
+name = "gen_splat_asset"
+required-features = ["splat"]
+
 # The RHI backend is platform-selected: Vulkan everywhere but macOS, Metal 4

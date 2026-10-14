@@ -895,7 +895,7 @@ mod tests {
             .get_resource::<moonfield_asset::Assets<moonfield_shader::Shader>>()
             .expect("Assets<Shader>");
         #[cfg(feature = "splat")]
-        assert_eq!(shaders.len(), 3);
+        assert_eq!(shaders.len(), 5);
         #[cfg(not(feature = "splat"))]
         assert_eq!(shaders.len(), 2);
         let requests = app
@@ -909,11 +909,23 @@ mod tests {
         );
         assert!(requests.get(crate::egui_vk::EGUI_SHADER).is_some());
         #[cfg(feature = "splat")]
-        assert!(
-            requests
-                .get(moonfield_render_feature::splat::sort_pass::SPLAT_SORT_SHADER)
-                .is_some()
-        );
+        {
+            assert!(
+                requests
+                    .get(moonfield_render_feature::splat::sort_pass::SPLAT_SORT_SHADER)
+                    .is_some()
+            );
+            assert!(
+                requests
+                    .get(moonfield_render_feature::splat::forward_pass::SPLAT_FORWARD_SHADER)
+                    .is_some()
+            );
+            assert!(
+                requests
+                    .get(moonfield_render_feature::splat::forward_pass::SPLAT_COMPOSITE_SHADER)
+                    .is_some()
+            );
+        }
     }
 
     /// Without a window (no `WinitWindow`) or a render device, extraction and

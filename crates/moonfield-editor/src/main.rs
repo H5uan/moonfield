@@ -9,11 +9,14 @@
 //! `MOONFIELD_EDITOR_SIM_RESIZE=1` to emulate a continuous window drag
 //! (every `Update` tick rewrites the primary window's cached physical size,
 //! driving the extract → size-mismatch → swapchain recreate path without
-//! moving the OS window).
+//! moving the OS window). Set `MOONFIELD_EDITOR_LOAD=<path>` to load an
+//! extra asset at startup (e.g. `assets/models/synth_splats.glb` for the
+//! splat acceptance run).
 //!
 //! ```sh
 //! MOONFIELD_EDITOR_AUTO_CLOSE=5 cargo run
 //! MOONFIELD_EDITOR_SIM_RESIZE=1 cargo run
+//! MOONFIELD_EDITOR_LOAD=assets/models/synth_splats.glb cargo run
 //! ```
 
 use moonfield_app::App;
@@ -38,6 +41,8 @@ fn main() -> std::process::ExitCode {
     app.add_plugin(LogPlugin::default());
     app.add_plugin(RenderPlugin);
     app.add_plugin(RenderFeaturePlugin);
+    #[cfg(feature = "splat")]
+    app.add_plugin(moonfield_render_feature::splat::forward_pass::SplatForwardPlugin);
     app.add_plugin(HierarchyPlugin);
     app.add_plugin(WinitPlugin::default().with_settings(WinitSettings::continuous()));
     app.add_plugin(EditorPlugin);
@@ -76,6 +81,16 @@ fn spawn_default_scene(world: &mut World) {
     let path = default_mesh_path();
     load_asset(world, &path)
         .unwrap_or_else(|error| panic!("failed to load default mesh {}: {error}", path.display()));
+
+    // `MOONFIELD_EDITOR_LOAD=<path>`: load an extra asset at startup (the
+    // splat acceptance run's synthetic cloud); a failure logs and leaves the
+    // rest of the scene up.
+    if let Some(extra) = std::env::var_os("MOONFIELD_EDITOR_LOAD") {
+        let path = PathBuf::from(extra);
+        if let Err(error) = load_asset(world, &path) {
+            moonfield_log::error!("failed to load {}: {error}", path.display());
+        }
+    }
 }
 
 #[cfg(test)]

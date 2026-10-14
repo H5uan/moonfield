@@ -94,11 +94,12 @@ pub fn editor_asset_server() -> AssetServer {
 }
 
 /// Eagerly load the built-in pipelines' shaders (`core_3d.slang`,
-/// `egui.slang`, and — with the `splat` feature — `util/radix_sort.slang`)
-/// through the asset server and register their pipeline requests, so the
-/// passes find prepared shaders from the first frame — matching the previous
-/// compile-at-pipeline-creation behavior. Loading is synchronous; failures
-/// are logged and the affected pass skips until its shader prepares.
+/// `egui.slang`, and — with the `splat` feature — `util/radix_sort.slang`,
+/// `gaussian.slang`, `gs/composite.slang`) through the asset server and
+/// register their pipeline requests, so the passes find prepared shaders
+/// from the first frame — matching the previous compile-at-pipeline-creation
+/// behavior. Loading is synchronous; failures are logged and the affected
+/// pass skips until its shader prepares.
 ///
 /// The shader directory resolves through [`moonfield_asset::assets_dir`],
 /// the one definition of the repository's asset root (`MOONFIELD_ASSETS_DIR`
@@ -120,11 +121,24 @@ pub fn load_pipeline_shaders(world: &mut World) {
     load_pipeline_shader(world, &shader_dir.join("egui.slang"), egui_shader);
     #[cfg(feature = "splat")]
     {
+        use moonfield_render_feature::splat::forward_pass::{
+            splat_composite_shader, splat_forward_shader,
+        };
         use moonfield_render_feature::splat::sort_pass::splat_sort_shader;
         load_pipeline_shader(
             world,
             &shader_dir.join("util/radix_sort.slang"),
             splat_sort_shader,
+        );
+        load_pipeline_shader(
+            world,
+            &shader_dir.join("gaussian.slang"),
+            splat_forward_shader,
+        );
+        load_pipeline_shader(
+            world,
+            &shader_dir.join("gs/composite.slang"),
+            splat_composite_shader,
         );
     }
 }
