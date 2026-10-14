@@ -18,7 +18,7 @@
 //! `Present`), depth-tested against the surface's depth buffer.
 
 use moonfield_app::prelude::World;
-use moonfield_asset::{AssetRevision, Handle};
+use moonfield_asset::Handle;
 use moonfield_camera::RenderTarget;
 use moonfield_log::{error, error_once};
 use moonfield_render_core::{
@@ -70,7 +70,7 @@ pub fn core_3d_shader(shader: Handle<Shader>) -> PipelineShader {
 
 /// The flat-lit mesh pipeline of the core 3D pass, as a render-world
 /// resource. [`prepare_core_3d_pipeline`] (re)builds it from
-/// [`PreparedShaders`] whenever the prepared shader's revision advances
+/// [`PreparedShaders`] whenever the prepared shader's generation advances
 /// past the one the pipeline was built from.
 pub struct Core3dPipeline {
     pipeline: GraphicsPipeline,
@@ -83,8 +83,8 @@ pub struct Core3dPipeline {
     view: RootParamPlace,
     /// The shader asset the pipeline was built from.
     shader: Handle<Shader>,
-    /// The prepared-shader revision the pipeline was built from.
-    shader_revision: AssetRevision,
+    /// The prepared-shader generation the pipeline was built from.
+    shader_generation: u64,
 }
 
 impl Core3dPipeline {
@@ -122,7 +122,7 @@ impl Core3dPipeline {
             root,
             view,
             shader,
-            shader_revision: prepared.revision(),
+            shader_generation: prepared.generation(),
         })
     }
 
@@ -246,7 +246,7 @@ pub fn prepare_core_3d_pipeline(world: &mut World) {
         .expect("Core3dPipelines was just ensured");
     for format in formats {
         let stale = pipelines.pipelines.get(&format).is_none_or(|pipeline| {
-            pipeline.shader != request.shader || pipeline.shader_revision != shader.revision()
+            pipeline.shader != request.shader || pipeline.shader_generation != shader.generation()
         });
         if !stale {
             continue;

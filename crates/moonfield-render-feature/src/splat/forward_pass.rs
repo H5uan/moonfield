@@ -32,7 +32,7 @@ use std::collections::HashMap;
 
 use moonfield_app::prelude::{App, IntoSystemConfigs, Plugin, World};
 use moonfield_app::{ExtractSchedule, Render};
-use moonfield_asset::{AssetRevision, Handle};
+use moonfield_asset::Handle;
 use moonfield_log::{error, error_once};
 use moonfield_math::{Mat3, Vec3};
 use moonfield_render_core::schedule as render_sets;
@@ -165,7 +165,7 @@ impl ForwardEntry {
 }
 
 /// The forward chain's seven compute pipelines, built from the prepared
-/// `gaussian.slang` asset and rebuilt when its revision advances.
+/// `gaussian.slang` asset and rebuilt when its generation advances.
 pub struct SplatForwardPipelines {
     clear: ForwardEntry,
     project_cull: ForwardEntry,
@@ -176,8 +176,8 @@ pub struct SplatForwardPipelines {
     blend: ForwardEntry,
     /// The shader asset the pipelines were built from.
     shader: Handle<Shader>,
-    /// The prepared-shader revision the pipelines were built from.
-    shader_revision: AssetRevision,
+    /// The prepared-shader generation the pipelines were built from.
+    shader_generation: u64,
 }
 
 impl SplatForwardPipelines {
@@ -198,7 +198,7 @@ impl SplatForwardPipelines {
             tile_ranges: build("tile_ranges")?,
             blend: build("blend")?,
             shader,
-            shader_revision: prepared.revision(),
+            shader_generation: prepared.generation(),
         })
     }
 }
@@ -210,8 +210,8 @@ pub struct SplatCompositePipeline {
     entry: ForwardEntry,
     /// The shader asset the pipeline was built from.
     shader: Handle<Shader>,
-    /// The prepared-shader revision the pipeline was built from.
-    shader_revision: AssetRevision,
+    /// The prepared-shader generation the pipeline was built from.
+    shader_generation: u64,
 }
 
 /// One view's splat forward buffers: the RGBA16F splat image, the
@@ -227,7 +227,7 @@ pub struct ViewArtifacts {
     sort: RadixSort,
     /// The sort shader identity the sort was built from.
     sort_shader: Handle<Shader>,
-    sort_revision: AssetRevision,
+    sort_generation: u64,
     image: Texture,
     transmittance: GpuAllocation,
     records: GpuAllocation,
@@ -302,7 +302,7 @@ impl ViewArtifacts {
             capacity,
             sort,
             sort_shader,
-            sort_revision: sort_prepared.revision(),
+            sort_generation: sort_prepared.generation(),
             image,
             transmittance: gpu(u64::from(width) * u64::from(height) * size_of::<f32>() as u64)?,
             records: gpu(u64::from(count) * size_of::<SplatRecord>() as u64)?,
@@ -328,19 +328,19 @@ impl ViewArtifacts {
     }
 
     /// Whether these artifacts already serve `(width, height, count)` built
-    /// from this sort shader revision.
+    /// from this sort shader generation.
     fn matches(
         &self,
         width: u32,
         height: u32,
         count: u32,
         sort_shader: Handle<Shader>,
-        sort_revision: AssetRevision,
+        sort_generation: u64,
     ) -> bool {
         self.extent == (width, height)
             && self.gaussian_count == count
             && self.sort_shader == sort_shader
-            && self.sort_revision == sort_revision
+            && self.sort_generation == sort_generation
     }
 
     /// The RGBA16F splat image the chain blends into.
@@ -383,11 +383,15 @@ impl SplatViewArtifacts {
         sort_prepared: &PreparedShader,
         device: &Device,
     ) -> bool {
-        if self
-            .views
-            .get(&camera)
-            .is_some_and(|a| a.matches(width, height, count, sort_shader, sort_prepared.revision()))
-        {
+        if self.views.get(&camera).is_some_and(|a| {
+            a.matches(
+                width,
+                height,
+                count,
+                sort_shader,
+                sort_prepared.generation(),
+            )
+        }) {
             return true;
         }
         match ViewArtifacts::build(device, sort_shader, sort_prepared, width, height, count) {
@@ -468,7 +472,8 @@ pub fn prepare_splat_forward(world: &mut World) {
         let stale = world
             .get_resource::<SplatForwardPipelines>()
             .is_none_or(|pipelines| {
-                pipelines.shader != request.shader || pipelines.shader_revision != shader.revision()
+                pipelines.shader != request.shader
+                    || pipelines.shader_generation != shader.generation()
             });
         if stale {
             SplatForwardPipelines::from_prepared(render_device.device(), request.shader, shader)
@@ -509,14 +514,15 @@ fn prepare_splat_composite(world: &mut World, render_device: &RenderDevice) {
         let stale = world
             .get_resource::<SplatCompositePipeline>()
             .is_none_or(|pipeline| {
-                pipeline.shader != request.shader || pipeline.shader_revision != shader.revision()
+                pipeline.shader != request.shader
+                    || pipeline.shader_generation != shader.generation()
             });
         if stale {
             ForwardEntry::from_prepared(render_device.device(), shader, "composite")
                 .map(|entry| SplatCompositePipeline {
                     entry,
                     shader: request.shader,
-                    shader_revision: shader.revision(),
+                    shader_generation: shader.generation(),
                 })
                 .ok()
         } else {

@@ -550,7 +550,7 @@ fn prepare_egui_frame(world: &mut World) {
                     .get_resource::<egui_vk::EguiPipeline>()
                     .is_none_or(|pipeline| {
                         pipeline.shader() != request.shader
-                            || pipeline.shader_revision() != shader.revision()
+                            || pipeline.shader_generation() != shader.generation()
                     });
                 if stale {
                     Some(egui_vk::EguiPipeline::new(

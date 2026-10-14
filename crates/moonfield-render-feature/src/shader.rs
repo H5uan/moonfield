@@ -53,6 +53,25 @@ pub struct PipelineShader {
     pub entries: &'static [ShaderEntry],
 }
 
+impl PipelineShader {
+    /// A fingerprint of everything in the request that changes the compiled
+    /// artifacts: the reflection entry and the entry set (names and
+    /// capabilities). Changing any of these without touching the source must
+    /// still re-prepare, so [`PreparedShaders`] slots compare the fingerprint
+    /// alongside the source revision. Process-local — fingerprints are
+    /// compared within one run, never persisted.
+    pub fn fingerprint(&self) -> u64 {
+        use std::hash::{Hash, Hasher};
+        let mut hasher = std::collections::hash_map::DefaultHasher::new();
+        self.reflect_entry.hash(&mut hasher);
+        for entry in self.entries {
+            entry.name.hash(&mut hasher);
+            entry.capabilities.hash(&mut hasher);
+        }
+        hasher.finish()
+    }
+}
+
 /// Every pipeline's shader request. A main-world resource, populated by
 /// whoever loads the shader assets (the editor, at startup) and cloned into
 /// the render world by [`extract_shader_assets`].
@@ -114,6 +133,12 @@ impl ExtractedShaders {
 pub struct PreparedShader {
     /// The source revision these artifacts were compiled from.
     revision: AssetRevision,
+    /// The prepared-artifact generation: bumped by [`PreparedShaders`] on
+    /// every successful compile, never on failure. Pipelines key their
+    /// rebuilds on this — not on the source revision — so a failed
+    /// recompile leaves the pipeline built from the previous generation
+    /// untouched.
+    generation: u64,
     reflection: Arc<Reflection>,
     entries: Vec<(&'static str, Arc<CompiledShader>)>,
 }
@@ -136,6 +161,11 @@ impl PreparedShader {
     pub fn revision(&self) -> AssetRevision {
         self.revision
     }
+
+    /// The prepared-artifact generation of these artifacts.
+    pub fn generation(&self) -> u64 {
+        self.generation
+    }
 }
 
 /// One pipeline's slot: the compiled artifacts, or the failure recorded for
@@ -144,6 +174,8 @@ impl PreparedShader {
 struct Slot {
     asset: AssetId,
     revision: AssetRevision,
+    /// The [`PipelineShader::fingerprint`] the slot was compiled from.
+    fingerprint: u64,
     result: Result<PreparedShader, String>,
 }
 
@@ -160,14 +192,20 @@ struct Slot {
 pub struct PreparedShaders {
     cache: Option<ShaderCache>,
     shaders: HashMap<&'static str, Slot>,
+    /// Hands out [`PreparedShader::generation`] values; bumps only on
+    /// successful compiles, so generation 0 never names a usable artifact.
+    next_generation: u64,
 }
 
 impl PreparedShaders {
-    /// Whether `pipeline` has no record for `(asset, revision)` yet.
-    pub fn needs_prepare(&self, pipeline: &str, asset: AssetId, revision: AssetRevision) -> bool {
-        self.shaders
-            .get(pipeline)
-            .is_none_or(|slot| slot.asset != asset || slot.revision != revision)
+    /// Whether `request`'s pipeline has no record matching its asset, its
+    /// asset's `revision`, and its [`PipelineShader::fingerprint`].
+    pub fn needs_prepare(&self, request: &PipelineShader, revision: AssetRevision) -> bool {
+        self.shaders.get(request.pipeline).is_none_or(|slot| {
+            slot.asset != request.shader.id()
+                || slot.revision != revision
+                || slot.fingerprint != request.fingerprint()
+        })
     }
 
     /// The compiled artifacts for `pipeline`, when its last compile
@@ -204,15 +242,21 @@ impl PreparedShaders {
     }
 
     /// Compile `request`'s entries from the extracted shader source and
-    /// record the outcome. A failure replaces the slot for the new revision
-    /// — the pass keeps running the pipeline it already built.
+    /// record the outcome. A success bumps the artifact generation; a
+    /// failure replaces the slot for the new revision without one, so
+    /// pipelines built from the previous generation keep running untouched.
     pub fn compile(&mut self, request: &PipelineShader, extracted: &ExtractedShader) {
-        let result = self.compile_request(request, extracted);
+        let mut result = self.compile_request(request, extracted);
+        if let Ok(prepared) = &mut result {
+            self.next_generation += 1;
+            prepared.generation = self.next_generation;
+        }
         self.shaders.insert(
             request.pipeline,
             Slot {
                 asset: request.shader.id(),
                 revision: extracted.revision,
+                fingerprint: request.fingerprint(),
                 result,
             },
         );
@@ -246,6 +290,8 @@ impl PreparedShaders {
         }
         Ok(PreparedShader {
             revision: extracted.revision,
+            // Assigned by `compile` once the compile succeeds.
+            generation: 0,
             reflection,
             entries: compiled,
         })
@@ -338,7 +384,7 @@ pub fn prepare_shaders(world: &mut World) {
         let Some(shader) = extracted.get(id) else {
             continue;
         };
-        if !prepared.needs_prepare(request.pipeline, id, shader.revision) {
+        if !prepared.needs_prepare(request, shader.revision) {
             continue;
         }
         prepared.compile(request, shader);
@@ -449,40 +495,84 @@ mod tests {
         );
     }
 
-    /// Revision bookkeeping without compiling: a recorded failure is not
-    /// retried until the asset revision advances, and dropped pipelines are
-    /// pruned.
+    /// Revision and fingerprint bookkeeping without compiling: a recorded
+    /// failure is not retried until the asset revision or the request
+    /// changes, and dropped pipelines are pruned.
     #[test]
     fn test_prepared_shaders_revision_bookkeeping() {
         let mut assets = Assets::<Shader>::default();
         let shader = assets.add(Shader::new("source".into(), "test.slang".into()));
         let revision = assets.revision(&shader).unwrap();
+        let request = test_request("test", shader);
 
         let mut prepared = PreparedShaders::default();
-        assert!(prepared.needs_prepare("test", shader.id(), revision));
+        assert!(prepared.needs_prepare(&request, revision));
         prepared.shaders.insert(
             "test",
             Slot {
                 asset: shader.id(),
                 revision,
+                fingerprint: request.fingerprint(),
                 result: Err("boom".to_string()),
             },
         );
-        assert!(!prepared.needs_prepare("test", shader.id(), revision));
+        assert!(!prepared.needs_prepare(&request, revision));
         assert!(prepared.get("test").is_none());
         assert_eq!(prepared.error("test"), Some("boom"));
 
         // A revision advance (even without a source change) re-arms prepare.
         let _ = assets.get_mut(&shader).unwrap();
         let new_revision = assets.revision(&shader).unwrap();
-        assert!(prepared.needs_prepare("test", shader.id(), new_revision));
+        assert!(prepared.needs_prepare(&request, new_revision));
+
+        // A request change at an unchanged revision also re-arms prepare.
+        let changed = PipelineShader {
+            reflect_entry: "other",
+            ..request
+        };
+        assert_ne!(changed.fingerprint(), request.fingerprint());
+        assert!(prepared.needs_prepare(&changed, revision));
 
         // A pipeline no longer requested loses its slot.
         let mut requests = PipelineShaders::default();
         requests.push(test_request("other", shader));
         prepared.retain_pipelines(&requests);
         assert!(prepared.is_empty());
-        assert!(prepared.needs_prepare("test", shader.id(), new_revision));
+        assert!(prepared.needs_prepare(&request, new_revision));
+    }
+
+    /// The generation counts successful compiles only: a failed recompile
+    /// leaves the last usable artifacts' generation untouched, so pipelines
+    /// keyed on it never rebuild from a broken source.
+    #[test]
+    fn test_prepared_shader_generation_bumps_only_on_success() {
+        let _gpu = crate::test_util::GPU_LOCK.lock().unwrap();
+        let mut assets = Assets::<Shader>::default();
+        let shader = assets.add(Shader::new(TEST_SHADER.into(), "test.slang".into()));
+        let request = test_request("test", shader);
+        let mut prepared = PreparedShaders::default();
+
+        let extracted = |assets: &Assets<Shader>| ExtractedShader {
+            revision: assets.revision(&shader).unwrap(),
+            shader: assets.get(&shader).unwrap().clone(),
+        };
+
+        prepared.compile(&request, &extracted(&assets));
+        let first_generation = prepared.get("test").unwrap().generation();
+
+        // Break the source: the failed compile is recorded but hands out no
+        // generation, and `get` stops serving artifacts.
+        *assets.get_mut(&shader).unwrap() = Shader::new("not slang".into(), "test.slang".into());
+        prepared.compile(&request, &extracted(&assets));
+        assert!(prepared.get("test").is_none());
+        assert!(prepared.error("test").is_some());
+
+        // Fix the source: the next success gets a new generation.
+        *assets.get_mut(&shader).unwrap() = Shader::new(TEST_SHADER.into(), "test.slang".into());
+        prepared.compile(&request, &extracted(&assets));
+        let third_generation = prepared.get("test").unwrap().generation();
+        assert!(first_generation < third_generation);
+        assert_eq!(third_generation - first_generation, 1);
     }
 
     /// The full extract → prepare flow compiles a real shader (Slang needs
@@ -510,7 +600,7 @@ mod tests {
             .render_world()
             .get_resource::<PreparedShaders>()
             .unwrap();
-        assert!(!prepared.needs_prepare("test", handles[0].id(), first_revision));
+        assert!(!prepared.needs_prepare(&test_request("test", handles[0]), first_revision));
         drop(prepared);
 
         // Break the source: the revision advances, the failure is recorded
@@ -533,6 +623,6 @@ mod tests {
             .unwrap();
         assert!(prepared.get("test").is_none());
         assert!(prepared.error("test").is_some());
-        assert!(!prepared.needs_prepare("test", handles[0].id(), broken_revision));
+        assert!(!prepared.needs_prepare(&test_request("test", handles[0]), broken_revision));
     }
 }

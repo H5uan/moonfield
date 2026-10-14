@@ -15,7 +15,7 @@
 use std::sync::{Arc, Mutex};
 
 use moonfield_app::prelude::{App, IntoSystemConfigs, Render, World};
-use moonfield_asset::{AssetRevision, Handle};
+use moonfield_asset::Handle;
 #[cfg(test)]
 use moonfield_asset::{AssetServer, Assets};
 use moonfield_log::error_once;
@@ -73,13 +73,13 @@ pub struct SplatSortPass {
     pairs: u32,
     /// The shader asset the sort was built from.
     shader: Handle<Shader>,
-    /// The prepared-shader revision the sort was built from.
-    shader_revision: AssetRevision,
+    /// The prepared-shader generation the sort was built from.
+    shader_generation: u64,
 }
 
 /// `PrepareViews` set system: build the pass's pipelines and buffers from
 /// the prepared `radix_sort.slang` asset, whenever the prepared shader's
-/// revision advances past the one the sort was built from (the
+/// generation advances past the one the sort was built from (the
 /// rebuild-on-advance behavior of `prepare_core_3d_pipeline`).
 pub fn prepare_splat_sort(world: &mut World) {
     let Some(request) = world
@@ -97,16 +97,16 @@ pub fn prepare_splat_sort(world: &mut World) {
     };
 
     let pairs = 1024u32;
-    // The `Ref` guard is scoped here: the sort and the revision it yields
+    // The `Ref` guard is scoped here: the sort and the generation it yields
     // outlive it, so the resource insert below borrows the world cleanly.
-    let (sort, shader_revision) = {
+    let (sort, shader_generation) = {
         let prepared = world.get_resource::<PreparedShaders>();
         let Some(prepared_shader) = prepared.as_ref().and_then(|p| p.get(SPLAT_SORT_SHADER)) else {
             error_once!("the splat sort shader is not ready; skipping the splat sort pass");
             return;
         };
         let stale = world.get_resource::<SplatSortPass>().is_none_or(|pass| {
-            pass.shader != request.shader || pass.shader_revision != prepared_shader.revision()
+            pass.shader != request.shader || pass.shader_generation != prepared_shader.generation()
         });
         if !stale {
             return;
@@ -116,7 +116,7 @@ pub fn prepare_splat_sort(world: &mut World) {
         else {
             return;
         };
-        (sort, prepared_shader.revision())
+        (sort, prepared_shader.generation())
     };
 
     let device = render_device.device();
@@ -137,7 +137,7 @@ pub fn prepare_splat_sort(world: &mut World) {
         values_out,
         pairs,
         shader: request.shader,
-        shader_revision,
+        shader_generation,
     });
 }
 

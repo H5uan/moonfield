@@ -25,7 +25,7 @@
 
 use egui::epaint::{ClippedPrimitive, ImageDelta, Primitive, TextureId};
 use egui::{TextureFilter, TextureOptions, TextureWrapMode};
-use moonfield_asset::{AssetRevision, Handle};
+use moonfield_asset::Handle;
 use moonfield_render_feature::shader::{PipelineShader, PreparedShader, ShaderEntry};
 use moonfield_rhi::MemoryResidency;
 use moonfield_rhi::types::WrapMode;
@@ -164,8 +164,8 @@ pub struct EguiPipeline {
     options: EguiOptions,
     /// The shader asset the pipeline was built from.
     shader: Handle<Shader>,
-    /// The prepared-shader revision the pipeline was built from.
-    shader_revision: AssetRevision,
+    /// The prepared-shader generation the pipeline was built from.
+    shader_generation: u64,
     /// Reserved for future paint callbacks; see [`CallbackResources`].
     pub callback_resources: CallbackResources,
 }
@@ -237,7 +237,7 @@ impl EguiPipeline {
             heap: device.descriptor_heap(),
             options,
             shader,
-            shader_revision: prepared.revision(),
+            shader_generation: prepared.generation(),
             callback_resources: CallbackResources { _private: () },
         })
     }
@@ -253,9 +253,9 @@ impl EguiPipeline {
         self.shader
     }
 
-    /// The prepared-shader revision the pipeline was built from.
-    pub fn shader_revision(&self) -> AssetRevision {
-        self.shader_revision
+    /// The prepared-shader generation the pipeline was built from.
+    pub fn shader_generation(&self) -> u64 {
+        self.shader_generation
     }
 
     /// The descriptor-heap slot of the sampler for the given egui options
