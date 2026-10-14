@@ -64,13 +64,44 @@ impl ResolvedScene {
     /// with a [`ChildOf`] component. Precondition: the world must have
     /// called [`World::register_hierarchy`], otherwise the link hooks do not
     /// fire and `Children` is never maintained.
+    ///
+    /// Failure is all-or-nothing for entities: on error, every entity this
+    /// call spawned is despawned before the error returns. The guarantee is
+    /// bounded to operation-owned entities — a template's own side effects
+    /// through [`TemplateContext`] (assets loaded into the world's asset
+    /// storage, resource mutations, entities a template spawns itself) are
+    /// not rolled back; loaded assets stay cached.
     pub fn apply(&self, world: &mut World) -> Result<Entity, SceneError> {
+        let mut spawned = Vec::new();
+        match self.apply_tracked(world, &mut spawned) {
+            Ok(entity) => Ok(entity),
+            Err(err) => {
+                // Reverse spawn order: children despawn before their parents,
+                // so the `ChildOf` unlink hooks never meet a dead target.
+                // (Despawning a parent would cascade to linked children
+                // anyway; the explicit order keeps that incidental.)
+                for entity in spawned.into_iter().rev() {
+                    let _ = world.despawn(entity);
+                }
+                Err(err)
+            }
+        }
+    }
+
+    /// [`apply`](Self::apply) with every spawned entity recorded in
+    /// `spawned`, in spawn order.
+    fn apply_tracked(
+        &self,
+        world: &mut World,
+        spawned: &mut Vec<Entity>,
+    ) -> Result<Entity, SceneError> {
         let entity = world.spawn_empty();
+        spawned.push(entity);
         for template in &self.templates {
             template.insert_into_world(world, entity)?;
         }
         for child in &self.children {
-            let child_entity = child.apply(world)?;
+            let child_entity = child.apply_tracked(world, spawned)?;
             world
                 .insert_component(child_entity, ChildOf(entity))
                 .ok_or_else(|| {
@@ -141,6 +172,40 @@ mod tests {
                 .as_str(),
             "grand"
         );
+    }
+
+    #[test]
+    fn test_failed_apply_leaves_no_entities_behind() {
+        // A template that always fails to insert; not `Clone`, so it does
+        // not hit the blanket `Template` impl and can fail on demand.
+        struct Failing;
+        impl SceneTemplate for Failing {
+            fn insert_into_world(&self, _: &mut World, _: Entity) -> Result<(), SceneError> {
+                Err(SceneError::Invalid("boom".to_string()))
+            }
+        }
+
+        // Root → child A (fine), child B (fails after spawning itself and
+        // its own child).
+        let scene = ResolvedScene::new(
+            vec![Box::new(Name::new("root"))],
+            vec![
+                ResolvedScene::new(vec![Box::new(Name::new("child-a"))], vec![]),
+                ResolvedScene::new(
+                    vec![Box::new(Name::new("child-b")), Box::new(Failing)],
+                    vec![ResolvedScene::new(
+                        vec![Box::new(Name::new("grand-b"))],
+                        vec![],
+                    )],
+                ),
+            ],
+        );
+
+        let mut world = World::new();
+        world.register_hierarchy();
+        let err = scene.apply(&mut world).unwrap_err();
+        assert!(matches!(err, SceneError::Invalid(_)));
+        assert_eq!(world.iter_entities().count(), 0);
     }
 
     #[test]

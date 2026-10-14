@@ -402,6 +402,14 @@ fn parse_root(text: &str) -> Result<Root, SceneError> {
 /// [`World::register_hierarchy`] first. When the hierarchy mapping is not
 /// registered, every node in the document still spawns, but as a flat,
 /// unlinked root.
+///
+/// Loading is all-or-nothing for entities. Every root is resolved
+/// (parsed and validated, without touching the world) before any spawning,
+/// and if applying a root fails, its own entities are removed by
+/// [`ResolvedScene::apply`] and the roots already spawned by this call are
+/// despawned (despawning a hierarchy root removes its linked children
+/// recursively). Side effects that are not entities — assets loaded into
+/// the world's asset storage while building templates — stay cached.
 pub fn load_scene(
     world: &mut World,
     registry: &SceneRegistry,
@@ -409,21 +417,41 @@ pub fn load_scene(
 ) -> Result<Vec<Entity>, SceneError> {
     let root = parse_root(text)?;
     let hierarchy = registry.contains(HIERARCHY);
-    let mut roots = Vec::new();
 
     let scene_index = root.scene.map(|index| index.value()).unwrap_or(0);
     let Some(scene) = root.scenes.get(scene_index) else {
-        return Ok(roots);
+        return Ok(Vec::new());
     };
+    // Resolve every root before any spawning: resolution is pure, so an
+    // invalid later root cannot strand earlier roots' entities.
     let mut visited = HashSet::new();
+    let mut resolved = Vec::new();
     for &node_index in &scene.nodes {
-        let resolved = load_node(&root, registry, node_index.value(), &mut visited)?;
-        if hierarchy {
-            roots.push(resolved.apply(world)?);
+        resolved.push(load_node(
+            &root,
+            registry,
+            node_index.value(),
+            &mut visited,
+        )?);
+    }
+
+    let mut roots = Vec::new();
+    for resolved_root in resolved {
+        let result = if hierarchy {
+            resolved_root.apply(world).map(|root| roots.push(root))
         } else {
-            for flat in resolved.flatten() {
-                roots.push(flat.apply(world)?);
+            resolved_root
+                .flatten()
+                .into_iter()
+                .try_for_each(|flat| flat.apply(world).map(|root| roots.push(root)))
+        };
+        if let Err(err) = result {
+            // The failed subtree cleaned up after itself; remove the roots
+            // that succeeded.
+            for &entity in roots.iter().rev() {
+                let _ = world.despawn(entity);
             }
+            return Err(err);
         }
     }
     Ok(roots)
@@ -909,6 +937,81 @@ mod tests {
         assert_eq!(mesh.source(), Some(path.display().to_string().as_str()));
 
         std::fs::remove_file(&path).unwrap();
+        std::fs::remove_dir(&dir).unwrap();
+    }
+
+    // ---------------------------------------------------------------
+    // Load failure semantics
+    // ---------------------------------------------------------------
+
+    #[test]
+    fn test_invalid_later_root_leaves_no_entities() {
+        // Node 0 is a valid root; the scene also names node 99, which does
+        // not exist. Resolution of all roots precedes any spawning, so the
+        // world stays empty.
+        let text = r#"{
+            "asset": { "version": "2.0", "generator": "test" },
+            "scene": 0,
+            "scenes": [{ "nodes": [0, 99] }],
+            "nodes": [{ "name": "Solo" }]
+        }"#;
+
+        let mut world = World::new();
+        world.register_hierarchy();
+        let err = load_scene(&mut world, &test_registry(), text).unwrap_err();
+        assert!(matches!(err, SceneError::Invalid(_)));
+        assert_eq!(world.iter_entities().count(), 0);
+    }
+
+    #[test]
+    fn test_missing_asset_cleans_entities_but_keeps_loaded_assets() {
+        let dir = std::env::temp_dir().join(format!(
+            "moonfield-scene-test-missing-{}",
+            std::process::id()
+        ));
+        std::fs::create_dir_all(&dir).unwrap();
+        let present = dir.join("present.fake");
+        std::fs::write(&present, "payload").unwrap();
+        let missing = dir.join("missing.fake");
+
+        // Node 0 loads an existing asset; node 1 names one that does not
+        // exist, failing mid-apply after both entities spawned.
+        let text = format!(
+            r#"{{
+                "asset": {{ "version": "2.0", "generator": "test" }},
+                "scene": 0,
+                "scenes": [{{ "nodes": [0, 1] }}],
+                "nodes": [
+                    {{ "name": "first",
+                       "extras": {{ "components": {{ "splat_cloud": "{present}" }} }} }},
+                    {{ "name": "second",
+                       "extras": {{ "components": {{ "splat_cloud": "{missing}" }} }} }}
+                ]
+            }}"#,
+            present = present.to_string_lossy().replace('\\', "/"),
+            missing = missing.to_string_lossy().replace('\\', "/"),
+        );
+
+        let mut world = World::new();
+        world.register_hierarchy();
+        let mut server = AssetServer::default();
+        server.register_loader(FakeLoader);
+        world.insert_resource(server);
+        world.insert_resource(Assets::<String>::default());
+        let mut registry = SceneRegistry::new();
+        registry.register_native_hierarchy();
+        registry.register_custom(NAME, name_save, name_load);
+        registry.register_custom("splat_cloud", cloud_save, cloud_load);
+
+        let err = load_scene(&mut world, &registry, &text).unwrap_err();
+        assert!(matches!(err, SceneError::Template(_)));
+        // No operation-owned entities remain.
+        assert_eq!(world.iter_entities().count(), 0);
+        // The asset the first node loaded stays cached.
+        let assets = world.get_resource::<Assets<String>>().unwrap();
+        assert_eq!(assets.iter().count(), 1);
+
+        std::fs::remove_file(&present).unwrap();
         std::fs::remove_dir(&dir).unwrap();
     }
 }
