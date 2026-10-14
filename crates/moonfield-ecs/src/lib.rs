@@ -11,6 +11,7 @@
 
 use std::any::{Any, TypeId};
 use std::cell::{RefCell, RefMut};
+use std::thread::ThreadId;
 
 use crate::archetype::TypeIdMap;
 
@@ -103,11 +104,19 @@ pub mod prelude {
 /// (e.g. GPU objects created from a `RenderDevice`) are destroyed before the
 /// resource they depend on. Vulkan wrapper types hold raw `ash` handles, so
 /// this ordering is load-bearing for clean shutdown.
+///
+/// Thread-local resources share the same storage and drop order; a type's
+/// entry in `thread_pins` marks it thread-local and records the inserting
+/// thread. Pinning is forward-looking — `World` is itself neither `Send`
+/// nor `Sync`, so nothing here crosses threads today — and turns a future
+/// cross-thread access into a panic instead of a data race.
 #[derive(Default)]
 pub(crate) struct Resources {
     data: TypeIdMap<RefCell<Box<dyn Any>>>,
     /// First-insertion order of the keys in `data`; reversed on drop.
     order: Vec<TypeId>,
+    /// The inserting thread of every thread-local resource, keyed by type.
+    thread_pins: TypeIdMap<ThreadId>,
 }
 
 impl Resources {
@@ -116,11 +125,66 @@ impl Resources {
         if !self.data.contains_key(&id) {
             self.order.push(id);
         }
+        // A regular (Send + Sync) resource is unpinned.
+        self.thread_pins.remove(&id);
         self.data.insert(id, RefCell::new(Box::new(res)));
+    }
+
+    /// Insert a resource pinned to the current thread; `T` need not be
+    /// `Send` or `Sync`.
+    pub fn insert_thread_local<T: 'static>(&mut self, res: T) {
+        let id = TypeId::of::<T>();
+        if !self.data.contains_key(&id) {
+            self.order.push(id);
+        }
+        self.data.insert(id, RefCell::new(Box::new(res)));
+        self.thread_pins.insert(id, std::thread::current().id());
     }
 
     pub fn contains<R: Resource>(&self) -> bool {
         self.data.contains_key(&TypeId::of::<R>())
+    }
+
+    pub fn contains_thread_local<T: 'static>(&self) -> bool {
+        self.thread_pins.contains_key(&TypeId::of::<T>())
+    }
+
+    /// Panic unless the resource of type `T` exists, was inserted as
+    /// thread-local, and is accessed from its inserting thread.
+    fn check_thread_pin<T: 'static>(&self) -> Option<()> {
+        let id = TypeId::of::<T>();
+        self.data.get(&id)?;
+        let Some(pin) = self.thread_pins.get(&id) else {
+            panic!(
+                "resource `{}` is not thread-local; use the regular accessors",
+                std::any::type_name::<T>()
+            );
+        };
+        assert_eq!(
+            *pin,
+            std::thread::current().id(),
+            "thread-local resource `{}` accessed from a non-owner thread",
+            std::any::type_name::<T>()
+        );
+        Some(())
+    }
+
+    pub fn get_thread_local<T: 'static>(&self) -> Option<std::cell::Ref<'_, T>> {
+        self.check_thread_pin::<T>()?;
+        let cell = self.data.get(&TypeId::of::<T>())?;
+        // If already mutably borrowed, this will panic at runtime — as with
+        // the regular accessors.
+        Some(std::cell::Ref::map(cell.borrow(), |any| {
+            any.downcast_ref::<T>().unwrap()
+        }))
+    }
+
+    pub fn get_thread_local_mut<T: 'static>(&self) -> Option<RefMut<'_, T>> {
+        self.check_thread_pin::<T>()?;
+        let cell = self.data.get(&TypeId::of::<T>())?;
+        Some(RefMut::map(cell.borrow_mut(), |any| {
+            any.downcast_mut::<T>().unwrap()
+        }))
     }
 
     pub fn get<R: Resource>(&self) -> Option<std::cell::Ref<'_, R>> {
@@ -139,9 +203,18 @@ impl Resources {
     }
 
     pub fn remove<R: Resource>(&mut self) -> Option<R> {
+        self.thread_pins.remove(&TypeId::of::<R>());
         self.data
             .remove(&TypeId::of::<R>())
             .map(|cell| *cell.into_inner().downcast::<R>().unwrap())
+    }
+
+    pub fn remove_thread_local<T: 'static>(&mut self) -> Option<T> {
+        self.check_thread_pin::<T>()?;
+        self.thread_pins.remove(&TypeId::of::<T>());
+        self.data
+            .remove(&TypeId::of::<T>())
+            .map(|cell| *cell.into_inner().downcast::<T>().unwrap())
     }
 }
 

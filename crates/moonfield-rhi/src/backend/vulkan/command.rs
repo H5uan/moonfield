@@ -14,7 +14,7 @@ use crate::types::{
 };
 use crate::{BlendMode, ComputePipeline, GraphicsPipeline};
 use ash::vk;
-use std::cell::Cell;
+use std::sync::atomic::{AtomicBool, Ordering};
 
 /// One attachment of a render pass, in the crate's own vocabulary.
 #[derive(Clone)]
@@ -117,6 +117,18 @@ pub struct CullState {
 /// [`Device::submit_frame`](crate::Device::submit_frame))
 /// end them. `Drop` frees the buffer back into its pool
 /// (`vkFreeCommandBuffers`).
+///
+/// Threading contract: a buffer records from exactly one thread at a time —
+/// the recording methods take `&self` because the frame loop hands shared
+/// references to the render world's systems, and schedules run
+/// single-threaded. Vulkan requires host synchronization around command
+/// buffer recording, so sharing a *recording* buffer across threads is a
+/// contract violation; the owner (frame loop / uploader) upholds it by
+/// construction. The only shared-state mutation is the idempotent
+/// [`end`](Self::end), whose flag is atomic: a concurrent double-end is a
+/// no-op, never a race. The type is auto `Send + Sync` (all fields are);
+/// owners that store buffers in ECS resources (the window frame loop's
+/// per-slot ring) rely on that.
 pub struct CommandBuffer {
     buffer: vk::CommandBuffer,
     pool: vk::CommandPool,
@@ -128,19 +140,11 @@ pub struct CommandBuffer {
     ctx: DeviceContext,
     /// Whether the buffer is *not* in the recording state — true initially,
     /// after a successful [`end`](Self::end), and after [`reset`](Self::reset);
-    /// false between [`begin`](Self::begin) and `end`. A `Cell` so the
-    /// idempotent `end` works through the shared references the submit entry
-    /// points receive.
-    ended: Cell<bool>,
+    /// false between [`begin`](Self::begin) and `end`. Atomic so the
+    /// idempotent `end` works soundly through the shared references the
+    /// submit entry points receive.
+    ended: AtomicBool,
 }
-
-// The `Cell` above costs the auto implementations that owners rely on (the
-// window frame loop stores its per-slot buffers in an ECS resource, which
-// requires `Send + Sync`). Recording and submission are externally
-// synchronized by the owning frame loop on the render thread, and the cell
-// is bookkeeping for the idempotent `end`, never touched concurrently.
-unsafe impl Send for CommandBuffer {}
-unsafe impl Sync for CommandBuffer {}
 
 impl CommandBuffer {
     /// Allocate a single primary command buffer from `pool`.
@@ -164,7 +168,7 @@ impl CommandBuffer {
             buffer: buffers[0],
             pool,
             ctx,
-            ended: Cell::new(true),
+            ended: AtomicBool::new(true),
         })
     }
 
@@ -189,7 +193,7 @@ impl CommandBuffer {
                 .begin_command_buffer(self.buffer, &begin_info)
                 .map_err(|e| Error::Backend(format!("failed to begin command buffer: {:?}", e)))?;
         }
-        self.ended.set(false);
+        self.ended.store(false, Ordering::Relaxed);
         Ok(())
     }
 
@@ -201,19 +205,26 @@ impl CommandBuffer {
     /// buffer may still be recording; abandon it with
     /// [`reset`](Self::reset) before re-recording.
     pub(crate) fn end(&self) -> Result<()> {
-        if self.ended.get() {
+        // Claim the end before calling into Vulkan: the swap makes a
+        // concurrent `end` observe an already-ended buffer and return, so
+        // `vkEndCommandBuffer` runs at most once per recording.
+        if self.ended.swap(true, Ordering::AcqRel) {
             return Ok(());
         }
         // SAFETY: the command buffer is in the recording state — the `ended`
         // flag is only cleared by a successful `begin`.
-        unsafe {
+        let result = unsafe {
             self.ctx
                 .raw()
                 .end_command_buffer(self.buffer)
-                .map_err(|e| Error::Backend(format!("failed to end command buffer: {:?}", e)))?;
+                .map_err(|e| Error::Backend(format!("failed to end command buffer: {:?}", e)))
+        };
+        if result.is_err() {
+            // The buffer may still be recording; restore the flag so a
+            // later `end` retries and `reset`'s state stays accurate.
+            self.ended.store(false, Ordering::Release);
         }
-        self.ended.set(true);
-        Ok(())
+        result
     }
 
     /// Reset this command buffer to the initial state.
@@ -232,7 +243,7 @@ impl CommandBuffer {
                 .reset_command_buffer(self.buffer, vk::CommandBufferResetFlags::empty())
                 .map_err(|e| Error::Backend(format!("failed to reset command buffer: {:?}", e)))?;
         }
-        self.ended.set(true);
+        self.ended.store(true, Ordering::Relaxed);
         Ok(())
     }
 

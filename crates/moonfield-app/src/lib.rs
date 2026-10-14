@@ -325,6 +325,31 @@ mod tests {
     }
 
     #[test]
+    fn panicking_extract_system_leaves_app_recoverable() {
+        struct MainMarker;
+
+        let mut app = App::new();
+        app.insert_resource(MainMarker);
+        app.world_mut().spawn_empty();
+        app.add_render_systems(ExtractSchedule, |_: &mut World| {
+            panic!("extract system failure");
+        });
+
+        let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| app.render()));
+        assert!(result.is_err());
+
+        // The panic propagated, but the main world is back in place and no
+        // parked pointer remains in the render world.
+        assert!(app.world().contains_resource::<MainMarker>());
+        assert_eq!(app.world().iter_entities().count(), 1);
+        assert!(
+            app.render_world()
+                .get_resource::<moonfield_ecs::MainWorld>()
+                .is_none()
+        );
+    }
+
+    #[test]
     fn update_loop_exits_on_app_exit_resource() {
         use crate::{AppExit, Update};
         use moonfield_ecs::{Commands, ResMut};

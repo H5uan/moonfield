@@ -595,18 +595,87 @@ impl World {
     }
 
     // ------------------------------------------------------------------
+    // Thread-local resources
+    // ------------------------------------------------------------------
+
+    /// Insert a thread-local resource: a value that cannot soundly satisfy
+    /// [`Resource`](crate::Resource)'s `Send + Sync` bounds (e.g. GPU objects
+    /// bound to the thread that created them).
+    ///
+    /// The value joins the same LIFO drop order as regular resources, so a
+    /// thread-local object is destroyed before the resources it was created
+    /// from. Access through the thread-local accessors is pinned to the
+    /// inserting thread and panics from any other.
+    pub fn insert_thread_local_resource<T: 'static>(&mut self, res: T) {
+        self.resources.insert_thread_local(res);
+    }
+
+    /// Get an immutable reference to a thread-local resource.
+    ///
+    /// Panics from any thread other than the one that inserted it.
+    pub fn get_thread_local_resource<T: 'static>(&self) -> Option<std::cell::Ref<'_, T>> {
+        self.resources.get_thread_local::<T>()
+    }
+
+    /// Get a mutable reference to a thread-local resource.
+    ///
+    /// Panics from any thread other than the one that inserted it.
+    pub fn get_thread_local_resource_mut<T: 'static>(&self) -> Option<std::cell::RefMut<'_, T>> {
+        self.resources.get_thread_local_mut::<T>()
+    }
+
+    /// Whether a thread-local resource of type `T` exists in the world.
+    pub fn contains_thread_local_resource<T: 'static>(&self) -> bool {
+        self.resources.contains_thread_local::<T>()
+    }
+
+    /// Remove a thread-local resource, returning it if it existed.
+    ///
+    /// Panics from any thread other than the one that inserted it.
+    pub fn remove_thread_local_resource<T: 'static>(&mut self) -> Option<T> {
+        self.resources.remove_thread_local::<T>()
+    }
+
+    // ------------------------------------------------------------------
     // Main-world parking (extract schedules)
     // ------------------------------------------------------------------
 
-    /// Park `main` as this world's [`MainWorld`] resource for the duration
-    /// of an extract schedule, so extract systems can read it through the
-    /// `Extract` system parameter (moonfield-render-core).
-    pub fn park_main_world(&mut self, main: &World) {
+    /// Run `f` with `main` parked as this world's [`MainWorld`] resource,
+    /// removing the resource before returning — including when `f` panics.
+    ///
+    /// This scope is the only way to park a main world (for extract
+    /// schedules; see `moonfield-render-core`'s `Extract` parameter). Because
+    /// the resource cannot outlive this call, safe code can never dereference
+    /// a parked pointer to a destroyed world.
+    pub fn with_parked_main_world<R>(
+        &mut self,
+        main: &World,
+        f: impl FnOnce(&mut World) -> R,
+    ) -> R {
+        self.park_main_world(main);
+        // The guard removes the parked resource on every exit path, so the
+        // raw pointer inside `MainWorld` never outlives this call — and
+        // `main`, borrowed for the call, always outlives the pointer.
+        struct UnparkOnDrop(*mut World);
+        impl Drop for UnparkOnDrop {
+            fn drop(&mut self) {
+                // SAFETY: the guard never escapes `with_parked_main_world`,
+                // whose `&mut World` receiver outlives it.
+                unsafe { &mut *self.0 }.unpark_main_world();
+            }
+        }
+        let _guard = UnparkOnDrop(self as *mut World);
+        f(self)
+    }
+
+    /// Park `main` as this world's [`MainWorld`] resource; called by
+    /// [`Self::with_parked_main_world`], which pairs it with the removal.
+    fn park_main_world(&mut self, main: &World) {
         self.insert_resource(MainWorld::park(main));
     }
 
     /// Remove the parked [`MainWorld`], returning whether one was parked.
-    pub fn unpark_main_world(&mut self) -> bool {
+    fn unpark_main_world(&mut self) -> bool {
         self.remove_resource::<MainWorld>().is_some()
     }
 
@@ -1197,12 +1266,12 @@ impl World {
 /// Worlds are neither `Send` nor `Sync` (deferred command queues carry
 /// unrestricted closures; archetype columns carry borrow flags), so the
 /// parked world travels as a raw pointer in `Send + Sync` clothing. The
-/// pointer's validity is a contract, not a type property: the parker
-/// ([`World::park_main_world`]'s caller) keeps the world alive and only
-/// reads it until [`World::unpark_main_world`] removes the resource.
-/// References derived from a `MainWorld` borrow are tied to that borrow, so
-/// one parked resource cannot mint overlapping world references with
-/// caller-chosen lifetimes.
+/// pointer's validity is upheld structurally: parking goes through
+/// [`World::with_parked_main_world`], which keeps the source world borrowed
+/// for the whole scope and removes this resource on every exit path,
+/// including unwinding. References derived from a `MainWorld` borrow are
+/// tied to that borrow, so one parked resource cannot mint overlapping world
+/// references with caller-chosen lifetimes.
 pub struct MainWorld(*const World);
 
 // SAFETY: the struct is a bare pointer; every dereference goes through
@@ -1211,7 +1280,8 @@ unsafe impl Send for MainWorld {}
 unsafe impl Sync for MainWorld {}
 
 impl MainWorld {
-    /// Park `world`.
+    /// Park `world`; called by [`World::with_parked_main_world`], which owns
+    /// the removal on every exit path.
     pub(crate) fn park(world: &World) -> Self {
         Self(world as *const World)
     }
@@ -1277,17 +1347,98 @@ mod tests {
         main.spawn_empty();
         let mut render = World::new();
 
-        render.park_main_world(&main);
-        {
+        let count = render.with_parked_main_world(&main, |render| {
             let parked = render.get_resource::<MainWorld>().unwrap();
-            // SAFETY: `main` outlives the borrow and nothing writes it.
+            // SAFETY: the scope keeps `main` alive and unwritten for the
+            // borrow's duration.
             let world = unsafe { parked.world() };
-            assert_eq!(world.iter_entities().count(), 1);
             // Two overlapping shared borrows from the same resource are fine.
             let again = unsafe { parked.world() };
             assert!(std::ptr::eq(world, again));
-        }
-        assert!(render.unpark_main_world());
+            world.iter_entities().count()
+        });
+
+        assert_eq!(count, 1);
         assert!(render.get_resource::<MainWorld>().is_none());
+    }
+
+    #[test]
+    fn test_parked_main_world_removed_on_unwind() {
+        let main = World::new();
+        let mut render = World::new();
+
+        let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            render.with_parked_main_world(&main, |render| {
+                assert!(render.get_resource::<MainWorld>().is_some());
+                panic!("extract system failure");
+            });
+        }));
+
+        assert!(result.is_err());
+        assert!(render.get_resource::<MainWorld>().is_none());
+    }
+
+    #[test]
+    fn test_thread_local_resource_roundtrip() {
+        use std::cell::Cell;
+        use std::rc::Rc;
+
+        // `Rc<Cell<_>>` is neither `Send` nor `Sync`: it cannot be a regular
+        // resource, only a thread-local one.
+        let mut world = World::new();
+        world.insert_thread_local_resource(Rc::new(Cell::new(7)));
+        assert!(world.contains_thread_local_resource::<Rc<Cell<i32>>>());
+
+        let value = world.get_thread_local_resource::<Rc<Cell<i32>>>();
+        assert_eq!(value.as_deref().unwrap().get(), 7);
+        drop(value);
+
+        world
+            .get_thread_local_resource_mut::<Rc<Cell<i32>>>()
+            .unwrap()
+            .set(42);
+        let removed = world.remove_thread_local_resource::<Rc<Cell<i32>>>();
+        assert_eq!(removed.as_deref().map(Cell::get), Some(42));
+        assert!(!world.contains_thread_local_resource::<Rc<Cell<i32>>>());
+    }
+
+    #[test]
+    fn test_thread_local_resources_drop_in_lifo_order_with_regular_ones() {
+        use std::marker::PhantomData;
+        use std::sync::{Arc, Mutex};
+
+        struct First;
+        struct Second;
+        struct Third;
+        struct DropLog<Tag> {
+            log: Arc<Mutex<Vec<&'static str>>>,
+            name: &'static str,
+            _tag: PhantomData<Tag>,
+        }
+        impl<Tag> Drop for DropLog<Tag> {
+            fn drop(&mut self) {
+                self.log.lock().unwrap().push(self.name);
+            }
+        }
+        fn drop_log<Tag>(log: &Arc<Mutex<Vec<&'static str>>>, name: &'static str) -> DropLog<Tag> {
+            DropLog {
+                log: log.clone(),
+                name,
+                _tag: PhantomData,
+            }
+        }
+
+        let log = Arc::new(Mutex::new(Vec::new()));
+        {
+            let mut world = World::new();
+            world.insert_thread_local_resource(drop_log::<First>(&log, "thread-local-first"));
+            world.insert_resource(drop_log::<Second>(&log, "regular-second"));
+            world.insert_thread_local_resource(drop_log::<Third>(&log, "thread-local-third"));
+        }
+
+        assert_eq!(
+            log.lock().unwrap().as_slice(),
+            &["thread-local-third", "regular-second", "thread-local-first"]
+        );
     }
 }

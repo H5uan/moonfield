@@ -413,6 +413,11 @@ impl App {
     /// a [`MainWorld`](moonfield_ecs::MainWorld) resource, then [`Render`].
     /// Startup runs lazily on the first call so a backend that drives
     /// `render` without `update` still initializes.
+    ///
+    /// The park scope removes the parked resource even when an extract
+    /// system panics, and the panic is resumed only after the main world is
+    /// restored to the app — a panicking extractor leaves no dangling
+    /// pointer and no lost world.
     pub fn render(&mut self) {
         if !self.initialized {
             self.startup();
@@ -421,14 +426,20 @@ impl App {
         // Park the main world where extract systems read it, rebuild the
         // render world's entities, run extraction, then take the world back.
         let main_world = std::mem::take(&mut self.world);
-        self.render_world.park_main_world(&main_world);
-        self.render_world.clear();
-        self.run_render_schedule(ExtractSchedule);
-        assert!(
-            self.render_world.unpark_main_world(),
-            "App::render re-takes the parked main world after ExtractSchedule"
-        );
+        // AssertUnwindSafe: the park scope restores its own invariant (no
+        // parked pointer) during unwind, and `self.world` is restored below
+        // before the panic resumes, so no broken state is observable.
+        let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            self.render_world
+                .with_parked_main_world(&main_world, |render_world| {
+                    render_world.clear();
+                    render_world.run_schedule(ExtractSchedule);
+                });
+        }));
         self.world = main_world;
+        if let Err(payload) = result {
+            std::panic::resume_unwind(payload);
+        }
         self.run_render_schedule(Render);
     }
 
