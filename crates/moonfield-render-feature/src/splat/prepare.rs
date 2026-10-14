@@ -18,30 +18,24 @@ use moonfield_rhi::{GpuAllocation, GpuPtr, MemoryResidency, RenderDevice};
 
 use crate::splat::cloud::{SplatCloud, SplatCloudHandle};
 use crate::splat::forward::Gaussian3D;
-use crate::splat::scene::GaussianScene;
+use moonfield_gaussian::GaussianScene;
 
 /// Pack a scene's SoA attributes into the `Gaussian3D` AoS records the
 /// forward kernels index — the byte layout `bytemuck::cast_slice` of the
 /// result carries, pinned by the layout test in `splat::forward`. `sh_rest`
 /// does not cross: the forward pass evaluates the view-independent DC term
-/// only. A scene with mismatched attribute lengths packs to the shortest —
-/// the loaders keep them equal; truncating beats panicking in a prepare
-/// system.
+/// only. Every attribute array holds one entry per Gaussian
+/// ([`GaussianScene`]'s construction invariant), so the pack is exact — no
+/// truncation, no length checks.
 pub fn pack_gaussians(scene: &GaussianScene) -> Vec<Gaussian3D> {
-    let count = scene
-        .len()
-        .min(scene.scales.len())
-        .min(scene.rotations.len())
-        .min(scene.opacities.len())
-        .min(scene.sh_dc.len());
-    (0..count)
+    (0..scene.len())
         .map(|i| {
             Gaussian3D::new(
-                scene.positions[i],
-                scene.scales[i],
-                scene.rotations[i],
-                scene.opacities[i],
-                scene.sh_dc[i],
+                scene.positions()[i],
+                scene.scales()[i],
+                scene.rotations()[i],
+                scene.opacities()[i],
+                scene.sh_dc()[i],
             )
         })
         .collect()
@@ -276,14 +270,15 @@ mod tests {
     use moonfield_math::GlobalTransform;
 
     fn sample_scene() -> GaussianScene {
-        GaussianScene {
-            positions: vec![[1.0, 2.0, 3.0], [-4.0, 5.5, 6.25]],
-            scales: vec![[-2.0, -1.5, -1.0], [0.0, 0.25, 0.5]],
-            rotations: vec![[1.0, 0.0, 0.0, 0.0], [0.5, -0.5, 0.5, -0.5]],
-            opacities: vec![0.0, 1.75],
-            sh_dc: vec![[0.1, 0.2, 0.3], [-0.4, 0.5, -0.6]],
-            sh_rest: vec![[0.0; 45]; 2],
-        }
+        GaussianScene::new(
+            vec![[1.0, 2.0, 3.0], [-4.0, 5.5, 6.25]],
+            vec![[-2.0, -1.5, -1.0], [0.0, 0.25, 0.5]],
+            vec![[1.0, 0.0, 0.0, 0.0], [0.5, -0.5, 0.5, -0.5]],
+            vec![0.0, 1.75],
+            vec![[0.1, 0.2, 0.3], [-0.4, 0.5, -0.6]],
+            vec![[0.0; 45]; 2],
+        )
+        .expect("valid sample scene")
     }
 
     #[test]
@@ -296,28 +291,27 @@ mod tests {
         assert_eq!(bytes.len(), scene.len() * size_of::<Gaussian3D>());
         let records: &[Gaussian3D] = bytemuck::cast_slice(bytes);
         for (i, record) in records.iter().enumerate() {
-            assert_eq!(record.mean(), scene.positions[i], "record {i} mean");
-            assert_eq!(record.log_scale(), scene.scales[i], "record {i} log_scale");
-            assert_eq!(record.rotation(), scene.rotations[i], "record {i} rotation");
+            assert_eq!(record.mean(), scene.positions()[i], "record {i} mean");
+            assert_eq!(
+                record.log_scale(),
+                scene.scales()[i],
+                "record {i} log_scale"
+            );
+            assert_eq!(
+                record.rotation(),
+                scene.rotations()[i],
+                "record {i} rotation"
+            );
             assert_eq!(
                 record.logit_opacity(),
-                scene.opacities[i],
+                scene.opacities()[i],
                 "record {i} logit_opacity"
             );
-            assert_eq!(record.sh_dc(), scene.sh_dc[i], "record {i} sh_dc");
+            assert_eq!(record.sh_dc(), scene.sh_dc()[i], "record {i} sh_dc");
         }
         // The mirror is tightly packed (natural pointer layout): a Pod struct
         // with no padding, so the cast itself proves no garbage can leak.
         assert_eq!(size_of::<Gaussian3D>(), 56);
-    }
-
-    #[test]
-    fn test_pack_gaussians_truncates_to_the_shortest_attribute() {
-        let mut scene = sample_scene();
-        scene.opacities.pop();
-        let packed = pack_gaussians(&scene);
-        assert_eq!(packed.len(), 1);
-        assert_eq!(packed[0].mean(), scene.positions[0]);
     }
 
     /// The extract → prepare flow: referenced clouds land in the render

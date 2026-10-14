@@ -434,7 +434,7 @@ mod tests {
         let handle = world.get_component::<SplatCloudHandle>(entity).unwrap();
         let cloud = clouds.get(&handle.0).unwrap();
         assert_eq!(cloud.len(), 1);
-        assert_eq!(cloud.scene().positions[0], [1.0, 2.0, 3.0]);
+        assert_eq!(cloud.scene().positions()[0], [1.0, 2.0, 3.0]);
         assert_eq!(cloud.aabb(), ([1.0, 2.0, 3.0], [1.0, 2.0, 3.0]));
         drop(clouds);
 
@@ -584,7 +584,7 @@ mod tests {
         assert_eq!(clouds.len(), 1);
         let cloud = clouds.get(&loaded_handle).unwrap();
         assert_eq!(cloud.len(), 1);
-        assert_eq!(cloud.scene().positions[0], [1.0, 2.0, 3.0]);
+        assert_eq!(cloud.scene().positions()[0], [1.0, 2.0, 3.0]);
         assert_eq!(
             cloud.source(),
             Some(splat_path.display().to_string().as_str())

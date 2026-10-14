@@ -12,8 +12,8 @@
 //!
 //! ## Render space → training space
 //!
-//! [`GaussianScene`] keeps the 3DGS training conventions (see
-//! [`crate::splat::scene`]); the loader converts the glTF render-space values:
+//! [`GaussianScene`] keeps the 3DGS training conventions (defined in
+//! [`moonfield_gaussian`]); the loader converts the glTF render-space values:
 //!
 //! - `SCALE` (linear, non-negative) → `scales = ln(scale)` component-wise;
 //! - `OPACITY` (`0..=1`) → `opacities = logit(p) = ln(p / (1 - p))`;
@@ -24,6 +24,11 @@
 //! - `SH_DEGREE_l_COEF_n` (one RGB VEC3 per coefficient) → `sh_rest`
 //!   channel-blocked layout: coefficient `c = l*l - 1 + n` of channel `ch`
 //!   lands at `sh_rest[ch * 15 + c]`; missing degrees are zero-filled.
+//!
+//! Scales clamp to [`MIN_LINEAR_SCALE`] and opacities into
+//! `[MIN_OPACITY, 1 - MIN_OPACITY]` before the log/logit mapping, so a
+//! degenerate file value cannot produce a non-finite scene (the scene
+//! rejects those at construction).
 //!
 //! Two implementation notes:
 //!
@@ -40,10 +45,17 @@ use std::path::Path;
 
 use serde_json::Value;
 
-use crate::splat::scene::{GaussianScene, SH_REST_LEN};
+use moonfield_gaussian::{GaussianScene, GaussianSceneError, SH_REST_LEN};
 
 /// The extension name as it appears in `extensions` and attribute semantics.
 const EXTENSION: &str = "KHR_gaussian_splatting";
+
+/// The smallest linear scale accepted from a file; smaller (or negative)
+/// values clamp to it so the log-space mapping stays finite.
+const MIN_LINEAR_SCALE: f32 = 1e-6;
+
+/// How far opacities stay from 0 and 1, so the logit mapping stays finite.
+const MIN_OPACITY: f32 = 1e-6;
 
 /// Errors returned by [`load_splat_gltf`].
 #[derive(Debug, thiserror::Error)]
@@ -91,6 +103,9 @@ pub enum SplatGltfError {
     /// An accessor reads past the end of its buffer.
     #[error("splat attribute `{0}` overruns its buffer")]
     BufferOverrun(String),
+    /// A decoded value cannot live in a [`GaussianScene`] (non-finite).
+    #[error("invalid Gaussian value: {0}")]
+    Domain(#[from] GaussianSceneError),
 }
 
 /// Parse a `KHR_gaussian_splatting` glTF/GLB byte stream into a
@@ -202,25 +217,6 @@ fn load_primitive(
     }
 
     for i in 0..count {
-        scene
-            .positions
-            .push([positions[3 * i], positions[3 * i + 1], positions[3 * i + 2]]);
-        // glTF quaternion (x, y, z, w) → training convention (w, x, y, z).
-        scene.rotations.push([
-            rotations[4 * i + 3],
-            rotations[4 * i],
-            rotations[4 * i + 1],
-            rotations[4 * i + 2],
-        ]);
-        scene.scales.push([
-            scales[3 * i].ln(),
-            scales[3 * i + 1].ln(),
-            scales[3 * i + 2].ln(),
-        ]);
-        scene.opacities.push(logit(opacities[i]));
-        scene
-            .sh_dc
-            .push([sh_dc[3 * i], sh_dc[3 * i + 1], sh_dc[3 * i + 2]]);
         // Transpose the per-coefficient RGB vectors into the channel-blocked
         // `f_rest` layout: coefficient c of channel ch → sh_rest[ch * 15 + c].
         let mut sh_rest = [0.0f32; SH_REST_LEN];
@@ -231,7 +227,24 @@ fn load_primitive(
                 }
             }
         }
-        scene.sh_rest.push(sh_rest);
+        scene.push(
+            [positions[3 * i], positions[3 * i + 1], positions[3 * i + 2]],
+            [
+                scales[3 * i].max(MIN_LINEAR_SCALE).ln(),
+                scales[3 * i + 1].max(MIN_LINEAR_SCALE).ln(),
+                scales[3 * i + 2].max(MIN_LINEAR_SCALE).ln(),
+            ],
+            // glTF quaternion (x, y, z, w) → training convention (w, x, y, z).
+            [
+                rotations[4 * i + 3],
+                rotations[4 * i],
+                rotations[4 * i + 1],
+                rotations[4 * i + 2],
+            ],
+            logit(opacities[i].clamp(MIN_OPACITY, 1.0 - MIN_OPACITY)),
+            [sh_dc[3 * i], sh_dc[3 * i + 1], sh_dc[3 * i + 2]],
+            sh_rest,
+        )?;
     }
     Ok(())
 }
@@ -484,28 +497,28 @@ mod tests {
         assert_eq!(scene.len(), 2);
 
         // Positions pass through verbatim.
-        assert_eq!(scene.positions[0], [1.0, 2.0, 3.0]);
-        assert_eq!(scene.positions[1], [-1.0, 0.5, 2.0]);
+        assert_eq!(scene.positions()[0], [1.0, 2.0, 3.0]);
+        assert_eq!(scene.positions()[1], [-1.0, 0.5, 2.0]);
         // Linear scale → log space.
-        assert_close(scene.scales[0][0], std::f32::consts::LN_2);
-        assert_close(scene.scales[0][1], 2.0 * std::f32::consts::LN_2);
-        assert_close(scene.scales[0][2], -std::f32::consts::LN_2);
-        assert_eq!(scene.scales[1], [0.0; 3]);
+        assert_close(scene.scales()[0][0], std::f32::consts::LN_2);
+        assert_close(scene.scales()[0][1], 2.0 * std::f32::consts::LN_2);
+        assert_close(scene.scales()[0][2], -std::f32::consts::LN_2);
+        assert_eq!(scene.scales()[1], [0.0; 3]);
         // glTF quaternion (x, y, z, w) → (w, x, y, z).
-        assert_eq!(scene.rotations[0], [1.0, 0.0, 0.0, 0.0]);
-        assert_eq!(scene.rotations[1], [0.9, 0.1, 0.2, 0.3]);
+        assert_eq!(scene.rotations()[0], [1.0, 0.0, 0.0, 0.0]);
+        assert_eq!(scene.rotations()[1], [0.9, 0.1, 0.2, 0.3]);
         // Opacity 0..1 → logit space.
-        assert_close(scene.opacities[0], 0.0);
-        assert_close(scene.opacities[1], (0.25f32 / 0.75).ln());
+        assert_close(scene.opacities()[0], 0.0);
+        assert_close(scene.opacities()[1], (0.25f32 / 0.75).ln());
         // Degree-0 SH maps verbatim onto sh_dc.
-        assert_eq!(scene.sh_dc[0], [0.1, -0.2, 0.3]);
+        assert_eq!(scene.sh_dc()[0], [0.1, -0.2, 0.3]);
     }
 
     #[test]
     fn test_sh_rest_transpose_is_channel_blocked() {
         let scene =
             load_splat_gltf(&splat_glb(&sample_attrs(), Some(KERNEL_ELLIPSE)), None).unwrap();
-        let rest = &scene.sh_rest[0];
+        let rest = &scene.sh_rest()[0];
         // Degree-1 coefficients land at c = 0..2, channel-blocked:
         // sh_rest[ch * 15 + c] = coef value for that channel.
         assert_eq!(rest[0], 10.0); // c0 red
@@ -522,8 +535,8 @@ mod tests {
         assert!(rest[18..30].iter().all(|&v| v == 0.0));
         assert!(rest[33..45].iter().all(|&v| v == 0.0));
         // Second splat transposes its own values.
-        assert_eq!(scene.sh_rest[1][0], -10.0);
-        assert_eq!(scene.sh_rest[1][17], -22.0);
+        assert_eq!(scene.sh_rest()[1][0], -10.0);
+        assert_eq!(scene.sh_rest()[1][17], -22.0);
     }
 
     #[test]
@@ -531,10 +544,10 @@ mod tests {
         let attrs: Vec<Attr> = sample_attrs().into_iter().take(5).collect();
         let scene = load_splat_gltf(&splat_glb(&attrs, Some(KERNEL_ELLIPSE)), None).unwrap();
         assert_eq!(scene.len(), 2);
-        assert_eq!(scene.sh_dc[0], [0.1, -0.2, 0.3]);
+        assert_eq!(scene.sh_dc()[0], [0.1, -0.2, 0.3]);
         assert!(
             scene
-                .sh_rest
+                .sh_rest()
                 .iter()
                 .all(|rest| rest.iter().all(|&v| v == 0.0))
         );
@@ -591,10 +604,10 @@ mod tests {
             bin.len()
         );
         let scene = load_splat_gltf(&glb(&json, &bin), None).unwrap();
-        assert_eq!(scene.positions[1], [4.0, 5.0, 6.0]);
-        assert_close(scene.opacities[0], 0.0);
-        assert_close(scene.opacities[1], (0.25f32 / 0.75).ln());
-        assert_eq!(scene.sh_dc[1], [0.4, 0.5, 0.6]);
+        assert_eq!(scene.positions()[1], [4.0, 5.0, 6.0]);
+        assert_close(scene.opacities()[0], 0.0);
+        assert_close(scene.opacities()[1], (0.25f32 / 0.75).ln());
+        assert_eq!(scene.sh_dc()[1], [0.4, 0.5, 0.6]);
     }
 
     #[test]
@@ -645,9 +658,9 @@ mod tests {
         );
         let scene = load_splat_gltf(json.as_bytes(), None).unwrap();
         assert_eq!(scene.len(), 1);
-        assert_eq!(scene.positions[0], [1.0, 2.0, 3.0]);
-        assert_close(scene.scales[0][0], std::f32::consts::LN_2);
-        assert_eq!(scene.sh_dc[0], [0.1, 0.2, 0.3]);
+        assert_eq!(scene.positions()[0], [1.0, 2.0, 3.0]);
+        assert_close(scene.scales()[0][0], std::f32::consts::LN_2);
+        assert_eq!(scene.sh_dc()[0], [0.1, 0.2, 0.3]);
     }
 
     #[test]

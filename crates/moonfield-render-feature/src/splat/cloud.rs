@@ -11,9 +11,9 @@
 use std::path::Path;
 
 use moonfield_asset::Handle;
+use moonfield_gaussian::GaussianScene;
 
 use crate::splat::io::gltf::{SplatGltfError, load_splat_gltf};
-use crate::splat::scene::GaussianScene;
 
 /// Errors loading a [`SplatCloud`] from a file.
 #[derive(Debug, thiserror::Error)]
@@ -119,7 +119,7 @@ fn compute_aabb(scene: &GaussianScene) -> ([f32; 3], [f32; 3]) {
     }
     let mut min = [f32::INFINITY; 3];
     let mut max = [f32::NEG_INFINITY; 3];
-    for p in &scene.positions {
+    for p in scene.positions() {
         for axis in 0..3 {
             min[axis] = min[axis].min(p[axis]);
             max[axis] = max[axis].max(p[axis]);
@@ -148,14 +148,15 @@ mod tests {
     use super::*;
 
     fn sample_scene() -> GaussianScene {
-        GaussianScene {
-            positions: vec![[0.0, 0.0, 0.0], [2.0, -1.0, 4.0]],
-            scales: vec![[0.0; 3]; 2],
-            rotations: vec![[1.0, 0.0, 0.0, 0.0]; 2],
-            opacities: vec![0.0; 2],
-            sh_dc: vec![[0.0; 3]; 2],
-            sh_rest: vec![[0.0; 45]; 2],
-        }
+        GaussianScene::new(
+            vec![[0.0, 0.0, 0.0], [2.0, -1.0, 4.0]],
+            vec![[0.0; 3]; 2],
+            vec![[1.0, 0.0, 0.0, 0.0]; 2],
+            vec![0.0; 2],
+            vec![[0.0; 3]; 2],
+            vec![[0.0; 45]; 2],
+        )
+        .expect("valid sample scene")
     }
 
     /// A minimal one-splat GLB (degree-0 SH only) at position [1, 2, 3].
@@ -231,7 +232,7 @@ mod tests {
         assert_eq!(cloud.len(), 2);
         assert_eq!(cloud.source(), Some("test.gltf"));
         assert_eq!(cloud.aabb(), ([0.0, -1.0, 0.0], [2.0, 0.0, 4.0]));
-        assert_eq!(cloud.scene().positions.len(), 2);
+        assert_eq!(cloud.scene().positions().len(), 2);
     }
 
     #[test]

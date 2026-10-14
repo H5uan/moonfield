@@ -23,6 +23,7 @@ gpu-allocator = { git = "https://github.com/Traverse-Research/gpu-allocator", re
 moonfield-app = { path = "crates/moonfield-app" }
 moonfield-asset = { path = "crates/moonfield-asset" }
 moonfield-camera = { path = "crates/moonfield-camera" }
+moonfield-gaussian = { path = "crates/moonfield-gaussian" }
 moonfield-ecs = { path = "crates/moonfield-ecs" }
 moonfield-rhi = { path = "crates/moonfield-rhi", default-features = false }
 moonfield-render-core = { path = "crates/moonfield-render-core" }

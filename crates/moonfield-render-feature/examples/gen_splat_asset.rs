@@ -188,17 +188,17 @@ fn main() {
     let scene = load_splat_gltf(&written, None).expect("generated file must load");
     assert_eq!(scene.len(), N * N * N);
     let close = |a: f32, b: f32| assert!((a - b).abs() < 1e-6, "{a} != {b}");
-    close(scene.scales[0][0], SCALE.ln());
-    close(scene.opacities[0], (OPACITY / (1.0 - OPACITY)).ln());
-    assert_eq!(scene.rotations[0], [1.0, 0.0, 0.0, 0.0]); // xyzw → wxyz
+    close(scene.scales()[0][0], SCALE.ln());
+    close(scene.opacities()[0], (OPACITY / (1.0 - OPACITY)).ln());
+    assert_eq!(scene.rotations()[0], [1.0, 0.0, 0.0, 0.0]); // xyzw → wxyz
     // First grid corner is black, the opposite white, one mid axis red.
-    assert_eq!(scene.sh_dc[0], [0.0, 0.0, 0.0]);
-    let last = scene.sh_dc[N * N * N - 1];
+    assert_eq!(scene.sh_dc()[0], [0.0, 0.0, 0.0]);
+    let last = scene.sh_dc()[N * N * N - 1];
     close(last[0], 1.0);
     close(last[1], 1.0);
     close(last[2], 1.0);
     let half = (N as f32 - 1.0) * 0.5 * STEP;
-    close(scene.positions[0][0], -half);
-    close(scene.positions[N * N * N - 1][0], half);
+    close(scene.positions()[0][0], -half);
+    close(scene.positions()[N * N * N - 1][0], half);
     println!("round-trip through load_splat_gltf: ok");
 }

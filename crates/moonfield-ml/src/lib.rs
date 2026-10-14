@@ -13,9 +13,10 @@
 //! - [`optimizer`] — GPU optimizer kernels (Adam).
 //! - [`dataset`] — training-view sources.
 //! - [`checkpoint`] — parameter checkpoint save/restore.
-//! - [`gs`] — the Gaussian Splatting method (3DGS / 2DGS / Stoch3DGS). Domain
-//!   types (`GaussianScene`, `SplatCloud`) live in
-//!   `moonfield-render-feature::splat`; this module owns only training state.
+//! - [`gs`] — the Gaussian Splatting method (3DGS / 2DGS / Stoch3DGS). The
+//!   domain type (`GaussianScene`) lives in `moonfield-gaussian`; the asset
+//!   container and I/O live in `moonfield-render-feature::splat`; this module
+//!   owns only training state.
 
 pub mod checkpoint;
 pub mod dataset;

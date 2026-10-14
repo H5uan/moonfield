@@ -21,6 +21,8 @@ moonfield-ecs/      # ECS world implementation (archetype storage, system params
                     # types come from moonfield-math — see docs/architecture.md)
 moonfield-editor/   # The editor — the workspace's only binary (src/main.rs). EditorPlugin
                     # (egui + egui_dock + in-house Vulkan backend in src/egui_vk.rs): dock panels, offscreen viewport
+moonfield-gaussian/ # The shared CPU Gaussian domain: GaussianScene (SoA attributes,
+                    # 3DGS conventions, validated construction); no framework deps
 moonfield-log/      # Logging utilities (framework layer: LogPlugin needs moonfield-app;
                     # leaf crates use tracing directly — see crates/AGENTS.md)
 moonfield-math/     # The workspace math single entry: glam re-export + domain types (Dir3/Ray3d, Transform)

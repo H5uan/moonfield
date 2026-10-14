@@ -12,13 +12,13 @@ use moonfield_app::App;
 use moonfield_app::prelude::Entity;
 use moonfield_asset::{AssetServer, Assets};
 use moonfield_camera::{Camera, PrimaryCamera};
+use moonfield_gaussian::GaussianScene;
 use moonfield_math::GlobalTransform;
 use moonfield_render_core::{MainEntity, RenderPlugin, RenderTargetSizes, ViewTargets};
 use moonfield_render_feature::splat::cloud::{SplatCloud, SplatCloudHandle};
 use moonfield_render_feature::splat::forward_pass::{
     SplatForwardPlugin, SplatViewArtifacts, splat_composite_shader, splat_forward_shader,
 };
-use moonfield_render_feature::splat::scene::GaussianScene;
 use moonfield_render_feature::splat::sort_pass::splat_sort_shader;
 use moonfield_render_feature::{RenderFeaturePlugin, shader::PipelineShaders};
 use moonfield_rhi::RenderDevice;
@@ -62,29 +62,30 @@ fn pixel(pixels: &[u8], x: u32, y: u32) -> [f32; 4] {
 /// (must be culled by its tile rectangle; had it survived, the clamped
 /// rectangle would paint the right edge). All fully opaque (logit 8).
 fn test_scene() -> GaussianScene {
-    GaussianScene {
-        positions: vec![
+    GaussianScene::new(
+        vec![
             [0.0, 0.0, -3.0],
             [0.0, 0.0, -6.0],
             [0.0, 0.0, -9.0],
             [50.0, 0.0, -10.0],
         ],
-        scales: vec![
+        vec![
             [f32::ln(0.3); 3],
             [f32::ln(0.6); 3],
             [f32::ln(2.0); 3],
             [0.0; 3],
         ],
-        rotations: vec![[1.0, 0.0, 0.0, 0.0]; 4],
-        opacities: vec![8.0; 4],
-        sh_dc: vec![
+        vec![[1.0, 0.0, 0.0, 0.0]; 4],
+        vec![8.0; 4],
+        vec![
             [1.0, 0.0, 0.0],
             [0.0, 1.0, 0.0],
             [0.0, 0.0, 1.0],
             [1.0, 1.0, 0.0],
         ],
-        sh_rest: vec![[0.0; 45]; 4],
-    }
+        vec![[0.0; 45]; 4],
+    )
+    .expect("valid test scene")
 }
 
 /// Build the app and render two frames: frame 1 builds the pipelines and

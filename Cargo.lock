@@ -1176,6 +1176,13 @@ dependencies = [
 ]
 
 [[package]]
+name = "moonfield-gaussian"
+version = "0.1.0"
+dependencies = [
+ "thiserror 2.0.20",
+]
+
+[[package]]
 name = "moonfield-log"
 version = "0.1.0"
 dependencies = [
@@ -1200,7 +1207,7 @@ name = "moonfield-ml"
 version = "0.1.0"
 dependencies = [
  "moonfield-asset",
- "moonfield-render-feature",
+ "moonfield-gaussian",
  "moonfield-rhi",
  "moonfield-shader",
  "tracing",
@@ -1247,6 +1254,7 @@ dependencies = [
  "moonfield-asset",
  "moonfield-camera",
  "moonfield-ecs",
+ "moonfield-gaussian",
  "moonfield-log",
  "moonfield-math",
  "moonfield-reflect",

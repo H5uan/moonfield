@@ -3,11 +3,12 @@
 //! 3DGS, 2DGS, and the Stoch3DGS stochastic ray-tracing variant share this
 //! scaffolding: the same trainable parameter set and optimizer, different
 //! forward/backward kernel families (rasterization vs. sorting-free
-//! stochastic ray tracing). Domain types (`GaussianScene`, `SplatCloud`,
-//! COLMAP / glTF I/O) live in `moonfield_render_feature::splat`; this module
-//! owns only training state.
+//! stochastic ray tracing). Domain types (`GaussianScene`) live in
+//! `moonfield-gaussian`; the asset container (`SplatCloud`) and the COLMAP /
+//! glTF I/O live in `moonfield-render-feature::splat`; this module owns only
+//! training state.
 
-use moonfield_render_feature::splat::scene::GaussianScene;
+use moonfield_gaussian::GaussianScene;
 use moonfield_rhi::CommandBuffer;
 
 use crate::trainer::TrainingMethod;

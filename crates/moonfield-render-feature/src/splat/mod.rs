@@ -8,5 +8,4 @@ pub mod forward;
 pub mod forward_pass;
 pub mod io;
 pub mod prepare;
-pub mod scene;
 pub mod sort_pass;
