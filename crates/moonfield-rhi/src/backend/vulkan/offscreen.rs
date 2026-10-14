@@ -5,9 +5,10 @@
 //! it afterwards. The caller picks the attachment layout when beginning a
 //! rendering pass; `GENERAL` outside a pass keeps the image sampleable with
 //! no explicit transitions. Sampling goes through the
-//! descriptor heap: the target owns one image slot, and its sampler comes
-//! from the heap's description cache; a resize allocates a new image slot
-//! and retires the old one, so holders re-register when the handles change.
+//! descriptor heap: the target owns two image slots over its color view (a
+//! sampled-image slot and a storage-image slot), and its sampler comes
+//! from the heap's description cache; a resize allocates new image slots
+//! and retires the old ones, so holders re-register when the handles change.
 //!
 //! [`OffscreenTarget::new_with_depth`] adds a `D32Sfloat` depth attachment for
 //! depth-tested scene rendering (reverse-Z: the depth clear value is 0.0).
@@ -24,13 +25,15 @@ use crate::{DescriptorHeap, SamplerHandle, TextureHandle};
 use ash::vk;
 use gpu_allocator::vulkan::Allocation;
 use std::sync::Arc;
-/// The target's descriptor-heap slots: the color view's image slot and the
-/// linear/clamp sampler from the heap's description cache. A resize
-/// allocates a fresh image slot (the old one retires through the ring);
+/// The target's descriptor-heap slots: the color view's sampled-image slot,
+/// its storage-image slot (compute writes, e.g. the splat composite), and
+/// the linear/clamp sampler from the heap's description cache. A resize
+/// allocates fresh image slots (the old ones retire through the ring);
 /// the cached sampler handle is shared by every target with the same
 /// description.
 struct HeapSlots {
     texture: TextureHandle,
+    storage: TextureHandle,
     sampler: SamplerHandle,
     heap: Arc<DescriptorHeap>,
     /// The color view's create info, owned for its *lifetime*: the heap's
@@ -44,21 +47,33 @@ struct HeapSlots {
 }
 
 impl HeapSlots {
-    /// Allocate the image slot, write its descriptor, and fetch the cached
-    /// sampler.
+    /// Allocate the image slots, write their descriptors (sampled +
+    /// storage), and fetch the cached sampler.
     fn new(device: &Device, view_create_info: vk::ImageViewCreateInfo<'static>) -> Result<Self> {
         let heap = device.descriptor_heap();
         let texture = heap.alloc_image_slot()?;
-        heap.write_resource_descriptors(&[(
-            texture,
-            super::descriptor_heap::TextureSlotDesc::new(
-                &view_create_info,
-                vk::ImageLayout::GENERAL,
+        let storage = heap.alloc_image_slot()?;
+        heap.write_resource_descriptors(&[
+            (
+                texture,
+                super::descriptor_heap::TextureSlotDesc::new(
+                    &view_create_info,
+                    vk::ImageLayout::GENERAL,
+                ),
             ),
-        )])?;
+            (
+                storage,
+                super::descriptor_heap::TextureSlotDesc::new(
+                    &view_create_info,
+                    vk::ImageLayout::GENERAL,
+                )
+                .storage(),
+            ),
+        ])?;
         let sampler = heap.sampler_for(target_sampler_desc())?;
         Ok(Self {
             texture,
+            storage,
             sampler,
             heap,
             view_create_info,
@@ -70,14 +85,16 @@ impl HeapSlots {
 impl Drop for HeapSlots {
     fn drop(&mut self) {
         // Teardown is deferred: in-flight frames may still index the image
-        // slot. The action carries the view create info (the heap's
+        // slots. The action carries the view create info (the heap's
         // encoded descriptor references it by pointer). The sampler slot
         // is cached and never freed.
-        self.ctx.ring().push(RetireAction::ImageSlot {
-            slots: self.heap.image_slots(),
-            handle: self.texture,
-            view_create_info: self.view_create_info,
-        });
+        for handle in [self.texture, self.storage] {
+            self.ctx.ring().push(RetireAction::ImageSlot {
+                slots: self.heap.image_slots(),
+                handle,
+                view_create_info: self.view_create_info,
+            });
+        }
     }
 }
 
@@ -262,6 +279,13 @@ impl OffscreenTarget {
     /// slots); holders re-register when it changes.
     pub fn texture_handle(&self) -> TextureHandle {
         self.heap_slots.texture
+    }
+
+    /// The color view's storage-image descriptor-heap slot, for compute
+    /// `RWTexture2D` writes (e.g. the splat composite). Changed by a resize,
+    /// like [`texture_handle`](Self::texture_handle).
+    pub fn storage_handle(&self) -> TextureHandle {
+        self.heap_slots.storage
     }
 
     /// The target's fixed sampler's descriptor-heap slot (linear filtering,
@@ -487,7 +511,8 @@ impl Drop for DepthBuffer {
     }
 }
 
-/// Create the color attachment image (renderable + sampleable + copy source).
+/// Create the color attachment image (renderable + compute-writable +
+/// sampleable + copy source).
 fn create_color_image(
     ctx: &DeviceContext,
     extent: vk::Extent2D,
@@ -501,6 +526,7 @@ fn create_color_image(
         format,
         vk::ImageUsageFlags::COLOR_ATTACHMENT
             | vk::ImageUsageFlags::SAMPLED
+            | vk::ImageUsageFlags::STORAGE
             | vk::ImageUsageFlags::TRANSFER_SRC,
         vk::ImageAspectFlags::COLOR,
     )

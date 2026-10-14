@@ -13,10 +13,10 @@ use moonfield_app::prelude::Entity;
 use moonfield_asset::{AssetServer, Assets};
 use moonfield_camera::{Camera, PrimaryCamera};
 use moonfield_math::GlobalTransform;
-use moonfield_render_core::{MainEntity, RenderPlugin, RenderTargetSizes};
+use moonfield_render_core::{MainEntity, RenderPlugin, RenderTargetSizes, ViewTargets};
 use moonfield_render_feature::splat::cloud::{SplatCloud, SplatCloudHandle};
 use moonfield_render_feature::splat::forward_pass::{
-    SplatForwardPlugin, SplatViewArtifacts, splat_forward_shader,
+    SplatForwardPlugin, SplatViewArtifacts, splat_composite_shader, splat_forward_shader,
 };
 use moonfield_render_feature::splat::scene::GaussianScene;
 use moonfield_render_feature::splat::sort_pass::splat_sort_shader;
@@ -26,6 +26,10 @@ use moonfield_shader::{Shader, SlangLoader};
 
 /// The offscreen view size: 4×4 tiles.
 const SIZE: u32 = 64;
+
+/// The test camera's clear color — what an uncovered view-target pixel must
+/// keep through the composite.
+const CLEAR_COLOR: [f32; 4] = [0.1, 0.2, 0.3, 1.0];
 
 /// f16 (IEEE 754 half) → f32, for the RGBA16F readback.
 fn f16_to_f32(bits: u16) -> f32 {
@@ -113,6 +117,12 @@ fn rendered_app() -> Option<(App, Entity)> {
             &moonfield_asset::assets_dir().join("shaders/util/radix_sort.slang"),
         )
         .expect("load radix_sort.slang");
+    let composite = server
+        .load(
+            &mut assets,
+            &moonfield_asset::assets_dir().join("shaders/gs/composite.slang"),
+        )
+        .expect("load composite.slang");
     drop(assets);
     let mut requests = app
         .world_mut()
@@ -120,6 +130,7 @@ fn rendered_app() -> Option<(App, Entity)> {
         .expect("PipelineShaders registered by RenderFeaturePlugin");
     requests.push(splat_forward_shader(forward));
     requests.push(splat_sort_shader(sort));
+    requests.push(splat_composite_shader(composite));
     drop(requests);
 
     let cloud = app
@@ -129,9 +140,14 @@ fn rendered_app() -> Option<(App, Entity)> {
         .add(SplatCloud::new(test_scene(), None));
     app.world_mut()
         .spawn((SplatCloudHandle(cloud), GlobalTransform::IDENTITY));
-    let camera =
-        app.world_mut()
-            .spawn((Camera::default(), PrimaryCamera, GlobalTransform::IDENTITY));
+    let camera = app.world_mut().spawn((
+        Camera {
+            clear_color: CLEAR_COLOR,
+            ..Camera::default()
+        },
+        PrimaryCamera,
+        GlobalTransform::IDENTITY,
+    ));
     // The viewport size a panel would report, so the pooled target (and the
     // splat artifacts) come out at 64×64 instead of the 1280×720 default.
     app.render_world_mut().insert_resource(RenderTargetSizes(
@@ -192,9 +208,9 @@ fn splat_forward_blends_depth_ordered() {
         "corner pixel must be transparent, got {corner:?}"
     );
 
-    // The culled yellow Gaussian (closest depth, huge, off-screen center)
-    // must have contributed nowhere — a leak would paint yellow across the
-    // image.
+    // The culled yellow Gaussian (off-screen center, footprint covers no
+    // tile) must have contributed nowhere — a leak would clamp onto the
+    // grid and paint yellow down the right edge.
     let yellow_pixels = (0..SIZE)
         .flat_map(|y| (0..SIZE).map(move |x| (x, y)))
         .map(|(x, y)| pixel(&pixels, x, y))
@@ -203,5 +219,72 @@ fn splat_forward_blends_depth_ordered() {
     assert_eq!(
         yellow_pixels, 0,
         "the culled Gaussian leaked into the image"
+    );
+}
+
+/// The composite step: the splat image lands in the view target. Read the
+/// pooled `OffscreenTarget` (BGRA8) back and check the over math against
+/// hand-computed Reinhard values.
+#[test]
+fn splat_composite_writes_view_target() {
+    let Some((app, camera)) = rendered_app() else {
+        return;
+    };
+    let device = app
+        .render_world()
+        .get_resource::<RenderDevice>()
+        .expect("render device")
+        .clone();
+    device.device().wait_idle().expect("wait idle");
+
+    let targets = app
+        .render_world()
+        .get_resource::<ViewTargets>()
+        .expect("ViewTargets");
+    let target = targets
+        .get(MainEntity(camera))
+        .expect("pooled target for the camera");
+    let pixels = target.read_pixels(device.device()).expect("readback");
+    assert_eq!(pixels.len(), (SIZE * SIZE * 4) as usize);
+    // BGRA8, row-major.
+    let px = |x: u32, y: u32| -> [u8; 4] {
+        let base = ((y * SIZE + x) * 4) as usize;
+        pixels[base..base + 4].try_into().unwrap()
+    };
+    let near = |got: u8, expected: f32, what: &str| {
+        let expected_byte = (expected * 255.0).round() as i32;
+        assert!(
+            (i32::from(got) - expected_byte).abs() <= 2,
+            "{what}: got {got}, expected ~{expected_byte}"
+        );
+    };
+
+    // Center: the front red Gaussian is ~opaque (splat alpha ≈ 1), so the
+    // target ≈ Reinhard(premultiplied splat color). The blend accumulates
+    // red a=0.99 (capped) then green ≈ 0.0099: rgb ≈ (0.99, 0.0099, 0),
+    // and c/(1+c) maps them to ≈ 0.497 and ≈ 0.0098.
+    let [b, g, r, a] = px(32, 32);
+    near(r, 0.99 / 1.99, "center red (tonemapped)");
+    near(g, 0.0099 / 1.0099, "center green (leak-through)");
+    near(b, 0.0, "center blue");
+    assert_eq!(a, 255, "target alpha stays the clear alpha");
+
+    // Uncovered corner: the splat image is transparent there, so the target
+    // keeps the clear color (the "scene underneath survives" half of the
+    // composite contract).
+    let [b, g, r, a] = px(2, 2);
+    near(b, CLEAR_COLOR[2], "corner blue (clear)");
+    near(g, CLEAR_COLOR[1], "corner green (clear)");
+    near(r, CLEAR_COLOR[0], "corner red (clear)");
+    assert_eq!(a, 255);
+
+    // Back-only pixel: blue-dominated, composited over the dimmed clear
+    // color. Hand-computed: splat rgb ≈ (0.039, 0.037, 0.48) at alpha ≈ 0.56;
+    // Reinhard gives ≈ (0.038, 0.036, 0.33), and 0.44 × clear adds
+    // ≈ (0.044, 0.087, 0.131) — blue lands near 0.46, the others under 0.13.
+    let [b, g, r, _] = px(32, 46);
+    assert!(
+        i32::from(b) > 100 && b > 2 * r && b > 2 * g,
+        "back-only pixel must composite blue over the clear color, got BGRA [{b}, {g}, {r}]"
     );
 }

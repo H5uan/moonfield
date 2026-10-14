@@ -358,6 +358,18 @@ pub struct CompositeParams {
     height: u32,
 }
 
+impl CompositeParams {
+    /// The blob for one `composite` dispatch.
+    pub fn new(splat_image: u32, target_image: u32, width: u32, height: u32) -> Self {
+        Self {
+            splat_image,
+            target_image,
+            width,
+            height,
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

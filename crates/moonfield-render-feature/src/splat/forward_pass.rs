@@ -1,5 +1,6 @@
 //! The per-view splat forward chain: the `gs/forward.slang` kernels recorded
-//! into the `Core3d` schedule after the opaque pass.
+//! into the `Core3d` schedule after the opaque pass, then the
+//! `gs/composite.slang` composite into the view target.
 //!
 //! Per view per frame, [`splat_forward`] records, through the
 //! [`RenderContext`] compute door (whose automatic `COMPUTE → COMPUTE`
@@ -9,6 +10,10 @@
 //! over the full entry capacity → `gather` → tile `RadixSort` →
 //! `clear_tile_ranges` → `tile_ranges` → `blend`.
 //!
+//! [`splat_composite`] follows in the same schedule: the splat image is
+//! tonemapped (Reinhard) and alpha-composited into the view's pooled
+//! offscreen target, so the frame the editor displays carries the splats.
+//!
 //! The appended entry count never leaves the GPU: `clear` sentinel-fills the
 //! tile keys, both sorts run over the full capacity (the sentinels cluster at
 //! the end), and `tile_ranges` skips them. Multiple clouds share one entry
@@ -17,7 +22,8 @@
 //!
 //! Persistent state lives in render-world resources:
 //! [`SplatForwardPipelines`] (built in `PrepareViews` from the prepared
-//! `gaussian.slang` asset, revision-tracked like `SplatSortPass`) and
+//! `gaussian.slang` asset, revision-tracked like `SplatSortPass`),
+//! [`SplatCompositePipeline`] (the same, from `gs/composite.slang`), and
 //! [`SplatViewArtifacts`] (per-view buffers, the RGBA16F splat image, and the
 //! `RadixSort`, rebuilt when the view's extent or total Gaussian count
 //! changes).
@@ -32,7 +38,7 @@ use moonfield_math::{Mat3, Vec3};
 use moonfield_render_core::schedule as render_sets;
 use moonfield_render_core::{
     ComputeRecording, CurrentView, ExtractedView, MainEntity, RenderContext, ViewAttachments,
-    extract_with_transform,
+    ViewTargets, extract_with_transform,
 };
 use moonfield_rhi::{
     ComputePipeline, Device, Format, GpuAllocation, GpuPtr, MemoryResidency, RenderDevice, Result,
@@ -48,8 +54,8 @@ use crate::shader::{
 };
 use crate::splat::cloud::SplatCloudHandle;
 use crate::splat::forward::{
-    BlendParams, ClearParams, ClearTileRangesParams, DuplicateKeysParams, GatherParams,
-    ProjectCullParams, SplatRecord, SplatView, TileRangesParams,
+    BlendParams, ClearParams, ClearTileRangesParams, CompositeParams, DuplicateKeysParams,
+    GatherParams, ProjectCullParams, SplatRecord, SplatView, TileRangesParams,
 };
 use crate::splat::prepare::{PreparedSplats, extract_splat_assets, prepare_splats};
 use crate::splat::sort_pass::SPLAT_SORT_SHADER;
@@ -57,6 +63,10 @@ use crate::splat::sort_pass::SPLAT_SORT_SHADER;
 /// The name keying the splat forward chain's shader in [`PipelineShaders`]
 /// and [`PreparedShaders`].
 pub const SPLAT_FORWARD_SHADER: &str = "splat_forward";
+
+/// The name keying the splat composite shader in [`PipelineShaders`] and
+/// [`PreparedShaders`].
+pub const SPLAT_COMPOSITE_SHADER: &str = "splat_composite";
 
 /// The `gs/forward.slang` tile edge length in pixels.
 const TILE_SIZE: u32 = 16;
@@ -113,10 +123,45 @@ pub fn splat_forward_shader(shader: Handle<Shader>) -> PipelineShader {
     }
 }
 
+/// The splat composite's shader request: `gs/composite.slang`, one compute
+/// entry. It reads and writes storage images through the descriptor heap,
+/// so it compiles with the backend's heap capability.
+pub fn splat_composite_shader(shader: Handle<Shader>) -> PipelineShader {
+    PipelineShader {
+        pipeline: SPLAT_COMPOSITE_SHADER,
+        shader,
+        reflect_entry: "composite",
+        entries: SPLAT_COMPOSITE_ENTRIES,
+    }
+}
+
+/// The composite's single entry (kept out of the function body: the
+/// capabilities expression is not const-promotable inline).
+const SPLAT_COMPOSITE_ENTRIES: &[ShaderEntry] = &[ShaderEntry {
+    name: "composite",
+    capabilities: moonfield_rhi::shader_capabilities(),
+}];
+
 /// One entry's pipeline plus its `params` root-blob placement.
 struct ForwardEntry {
     pipeline: ComputePipeline,
     place: RootParamPlace,
+}
+
+impl ForwardEntry {
+    /// Build one entry's pipeline from a prepared shader. Each entry takes a
+    /// single `uniform Params` struct; reflect its one root placement and
+    /// push it as one POD blob per dispatch.
+    fn from_prepared(device: &Device, prepared: &PreparedShader, entry: &str) -> Result<Self> {
+        let binder = RootBinder::new(prepared.reflection(), entry)?;
+        let place = binder.uniform_param("params")?;
+        let artifact = prepared.entry(entry).ok_or_else(|| {
+            moonfield_rhi::Error::Backend(format!("prepared shader is missing '{entry}'"))
+        })?;
+        let module = ShaderModule::from_compiled(device, artifact)?;
+        let pipeline = ComputePipeline::new(device, &module)?;
+        Ok(Self { pipeline, place })
+    }
 }
 
 /// The forward chain's seven compute pipelines, built from the prepared
@@ -143,20 +188,7 @@ impl SplatForwardPipelines {
         shader: Handle<Shader>,
         prepared: &PreparedShader,
     ) -> Result<Self> {
-        let build = |entry: &str| -> Result<ForwardEntry> {
-            let binder = RootBinder::new(prepared.reflection(), entry)?;
-            // Each entry takes a single `uniform Params` struct; reflect its
-            // one root placement and push it as one POD blob per dispatch.
-            let place = binder.uniform_param("params")?;
-            let artifact = prepared.entry(entry).ok_or_else(|| {
-                moonfield_rhi::Error::Backend(format!(
-                    "prepared splat forward shader is missing '{entry}'"
-                ))
-            })?;
-            let module = ShaderModule::from_compiled(device, artifact)?;
-            let pipeline = ComputePipeline::new(device, &module)?;
-            Ok(ForwardEntry { pipeline, place })
-        };
+        let build = |entry: &str| ForwardEntry::from_prepared(device, prepared, entry);
         Ok(Self {
             clear: build("clear")?,
             project_cull: build("project_cull")?,
@@ -169,6 +201,17 @@ impl SplatForwardPipelines {
             shader_revision: prepared.revision(),
         })
     }
+}
+
+/// The composite pipeline: `gs/composite.slang`'s `composite` entry, writing
+/// the splat image into the view target. A sibling of
+/// [`SplatForwardPipelines`] because it builds from a different asset.
+pub struct SplatCompositePipeline {
+    entry: ForwardEntry,
+    /// The shader asset the pipeline was built from.
+    shader: Handle<Shader>,
+    /// The prepared-shader revision the pipeline was built from.
+    shader_revision: AssetRevision,
 }
 
 /// One view's splat forward buffers: the RGBA16F splat image, the
@@ -208,6 +251,10 @@ pub struct ViewArtifacts {
     ranges: GpuAllocation,
     /// The per-frame `SplatView`, rewritten by the host every frame.
     view: GpuAllocation,
+    /// Whether `splat_forward` blended into the image this frame — the
+    /// composite runs only on fresh content (a stale image from a frame
+    /// with no prepared clouds must never reach the view target).
+    recorded: bool,
 }
 
 impl ViewArtifacts {
@@ -276,6 +323,7 @@ impl ViewArtifacts {
                 size_of::<SplatView>() as u64,
                 MemoryResidency::CpuWriteOnly,
             )?,
+            recorded: false,
         })
     }
 
@@ -359,6 +407,22 @@ impl SplatViewArtifacts {
     fn retain_cameras(&mut self, claimed: &[MainEntity]) {
         self.views.retain(|camera, _| claimed.contains(camera));
     }
+
+    /// Mark the camera's splat image as freshly blended this frame.
+    fn mark_recorded(&mut self, camera: MainEntity) {
+        if let Some(artifacts) = self.views.get_mut(&camera) {
+            artifacts.recorded = true;
+        }
+    }
+
+    /// Take the camera's recorded flag: true at most once per
+    /// `mark_recorded`, so a stale image composites at most once.
+    fn take_recorded(&mut self, camera: MainEntity) -> bool {
+        let Some(artifacts) = self.views.get_mut(&camera) else {
+            return false;
+        };
+        std::mem::take(&mut artifacts.recorded)
+    }
 }
 
 /// `PrepareViews` system: retire artifacts of cameras with no view, and
@@ -395,26 +459,73 @@ pub fn prepare_splat_forward(world: &mut World) {
         return;
     };
 
-    let prepared = world.get_resource::<PreparedShaders>();
-    let Some(shader) = prepared.as_ref().and_then(|p| p.get(SPLAT_FORWARD_SHADER)) else {
-        error_once!("the splat forward shader is not ready; skipping the splat forward pass");
-        return;
+    let built = {
+        let prepared = world.get_resource::<PreparedShaders>();
+        let Some(shader) = prepared.as_ref().and_then(|p| p.get(SPLAT_FORWARD_SHADER)) else {
+            error_once!("the splat forward shader is not ready; skipping the splat forward pass");
+            return;
+        };
+        let stale = world
+            .get_resource::<SplatForwardPipelines>()
+            .is_none_or(|pipelines| {
+                pipelines.shader != request.shader || pipelines.shader_revision != shader.revision()
+            });
+        if stale {
+            SplatForwardPipelines::from_prepared(render_device.device(), request.shader, shader)
+                .ok()
+        } else {
+            None
+        }
     };
-    let stale = world
-        .get_resource::<SplatForwardPipelines>()
-        .is_none_or(|pipelines| {
-            pipelines.shader != request.shader || pipelines.shader_revision != shader.revision()
-        });
-    if !stale {
-        return;
+    if let Some(built) = built {
+        world.insert_resource(built);
     }
-    let Ok(built) =
-        SplatForwardPipelines::from_prepared(render_device.device(), request.shader, shader)
+    prepare_splat_composite(world, &render_device);
+}
+
+/// The composite half of [`prepare_splat_forward`]: (re)build the composite
+/// pipeline when its prepared `gs/composite.slang` asset advanced. Missing
+/// request or failed build: the forward chain still runs; the splat image
+/// just never reaches the view target.
+fn prepare_splat_composite(world: &mut World, render_device: &RenderDevice) {
+    let Some(request) = world
+        .get_resource::<PipelineShaders>()
+        .and_then(|requests| requests.get(SPLAT_COMPOSITE_SHADER).copied())
     else {
+        error_once!(
+            "no '{SPLAT_COMPOSITE_SHADER}' shader registered; splats composite to no target"
+        );
         return;
     };
-    drop(prepared);
-    world.insert_resource(built);
+    let built = {
+        let prepared = world.get_resource::<PreparedShaders>();
+        let Some(shader) = prepared
+            .as_ref()
+            .and_then(|p| p.get(SPLAT_COMPOSITE_SHADER))
+        else {
+            error_once!("the splat composite shader is not ready; skipping the splat composite");
+            return;
+        };
+        let stale = world
+            .get_resource::<SplatCompositePipeline>()
+            .is_none_or(|pipeline| {
+                pipeline.shader != request.shader || pipeline.shader_revision != shader.revision()
+            });
+        if stale {
+            ForwardEntry::from_prepared(render_device.device(), shader, "composite")
+                .map(|entry| SplatCompositePipeline {
+                    entry,
+                    shader: request.shader,
+                    shader_revision: shader.revision(),
+                })
+                .ok()
+        } else {
+            None
+        }
+    };
+    if let Some(built) = built {
+        world.insert_resource(built);
+    }
 }
 
 /// The gs module's camera from the engine's. The engine camera looks down
@@ -532,6 +643,7 @@ pub fn splat_forward(world: &mut World) {
         ) {
             return;
         }
+        artifacts.mark_recorded(view.main_entity);
     }
     {
         let splat_view = splat_view(&view, width, height);
@@ -564,6 +676,60 @@ pub fn splat_forward(world: &mut World) {
         return;
     };
     record_chain(&mut compute, &pipelines, artifacts, &clouds);
+}
+
+/// `Core3d` per-view system, ordered after [`splat_forward`]: composite the
+/// view's splat image over its view target (the `gs/composite.slang`
+/// kernel — Reinhard tonemap + alpha-over, one thread per pixel). The
+/// blend→composite hazard is the recording's automatic `COMPUTE → COMPUTE`
+/// barrier; the composite→UI-sampling hazard is the door-switch barrier when
+/// the next raster pass begins. Skips views without a fresh splat image
+/// (nothing blended this frame) or without a pooled offscreen target
+/// (window views have no storage handle — M3 composites viewport views
+/// only).
+pub fn splat_composite(world: &mut World) {
+    let Some(view_entity) = world.get_resource::<CurrentView>().map(|view| view.0) else {
+        return;
+    };
+    let Some(view) = world.get_component::<ExtractedView>(view_entity).copied() else {
+        return;
+    };
+    let Some(mut artifacts) = world.get_resource_mut::<SplatViewArtifacts>() else {
+        return;
+    };
+    if !artifacts.take_recorded(view.main_entity) {
+        return;
+    }
+    let Some((splat_image, (width, height))) = artifacts
+        .get(view.main_entity)
+        .map(|a| (a.image.storage_handle().map(|h| h.0), a.extent))
+    else {
+        return;
+    };
+    let Some(splat_image) = splat_image else {
+        return;
+    };
+    drop(artifacts);
+    let Some(target_image) = world
+        .get_resource::<ViewTargets>()
+        .and_then(|targets| targets.get(view.main_entity).map(|t| t.storage_handle().0))
+    else {
+        return;
+    };
+    let Some(pipeline) = world.get_resource::<SplatCompositePipeline>() else {
+        return;
+    };
+    let mut ctx = RenderContext::get(world);
+    let Some(mut compute) = ctx.compute() else {
+        return;
+    };
+    compute.bind_pipeline(&pipeline.entry.pipeline);
+    let params = CompositeParams::new(splat_image, target_image, width, height);
+    compute.push_data(
+        pipeline.entry.place.offset as u32,
+        bytemuck::bytes_of(&params),
+    );
+    compute.dispatch(width.div_ceil(TILE_SIZE), height.div_ceil(TILE_SIZE), 1);
 }
 
 /// Record the full chain for one view. Every link's read-after-write hazard
@@ -708,8 +874,9 @@ fn record_chain(
 }
 
 /// The splat forward pass as a plugin: the data path (extraction + GPU
-/// upload) plus the per-view chain. The app wiring registers both shader
-/// requests — [`splat_forward_shader`] and
+/// upload) plus the per-view chain and the view-target composite. The app
+/// wiring registers all three shader requests — [`splat_forward_shader`],
+/// [`splat_composite_shader`], and
 /// [`crate::splat::sort_pass::splat_sort_shader`] — like the mesh pipeline's.
 pub struct SplatForwardPlugin;
 
@@ -738,6 +905,12 @@ impl Plugin for SplatForwardPlugin {
             Render,
             prepare_splat_forward.in_set::<render_sets::PrepareViews>(),
         );
-        app.add_render_systems(Core3d, splat_forward.after(&opaque_pass_3d));
+        app.add_render_systems(
+            Core3d,
+            (
+                splat_forward.after(&opaque_pass_3d),
+                splat_composite.after(&splat_forward),
+            ),
+        );
     }
 }
