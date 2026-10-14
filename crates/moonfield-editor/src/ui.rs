@@ -10,8 +10,8 @@ use egui_dock::{DockArea, DockState, NodeIndex, TabViewer};
 use moonfield_camera::{Camera, PrimaryCamera, view_matrix};
 use moonfield_ecs::{ChildOf, Children, Entity, Name, RelationshipTarget, World};
 use moonfield_math::{GlobalTransform, Transform};
-use moonfield_scene::SceneRegistry;
 
+use crate::action::EditorAction;
 use crate::interaction::{
     GizmoDrag, GizmoFrame, GizmoHandle, GizmoMode, OrbitCamera, hit_test, screen_to_ray,
     world_to_screen, world_trs_to_local,
@@ -50,6 +50,9 @@ pub struct TabContext<'w> {
     pub gizmo_mode: &'w mut GizmoMode,
     /// The in-progress gizmo drag, if any.
     pub gizmo_drag: &'w mut Option<GizmoDrag>,
+    /// The dragged entity's local transform when the current drag began;
+    /// recorded as one undo unit when the drag ends.
+    pub gizmo_drag_before: &'w mut Option<Transform>,
     /// The hierarchy panel's row buffer, reused across frames (cleared and
     /// refilled by [`collect_hierarchy_into`]).
     pub hierarchy_entries: &'w mut Vec<HierarchyEntry>,
@@ -72,9 +75,8 @@ pub struct LoadAssetState {
 /// Content panel state for scene save/load: a `.gltf` path field and the
 /// last operation's status message (error or success).
 ///
-/// Save/load go through the world's `SceneRegistry` resource via
-/// moonfield-scene's file APIs, synchronously on the UI thread (same known
-/// debt as the asset loader).
+/// Save/load go through the [`crate::action`] interface, synchronously on
+/// the UI thread (same known debt as the asset loader).
 #[derive(Default)]
 pub struct SceneIoState {
     /// The scene path to save to / load from.
@@ -250,9 +252,9 @@ fn content_panel(
     load_state: &mut LoadAssetState,
     scene_state: &mut SceneIoState,
 ) {
-    // Asset loading: type/paste a glTF path, load it synchronously into the
-    // world (asset store + entity with the matching handle component —
-    // splat cloud or mesh, decided by file content).
+    // Asset loading: type/paste a glTF path, import it synchronously through
+    // the action interface (undoable: the spawned entity gets a delete
+    // record).
     ui.horizontal(|ui| {
         ui.label("Asset:");
         ui.add(
@@ -262,12 +264,17 @@ fn content_panel(
         );
         if ui.button("Load").clicked() && !load_state.path.trim().is_empty() {
             let path = std::path::PathBuf::from(load_state.path.trim());
-            load_state.status = Some(match crate::scene_io::load_asset(world, &path) {
-                Ok(entity) => {
-                    *selection = Some(entity);
-                    theme::Status::Success(format!("Loaded {}", path.display()))
+            load_state.status = Some(match crate::action::perform(
+                world,
+                crate::action::EditorAction::ImportAsset { path },
+            ) {
+                Ok(outcome) => {
+                    if let Some(entity) = outcome.entity {
+                        *selection = Some(entity);
+                    }
+                    theme::Status::Success(outcome.message)
                 }
-                Err(e) => theme::Status::Failure(format!("Load failed: {e}")),
+                Err(error) => theme::Status::Failure(error.to_string()),
             });
         }
     });
@@ -276,7 +283,7 @@ fn content_panel(
     }
 
     // Scene save/load: the world's registered entities ⇄ a .gltf document
-    // via moonfield-scene, using the SceneRegistry resource.
+    // via the action interface (loads are undoable; saves are not).
     ui.horizontal(|ui| {
         ui.label("Scene:");
         ui.add(
@@ -287,41 +294,28 @@ fn content_panel(
         let path_is_empty = scene_state.path.trim().is_empty();
         if ui.button("Save").clicked() && !path_is_empty {
             let path = std::path::PathBuf::from(scene_state.path.trim());
-            scene_state.status = Some(match world.get_resource::<SceneRegistry>() {
-                Some(registry) => {
-                    match moonfield_scene::save_scene_to_file(world, &registry, &path) {
-                        Ok(()) => theme::Status::Success(format!("Saved {}", path.display())),
-                        Err(e) => theme::Status::Failure(format!("Save failed: {e}")),
-                    }
-                }
-                None => theme::Status::Failure(
-                    "Save failed: SceneRegistry resource missing".to_string(),
-                ),
+            scene_state.status = Some(match crate::action::perform(
+                world,
+                crate::action::EditorAction::SaveScene { path },
+            ) {
+                Ok(outcome) => theme::Status::Success(outcome.message),
+                Err(error) => theme::Status::Failure(error.to_string()),
             });
         }
         if ui.button("Load").clicked() && !path_is_empty {
             let path = std::path::PathBuf::from(scene_state.path.trim());
-            // `load_scene_from_file` needs `&mut World` while the registry
-            // lives inside the world's resource storage; the scope holds the
-            // registry out for the call's duration.
-            scene_state.status = Some(
-                match world.try_resource_scope(|world, registry: &mut SceneRegistry| {
-                    moonfield_scene::load_scene_from_file(world, registry, &path)
-                }) {
-                    Some(Ok(roots)) => {
-                        *selection = roots.first().copied();
-                        theme::Status::Success(format!(
-                            "Loaded {} ({} roots)",
-                            path.display(),
-                            roots.len()
-                        ))
+            scene_state.status = Some(match crate::action::perform(
+                world,
+                crate::action::EditorAction::LoadScene { path },
+            ) {
+                Ok(outcome) => {
+                    if let Some(entity) = outcome.entity {
+                        *selection = Some(entity);
                     }
-                    Some(Err(e)) => theme::Status::Failure(format!("Load failed: {e}")),
-                    None => theme::Status::Failure(
-                        "Load failed: SceneRegistry resource missing".to_string(),
-                    ),
-                },
-            );
+                    theme::Status::Success(outcome.message)
+                }
+                Err(error) => theme::Status::Failure(error.to_string()),
+            });
         }
     });
     if let Some(status) = &scene_state.status {
@@ -491,6 +485,7 @@ fn gizmo(ui: &egui::Ui, context: &mut TabContext, rect: egui::Rect, response: &e
         .filter(|e| context.world.get_component::<Transform>(*e).is_some())
     else {
         *context.gizmo_drag = None;
+        *context.gizmo_drag_before = None;
         return;
     };
     // glam's decompose returns (scale, rotation, translation); the gizmo

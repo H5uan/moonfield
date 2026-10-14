@@ -29,5 +29,6 @@ egui = { version = "0.36.1", features = ["bytemuck"] }
 egui-winit = { version = "0.36.1", default-features = false }
 egui_dock = "0.21.1"
 serde_json = { workspace = true }
+thiserror = { workspace = true }
 
 # The RHI backend is platform-selected: Vulkan everywhere but macOS, Metal 4
