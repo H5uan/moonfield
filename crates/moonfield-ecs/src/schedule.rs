@@ -337,6 +337,11 @@ impl Schedule {
         self
     }
 
+    /// Whether the set `S`'s anchor is registered in this schedule.
+    pub fn has_set<S: SystemSet>(&self) -> bool {
+        self.set_chain.iter().any(|label| label == type_name::<S>())
+    }
+
     /// The anchor following `set` in the set chain, if any.
     fn next_set_anchor(&self, set: &str) -> Option<String> {
         let index = self.set_chain.iter().position(|label| label == set)?;

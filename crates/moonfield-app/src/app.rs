@@ -192,6 +192,13 @@ impl App {
         self
     }
 
+    /// Inserts `R::default()` into the app's world when no resource of type
+    /// `R` exists; a caller-provided resource survives plugin composition.
+    pub fn init_resource<R: moonfield_ecs::Resource + Default>(&mut self) -> &mut Self {
+        self.world.init_resource::<R>();
+        self
+    }
+
     /// Register lifecycle hooks for component `T` in the app's world.
     ///
     /// See [`moonfield_ecs::ComponentHooks`] for firing points and semantics.

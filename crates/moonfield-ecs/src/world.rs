@@ -543,6 +543,14 @@ impl World {
         self.resources.insert(res);
     }
 
+    /// Insert `R::default()` when no resource of type `R` exists; a
+    /// caller-provided resource survives.
+    pub fn init_resource<R: crate::Resource + Default>(&mut self) {
+        if !self.contains_resource::<R>() {
+            self.insert_resource(R::default());
+        }
+    }
+
     /// Get an immutable reference to a resource.
     pub fn get_resource<R: crate::Resource>(&self) -> Option<std::cell::Ref<'_, R>> {
         self.resources.get::<R>()

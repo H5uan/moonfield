@@ -96,9 +96,8 @@ fn rendered_app() -> Option<(App, Entity)> {
     app.add_plugin(RenderFeaturePlugin);
     app.add_plugin(SplatForwardPlugin);
 
-    // The app wiring: load both shader assets through the asset server and
-    // register both pipeline requests (the forward chain's and the radix
-    // sort's), the editor's startup shape.
+    // The plugins' startup systems load these same shaders on their own;
+    // pushing the requests here keeps the test's handles explicit.
     let mut server = AssetServer::default();
     server.register_loader(SlangLoader);
     let mut assets = app

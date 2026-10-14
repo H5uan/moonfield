@@ -1,7 +1,7 @@
 //! The renderer's runtime plugin: asset stores and extraction systems.
 
 use moonfield_app::prelude::IntoSystemConfigs;
-use moonfield_app::{App, ExtractSchedule, Plugin, Render};
+use moonfield_app::{App, ExtractSchedule, Plugin, Render, Startup};
 use moonfield_render_core::camera_driver;
 use moonfield_render_core::prepare_phase;
 use moonfield_render_core::prepare_view_attachments;
@@ -10,14 +10,29 @@ use moonfield_render_core::{DrawFunctions, SortedPhasePlugin, extract_with_trans
 
 use crate::mesh::{Mesh, MeshRenderer, PreparedGpuMeshes, extract_mesh_assets, prepare_meshes};
 use crate::render_phase::{DrawMesh, Opaque3d, debug_scene_log, queue_opaque_3d};
-use crate::shader::{PipelineShaders, PreparedShaders, extract_shader_assets, prepare_shaders};
+use crate::shader::{
+    PipelineShaders, PreparedShaders, extract_shader_assets, load_feature_shaders, prepare_shaders,
+};
 #[cfg(feature = "splat")]
 use crate::splat::cloud::SplatCloud;
+
+/// `Startup` system: the core 3D pass's shader is the mesh feature's own
+/// need — load and register it (see [`load_feature_shaders`]).
+fn load_core_3d_shader(world: &mut moonfield_app::prelude::World) {
+    load_feature_shaders(
+        world,
+        &[("core_3d.slang", crate::core_3d::pass::core_3d_shader)],
+    );
+}
 
 /// Registers the renderer's ECS surface: the `Assets` stores entities
 /// reference through `MeshRenderer` / `SplatCloudHandle`, the shader-asset
 /// pipeline (`PipelineShaders` requests → extraction → `PreparedShaders`),
 /// and the per-frame extraction of those components into the render world.
+///
+/// The plugin initializes its stores only when absent (a preconfigured store
+/// survives composition) and declares its own shader needs at startup, so a
+/// minimal app renders meshes without the editor.
 pub struct RenderFeaturePlugin;
 
 impl Plugin for RenderFeaturePlugin {
@@ -26,11 +41,12 @@ impl Plugin for RenderFeaturePlugin {
     }
 
     fn build(&self, app: &mut App) {
-        app.insert_resource(moonfield_asset::Assets::<Mesh>::default());
+        app.init_resource::<moonfield_asset::Assets<Mesh>>();
         #[cfg(feature = "splat")]
-        app.insert_resource(moonfield_asset::Assets::<SplatCloud>::default());
-        app.insert_resource(moonfield_asset::Assets::<moonfield_shader::Shader>::default());
-        app.insert_resource(PipelineShaders::default());
+        app.init_resource::<moonfield_asset::Assets<SplatCloud>>();
+        app.init_resource::<moonfield_asset::Assets<moonfield_shader::Shader>>();
+        app.init_resource::<PipelineShaders>();
+        app.add_systems(Startup, load_core_3d_shader);
 
         app.add_render_systems(
             ExtractSchedule,
@@ -40,13 +56,14 @@ impl Plugin for RenderFeaturePlugin {
                 extract_with_transform::<MeshRenderer>,
             ),
         );
+        app.render_world_mut().init_resource::<PreparedGpuMeshes>();
+        app.render_world_mut().init_resource::<PreparedShaders>();
         app.render_world_mut()
-            .insert_resource(PreparedGpuMeshes::default());
+            .init_resource::<DrawFunctions<Opaque3d>>();
         app.render_world_mut()
-            .insert_resource(PreparedShaders::default());
-        let mut draw_functions = DrawFunctions::<Opaque3d>::default();
-        draw_functions.register::<DrawMesh>();
-        app.render_world_mut().insert_resource(draw_functions);
+            .get_resource_mut::<DrawFunctions<Opaque3d>>()
+            .expect("DrawFunctions<Opaque3d> was just ensured")
+            .register::<DrawMesh>();
 
         app.add_plugins(SortedPhasePlugin::<Opaque3d>::default());
         app.add_render_systems(
@@ -87,6 +104,36 @@ impl Plugin for RenderFeaturePlugin {
             crate::core_3d::pass::opaque_pass_3d.in_set::<crate::core_3d::Core3dOpaquePass>(),
         );
     }
+
+    /// Composition check: the feature's systems anchor on the `Render`
+    /// schedule's set chain, which `moonfield_render_core::RenderPlugin`
+    /// registers. Missing anchors mean the plugin was composed without the
+    /// render core — fail with the remedy rather than silently misordering.
+    fn finish(&self, app: &mut App) {
+        let schedules = app
+            .render_world()
+            .get_resource::<moonfield_ecs::Schedules>();
+        let render = schedules
+            .as_deref()
+            .and_then(|schedules| schedules.get(&std::any::TypeId::of::<Render>()));
+        let missing: Vec<&'static str> = [
+            render.is_some_and(|s| s.has_set::<render_sets::PrepareAssets>()),
+            render.is_some_and(|s| s.has_set::<render_sets::Queue>()),
+            render.is_some_and(|s| s.has_set::<render_sets::PrepareViews>()),
+            render.is_some_and(|s| s.has_set::<render_sets::CameraDriver>()),
+        ]
+        .into_iter()
+        .zip(["PrepareAssets", "Queue", "PrepareViews", "CameraDriver"])
+        .filter_map(|(present, name)| (!present).then_some(name))
+        .collect();
+        assert!(
+            missing.is_empty(),
+            "RenderFeaturePlugin requires moonfield_render_core::RenderPlugin: \
+             the Render schedule is missing the {} anchor(s). \
+             Add RenderPlugin before RenderFeaturePlugin.",
+            missing.join(", ")
+        );
+    }
 }
 
 #[cfg(test)]
@@ -119,6 +166,51 @@ mod tests {
             app.world()
                 .contains_resource::<moonfield_asset::Assets<SplatCloud>>()
         );
+    }
+
+    #[test]
+    fn render_feature_plugin_preserves_preconfigured_stores() {
+        let mut app = App::new();
+        // The caller's store, with content, exists before the plugin builds.
+        let mesh = {
+            let mut meshes = moonfield_asset::Assets::<Mesh>::default();
+            let mesh = meshes.add(Mesh::new(vec![[0.0; 3]], vec![0], None));
+            app.insert_resource(meshes);
+            mesh
+        };
+        app.add_plugin(RenderFeaturePlugin);
+        let meshes = app
+            .world()
+            .get_resource::<moonfield_asset::Assets<Mesh>>()
+            .unwrap();
+        assert_eq!(meshes.len(), 1);
+        assert!(meshes.get(&mesh).is_some());
+    }
+
+    #[test]
+    fn render_feature_plugin_loads_its_own_shader_at_startup() {
+        // No editor: the plugin declares and registers the core 3D shader
+        // itself at startup.
+        let mut app = App::new();
+        app.add_plugin(RenderFeaturePlugin);
+        app.render();
+        let requests = app
+            .world()
+            .get_resource::<PipelineShaders>()
+            .expect("PipelineShaders");
+        assert!(
+            requests.get(crate::core_3d::pass::CORE_3D_SHADER).is_some(),
+            "core 3d shader request registered"
+        );
+    }
+
+    #[test]
+    #[should_panic(expected = "requires moonfield_render_core::RenderPlugin")]
+    fn render_feature_plugin_finish_requires_render_plugin_anchors() {
+        let mut app = App::new();
+        app.add_plugin(RenderFeaturePlugin);
+        // Composition is complete without RenderPlugin: finish must fail.
+        Plugin::finish(&RenderFeaturePlugin, &mut app);
     }
 
     #[test]

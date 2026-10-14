@@ -234,9 +234,9 @@ mod tests {
         // The registration under test: new file plus this call.
         app.add_plugin(SplatSortPassPlugin);
 
-        // The app wiring this pass assumes: load `radix_sort.slang` through
-        // the asset server and register the pipeline request, the same shape
-        // the editor's `load_pipeline_shaders` gives the mesh pipelines.
+        // The wiring this pass assumes: `radix_sort.slang` loaded through
+        // the asset server with the pipeline request registered — the shape
+        // `SplatForwardPlugin`'s startup produces on its own.
         let shader_path = moonfield_asset::assets_dir().join("shaders/util/radix_sort.slang");
         let mut server = AssetServer::default();
         server.register_loader(SlangLoader);

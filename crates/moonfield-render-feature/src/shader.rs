@@ -17,10 +17,10 @@ use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 
 use moonfield_app::prelude::{Commands, Res, World};
-use moonfield_asset::{AssetId, AssetRevision, Assets, Handle};
+use moonfield_asset::{AssetId, AssetRevision, AssetServer, Assets, Handle};
 use moonfield_render_core::Extract;
 use moonfield_rhi::{CompiledShader, Reflection, ShaderCache};
-use moonfield_shader::Shader;
+use moonfield_shader::{Shader, SlangLoader};
 
 /// One entry point a pipeline compiles from its shader asset.
 #[derive(Debug, Clone, Copy)]
@@ -303,6 +303,55 @@ impl PreparedShaders {
                 Some(ShaderCache::new(moonfield_rhi::shader_target()).map_err(|e| e.to_string())?);
         }
         Ok(self.cache.as_ref().expect("cache was just ensured"))
+    }
+}
+
+/// One feature shader to load and register: the file name under
+/// `<assets>/shaders/` and the builder turning its handle into a pipeline
+/// request.
+pub type FeatureShaderSpec<'a> = (&'a str, fn(Handle<Shader>) -> PipelineShader);
+
+/// Load and register a feature's shader needs: each [`FeatureShaderSpec`]
+/// loads `<assets>/shaders/<file>` through the world's [`AssetServer`] and
+/// pushes the built request into [`PipelineShaders`].
+///
+/// This is how the rendering features declare their own shaders at startup —
+/// the application supplies the asset configuration (its own `AssetServer`
+/// and `Assets<Shader>` are reused when present; otherwise a minimal server
+/// with the `.slang` loader and an empty store appear). The shader directory
+/// resolves through [`moonfield_asset::assets_dir`], including its
+/// `MOONFIELD_ASSETS_DIR` override. Loading is synchronous; a failure is
+/// logged and skipped, and the affected pass runs without its pipeline until
+/// the shader prepares.
+pub fn load_feature_shaders(world: &mut World, shaders: &[FeatureShaderSpec<'_>]) {
+    if !world.contains_resource::<AssetServer>() {
+        let mut server = AssetServer::default();
+        server.register_loader(SlangLoader);
+        world.insert_resource(server);
+    }
+    world.init_resource::<Assets<Shader>>();
+    world.init_resource::<PipelineShaders>();
+    let shader_dir = moonfield_asset::assets_dir().join("shaders");
+    for (file, request) in shaders {
+        let path = shader_dir.join(file);
+        // `AssetServer::load` needs `&mut AssetServer` and
+        // `&mut Assets<Shader>` at once; the scope holds the server out of
+        // the world's storage while the store is borrowed from the world.
+        let result = world.resource_scope(|world, server: &mut AssetServer| {
+            let mut assets = world
+                .get_resource_mut::<Assets<Shader>>()
+                .expect("Assets<Shader> was just ensured");
+            server.load(&mut assets, &path)
+        });
+        match result {
+            Ok(handle) => world
+                .get_resource_mut::<PipelineShaders>()
+                .expect("PipelineShaders was just ensured")
+                .push(request(handle)),
+            Err(error) => {
+                moonfield_log::error!("failed to load shader {}: {error}", path.display())
+            }
+        }
     }
 }
 

@@ -89,9 +89,9 @@ impl Plugin for EditorPlugin {
         // backs the hierarchy panel's Save/Load buttons.
         app.insert_resource(scene_io::editor_asset_server());
         app.insert_resource(scene_io::editor_scene_registry());
-        // The built-in pipelines' shaders load eagerly so the passes find
-        // prepared shaders from the first frame.
-        scene_io::load_pipeline_shaders(app.world_mut());
+        // The renderer's pipelines load their own shaders at startup (their
+        // plugins' Startup systems); only the egui shader is the editor's.
+        scene_io::load_editor_shaders(app.world_mut());
         app.add_render_systems(ExtractSchedule, extract_editor_frame);
         app.add_systems(PreRender, editor_prepare.before(&ensure_global_transforms));
         app.add_render_systems(
@@ -883,10 +883,11 @@ mod tests {
         assert!(channel.take().is_none());
     }
 
-    /// EditorPlugin eagerly loads the built-in pipelines' shaders and
-    /// registers their requests (synchronous file reads, no GPU).
+    /// EditorPlugin eagerly loads its own (egui) shader and registers its
+    /// request (synchronous file reads, no GPU); the renderer's pipelines
+    /// load their shaders through their own plugins' startup systems.
     #[test]
-    fn test_editor_plugin_loads_pipeline_shaders() {
+    fn test_editor_plugin_loads_its_own_shader() {
         let mut app = App::new();
         app.add_plugin(EditorPlugin);
 
@@ -894,38 +895,18 @@ mod tests {
             .world()
             .get_resource::<moonfield_asset::Assets<moonfield_shader::Shader>>()
             .expect("Assets<Shader>");
-        #[cfg(feature = "splat")]
-        assert_eq!(shaders.len(), 5);
-        #[cfg(not(feature = "splat"))]
-        assert_eq!(shaders.len(), 2);
+        assert_eq!(shaders.len(), 1);
         let requests = app
             .world()
             .get_resource::<moonfield_render_feature::shader::PipelineShaders>()
             .expect("PipelineShaders");
+        assert!(requests.get(crate::egui_vk::EGUI_SHADER).is_some());
+        // The renderer's pipelines are not the editor's to load.
         assert!(
             requests
                 .get(moonfield_render_feature::core_3d::pass::CORE_3D_SHADER)
-                .is_some()
+                .is_none()
         );
-        assert!(requests.get(crate::egui_vk::EGUI_SHADER).is_some());
-        #[cfg(feature = "splat")]
-        {
-            assert!(
-                requests
-                    .get(moonfield_render_feature::splat::sort_pass::SPLAT_SORT_SHADER)
-                    .is_some()
-            );
-            assert!(
-                requests
-                    .get(moonfield_render_feature::splat::forward_pass::SPLAT_FORWARD_SHADER)
-                    .is_some()
-            );
-            assert!(
-                requests
-                    .get(moonfield_render_feature::splat::forward_pass::SPLAT_COMPOSITE_SHADER)
-                    .is_some()
-            );
-        }
     }
 
     /// Without a window (no `WinitWindow`) or a render device, extraction and

@@ -7,7 +7,7 @@
 //!   `KHR_gaussian_splatting` files when the `splat` feature is enabled.
 //!   [`editor_asset_server`] bundles it with the `SlangLoader` (`.slang` →
 //!   `Shader` assets) into the `AssetServer` resource;
-//!   [`load_pipeline_shaders`] eagerly loads the built-in pipelines' shaders
+//!   [`load_editor_shaders`] eagerly loads the editor's own (egui) shader
 //!   through it at startup. [`load_asset`] routes a path through that server
 //!   (path-deduped) and spawns an entity holding the right handle component
 //!   (`SplatCloudHandle` or [`MeshRenderer`]).
@@ -23,7 +23,6 @@ use std::path::{Path, PathBuf};
 use moonfield_asset::{AssetError, AssetLoader, AssetServer, Assets, Handle};
 use moonfield_ecs::{Entity, Name, Template, TemplateContext, TemplateError, World};
 use moonfield_math::Transform;
-use moonfield_render_feature::core_3d::pass::core_3d_shader;
 use moonfield_render_feature::mesh::{Mesh, MeshHandle, MeshRenderer};
 use moonfield_render_feature::shader::{PipelineShader, PipelineShaders};
 #[cfg(feature = "splat")]
@@ -93,54 +92,23 @@ pub fn editor_asset_server() -> AssetServer {
     server
 }
 
-/// Eagerly load the built-in pipelines' shaders (`core_3d.slang`,
-/// `egui.slang`, and — with the `splat` feature — `util/radix_sort.slang`,
-/// `gaussian.slang`, `gs/composite.slang`) through the asset server and
-/// register their pipeline requests, so the passes find prepared shaders
-/// from the first frame — matching the previous compile-at-pipeline-creation
-/// behavior. Loading is synchronous; failures are logged and the affected
-/// pass skips until its shader prepares.
+/// Eagerly load the editor's own shader (`egui.slang`) through the asset
+/// server and register its pipeline request, so the egui pass finds a
+/// prepared shader from the first frame. The renderer's pipelines load their
+/// own shaders the same way at startup
+/// ([`moonfield_render_feature::shader::load_feature_shaders`]); only the
+/// egui request belongs to the editor.
 ///
 /// The shader directory resolves through [`moonfield_asset::assets_dir`],
 /// the one definition of the repository's asset root (`MOONFIELD_ASSETS_DIR`
-/// override, then the compiled-in workspace path) — the same convention as
-/// the editor's default-scene mesh (`main.rs`'s `default_mesh_path`): path
-/// selection belongs to the app wiring, not to the pipelines.
-pub fn load_pipeline_shaders(world: &mut World) {
-    if !world.contains_resource::<AssetServer>() {
-        world.insert_resource(editor_asset_server());
-    }
-    if !world.contains_resource::<Assets<Shader>>() {
-        world.insert_resource(Assets::<Shader>::default());
-    }
+/// override, then the compiled-in workspace path). Loading is synchronous;
+/// failures are logged and the egui pass skips until its shader prepares.
+pub fn load_editor_shaders(world: &mut World) {
     if !world.contains_resource::<PipelineShaders>() {
         world.insert_resource(PipelineShaders::default());
     }
     let shader_dir = moonfield_asset::assets_dir().join("shaders");
-    load_pipeline_shader(world, &shader_dir.join("core_3d.slang"), core_3d_shader);
     load_pipeline_shader(world, &shader_dir.join("egui.slang"), egui_shader);
-    #[cfg(feature = "splat")]
-    {
-        use moonfield_render_feature::splat::forward_pass::{
-            splat_composite_shader, splat_forward_shader,
-        };
-        use moonfield_render_feature::splat::sort_pass::splat_sort_shader;
-        load_pipeline_shader(
-            world,
-            &shader_dir.join("util/radix_sort.slang"),
-            splat_sort_shader,
-        );
-        load_pipeline_shader(
-            world,
-            &shader_dir.join("gaussian.slang"),
-            splat_forward_shader,
-        );
-        load_pipeline_shader(
-            world,
-            &shader_dir.join("gs/composite.slang"),
-            splat_composite_shader,
-        );
-    }
 }
 
 /// Load one pipeline shader through the asset server and register its

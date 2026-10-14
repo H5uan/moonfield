@@ -1246,6 +1246,7 @@ dependencies = [
  "moonfield-app",
  "moonfield-asset",
  "moonfield-camera",
+ "moonfield-ecs",
  "moonfield-log",
  "moonfield-math",
  "moonfield-reflect",

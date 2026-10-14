@@ -880,11 +880,28 @@ fn record_chain(
 }
 
 /// The splat forward pass as a plugin: the data path (extraction + GPU
-/// upload) plus the per-view chain and the view-target composite. The app
-/// wiring registers all three shader requests — [`splat_forward_shader`],
+/// upload) plus the per-view chain and the view-target composite. The plugin
+/// declares its own shader needs at startup — [`splat_forward_shader`],
 /// [`splat_composite_shader`], and
-/// [`crate::splat::sort_pass::splat_sort_shader`] — like the mesh pipeline's.
+/// [`crate::splat::sort_pass::splat_sort_shader`] — loaded through
+/// [`crate::shader::load_feature_shaders`].
 pub struct SplatForwardPlugin;
+
+/// `Startup` system: the splat pass's shaders are its own need — load and
+/// register them (see [`crate::shader::load_feature_shaders`]).
+fn load_splat_shaders(world: &mut World) {
+    crate::shader::load_feature_shaders(
+        world,
+        &[
+            (
+                "util/radix_sort.slang",
+                crate::splat::sort_pass::splat_sort_shader,
+            ),
+            ("gaussian.slang", splat_forward_shader),
+            ("gs/composite.slang", splat_composite_shader),
+        ],
+    );
+}
 
 impl Plugin for SplatForwardPlugin {
     fn name(&self) -> &str {
@@ -892,10 +909,9 @@ impl Plugin for SplatForwardPlugin {
     }
 
     fn build(&self, app: &mut App) {
-        app.render_world_mut()
-            .insert_resource(PreparedSplats::default());
-        app.render_world_mut()
-            .insert_resource(SplatViewArtifacts::default());
+        app.render_world_mut().init_resource::<PreparedSplats>();
+        app.render_world_mut().init_resource::<SplatViewArtifacts>();
+        app.add_systems(moonfield_app::Startup, load_splat_shaders);
         app.add_render_systems(
             ExtractSchedule,
             (
@@ -917,6 +933,25 @@ impl Plugin for SplatForwardPlugin {
                 splat_forward.after(&opaque_pass_3d),
                 splat_composite.after(&splat_forward),
             ),
+        );
+    }
+
+    /// Composition check: the pass records into the per-view `Core3d`
+    /// schedule after its opaque-pass anchor, both registered by
+    /// `crate::RenderFeaturePlugin`. Missing anchors mean the feature plugin
+    /// was skipped — fail with the remedy rather than running unanchored.
+    fn finish(&self, app: &mut App) {
+        let schedules = app
+            .render_world()
+            .get_resource::<moonfield_ecs::Schedules>();
+        let core_3d = schedules
+            .as_deref()
+            .and_then(|schedules| schedules.get(&std::any::TypeId::of::<Core3d>()));
+        assert!(
+            core_3d.is_some_and(|s| s.has_set::<crate::core_3d::Core3dOpaquePass>()),
+            "SplatForwardPlugin requires crate::RenderFeaturePlugin: the Core3d schedule is \
+             missing its Core3dOpaquePass anchor. Add RenderFeaturePlugin before \
+             SplatForwardPlugin."
         );
     }
 }
