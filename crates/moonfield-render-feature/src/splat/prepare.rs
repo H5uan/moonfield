@@ -11,11 +11,9 @@
 
 use std::collections::{HashMap, HashSet};
 
-use moonfield_app::prelude::{App, Commands, IntoSystemConfigs, Plugin, Query, Res, World};
-use moonfield_app::{ExtractSchedule, Render};
+use moonfield_app::prelude::{Commands, Query, Res, World};
 use moonfield_asset::{AssetId, AssetRevision, Assets, Handle};
-use moonfield_render_core::schedule as render_sets;
-use moonfield_render_core::{Extract, extract_with_transform};
+use moonfield_render_core::Extract;
 use moonfield_rhi::{GpuAllocation, GpuPtr, MemoryResidency, RenderDevice};
 
 use crate::splat::cloud::{SplatCloud, SplatCloudHandle};
@@ -270,37 +268,11 @@ pub fn prepare_splats(world: &mut World) {
     }
 }
 
-/// The splat forward pass's plugin. This is the data-path skeleton: asset
-/// and entity extraction plus the GPU upload; the per-view forward chain
-/// (kernels from `gs/forward.slang` recorded against each view) lands on top
-/// of it.
-pub struct SplatForwardPlugin;
-
-impl Plugin for SplatForwardPlugin {
-    fn name(&self) -> &str {
-        "moonfield_render_feature::splat::SplatForwardPlugin"
-    }
-
-    fn build(&self, app: &mut App) {
-        app.render_world_mut()
-            .insert_resource(PreparedSplats::default());
-        app.add_render_systems(
-            ExtractSchedule,
-            (
-                extract_splat_assets,
-                extract_with_transform::<SplatCloudHandle>,
-            ),
-        );
-        app.add_render_systems(
-            Render,
-            prepare_splats.in_set::<render_sets::PrepareAssets>(),
-        );
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::splat::forward_pass::SplatForwardPlugin;
+    use moonfield_app::App;
     use moonfield_math::GlobalTransform;
 
     fn sample_scene() -> GaussianScene {
@@ -334,20 +306,9 @@ mod tests {
             );
             assert_eq!(record.sh_dc(), scene.sh_dc[i], "record {i} sh_dc");
         }
-
-        // The natural-layout padding (pinned by the reflection test in
-        // `splat::forward`) must be zeroed, never garbage: mean pad at
-        // 12..16, log_scale pad at 28..32, logit-opacity-to-sh_dc pad at
-        // 52..64, trailing pad at 76..80.
-        for (i, record) in records.iter().enumerate() {
-            let bytes = bytemuck::bytes_of(record);
-            for range in [12..16, 28..32, 52..64, 76..80] {
-                assert!(
-                    bytes[range.clone()].iter().all(|&b| b == 0),
-                    "record {i} padding {range:?} must be zero"
-                );
-            }
-        }
+        // The mirror is tightly packed (natural pointer layout): a Pod struct
+        // with no padding, so the cast itself proves no garbage can leak.
+        assert_eq!(size_of::<Gaussian3D>(), 56);
     }
 
     #[test]

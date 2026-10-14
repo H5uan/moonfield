@@ -165,6 +165,44 @@ impl Reflection {
             .ok_or_else(|| RenderError::Backend(format!("no layout for type '{name}'")))?;
         Ok(Layout { layout })
     }
+
+    /// The layout a `Ptr<T>` struct field dereferences with: the pointee's
+    /// layout as baked into the emitted pointer arithmetic. This is NOT what
+    /// [`struct_layout`](Self::struct_layout) reports for `T` — the default
+    /// rules pad `float3` to 16-byte alignment, while pointer targets pack
+    /// tightly (C-like natural layout). Host mirrors of `Ptr` pointees must
+    /// match this layout, not the default one.
+    pub fn field_pointee_layout(&self, struct_name: &str, field: &str) -> RenderResult<Layout<'_>> {
+        let reflection = unsafe { &*self.reflection };
+        let ty = reflection
+            .find_type_by_name(struct_name)
+            .map_err(|e| RenderError::Backend(format!("failed to find type '{struct_name}': {e}")))?
+            .ok_or_else(|| {
+                RenderError::Backend(format!("type '{struct_name}' not found in reflection"))
+            })?;
+        let layout = reflection
+            .type_layout(ty, shader_slang::LayoutRules::Default)
+            .ok_or_else(|| RenderError::Backend(format!("no layout for type '{struct_name}'")))?;
+        let idx = layout.find_field_index_by_name(field);
+        if idx < 0 {
+            return Err(RenderError::Backend(format!(
+                "field '{field}' not found in '{struct_name}'"
+            )));
+        }
+        let field_layout = layout
+            .field_by_index(idx as u32)
+            .and_then(|field| field.type_layout())
+            .ok_or_else(|| RenderError::Backend(format!("field '{field}' has no type layout")))?;
+        if field_layout.kind() != shader_slang::TypeKind::Pointer {
+            return Err(RenderError::Backend(format!(
+                "field '{struct_name}.{field}' is not a pointer"
+            )));
+        }
+        let pointee = field_layout.element_type_layout().ok_or_else(|| {
+            RenderError::Backend(format!("pointer field '{field}' has no pointee layout"))
+        })?;
+        Ok(Layout { layout: pointee })
+    }
 }
 
 /// A field's `[Attribute(...)]` annotation: name plus typed arguments.

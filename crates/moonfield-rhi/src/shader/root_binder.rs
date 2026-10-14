@@ -257,10 +257,12 @@ mod tests {
 
         // The emitted SPIR-V names the `Ptr` pointee types `..._natural`
         // (Slang's C-like natural layout — offsets baked into the pointer
-        // arithmetic, no std140 padding games) and the entry-parameter
-        // block `EntryPointParams_std430`. The natural layout is what
-        // `struct_layout` (LayoutRules::Default) reports; the Rust mirror
-        // must match it field-for-field.
+        // arithmetic) and the entry-parameter block `EntryPointParams_std430`.
+        // NOTE: `struct_layout` (LayoutRules::Default) only matches the
+        // natural layout when no `float3` field sits off a 16-byte boundary
+        // (these two structs qualify); for general pointees use
+        // `Reflection::field_pointee_layout`, which reflects through the
+        // pointer itself (see the splat forward records).
         let view = reflection.struct_layout("ViewUniforms").expect("layout");
         assert_eq!(view.size(), 80);
         assert_eq!(view.field_offset("view_pos").expect("field"), 0);

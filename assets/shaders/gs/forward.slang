@@ -1,11 +1,19 @@
-// The tile-based forward pass kernels. `project_cull` evaluates the shared
+// The tile-based forward pass kernels. `clear` resets the entry arrays
+// (sentinel tile keys, zeroed counters), `project_cull` evaluates the shared
 // projection math per Gaussian and records its screen-space extent,
 // `duplicate_keys` appends one (tile, depth, Gaussian) sort entry per
-// covered tile by atomic slot allocation, `clear_tile_ranges`/`tile_ranges`
-// bracket the host-side sort, and `blend` walks each tile's range
-// front-to-back with one 16×16 workgroup per tile. The sort itself is the
-// host's: two stable `RadixSort` runs — depth keys first, then tile keys —
-// over the appended pairs.
+// covered tile by atomic slot allocation, `gather` carries the tile keys
+// through the depth sort's permutation, `clear_tile_ranges`/`tile_ranges`
+// bracket the second sort, and `blend` walks each tile's range front-to-back
+// with one 16×16 workgroup per tile.
+//
+// The entry count never leaves the GPU: both `RadixSort` runs and
+// `tile_ranges` operate on the FULL entry capacity, not the appended count.
+// `clear` fills `tile_keys` with the 0xFFFFFFFF sentinel; the stable tile
+// sort clusters the sentinels (and their garbage companions) at the end, and
+// `tile_ranges` skips them. The sorts are the host's: two stable `RadixSort`
+// runs over the capacity — (depth keys, slot identity), then (gathered tile
+// keys, gathered Gaussian ids) — a stable (tile, depth) composite order.
 //
 // Each entry point takes its parameters as a single `uniform` struct, so
 // the host pushes one root blob per dispatch (the `util/radix_sort.slang`
@@ -18,6 +26,11 @@ implementing gaussian;
 
 /// Tile edge length in pixels; the blend dispatch is one workgroup per tile.
 static const uint TILE_SIZE = 16u;
+
+/// The tile-key value marking an unwritten entry slot. It is a tile id no
+/// real grid reaches (tile ids are ty * tiles_x + tx, dense from 0), and it
+/// sorts past every real key.
+static const uint SENTINEL_TILE = 0xFFFFFFFFu;
 
 /// One Gaussian's forward-pass record: everything `blend` needs to splat it,
 /// plus the covered tile rectangle. Culled Gaussians carry an empty
@@ -41,6 +54,17 @@ public struct SplatRecord
     public uint2 tile_max;
 }
 
+/// Root parameters for `clear`: sentinel-fill the tile keys over the full
+/// entry capacity and zero the counters (two slots), so the sorts and
+/// `tile_ranges` can run over the capacity without the host ever reading
+/// the appended count back.
+struct ClearParams
+{
+    Ptr<uint32_t, Access.ReadWrite> tile_keys;
+    Ptr<uint32_t, Access.ReadWrite> counters;
+    uint32_t capacity;
+};
+
 /// Root parameters for `project_cull`: the Gaussian AoS array in, one
 /// `SplatRecord` per Gaussian out, the camera behind a pointer, and the
 /// tile-grid shape for the clamp.
@@ -57,7 +81,9 @@ struct ProjectCullParams
 /// Root parameters for `duplicate_keys`: the records in, the appended
 /// (tile key, depth key, Gaussian index) triples out. `counters` is a
 /// two-slot buffer: [0] the next free slot, [1] the overflow count (entries
-/// dropped because the slot ran past capacity — observed, not fatal).
+/// dropped because the slot ran past capacity — observed, not fatal). `base`
+/// is the cloud's first index in the shared record array, so multi-cloud
+/// frames hand `blend` one contiguous id space.
 struct DuplicateKeysParams
 {
     Ptr<SplatRecord, Access.Read> records;
@@ -68,6 +94,21 @@ struct DuplicateKeysParams
     uint32_t count;
     uint32_t tiles_x;
     uint32_t capacity;
+    uint32_t base;
+};
+
+/// Root parameters for `gather`: the depth sort permuted the slot indices
+/// but not the tile keys, so the tile sort's inputs are re-read through the
+/// permutation — `out[i] = in[indices[i]]` for the tile keys and the
+/// Gaussian ids in one pass.
+struct GatherParams
+{
+    Ptr<uint32_t, Access.Read> indices;
+    Ptr<uint32_t, Access.Read> tile_keys;
+    Ptr<uint32_t, Access.Read> ids;
+    Ptr<uint32_t, Access.ReadWrite> tile_keys_out;
+    Ptr<uint32_t, Access.ReadWrite> ids_out;
+    uint32_t count;
 };
 
 /// Root parameters for `clear_tile_ranges`: one thread per tile.
@@ -77,8 +118,9 @@ struct ClearTileRangesParams
     uint32_t tile_count;
 };
 
-/// Root parameters for `tile_ranges`: one thread per sorted entry; the entry
-/// count is the counter value the host read back after `duplicate_keys`.
+/// Root parameters for `tile_ranges`: one thread per sorted entry.
+/// `entry_count` is the full sorted capacity, not the appended count (which
+/// never leaves the GPU); sentinel entries are skipped.
 struct TileRangesParams
 {
     Ptr<uint32_t, Access.Read> tile_keys;
@@ -100,6 +142,18 @@ struct BlendParams
     uint32_t height;
     uint32_t tiles_x;
 };
+
+/// One thread per entry slot: sentinel-fill the tile keys so the full
+/// capacity sorts deterministically, and zero the append counters. Runs
+/// first in the chain.
+[shader("compute")]
+[numthreads(256, 1, 1)]
+void clear(uint3 tid : SV_DispatchThreadID, uniform ClearParams params)
+{
+    uint i = tid.x;
+    if (i < params.capacity) params.tile_keys[i] = SENTINEL_TILE;
+    if (i < 2u) params.counters[i] = 0u;
+}
 
 /// One thread per Gaussian: project, cull, and record. Culling is the near
 /// plane (t.z ≤ 0.2), a degenerate conic, or a 3-sigma footprint covering no
@@ -178,9 +232,23 @@ void duplicate_keys(uint3 tid : SV_DispatchThreadID,
             }
             params.tile_keys[slot] = ty * params.tiles_x + tx;
             params.depth_keys[slot] = depth_key;
-            params.values[slot] = i;
+            params.values[slot] = params.base + i;
         }
     }
+}
+
+/// One thread per sorted entry: re-read the tile keys and Gaussian ids
+/// through the depth sort's slot permutation, aligning them with the depth
+/// order for the tile sort.
+[shader("compute")]
+[numthreads(256, 1, 1)]
+void gather(uint3 tid : SV_DispatchThreadID, uniform GatherParams params)
+{
+    uint i = tid.x;
+    if (i >= params.count) return;
+    uint slot = params.indices[i];
+    params.tile_keys_out[i] = params.tile_keys[slot];
+    params.ids_out[i] = params.ids[slot];
 }
 
 /// One thread per tile: (0, 0) marks an empty tile; `tile_ranges` only ever
@@ -196,7 +264,8 @@ void clear_tile_ranges(uint3 tid : SV_DispatchThreadID,
 
 /// One thread per sorted entry: after the host's (depth, tile) stable sort
 /// the entries of one tile are contiguous — the first entry of a run opens
-/// its tile's range, the last closes it.
+/// its tile's range, the last closes it. Sentinel (unwritten) slots carry no
+/// tile and are skipped.
 [shader("compute")]
 [numthreads(256, 1, 1)]
 void tile_ranges(uint3 tid : SV_DispatchThreadID,
@@ -205,6 +274,7 @@ void tile_ranges(uint3 tid : SV_DispatchThreadID,
     uint i = tid.x;
     if (i >= params.entry_count) return;
     uint t = params.tile_keys[i];
+    if (t == SENTINEL_TILE) return;
     if (i == 0u || params.tile_keys[i - 1u] != t) params.ranges[t].x = i;
     if (i == params.entry_count - 1u || params.tile_keys[i + 1u] != t)
         params.ranges[t].y = i + 1u;
