@@ -1,10 +1,11 @@
 //! Editor actions: the single execution interface for editor operations.
 //!
-//! UI, keyboard shortcuts, and automation all route through [`EditorAction`]
-//! + [`perform`]: this module owns validation, results, and the undo record
-//! ([`EditorHistory`]); UI code owns presentation (status text, selection).
-//! The render-frame handoff (egui frame extraction, viewport texture upload)
-//! is not an action and stays outside this interface.
+//! UI, keyboard shortcuts, and automation all route through
+//! [`EditorAction`] and [`perform`]: this module owns validation, results,
+//! and the undo record ([`EditorHistory`]); UI code owns presentation
+//! (status text, selection). The render-frame handoff (egui frame
+//! extraction, viewport texture upload) is not an action and stays outside
+//! this interface.
 
 use std::path::PathBuf;
 
@@ -143,14 +144,13 @@ pub fn execute(world: &mut World, action: &EditorAction) -> Result<ActionOutcome
             })
         }
         EditorAction::SetTransform { entity, transform } => {
-            let before = world
-                .get_component::<Transform>(*entity)
-                .copied()
-                .ok_or(if world.contains(*entity) {
+            let before = world.get_component::<Transform>(*entity).copied().ok_or(
+                if world.contains(*entity) {
                     ActionError::MissingTransform(*entity)
                 } else {
                     ActionError::MissingEntity(*entity)
-                })?;
+                },
+            )?;
             *world
                 .get_component_mut::<Transform>(*entity)
                 .expect("checked above") = *transform;
@@ -184,7 +184,8 @@ pub fn execute(world: &mut World, action: &EditorAction) -> Result<ActionOutcome
             Ok(ActionOutcome {
                 message: format!("Batched {} actions", actions.len()),
                 entity,
-                undo: (!undos.is_empty()).then(|| EditorAction::Batch(undos.into_iter().rev().collect())),
+                undo: (!undos.is_empty())
+                    .then(|| EditorAction::Batch(undos.into_iter().rev().collect())),
             })
         }
     }
@@ -405,6 +406,37 @@ mod tests {
             ),
             Err(ActionError::MissingEntity(_))
         ));
+    }
+
+    #[test]
+    fn test_record_turns_gesture_into_undo_unit() {
+        // A gizmo drag writes its increments directly, then records the
+        // whole gesture as one unit — undo must restore the pre-drag
+        // transform, redo the end state.
+        let mut world = World::new();
+        let entity = world.spawn((Name::new("dragged"), Transform::IDENTITY));
+        let moved = Transform::from_xyz(4.0, 0.0, 0.0);
+        *world.get_component_mut::<Transform>(entity).unwrap() = moved;
+
+        record(
+            &mut world,
+            EditorAction::SetTransform {
+                entity,
+                transform: moved,
+            },
+            EditorAction::SetTransform {
+                entity,
+                transform: Transform::IDENTITY,
+            },
+        );
+
+        undo(&mut world).expect("recorded").expect("undo succeeds");
+        assert_eq!(
+            world.get_component::<Transform>(entity),
+            Some(&Transform::IDENTITY)
+        );
+        redo(&mut world).expect("redoable").expect("redo succeeds");
+        assert_eq!(world.get_component::<Transform>(entity), Some(&moved));
     }
 
     #[test]

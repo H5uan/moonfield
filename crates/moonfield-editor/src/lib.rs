@@ -38,6 +38,7 @@ use moonfield_app::{App, ExtractSchedule, Plugin};
 use moonfield_camera::PrimaryCamera;
 use moonfield_ecs::{Commands, MessageCursor, Messages, ResMut, ensure_global_transforms};
 use moonfield_log::{error, error_once};
+use moonfield_math::Transform;
 use moonfield_render_core::schedule as render_sets;
 use moonfield_render_core::{
     Extract, ExtractedView, FrameContext, MAX_FRAMES_IN_FLIGHT, MainEntity, RenderTargetSizes,
@@ -250,6 +251,9 @@ struct EditorMainState {
     gizmo_mode: interaction::GizmoMode,
     /// The in-progress gizmo drag, if any.
     gizmo_drag: Option<interaction::GizmoDrag>,
+    /// The dragged entity's local transform when the current drag began;
+    /// recorded as one undo unit when the drag ends.
+    gizmo_drag_before: Option<Transform>,
     /// Render-world completion count, for the auto-close debug helper.
     frames_rendered: u64,
     /// The hierarchy panel's row buffer, reused across frames.
@@ -286,6 +290,7 @@ impl EditorMainState {
             camera: None,
             gizmo_mode: interaction::GizmoMode::Translate,
             gizmo_drag: None,
+            gizmo_drag_before: None,
             frames_rendered: 0,
             hierarchy_entries: Vec::new(),
         })
@@ -396,6 +401,7 @@ fn editor_prepare(world: &mut World) {
             camera: &mut state.camera,
             gizmo_mode: &mut state.gizmo_mode,
             gizmo_drag: &mut state.gizmo_drag,
+            gizmo_drag_before: &mut state.gizmo_drag_before,
             hierarchy_entries: &mut state.hierarchy_entries,
         };
         let full_output = egui_ctx.run_ui(raw_input, |ui| {

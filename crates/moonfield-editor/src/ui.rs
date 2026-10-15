@@ -107,6 +107,28 @@ pub fn initial_dock_state() -> DockState<Tab> {
 /// here (`Frame::NONE` is transparent and margin-less). `show_inside`
 /// derives the dock style from the egui style when none is set.
 pub fn show(ui: &mut egui::Ui, dock_state: &mut DockState<Tab>, context: &mut TabContext) {
+    // Editor-global shortcuts, through the same action history the panels
+    // use: Ctrl/Cmd+Z undoes, Ctrl/Cmd+Shift+Z (or Ctrl/Cmd+Y) redoes —
+    // unless a text field has keyboard focus.
+    if !ui.ctx().egui_wants_keyboard_input() {
+        if ui.input(|i| {
+            i.modifiers.matches_exact(egui::Modifiers::COMMAND) && i.key_pressed(egui::Key::Z)
+        }) && let Some(Err(err)) = crate::action::undo(context.world)
+        {
+            eprintln!("[editor] undo failed: {err}");
+        }
+        if ui.input(|i| {
+            (i.modifiers
+                .matches_exact(egui::Modifiers::COMMAND | egui::Modifiers::SHIFT)
+                && i.key_pressed(egui::Key::Z))
+                || (i.modifiers.matches_exact(egui::Modifiers::COMMAND)
+                    && i.key_pressed(egui::Key::Y))
+        }) && let Some(Err(err)) = crate::action::redo(context.world)
+        {
+            eprintln!("[editor] redo failed: {err}");
+        }
+    }
+
     egui::CentralPanel::default()
         .frame(egui::Frame::NONE)
         .show(ui, |ui| {
@@ -264,18 +286,20 @@ fn content_panel(
         );
         if ui.button("Load").clicked() && !load_state.path.trim().is_empty() {
             let path = std::path::PathBuf::from(load_state.path.trim());
-            load_state.status = Some(match crate::action::perform(
-                world,
-                crate::action::EditorAction::ImportAsset { path },
-            ) {
-                Ok(outcome) => {
-                    if let Some(entity) = outcome.entity {
-                        *selection = Some(entity);
+            load_state.status = Some(
+                match crate::action::perform(
+                    world,
+                    crate::action::EditorAction::ImportAsset { path },
+                ) {
+                    Ok(outcome) => {
+                        if let Some(entity) = outcome.entity {
+                            *selection = Some(entity);
+                        }
+                        theme::Status::Success(outcome.message)
                     }
-                    theme::Status::Success(outcome.message)
-                }
-                Err(error) => theme::Status::Failure(error.to_string()),
-            });
+                    Err(error) => theme::Status::Failure(error.to_string()),
+                },
+            );
         }
     });
     if let Some(status) = &load_state.status {
@@ -294,28 +318,28 @@ fn content_panel(
         let path_is_empty = scene_state.path.trim().is_empty();
         if ui.button("Save").clicked() && !path_is_empty {
             let path = std::path::PathBuf::from(scene_state.path.trim());
-            scene_state.status = Some(match crate::action::perform(
-                world,
-                crate::action::EditorAction::SaveScene { path },
-            ) {
-                Ok(outcome) => theme::Status::Success(outcome.message),
-                Err(error) => theme::Status::Failure(error.to_string()),
-            });
+            scene_state.status = Some(
+                match crate::action::perform(world, crate::action::EditorAction::SaveScene { path })
+                {
+                    Ok(outcome) => theme::Status::Success(outcome.message),
+                    Err(error) => theme::Status::Failure(error.to_string()),
+                },
+            );
         }
         if ui.button("Load").clicked() && !path_is_empty {
             let path = std::path::PathBuf::from(scene_state.path.trim());
-            scene_state.status = Some(match crate::action::perform(
-                world,
-                crate::action::EditorAction::LoadScene { path },
-            ) {
-                Ok(outcome) => {
-                    if let Some(entity) = outcome.entity {
-                        *selection = Some(entity);
+            scene_state.status = Some(
+                match crate::action::perform(world, crate::action::EditorAction::LoadScene { path })
+                {
+                    Ok(outcome) => {
+                        if let Some(entity) = outcome.entity {
+                            *selection = Some(entity);
+                        }
+                        theme::Status::Success(outcome.message)
                     }
-                    theme::Status::Success(outcome.message)
-                }
-                Err(error) => theme::Status::Failure(error.to_string()),
-            });
+                    Err(error) => theme::Status::Failure(error.to_string()),
+                },
+            );
         }
     });
     if let Some(status) = &scene_state.status {
@@ -500,6 +524,7 @@ fn gizmo(ui: &egui::Ui, context: &mut TabContext, rect: egui::Rect, response: &e
         })
     else {
         *context.gizmo_drag = None;
+        *context.gizmo_drag_before = None;
         return;
     };
 
@@ -532,6 +557,23 @@ fn gizmo(ui: &egui::Ui, context: &mut TabContext, rect: egui::Rect, response: &e
             }
         } else {
             drag = None;
+            // The gesture ended: its whole trajectory becomes one undo unit.
+            if let Some(before) = context.gizmo_drag_before.take()
+                && let Some(after) = context.world.get_component::<Transform>(entity).copied()
+                && after != before
+            {
+                crate::action::record(
+                    context.world,
+                    EditorAction::SetTransform {
+                        entity,
+                        transform: after,
+                    },
+                    EditorAction::SetTransform {
+                        entity,
+                        transform: before,
+                    },
+                );
+            }
         }
     }
 
@@ -555,6 +597,9 @@ fn gizmo(ui: &egui::Ui, context: &mut TabContext, rect: egui::Rect, response: &e
                 center,
                 (translation, rotation, scale),
             );
+            // Snapshot the pre-drag local transform: the whole drag is one
+            // undo unit, recorded when it ends.
+            *context.gizmo_drag_before = context.world.get_component::<Transform>(entity).copied();
         }
     }
     *context.gizmo_drag = drag;
@@ -721,6 +766,7 @@ mod tests {
         let mut camera = None;
         let mut gizmo_mode = GizmoMode::Translate;
         let mut gizmo_drag = None;
+        let mut gizmo_drag_before = None;
         let mut hierarchy_entries = Vec::new();
 
         let ctx = egui::Context::default();
@@ -738,6 +784,7 @@ mod tests {
                 camera: &mut camera,
                 gizmo_mode: &mut gizmo_mode,
                 gizmo_drag: &mut gizmo_drag,
+                gizmo_drag_before: &mut gizmo_drag_before,
                 hierarchy_entries: &mut hierarchy_entries,
             };
             viewport_panel(ui, &mut context);
@@ -763,6 +810,7 @@ mod tests {
         let mut camera = None;
         let mut gizmo_mode = GizmoMode::Translate;
         let mut gizmo_drag = None;
+        let mut gizmo_drag_before = None;
         let mut hierarchy_entries = Vec::new();
 
         let ctx = egui::Context::default();
@@ -777,6 +825,7 @@ mod tests {
                 camera: &mut camera,
                 gizmo_mode: &mut gizmo_mode,
                 gizmo_drag: &mut gizmo_drag,
+                gizmo_drag_before: &mut gizmo_drag_before,
                 hierarchy_entries: &mut hierarchy_entries,
             };
             viewport_panel(ui, &mut context);
@@ -812,6 +861,7 @@ mod tests {
         let mut camera = None;
         let mut gizmo_mode = GizmoMode::Translate;
         let mut gizmo_drag = None;
+        let mut gizmo_drag_before = None;
         let mut hierarchy_entries = Vec::new();
 
         let ctx = egui::Context::default();
@@ -833,6 +883,7 @@ mod tests {
                 camera: &mut camera,
                 gizmo_mode: &mut gizmo_mode,
                 gizmo_drag: &mut gizmo_drag,
+                gizmo_drag_before: &mut gizmo_drag_before,
                 hierarchy_entries: &mut hierarchy_entries,
             };
             viewport_panel(ui, &mut context);
@@ -857,6 +908,7 @@ mod tests {
         let mut camera = None;
         let mut gizmo_mode = GizmoMode::Translate;
         let mut gizmo_drag = None;
+        let mut gizmo_drag_before = None;
         let mut hierarchy_entries = Vec::new();
 
         let ctx = egui::Context::default();
@@ -889,6 +941,7 @@ mod tests {
                     camera: &mut camera,
                     gizmo_mode,
                     gizmo_drag: &mut gizmo_drag,
+                    gizmo_drag_before: &mut gizmo_drag_before,
                     hierarchy_entries: &mut hierarchy_entries,
                 };
                 viewport_panel(ui, &mut context);
@@ -939,6 +992,7 @@ mod tests {
         let mut camera = None;
         let mut gizmo_mode = GizmoMode::Translate;
         let mut gizmo_drag: Option<GizmoDrag> = None;
+        let mut gizmo_drag_before = None;
         let mut hierarchy_entries = Vec::new();
 
         let ctx = egui::Context::default();
@@ -971,6 +1025,7 @@ mod tests {
                         camera: &mut camera,
                         gizmo_mode,
                         gizmo_drag,
+                        gizmo_drag_before: &mut gizmo_drag_before,
                         hierarchy_entries: &mut hierarchy_entries,
                     };
                     viewport_panel(ui, &mut context);
