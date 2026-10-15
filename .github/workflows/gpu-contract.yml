@@ -1,0 +1,51 @@
+name: GPU contract
+
+# The strict GPU job from the architecture contract hardening proposal:
+# unlike the regular `test` job (which tolerates unsupported hardware — GPU
+# tests skip with an explicit reason), MOONFIELD_STRICT_GPU turns every skip
+# into a failure, so an unqualified device fails the job instead of counting
+# as a pass.
+#
+# Dispatch on a qualified runner — hardware that supports the full GPU
+# contract (a Vulkan device with VK_EXT_descriptor_heap, device-address
+# commands, and buffer float32 atomics; the `gpu` label). GitHub-hosted
+# runners are not qualified and would rightly fail this job, so it is manual
+# rather than gating every push.
+on:
+  workflow_dispatch:
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  CARGO_TERM_COLOR: always
+  CARGO_NET_RETRY: "10"
+  MOONFIELD_STRICT_GPU: "1"
+
+jobs:
+  strict-gpu:
+    name: strict GPU contract
+    runs-on: [self-hosted, gpu]
+    steps:
+      - uses: actions/checkout@v7
+
+      # rustup installs the pinned toolchain (+components) from rust-toolchain.toml.
+      - name: Install pinned toolchain
+        run: rustup show
+
+      - name: Install libclang (Linux)
+        if: runner.os == 'Linux'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y libclang-dev
+
+      # The shader-slang-rs-sys build script downloads the Slang release its
+      # own SLANG_VERSION pins; cache the download like the CI test job does.
+      - uses: actions/cache@v4
+        with:
+          path: ~/.cargo/git/checkouts/shader-slang-rs-*
+          key: slang-bin-strict-${{ runner.os }}-${{ hashFiles('Cargo.lock') }}
+
+      - name: Run the GPU contract tests in strict mode
+        run: cargo test --workspace --locked

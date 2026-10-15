@@ -23,7 +23,7 @@ fn setup() -> Option<(Instance, Device, FrameUploader)> {
     let instance = match Instance::new_headless() {
         Ok(instance) => instance,
         Err(err) => {
-            eprintln!("skipping: no Vulkan instance available ({err})");
+            common::skip(format!("no Vulkan instance available ({err}"));
             return None;
         }
     };
@@ -33,14 +33,14 @@ fn setup() -> Option<(Instance, Device, FrameUploader)> {
     let device = match Device::new(&instance, None) {
         Ok(device) => device,
         Err(err) => {
-            eprintln!("skipping: no Vulkan device available ({err})");
+            common::skip(format!("no Vulkan device available ({err}"));
             return None;
         }
     };
     let uploader = match FrameUploader::new(&device, UPLOAD_ARENA_SIZE) {
         Ok(uploader) => uploader,
         Err(err) => {
-            eprintln!("skipping: no frame uploader available ({err})");
+            common::skip(format!("no frame uploader available ({err}"));
             return None;
         }
     };

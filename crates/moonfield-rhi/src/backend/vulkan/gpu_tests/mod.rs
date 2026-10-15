@@ -1,6 +1,7 @@
 //! GPU integration tests, in-crate so they can verify `pub(crate)` internals
 //! (the public API exposes no raw handles). Every test skips gracefully when
-//! no compatible driver is present — see [`common`].
+//! no compatible driver is present — unless `MOONFIELD_STRICT_GPU` is set
+//! (the strict GPU job), in which case every skip is a failure; see [`common`].
 //!
 //! Run with `cargo test -p moonfield-rhi` (or a single module, e.g.
 //! `cargo test -p moonfield-rhi gpu_tests::headless_triangle`).

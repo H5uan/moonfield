@@ -39,7 +39,7 @@ fn bindless_memcpy_roundtrip() {
     let instance = match Instance::new_headless() {
         Ok(instance) => instance,
         Err(err) => {
-            eprintln!("skipping: no Vulkan instance available ({err})");
+            common::skip(format!("no Vulkan instance available ({err}"));
             return;
         }
     };
@@ -49,12 +49,12 @@ fn bindless_memcpy_roundtrip() {
     let device = match Device::new(&instance, None) {
         Ok(device) => device,
         Err(err) => {
-            eprintln!("skipping: no Vulkan device available ({err})");
+            common::skip(format!("no Vulkan device available ({err}"));
             return;
         }
     };
     if !device.device_address_commands() {
-        eprintln!("skipping: VK_KHR_device_address_commands is not supported by this driver");
+        common::skip("VK_KHR_device_address_commands is not supported by this driver");
         return;
     }
 
@@ -94,7 +94,7 @@ fn bindless_dispatch_indirect_roundtrip() {
     let instance = match Instance::new_headless() {
         Ok(instance) => instance,
         Err(err) => {
-            eprintln!("skipping: no Vulkan instance available ({err})");
+            common::skip(format!("no Vulkan instance available ({err}"));
             return;
         }
     };
@@ -104,12 +104,12 @@ fn bindless_dispatch_indirect_roundtrip() {
     let device = match Device::new(&instance, None) {
         Ok(device) => device,
         Err(err) => {
-            eprintln!("skipping: no Vulkan device available ({err})");
+            common::skip(format!("no Vulkan device available ({err}"));
             return;
         }
     };
     if !device.device_address_commands() {
-        eprintln!("skipping: VK_KHR_device_address_commands is not supported by this driver");
+        common::skip("VK_KHR_device_address_commands is not supported by this driver");
         return;
     }
 

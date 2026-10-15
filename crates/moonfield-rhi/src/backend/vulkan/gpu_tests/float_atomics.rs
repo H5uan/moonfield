@@ -34,7 +34,7 @@ fn atomic_add_sums_correctly() {
     let instance = match Instance::new_headless() {
         Ok(instance) => instance,
         Err(err) => {
-            eprintln!("skipping: no Vulkan instance available ({err})");
+            common::skip(format!("no Vulkan instance available ({err}"));
             return;
         }
     };
@@ -44,12 +44,12 @@ fn atomic_add_sums_correctly() {
     let device = match Device::new(&instance, None) {
         Ok(device) => device,
         Err(err) => {
-            eprintln!("skipping: no Vulkan device available ({err})");
+            common::skip(format!("no Vulkan device available ({err}"));
             return;
         }
     };
     if !device.buffer_float32_atomic_add() {
-        eprintln!("skipping: shaderBufferFloat32AtomicAdd is not supported by this driver");
+        common::skip("shaderBufferFloat32AtomicAdd is not supported by this driver");
         return;
     }
 

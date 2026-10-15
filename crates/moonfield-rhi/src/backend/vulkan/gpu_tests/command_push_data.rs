@@ -18,7 +18,7 @@ fn push_data_records_cleanly() {
     let instance = match Instance::new_headless() {
         Ok(instance) => instance,
         Err(err) => {
-            eprintln!("skipping: no Vulkan instance available ({err})");
+            common::skip(format!("no Vulkan instance available ({err}"));
             return;
         }
     };
@@ -28,7 +28,7 @@ fn push_data_records_cleanly() {
     let device = match Device::new(&instance, None) {
         Ok(device) => device,
         Err(err) => {
-            eprintln!("skipping: no Vulkan device available ({err})");
+            common::skip(format!("no Vulkan device available ({err}"));
             return;
         }
     };
@@ -64,7 +64,7 @@ fn push_data_feeds_root_pointers() {
     let instance = match Instance::new_headless() {
         Ok(instance) => instance,
         Err(err) => {
-            eprintln!("skipping: no Vulkan instance available ({err})");
+            common::skip(format!("no Vulkan instance available ({err}"));
             return;
         }
     };
@@ -74,7 +74,7 @@ fn push_data_feeds_root_pointers() {
     let device = match Device::new(&instance, None) {
         Ok(device) => device,
         Err(err) => {
-            eprintln!("skipping: no Vulkan device available ({err})");
+            common::skip(format!("no Vulkan device available ({err}"));
             return;
         }
     };
@@ -152,7 +152,7 @@ fn push_data_ranges_persist_across_writes() {
     let instance = match Instance::new_headless() {
         Ok(instance) => instance,
         Err(err) => {
-            eprintln!("skipping: no Vulkan instance available ({err})");
+            common::skip(format!("no Vulkan instance available ({err}"));
             return;
         }
     };
@@ -162,7 +162,7 @@ fn push_data_ranges_persist_across_writes() {
     let device = match Device::new(&instance, None) {
         Ok(device) => device,
         Err(err) => {
-            eprintln!("skipping: no Vulkan device available ({err})");
+            common::skip(format!("no Vulkan device available ({err}"));
             return;
         }
     };

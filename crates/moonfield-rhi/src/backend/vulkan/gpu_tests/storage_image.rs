@@ -49,7 +49,7 @@ fn rgba16f_storage_image_roundtrip() {
     let instance = match Instance::new_headless() {
         Ok(instance) => instance,
         Err(err) => {
-            eprintln!("skipping: no Vulkan instance available ({err})");
+            common::skip(format!("no Vulkan instance available ({err}"));
             return;
         }
     };
@@ -59,7 +59,7 @@ fn rgba16f_storage_image_roundtrip() {
     let device = match Device::new(&instance, None) {
         Ok(device) => device,
         Err(err) => {
-            eprintln!("skipping: no Vulkan device available ({err})");
+            common::skip(format!("no Vulkan device available ({err}"));
             return;
         }
     };
@@ -67,7 +67,7 @@ fn rgba16f_storage_image_roundtrip() {
     let mut uploader = match FrameUploader::new(&device, UPLOAD_ARENA_SIZE) {
         Ok(uploader) => uploader,
         Err(err) => {
-            eprintln!("skipping: frame uploader creation failed ({err})");
+            common::skip(format!("frame uploader creation failed ({err}"));
             return;
         }
     };

@@ -23,7 +23,7 @@ fn setup() -> Option<(Instance, Device)> {
     let instance = match Instance::new_headless() {
         Ok(instance) => instance,
         Err(err) => {
-            eprintln!("skipping: no Vulkan instance available ({err})");
+            common::skip(format!("no Vulkan instance available ({err}"));
             return None;
         }
     };
@@ -33,7 +33,7 @@ fn setup() -> Option<(Instance, Device)> {
     let device = match Device::new(&instance, None) {
         Ok(device) => device,
         Err(err) => {
-            eprintln!("skipping: no Vulkan device available ({err})");
+            common::skip(format!("no Vulkan device available ({err}"));
             return None;
         }
     };

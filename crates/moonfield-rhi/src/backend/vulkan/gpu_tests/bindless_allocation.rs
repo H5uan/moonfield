@@ -24,7 +24,7 @@ fn bindless_allocation_views_and_addresses() {
     let instance = match Instance::new_headless() {
         Ok(instance) => instance,
         Err(err) => {
-            eprintln!("skipping: no Vulkan instance available ({err})");
+            common::skip(format!("no Vulkan instance available ({err}"));
             return;
         }
     };
@@ -34,7 +34,7 @@ fn bindless_allocation_views_and_addresses() {
     let device = match Device::new(&instance, None) {
         Ok(device) => device,
         Err(err) => {
-            eprintln!("skipping: no Vulkan device available ({err})");
+            common::skip(format!("no Vulkan device available ({err}"));
             return;
         }
     };
@@ -77,7 +77,7 @@ fn bindless_allocation_write_and_drop() {
     let instance = match Instance::new_headless() {
         Ok(instance) => instance,
         Err(err) => {
-            eprintln!("skipping: no Vulkan instance available ({err})");
+            common::skip(format!("no Vulkan instance available ({err}"));
             return;
         }
     };
@@ -87,7 +87,7 @@ fn bindless_allocation_write_and_drop() {
     let device = match Device::new(&instance, None) {
         Ok(device) => device,
         Err(err) => {
-            eprintln!("skipping: no Vulkan device available ({err})");
+            common::skip(format!("no Vulkan device available ({err}"));
             return;
         }
     };
