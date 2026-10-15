@@ -117,3 +117,8 @@ python3 scripts/verify_agents.py
 ```
 
 Runs the full gate locally; CI runs it in the `agent-docs` job.
+
+## Active contract review
+
+[Architecture contract hardening](proposed/architecture/2026-10-14-architecture-contract-hardening.md)
+owns the architecture review records and their acceptance criteria.

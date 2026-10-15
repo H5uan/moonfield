@@ -87,3 +87,8 @@ python3 scripts/verify_agents.py
 ```
 
 本地跑全部门禁;CI 在 `agent-docs` job 中运行。
+
+## 当前契约审查
+
+[架构契约加固](proposed/architecture/2026-10-14-architecture-contract-hardening.zh.md)
+维护架构审查记录及其验收条件。

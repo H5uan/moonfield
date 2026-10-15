@@ -37,11 +37,13 @@ description and moves the raster state to per-draw dynamic commands.
 - **`RenderPassDesc` + `RenderAttachment`** replace both objects.
   `CommandBuffer::begin_rendering(&RenderPassDesc)` builds a `VkRenderingInfo`
   inline: color attachments (and optional depth) with image view, layout,
-  load/store op, and clear value. `image_layout` is both the rendering- and
-  the final layout — dynamic rendering transitions automatically, so the
-  old `SHADER_READ_ONLY_OPTIMAL` external subpass-dependency hack is gone;
-  swapchain passes use `PRESENT_SRC_KHR`, offscreen passes use
-  `SHADER_READ_ONLY_OPTIMAL`.
+  load/store op, and clear value. The attachment layout declares the image's
+  layout during rendering; `begin_rendering` forwards it without recording
+  layout transitions. Dynamic rendering performs no implicit initial or final
+  transition. Internal-image layouts follow the
+  [unified-layout decision](2026-08-26-unified-image-layouts.md). The invalid
+  PRESENT attachment mapping and depth initialization gap are tracked in the
+  [contract hardening proposal](../../proposed/architecture/2026-10-14-architecture-contract-hardening.md#vulkan-image-contracts).
 - **Rasterizer state is fully dynamic.** `CullState` and `DepthState` are
   set per draw via `set_cull_state` / `set_depth_state` (Vulkan 1.3 core)
   and `set_blend_state` (VK_EXT_extended_dynamic_state3, loaded once on
@@ -87,10 +89,11 @@ depth pass sets `DepthState { test: true, write: true, GREATER_OR_EQUAL }`
 - Pipelines now specify formats at creation; a pipeline must be recreated
   if the target format changes (it already was, via render-pass
   compatibility — the dependency just moved).
-- All subpass/external-dependency logic is gone: dynamic rendering has no
-  subpasses, and the final-layout transition is implicit. Renderers that
-  need a layout change after the pass (e.g. offscreen → sampler) express
-  it through the same `image_layout` field.
+- Dynamic rendering has no subpasses or automatic external dependencies.
+  Layout changes require explicit image transitions. Dependencies between image
+  writes and later reads require appropriate explicit synchronization, including
+  global memory barriers when the layout is unchanged. An attachment layout
+  declaration alone records neither.
 - The editor's egui backend now records blend state as a dynamic command;
   the premultiplied-alpha equation is encoded in `set_blend_state` and
   shared between window and offscreen targets.

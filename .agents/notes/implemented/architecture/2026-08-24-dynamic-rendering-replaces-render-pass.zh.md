@@ -33,10 +33,12 @@ render pass 对象,并把光栅状态移到逐 draw 的动态命令。
 - **`RenderPassDesc` + `RenderAttachment`** 取代这两个对象。
   `CommandBuffer::begin_rendering(&RenderPassDesc)` 内联构造
   `VkRenderingInfo`:color/depth 附件自带 image view、layout、load/store op
-  与 clear value。`image_layout` 既是渲染期也是结束时的布局 —— dynamic
-  rendering 自动完成转换,因此旧的 `SHADER_READ_ONLY_OPTIMAL` 外部 subpass
-  依赖 hack 消失;swapchain pass 用 `PRESENT_SRC_KHR`,offscreen pass 用
-  `SHADER_READ_ONLY_OPTIMAL`。
+  与 clear value。附件布局声明图像在渲染期间的布局；begin_rendering 直接转发
+  该声明，不记录布局转换。dynamic rendering 不执行隐式的初始或最终转换。
+  内部图像布局遵循[统一布局决策](2026-08-26-unified-image-layouts.zh.md)。
+  无效的 PRESENT 附件映射及深度初始化缺口由
+  [契约加固提案](../../proposed/architecture/2026-10-14-architecture-contract-hardening.zh.md#vulkan-image-contracts)
+  跟踪。
 - **光栅状态全部动态。** `CullState` 与 `DepthState` 由
   `set_cull_state` / `set_depth_state`(Vulkan 1.3 核心)逐 draw 设置,
   `set_blend_state`(VK_EXT_extended_dynamic_state3,设备上只加载一次)。
@@ -74,9 +76,9 @@ egui 在绘制前设置 `BlendMode::PremultipliedAlpha`。
   动态状态是 Vulkan 1.3 核心,不需要额外 feature。
 - 管线现在在创建时指定格式;若目标格式变化必须重建管线(之前通过
   render pass 兼容性同样如此 —— 依赖只是换了个位置)。
-- 所有 subpass/外部依赖逻辑消失:dynamic rendering 没有 subpass,final
-  layout 转换隐式完成。需要在 pass 之后改布局的渲染器(如 offscreen →
-  sampler)通过同一个 `image_layout` 字段表达。
+- Dynamic rendering 没有 subpass 或自动外部依赖。布局变更需要显式图像转换。
+  图像写入与后续读取之间的依赖需要恰当的显式同步，布局不变时也可使用全局
+  memory barrier。仅声明附件布局不会记录这两者。
 
 - 编辑器 egui 后端改为用动态命令记录 blend 状态;premultiplied-alpha
   方程编码在 `set_blend_state` 里,窗口与 offscreen 目标共用。
