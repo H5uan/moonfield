@@ -311,6 +311,7 @@ impl DescriptorHeap {
         &self,
         writes: &[(TextureHandle, TextureSlotDesc<'_>)],
     ) -> Result<()> {
+        self.resource_heap.assert_owner();
         let mut image_descs: Vec<vk::ImageDescriptorInfoEXT<'_>> = Vec::with_capacity(writes.len());
         for (_, desc) in writes {
             image_descs.push(
@@ -366,6 +367,7 @@ impl DescriptorHeap {
     /// [`alloc_image_slot`](Self::alloc_image_slot) (the resource heap is
     /// shared between image and buffer descriptors).
     pub fn write_buffer_descriptors(&self, writes: &[(TextureHandle, BufferRange)]) -> Result<()> {
+        self.resource_heap.assert_owner();
         let address_ranges: Vec<vk::DeviceAddressRangeEXT> = writes
             .iter()
             .map(|(_, range)| vk::DeviceAddressRangeEXT {
@@ -415,6 +417,7 @@ impl DescriptorHeap {
     /// The heap stores a driver-encoded sampler per slot; no `vk::Sampler`
     /// object is ever created.
     pub fn write_samplers(&self, writes: &[(SamplerHandle, SamplerDesc)]) -> Result<()> {
+        self.sampler_heap.assert_owner();
         let mut create_infos: Vec<vk::SamplerCreateInfo<'_>> = Vec::with_capacity(writes.len());
         for (_, desc) in writes {
             create_infos.push(sampler_create_info(desc));
@@ -451,6 +454,7 @@ impl DescriptorHeap {
     /// work); direct command-buffer owners (tests) bind their own.
     /// `reserved_range_size` satisfies the driver's minimum reserved range.
     pub fn cmd_bind(&self, cb: &CommandBuffer) -> Result<()> {
+        self.resource_heap.assert_owner();
         let resource_bind = vk::BindHeapInfoEXT::default()
             .heap_range(vk::DeviceAddressRangeEXT {
                 address: self.resource_heap.gpu_ptr().as_raw(),

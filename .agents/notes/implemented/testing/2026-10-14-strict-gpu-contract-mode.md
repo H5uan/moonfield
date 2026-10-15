@@ -6,47 +6,43 @@ Status: implemented
 
 ## Problem
 
-The [architecture contract hardening proposal](../../proposed/architecture/2026-10-14-architecture-contract-hardening.md)'s
-testing item: the rhi's GPU integration tests skip with an eprintln when no
-Vulkan instance or device is available, when the required
-`VK_EXT_descriptor_heap` is missing, or when a feature-gated capability
-(`VK_KHR_device_address_commands`, `shaderBufferFloat32AtomicAdd`, the
-frame uploader) is absent — so CI counts a skip as a pass, and a regression
-on hardware that is supposed to run the contract tests is invisible.
+Unsupported hardware is expected on hosted CI, but a GPU test that returns
+without exercising its contract is counted as passing. A strict helper used
+only inside the Vulkan backend leaves public RHI contracts, render features,
+editor rendering, and ML tests free to skip on a qualified runner.
 
 ## Decision
 
-**`MOONFIELD_STRICT_GPU` turns skips into failures.**
-`gpu_tests::common::skip` announces a skip in the tolerant default; when the
-env var is set it panics with the skip reason instead, failing the test and
-the job. Every skip site in the GPU tests routes through it: instance and
-device creation failures, the descriptor-heap probe, the feature-gated
-capabilities, and frame-uploader creation.
+**One public test policy covers every suite.**
+`moonfield_rhi::testing::skip_gpu` reports a skip in tolerant mode and
+panics with its reason when `MOONFIELD_STRICT_GPU` is set. Backend-local
+device and capability probes delegate to it, as do the public RHI contracts,
+render-core, mesh/splat, editor, and ML tests. The helper contains no backend
+types and has no GPU dependency of its own.
 
-**The `gpu-contract` workflow is the strict job.** It is manual
-(`workflow_dispatch`) and targets a qualified runner (the `self-hosted, gpu`
-label); GitHub-hosted runners are not qualified and would rightly fail it.
-It runs `cargo test --workspace --locked` with `MOONFIELD_STRICT_GPU` set,
-covering the public-contract GPU tests and the representative mesh and
-splat paths (`offscreen_triangle`, `gaussian_fit`). Regular CI keeps the
-tolerant default.
+**The strict job runs all feature paths.** The manual `gpu-contract`
+workflow targets `self-hosted, gpu` and runs
+`cargo test --workspace --all-features --locked` with strict mode set.
+Hosted CI retains tolerant behavior. The environment switch is tested through
+child processes so tests do not mutate process-global environment state.
 
 ## Alternatives considered
 
-- **Making the regular `test` job strict.** Lost: `VK_EXT_descriptor_heap`
-  is implemented only by recent NVIDIA drivers, so hosted runners would
-  fail every push. The strict contract needs its own qualified hardware.
-- **A separate strict test binary.** Lost: the same tests already encode the
-  contract, and a parallel suite would drift from it. The env var switches
-  behavior at the existing skip sites.
-- **Counting skips in the workflow and failing on a nonzero total.** Lost:
-  parsing test output is brittle; the panic fails at the site with the
-  reason, inside the test's own reporting.
+**Make hosted CI strict.** Rejected: hosted hardware does not satisfy the
+engine's GPU requirements. The strict contract needs a qualified runner.
+
+**Duplicate the skip helper in each crate.** Rejected: independent helpers
+can disagree about strict mode and leave newly added suites unguarded.
+
+**Separate strict test binaries or parse skip output.** Rejected: maintaining
+a parallel suite drifts from the tested interface, and output parsing is less
+direct than failing at the skip site.
 
 ## Consequences
 
-- A qualified runner is defined by what the tests demand: a Vulkan device
-  with `VK_EXT_descriptor_heap`, device-address commands, buffer float32
-  atomics, and a working frame uploader.
-- `skip_forced` is split from the env read, so the strict behavior is
-  unit-tested without mutating process-global environment state.
+- A qualified runner satisfies the Vulkan descriptor heap, device-address
+  commands, float32 atomics, and uploader requirements exercised by the suites.
+- A failed initialization or capability probe cannot silently pass any GPU
+  suite in strict mode.
+- The public policy and its environment behavior are testable without GPU
+  hardware; ordinary unit tests do not require the strict runner.

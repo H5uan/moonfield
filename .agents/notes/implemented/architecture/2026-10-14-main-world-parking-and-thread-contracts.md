@@ -6,83 +6,69 @@ Status: implemented
 
 ## Problem
 
-The [architecture contract hardening proposal](../../proposed/architecture/2026-10-14-architecture-contract-hardening.md)'s
-first item covered three soundness gaps: `World::park_main_world` stored a
-borrowed world's address through a public safe method, so a caller could keep
-the `MainWorld` resource alive past its source (and `App::render` dropping
-the taken-out main world mid-panic left exactly that dangling pointer in the
-render world); the RHI's `CommandBuffer` paired a `Cell<bool>` recording flag
-with hand-written `Send + Sync` impls, so a concurrent `end` through two
-shared references was a genuine data race; and `Resource`'s
-`Send + Sync + 'static` bound gave GPU objects that cannot soundly be shared
-no home in a `World` at all.
+The [contract hardening proposal](../../proposed/architecture/2026-10-14-architecture-contract-hardening.md)
+identifies lifetime and threading contracts that safe callers can bypass.
+Removing a parked resource at scope exit does not contain its pointer when a
+closure moves the resource or the destination world. Atomic recording flags
+likewise do not synchronize Vulkan command recording, pools, or queues.
 
 ## Decision
 
-**Parking is a scope, not a pair of calls.** `World::with_parked_main_world`
-is the only way to park: it inserts the `MainWorld` resource, runs the
-closure, and a drop guard removes the resource on every exit path including
-unwind, so the raw pointer inside `MainWorld` never outlives the call that
-borrows the source world. `park_main_world`/`unpark_main_world` are private.
-`App::render` wraps extraction in `catch_unwind`/`resume_unwind`: the panic
-still propagates, but only after the scope has unparked and the taken-out
-main world is restored to the app, so a panicking extractor leaves the app
-recoverable. `MainWorld::world`/`world_mut` keep their unsafe preconditions —
-they are the retained raw-pointer entries the proposal asks to expose.
+**Parking uses an expiring shared token.** `MainWorld` holds an
+`Arc` to an atomic world pointer and the parking thread's identity.
+`World::with_parked_main_world` invalidates the token before cleaning up
+the destination, including on unwind. A moved resource or world retains only
+an expired token. Nested parking into an occupied destination is rejected
+without replacing its source. Access checks expiration and thread ownership
+before dereferencing; the unsafe reference getters retain their lifetime and
+aliasing preconditions.
 
-**`CommandBuffer` is auto `Send + Sync`; the shared mutation is atomic.**
-The `ended` flag is an `AtomicBool`: `end` claims the end with a swap before
-calling `vkEndCommandBuffer`, so a concurrent double-end is a no-op and never
-a race. With the `Cell` gone, every field is `Send + Sync` and the manual
-impls are deleted. The struct documentation carries the recording contract:
-recording methods take `&self` because the frame loop hands shared
-references to single-threaded schedule systems; sharing a *recording* buffer
-across threads violates Vulkan's host-synchronization requirement and is a
-caller contract violation.
+`App::render` restores the taken-out main world before resuming an
+extraction panic. The extraction interface remains compatible with ordinary
+resource and query parameters; moving a token does not grant access to its
+source on another thread.
 
-**Thread-local resources are pinned storage, not a new world.** `Resources`
-keeps one map and one LIFO drop order; a `thread_pins` table marks types
-inserted through `World::insert_thread_local_resource` (any `'static` type)
-and records the inserting thread. The thread-local accessors panic on
-non-owner-thread access and on regular-vs-thread-local accessor mismatch.
-Pinning is forward-looking — `World` is neither `Send` nor `Sync` today — and
-turns a future cross-thread access into a panic instead of a data race.
+**GPU operations are bound to the device's creating thread.**
+`DeviceShared` records that thread and checks it before providing core
+or extension entry points, the allocator, or its command pool. Recording,
+submission, presentation, uploader batches, descriptor writes, and retirement
+draining enforce the same ownership. `CommandBuffer::end` checks before
+changing its atomic flag, so a rejected foreign-thread call cannot end the
+owner's recording. `Send + Sync` permits ECS storage, not concurrent
+driver access. Immutable handle values and mutex-protected retirement enqueue
+operations remain shareable; GPU work and resource teardown belong on the
+owner thread.
 
-The other manual impls were audited and stay: `Reflection` (read-only shared
-queries over an owned Slang object), `ShaderCache` (all session access under
-its mutexes), `HostPtr` (single-writer allocation contract), and
-`RawHandleWrapper` (handles only consumed by surface creation) each carry
-their justification at the impl site.
+**Thread-local resources share the existing storage and drop order.**
+`Resources` tracks insertion-thread pins in its single map and LIFO
+drop list. Thread-local accessors reject foreign threads and mismatched
+regular accessors. No new system-parameter category is introduced.
 
 ## Alternatives considered
 
-- **Making parking `unsafe` instead of scoped.** Lost: the scope removes the
-  failure mode (a parked pointer outliving its source) rather than asking
-  every caller to avoid it, and keeps `App::render` free of unsafe.
-- **Exclusive (`&mut self`) recording methods on `CommandBuffer`.** Deferred:
-  recording flows through `RenderContext`'s shared references to render
-  systems, so exclusivity would ripple through render-core, render-feature,
-  the editor, and the trainer for a guarantee the single-threaded schedule
-  already provides. The audited contract is documented instead; the atomic
-  flag removes the one real race.
-- **A separate map for thread-local resources.** Lost: a second store gets
-  its own drop pass and breaks the LIFO guarantee when a thread-local GPU
-  object depends on a regular resource created earlier.
-- **Thread-local system parameters.** Deferred: no consumer fetches
-  thread-local resources from systems yet; adding param support without one
-  would be an unexercised framework surface.
+**Destination cleanup alone.** Rejected: generic resource removal and moving
+the destination can escape a cleanup guard. Invalidating the shared token
+contains access independently of its storage location.
+
+**Atomic recording state alone.** Rejected: the flag protects a Rust field,
+not command-buffer recording, command-pool operations, or queue submission.
+The owner-thread check covers those driver calls.
+
+**Non-Send GPU objects and thread-local parameters throughout rendering.**
+Deferred: this requires migrating render-world resource fetching and every
+recording consumer. Device-level ownership checks enforce the current
+single-threaded execution model without adding that parameter category.
+
+**A separate thread-local resource map.** Rejected: independent destruction
+passes break the shared LIFO ordering of dependent resources.
 
 ## Consequences
 
-- Safe extraction can no longer read a destroyed main world: the resource
-  cannot outlive `with_parked_main_world`, and `App::render` restores the
-  main world before a panic resumes (covered by tests in `moonfield-ecs` and
-  `moonfield-app`).
-- ECS resource drop order is unchanged across the mixed store; a thread-local
-  resource drops before the resources it was created from, same as a regular
-  one.
-- `CommandBuffer`'s `Send + Sync` is now a compiler-checked property of its
-  fields; a field that loses the traits fails the build where owners store
-  buffers in resources, instead of weakening a hand-written promise.
-- System-param access to thread-local resources does not exist; systems that
-  need them take `&mut World` (or the `World` accessors) directly.
+- Escaped parked tokens are unusable after normal return or unwind, and
+  cannot be dereferenced through safe extraction on a foreign thread.
+- GPU recording, pool access, and queue operations fail before driver access
+  on a foreign thread. Ownership checks also guard direct extension paths.
+- Extraction retains the main-world change clock and the app restores its
+  world before propagating panics.
+- Mixed resource storage retains its existing drop order; thread-local
+  consumers use world accessors rather than a new parameter interface.

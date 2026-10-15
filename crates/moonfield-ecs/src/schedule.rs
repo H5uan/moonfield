@@ -41,7 +41,7 @@ pub struct SystemConfig {
     before: Vec<String>,
     after: Vec<String>,
     /// The set this config belongs to ([`IntoSystemConfigs::in_set`]);
-    /// `add_systems` expands it into anchor constraints.
+    /// Execution-order construction expands it into anchor constraints.
     in_set: Option<&'static str>,
 }
 
@@ -112,7 +112,7 @@ pub trait IntoSystemConfigs<M>: Sized {
     /// Run this system inside the set `S`: after the set's anchor and
     /// before the next anchor in the set chain, so systems of neighboring
     /// sets stay ordered without explicit constraints. The schedule resolves
-    /// the next anchor at registration time.
+    /// membership against its complete set chain when building execution order.
     fn in_set<S: SystemSet>(self) -> SystemConfigs {
         let mut configs = self.into_configs();
         for config in &mut configs {
@@ -270,20 +270,7 @@ impl Schedule {
         self
     }
 
-    /// Append `config`, expanding `in_set` membership into anchor constraints
-    /// against this schedule's set chain (without duplicating constraints the
-    /// config already carries).
-    fn push_config(&mut self, mut config: SystemConfig) {
-        if let Some(set) = config.in_set {
-            if !config.after.iter().any(|label| label == set) {
-                config.after.push(set.to_string());
-            }
-            if let Some(next) = self.next_set_anchor(set)
-                && !config.before.iter().any(|label| label == &next)
-            {
-                config.before.push(next);
-            }
-        }
+    fn push_config(&mut self, config: SystemConfig) {
         self.systems.push(config);
     }
 
@@ -293,9 +280,8 @@ impl Schedule {
     /// systems a running system registered into the schedule's own label back
     /// into the running schedule: the registration lands in a fresh entry
     /// (the running schedule is out of the resource), and a plain reinsert
-    /// would overwrite it. Ordering constraints come along unchanged; `in_set`
-    /// membership is re-expanded against this schedule's set chain, since the
-    /// source entry may not know it.
+    /// would overwrite it. Membership is resolved against the merged chain
+    /// when the next execution order is built.
     pub(crate) fn merge_from(&mut self, mut other: Schedule) {
         let gained_systems = !other.systems.is_empty();
         for config in other.systems.drain(..) {
@@ -317,19 +303,17 @@ impl Schedule {
     /// attach with [`IntoSystemConfigs::in_set`] (membership, anchored on
     /// both sides) or `before_set` / `after_set` (one-sided).
     pub fn add_sets<S: SetChain>(&mut self, _sets: S) -> &mut Self {
-        let mut previous: Option<String> = None;
         for label in S::labels() {
-            let mut config = SystemConfig {
+            if self.set_chain.iter().any(|existing| existing == label) {
+                continue;
+            }
+            let config = SystemConfig {
                 system: Box::new(NopSystem),
                 label: label.to_string(),
                 before: Vec::new(),
                 after: Vec::new(),
                 in_set: None,
             };
-            if let Some(previous) = previous.as_deref() {
-                config.after.push(previous.to_string());
-            }
-            previous = Some(label.to_string());
             self.set_chain.push(label.to_string());
             self.systems.push(config);
         }
@@ -343,9 +327,9 @@ impl Schedule {
     }
 
     /// The anchor following `set` in the set chain, if any.
-    fn next_set_anchor(&self, set: &str) -> Option<String> {
+    fn next_set_anchor(&self, set: &str) -> Option<&str> {
         let index = self.set_chain.iter().position(|label| label == set)?;
-        self.set_chain.get(index + 1).cloned()
+        self.set_chain.get(index + 1).map(String::as_str)
     }
 
     /// The number of registered systems.
@@ -395,17 +379,23 @@ impl Schedule {
         // successor edges + in-degree, deduplicated via a set of pairs.
         let mut edges: Vec<(usize, usize)> = Vec::new();
         let mut unresolved: Vec<&str> = Vec::new();
+        for anchors in self.set_chain.windows(2) {
+            for &from in &by_label[anchors[0].as_str()] {
+                edges.extend(by_label[anchors[1].as_str()].iter().map(|&to| (from, to)));
+            }
+        }
         for (i, slot) in self.systems.iter().enumerate() {
-            for target in &slot.after {
-                match by_label.get(target.as_str()) {
+            for target in slot.after.iter().map(String::as_str).chain(slot.in_set) {
+                match by_label.get(target) {
                     Some(js) => edges.extend(js.iter().map(|&j| (j, i))),
-                    None => unresolved.push(target.as_str()),
+                    None => unresolved.push(target),
                 }
             }
-            for target in &slot.before {
-                match by_label.get(target.as_str()) {
+            let next_anchor = slot.in_set.and_then(|set| self.next_set_anchor(set));
+            for target in slot.before.iter().map(String::as_str).chain(next_anchor) {
+                match by_label.get(target) {
                     Some(js) => edges.extend(js.iter().map(|&j| (i, j))),
-                    None => unresolved.push(target.as_str()),
+                    None => unresolved.push(target),
                 }
             }
         }
@@ -725,6 +715,59 @@ mod tests {
         // (in SetB).
         schedule.add_systems((second.in_set::<SetB>(), first.in_set::<SetA>()));
         schedule.run(&mut world);
+        assert_eq!(world.get_resource::<Log>().unwrap().0, ["first", "second"]);
+    }
+
+    #[test]
+    fn test_in_set_order_with_late_registered_chain() {
+        let mut world = World::new();
+        world.insert_resource(Log::default());
+        let mut schedule = Schedule::new();
+        schedule.add_systems((
+            second.in_set::<SetB>(),
+            first.in_set::<SetA>().after_label("prepare"),
+        ));
+        schedule.add_sets((SetA, SetB));
+        schedule.add_systems((|| {}).named("prepare"));
+        schedule.run(&mut world);
+        assert_eq!(world.get_resource::<Log>().unwrap().0, ["first", "second"]);
+    }
+
+    #[test]
+    fn test_in_set_order_when_next_anchor_is_added_after_run() {
+        let mut world = World::new();
+        world.insert_resource(Log::default());
+        let mut schedule = Schedule::new();
+        schedule.add_sets(SetA);
+        schedule.add_systems(first.in_set::<SetA>().after_label("prepare"));
+        schedule.add_systems((|| {}).named("prepare"));
+        schedule.run(&mut world);
+        world.get_resource_mut::<Log>().unwrap().0.clear();
+        schedule.add_sets(SetB);
+        schedule.add_systems(second.in_set::<SetB>());
+        schedule.run(&mut world);
+        assert_eq!(world.get_resource::<Log>().unwrap().0, ["first", "second"]);
+    }
+
+    #[test]
+    fn test_in_set_order_with_chain_merged_during_run() {
+        fn register(world: &mut World) {
+            world.add_sets(A, (SetA, SetB));
+            world.add_systems(A, (|| {}).named("prepare"));
+        }
+        let mut world = World::new();
+        world.insert_resource(Log::default());
+        world.add_systems(
+            A,
+            (
+                second.in_set::<SetB>(),
+                first.in_set::<SetA>().after_label("prepare"),
+                register,
+            ),
+        );
+        world.run_schedule(A);
+        world.get_resource_mut::<Log>().unwrap().0.clear();
+        world.run_schedule(A);
         assert_eq!(world.get_resource::<Log>().unwrap().0, ["first", "second"]);
     }
 

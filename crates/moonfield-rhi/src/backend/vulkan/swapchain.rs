@@ -487,6 +487,7 @@ impl Swapchain {
     /// (a binary semaphore cannot be unsignaled), so a fresh one is swapped
     /// in before acquiring.
     pub fn acquire(&mut self, slot: usize, timeout_ns: u64) -> Result<AcquiredImage> {
+        self.ctx.assert_owner();
         let Some(frame_slot) = self.slots.get_mut(slot) else {
             return Err(Error::Validation(format!(
                 "frame slot {slot} is out of range ({} slots)",
@@ -531,6 +532,7 @@ impl Swapchain {
     /// is consumed either way: by contract the frame's submit already
     /// consumed the slot's acquire semaphore, so no abort repair applies.
     pub fn present(&mut self, mut image: AcquiredImage) -> Result<bool> {
+        self.ctx.assert_owner();
         image.presented = true;
         let swapchains = [self.swapchain];
         let image_indices = [image.index];

@@ -29,7 +29,7 @@ fn egui_headless_frame_is_not_blank() {
     let render_device = match RenderDevice::new() {
         Ok(render_device) => render_device,
         Err(err) => {
-            eprintln!("skipping: no Vulkan device available ({err})");
+            moonfield_rhi::testing::skip_gpu(format!("no Vulkan device available ({err})"));
             return;
         }
     };

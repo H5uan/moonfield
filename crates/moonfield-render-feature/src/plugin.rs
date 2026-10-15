@@ -21,7 +21,11 @@ use crate::splat::cloud::SplatCloud;
 fn load_core_3d_shader(world: &mut moonfield_app::prelude::World) {
     load_feature_shaders(
         world,
-        &[("core_3d.slang", crate::core_3d::pass::core_3d_shader)],
+        &[(
+            crate::core_3d::pass::CORE_3D_SHADER,
+            "core_3d.slang",
+            crate::core_3d::pass::core_3d_shader,
+        )],
     );
 }
 
@@ -214,6 +218,31 @@ mod tests {
     }
 
     #[test]
+    fn test_render_feature_startup_preserves_application_shader_request() {
+        let mut app = App::new();
+        app.add_plugin(RenderFeaturePlugin);
+        let shader = app
+            .world()
+            .get_resource_mut::<moonfield_asset::Assets<moonfield_shader::Shader>>()
+            .unwrap()
+            .add(moonfield_shader::Shader::new(
+                "custom".into(),
+                "application.slang".into(),
+            ));
+        let mut request = crate::core_3d::pass::core_3d_shader(shader);
+        request.reflect_entry = "application_entry";
+        app.world()
+            .get_resource_mut::<PipelineShaders>()
+            .unwrap()
+            .push(request);
+        app.render();
+        let requests = app.world().get_resource::<PipelineShaders>().unwrap();
+        let actual = requests.get(crate::core_3d::pass::CORE_3D_SHADER).unwrap();
+        assert_eq!(actual.shader, shader);
+        assert_eq!(actual.reflect_entry, "application_entry");
+    }
+
+    #[test]
     fn test_render_feature_plugin_extracts_only_referenced_meshes_and_tracks_revisions() {
         use moonfield_math::GlobalTransform;
 
@@ -285,7 +314,7 @@ mod tests {
         let render_device = match moonfield_rhi::RenderDevice::new() {
             Ok(render_device) => render_device,
             Err(error) => {
-                eprintln!("skipping: no Vulkan device available ({error})");
+                moonfield_rhi::testing::skip_gpu(format!("no Vulkan device available ({error})"));
                 return;
             }
         };

@@ -156,7 +156,7 @@ fn rendered_app() -> Option<(App, Entity)> {
 
     app.render();
     if !app.render_world().contains_resource::<RenderDevice>() {
-        eprintln!("skipping: no Vulkan device available");
+        moonfield_rhi::testing::skip_gpu("no Vulkan device available");
         return None;
     }
     app.render();

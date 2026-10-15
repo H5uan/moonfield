@@ -118,17 +118,12 @@ pub struct CullState {
 /// end them. `Drop` frees the buffer back into its pool
 /// (`vkFreeCommandBuffers`).
 ///
-/// Threading contract: a buffer records from exactly one thread at a time —
-/// the recording methods take `&self` because the frame loop hands shared
-/// references to the render world's systems, and schedules run
-/// single-threaded. Vulkan requires host synchronization around command
-/// buffer recording, so sharing a *recording* buffer across threads is a
-/// contract violation; the owner (frame loop / uploader) upholds it by
-/// construction. The only shared-state mutation is the idempotent
-/// [`end`](Self::end), whose flag is atomic: a concurrent double-end is a
-/// no-op, never a race. The type is auto `Send + Sync` (all fields are);
-/// owners that store buffers in ECS resources (the window frame loop's
-/// per-slot ring) rely on that.
+/// Recording and submission are restricted to the device's owning thread.
+/// Core and extension calls check thread ownership before entering Vulkan;
+/// `end` checks before changing its recording flag. Shared references let
+/// single-threaded render systems record into the same frame buffer, but
+/// foreign-thread recording panics. The type is `Send + Sync` for ECS
+/// resource storage, not for concurrent GPU access.
 pub struct CommandBuffer {
     buffer: vk::CommandBuffer,
     pool: vk::CommandPool,
@@ -174,6 +169,7 @@ impl CommandBuffer {
 
     /// Access the raw `vk::CommandBuffer` handle.
     pub(crate) fn raw(&self) -> vk::CommandBuffer {
+        self.ctx.assert_owner();
         self.buffer
     }
 
@@ -205,6 +201,7 @@ impl CommandBuffer {
     /// buffer may still be recording; abandon it with
     /// [`reset`](Self::reset) before re-recording.
     pub(crate) fn end(&self) -> Result<()> {
+        self.ctx.assert_owner();
         // Claim the end before calling into Vulkan: the swap makes a
         // concurrent `end` observe an already-ended buffer and return, so
         // `vkEndCommandBuffer` runs at most once per recording.

@@ -30,7 +30,7 @@ mod scene_io;
 mod theme;
 mod ui;
 
-pub use action::{EditorAction, EditorHistory};
+pub use action::{EditorAction, EditorHistory, EditorUndo};
 pub use scene_io::{editor_asset_server, load_asset};
 
 use moonfield_app::prelude::{IntoSystemConfigs, PreRender, Render, World};

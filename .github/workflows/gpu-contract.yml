@@ -48,4 +48,4 @@ jobs:
           key: slang-bin-strict-${{ runner.os }}-${{ hashFiles('Cargo.lock') }}
 
       - name: Run the GPU contract tests in strict mode
-        run: cargo test --workspace --locked
+        run: cargo test --workspace --all-features --locked

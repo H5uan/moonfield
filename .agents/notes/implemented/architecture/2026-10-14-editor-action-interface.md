@@ -6,55 +6,63 @@ Status: implemented
 
 ## Problem
 
-The [architecture contract hardening proposal](../../proposed/architecture/2026-10-14-architecture-contract-hardening.md)'s
-sixth item: editor UI callbacks executed asset loading, scene I/O, and
-Transform edits directly against `World`, so undo, background imports, and
-automation would each reimplement the same operation, and no operation had
-a validation or result contract.
+The [contract hardening proposal](../../proposed/architecture/2026-10-14-architecture-contract-hardening.md)
+requires one execution interface for UI, automation, and undo. Recording an
+inverse against a spawned entity requires refreshing that inverse when redo
+creates a new entity generation. A batch cannot promise rollback while
+accepting deletion or file writes that have no compensation.
 
 ## Decision
 
-**`EditorAction` is the single execution interface.** `moonfield-editor`'s
-`action` module owns validation, results, and the undo record. `execute`
-runs one action and returns an `ActionOutcome` (status message, affected
-entity, inverse action); `perform` executes and records the inverse in the
-`EditorHistory` world resource; `record` turns an already-applied reversible
-gesture into one undo unit. `ImportAsset`, `LoadScene`, `SaveScene`,
-`SetTransform`, `DeleteEntity`, and `Batch` are the operations; `Batch`
-rolls back its completed steps when a later step fails.
+**User actions and compensation have separate types.** `EditorAction`
+expresses import, scene load/save, transform edits, deletion, and reversible
+batches. `EditorUndo` expresses restoring a transform, removing created
+roots, and ordered groups of compensation. `ActionOutcome` returns the
+affected entity, status, and optional compensation. `perform` records a
+successful action; `record` coalesces a completed gizmo gesture.
 
-**Every UI path routes through it.** The content and scene panels call
-`perform`; Ctrl/Cmd+Z and Ctrl/Cmd+Shift+Z (or Ctrl/Cmd+Y) walk the
-history. A gizmo drag writes its per-frame increments directly for
-immediate feedback, then records one undo unit (pre-drag transform → end
-transform) when the gesture ends. The render-frame handoff stays outside
-the interface.
+**Batches validate reversibility before execution.** Nested `DeleteEntity`
+and `SaveScene` actions are rejected before any step runs. A failed
+reversible batch applies completed steps' compensation in reverse order and
+collects all compensation errors. `ActionError::Rollback` preserves
+both the original failure and these errors. Scene templates and component
+hooks can have unrelated side effects; the guarantee excludes those effects
+and assets retained in the load cache. Compensation validates all referenced
+entities and components before mutation.
 
-**Windowless tests execute the same operations.** The `action` unit tests
-drive `perform`/`undo`/`redo` without a display: import and scene load are
-reversible, failed imports record nothing, `SetTransform` validates its
-entity and component, batches roll back, and a recorded gesture undoes to
-its start state.
+**History records the identities created by each execution.** Redo replaces
+the stored compensation with its successful outcome, rather than retaining
+the previous entities' generations. Failed undo or redo keeps its entry on
+the original stack for retry. New reversible edits and explicit deletion
+clear redo; saving a file does not discard redo.
+
+UI panels call `perform`; keyboard shortcuts call `undo` and
+`redo`. Gizmo increments write directly for same-frame feedback and
+record one compensation when the gesture ends. Inspector reflection and the
+render-frame handoff remain outside this history interface.
 
 ## Alternatives considered
 
-- **Undo at the `World` level.** Lost: component churn has no meaningful
-  inverse once an entity is despawned, and a generic undo layer cannot name
-  operations like "load scene". The action layer owns the operation and its
-  inverse together.
-- **One undo unit per drag frame.** Lost: a single drag would flood the
-  history with near-identical entries; `record` coalesces the gesture into
-  one unit whose inverse is the pre-drag transform.
-- **A command queue with deferred application.** Deferred: nothing queues
-  actions across frames yet. Background imports would build on this
-  interface, and a queue designed before those consumers would guess their
-  requirements.
+**Undo at the World level.** Rejected: arbitrary component deletion has no
+typed inverse, and world mutations do not identify user operations.
+
+**Use user-action batches for compensation.** Rejected: removing imported
+entities is valid compensation, but admitting deletion into a user batch
+makes its rollback promise false. Separate types encode that distinction.
+
+**Keep partial failures implicit.** Rejected: an original error hides a
+failed rollback and leaves callers unable to distinguish restored state from
+partial state. Compensation errors are part of the result.
+
+**One undo unit per drag frame.** Rejected: coalescing a gesture preserves
+the user's operation without flooding history with intermediate increments.
 
 ## Consequences
 
-- UI code owns presentation only (status text, selection); every mutation
-  an undo needs goes through the action interface.
-- `DeleteEntity` is deliberately not reversible — despawn discards
-  components, so an inverse would have to snapshot and respawn the subtree.
-- The inspector's reflect-driven editing writes components directly; undo
-  covers exactly the operations above.
+- Import and scene load support repeated undo/redo using the current entity
+  generations, and rejected history operations remain retryable.
+- Deletion and saving execute as standalone actions, not reversible batches.
+- Windowless tests use the same execution and compensation interfaces as UI.
+- Deletion discards arbitrary components and is not reversible. Inspector
+  changes do not create history entries; hook and template side effects have
+  no general rollback mechanism.

@@ -72,9 +72,8 @@ impl PipelineShader {
     }
 }
 
-/// Every pipeline's shader request. A main-world resource, populated by
-/// whoever loads the shader assets (the editor, at startup) and cloned into
-/// the render world by [`extract_shader_assets`].
+/// Every pipeline's shader request. Application requests take precedence
+/// over feature startup defaults. Extraction copies them into the render world.
 #[derive(Debug, Default, Clone)]
 pub struct PipelineShaders(Vec<PipelineShader>);
 
@@ -306,14 +305,14 @@ impl PreparedShaders {
     }
 }
 
-/// One feature shader to load and register: the file name under
-/// `<assets>/shaders/` and the builder turning its handle into a pipeline
-/// request.
-pub type FeatureShaderSpec<'a> = (&'a str, fn(Handle<Shader>) -> PipelineShader);
+/// A feature's default shader: pipeline name, file under `<assets>/shaders/`,
+/// and request builder. The name allows configuration checks before file I/O.
+pub type FeatureShaderSpec<'a> = (&'static str, &'a str, fn(Handle<Shader>) -> PipelineShader);
 
 /// Load and register a feature's shader needs: each [`FeatureShaderSpec`]
 /// loads `<assets>/shaders/<file>` through the world's [`AssetServer`] and
-/// pushes the built request into [`PipelineShaders`].
+/// pushes the built request into [`PipelineShaders`] only when its pipeline
+/// has no request. An existing request is preserved without loading the default.
 ///
 /// This is how the rendering features declare their own shaders at startup —
 /// the application supplies the asset configuration (its own `AssetServer`
@@ -332,7 +331,15 @@ pub fn load_feature_shaders(world: &mut World, shaders: &[FeatureShaderSpec<'_>]
     world.init_resource::<Assets<Shader>>();
     world.init_resource::<PipelineShaders>();
     let shader_dir = moonfield_asset::assets_dir().join("shaders");
-    for (file, request) in shaders {
+    for (pipeline, file, request) in shaders {
+        if world
+            .get_resource::<PipelineShaders>()
+            .expect("PipelineShaders was just ensured")
+            .get(pipeline)
+            .is_some()
+        {
+            continue;
+        }
         let path = shader_dir.join(file);
         // `AssetServer::load` needs `&mut AssetServer` and
         // `&mut Assets<Shader>` at once; the scope holds the server out of
@@ -344,10 +351,17 @@ pub fn load_feature_shaders(world: &mut World, shaders: &[FeatureShaderSpec<'_>]
             server.load(&mut assets, &path)
         });
         match result {
-            Ok(handle) => world
-                .get_resource_mut::<PipelineShaders>()
-                .expect("PipelineShaders was just ensured")
-                .push(request(handle)),
+            Ok(handle) => {
+                let request = request(handle);
+                assert_eq!(
+                    request.pipeline, *pipeline,
+                    "feature shader builder must match its declared pipeline"
+                );
+                world
+                    .get_resource_mut::<PipelineShaders>()
+                    .expect("PipelineShaders was just ensured")
+                    .push(request);
+            }
             Err(error) => {
                 moonfield_log::error!("failed to load shader {}: {error}", path.display())
             }
@@ -473,6 +487,59 @@ mod tests {
             reflect_entry: "main",
             entries: TEST_ENTRIES,
         }
+    }
+
+    #[test]
+    fn test_feature_shader_defaults_preserve_explicit_requests() {
+        let mut world = World::new();
+        let mut assets = Assets::<Shader>::default();
+        let custom = assets.add(Shader::new(TEST_SHADER.into(), "custom.slang".into()));
+        world.insert_resource(assets);
+        let mut requests = PipelineShaders::default();
+        requests.push(test_request("test", custom));
+        world.insert_resource(requests);
+        load_feature_shaders(
+            &mut world,
+            &[("test", "core_3d.slang", |shader| {
+                test_request("test", shader)
+            })],
+        );
+        assert_eq!(
+            world
+                .get_resource::<PipelineShaders>()
+                .unwrap()
+                .get("test")
+                .unwrap()
+                .shader,
+            custom
+        );
+        assert_eq!(world.get_resource::<Assets<Shader>>().unwrap().len(), 1);
+    }
+
+    #[test]
+    fn test_feature_shader_defaults_load_only_missing_requests() {
+        let mut world = World::new();
+        let specs: &[FeatureShaderSpec<'_>] = &[("test", "core_3d.slang", |shader| {
+            test_request("test", shader)
+        })];
+        load_feature_shaders(&mut world, specs);
+        let handle = world
+            .get_resource::<PipelineShaders>()
+            .unwrap()
+            .get("test")
+            .unwrap()
+            .shader;
+        load_feature_shaders(&mut world, specs);
+        assert_eq!(
+            world
+                .get_resource::<PipelineShaders>()
+                .unwrap()
+                .get("test")
+                .unwrap()
+                .shader,
+            handle
+        );
+        assert_eq!(world.get_resource::<Assets<Shader>>().unwrap().len(), 1);
     }
 
     /// An app whose main world holds one shader asset per `(pipeline,

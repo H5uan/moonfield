@@ -65,6 +65,7 @@ impl FrameUploader {
     }
 
     pub fn begin_frame(&mut self) -> Result<()> {
+        self.ctx.assert_owner();
         // Idempotent: a frame boundary may call this once, or each texture
         // delta may begin it lazily.
         if self.recording {
@@ -245,6 +246,7 @@ impl FrameUploader {
     }
 
     pub fn end_frame(&mut self) -> Result<()> {
+        self.ctx.assert_owner();
         // Idempotent: an empty frame (no uploads) submits nothing.
         if !self.recording {
             return Ok(());
@@ -287,6 +289,7 @@ impl FrameUploader {
     /// lost; the render-side caches that staged them do not re-stage (see the
     /// note `2026-10-08-abort-failed-frame-submits`).
     pub fn abort_frame(&mut self) -> Result<()> {
+        self.ctx.assert_owner();
         if !self.recording {
             return Ok(());
         }

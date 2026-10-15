@@ -31,6 +31,11 @@ feature shader 并推送 pipeline 请求。`RenderFeaturePlugin` 为 `core_3d.sl
 着补救方法 panic；`SplatForwardPlugin::finish` 对 `Core3d` 调度的 `Core3dOpaquePass` 锚点
 （即 `RenderFeaturePlugin` 缺失）做同样的事。两者背后是新增的 `Schedule::has_set` 查询。
 
+**显式请求优先于默认值。** 每个
+`FeatureShaderSpec` 在文件和请求构建函数之前声明 pipeline 名称。Startup 根据该名称
+检查，仅加载缺失请求；应用的 handle、入口、能力和反射选择均被保留，且不读取默认文件。
+`PipelineShaders::push` 保持显式替换接口。
+
 ## Alternatives considered
 
 - **在插件 build 时加载 feature shader。** 未采用：应用的 `AssetServer` 常常在插件 build

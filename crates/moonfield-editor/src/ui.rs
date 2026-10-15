@@ -568,7 +568,7 @@ fn gizmo(ui: &egui::Ui, context: &mut TabContext, rect: egui::Rect, response: &e
                         entity,
                         transform: after,
                     },
-                    EditorAction::SetTransform {
+                    crate::action::EditorUndo::SetTransform {
                         entity,
                         transform: before,
                     },

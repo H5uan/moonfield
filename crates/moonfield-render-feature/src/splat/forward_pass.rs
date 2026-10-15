@@ -894,11 +894,16 @@ fn load_splat_shaders(world: &mut World) {
         world,
         &[
             (
+                crate::splat::sort_pass::SPLAT_SORT_SHADER,
                 "util/radix_sort.slang",
                 crate::splat::sort_pass::splat_sort_shader,
             ),
-            ("gaussian.slang", splat_forward_shader),
-            ("gs/composite.slang", splat_composite_shader),
+            (SPLAT_FORWARD_SHADER, "gaussian.slang", splat_forward_shader),
+            (
+                SPLAT_COMPOSITE_SHADER,
+                "gs/composite.slang",
+                splat_composite_shader,
+            ),
         ],
     );
 }

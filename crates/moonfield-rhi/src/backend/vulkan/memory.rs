@@ -123,6 +123,10 @@ pub struct GpuAllocation {
 }
 
 impl GpuAllocation {
+    pub(crate) fn assert_owner(&self) {
+        self.ctx.assert_owner();
+    }
+
     /// Allocate `size` bytes in the given residency class and return the paired
     /// CPU/GPU views.
     ///
@@ -265,6 +269,7 @@ impl GpuAllocation {
     /// Read `out.len()` bytes from a host-visible allocation (the readback
     /// path). Errors on device-local allocations and overlong ranges.
     pub fn read_bytes(&self, out: &mut [u8]) -> Result<()> {
+        self.assert_owner();
         let Some(host) = self.host else {
             return Err(Error::Validation(
                 "cannot read a device-local allocation".to_string(),

@@ -246,6 +246,34 @@ mod tests {
         assert_eq!(app.render_world().query::<&PrimaryCamera>().count(), 0);
     }
 
+    #[test]
+    #[should_panic(expected = "parked main world is expired")]
+    fn test_extract_rejects_resource_escaped_from_parking_scope() {
+        fn read(_: Extract<moonfield_ecs::Res<usize>>) {}
+        let mut render = World::new();
+        let parked = {
+            let main = World::new();
+            render.with_parked_main_world(&main, |render| {
+                render.remove_resource::<MainWorld>().unwrap()
+            })
+        };
+        render.insert_resource(parked);
+        render.add_systems(moonfield_app::ExtractSchedule, read);
+        render.run_schedule(moonfield_app::ExtractSchedule);
+    }
+
+    #[test]
+    #[should_panic(expected = "parked main world is expired")]
+    fn test_extract_rejects_destination_escaped_from_parking_scope() {
+        fn read(_: Extract<moonfield_ecs::Res<usize>>) {}
+        let mut render = {
+            let main = World::new();
+            World::new().with_parked_main_world(&main, std::mem::take)
+        };
+        render.add_systems(moonfield_app::ExtractSchedule, read);
+        render.run_schedule(moonfield_app::ExtractSchedule);
+    }
+
     #[derive(Debug, Clone, Copy, PartialEq)]
     struct SpinningCube {
         speed: f32,

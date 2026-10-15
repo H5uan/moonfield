@@ -3,7 +3,9 @@ use std::borrow::Borrow;
 use std::cmp::Ordering;
 use std::collections::{HashMap, hash_map::Entry};
 use std::hash::{BuildHasherDefault, Hasher};
-use std::sync::atomic::{AtomicU64, Ordering as AtomicOrdering};
+use std::sync::Arc;
+use std::sync::atomic::{AtomicPtr, AtomicU64, Ordering as AtomicOrdering};
+use std::thread::ThreadId;
 
 use crate::archetype::{Archetype, ComponentMeta, TypeIdMap};
 use crate::bundle::{Bundle, DynamicBundle};
@@ -648,43 +650,44 @@ impl World {
     // Main-world parking (extract schedules)
     // ------------------------------------------------------------------
 
-    /// Run `f` with `main` parked as this world's [`MainWorld`] resource,
-    /// removing the resource before returning — including when `f` panics.
+    /// Run `f` with `main` parked as this world's [`MainWorld`] resource.
     ///
-    /// This scope is the only way to park a main world (for extract
-    /// schedules; see `moonfield-render-core`'s `Extract` parameter). Because
-    /// the resource cannot outlive this call, safe code can never dereference
-    /// a parked pointer to a destroyed world.
+    /// The scope invalidates its shared token on every exit, even if `f`
+    /// moves the resource or the destination world. Nested parking into the
+    /// same destination panics without replacing the active source. Access
+    /// through an expired token or from another thread panics before reading
+    /// the source world.
     pub fn with_parked_main_world<R>(
         &mut self,
         main: &World,
         f: impl FnOnce(&mut World) -> R,
     ) -> R {
-        self.park_main_world(main);
-        // The guard removes the parked resource on every exit path, so the
-        // raw pointer inside `MainWorld` never outlives this call — and
-        // `main`, borrowed for the call, always outlives the pointer.
-        struct UnparkOnDrop(*mut World);
+        assert!(
+            !self.contains_resource::<MainWorld>(),
+            "a main world is already parked in this destination"
+        );
+        let parked = MainWorld::park(main);
+        let token = parked.0.clone();
+        self.insert_resource(parked);
+        struct UnparkOnDrop {
+            world: *mut World,
+            token: Arc<ParkedWorld>,
+        }
         impl Drop for UnparkOnDrop {
             fn drop(&mut self) {
+                self.token
+                    .world
+                    .store(std::ptr::null_mut(), AtomicOrdering::Release);
                 // SAFETY: the guard never escapes `with_parked_main_world`,
                 // whose `&mut World` receiver outlives it.
-                unsafe { &mut *self.0 }.unpark_main_world();
+                unsafe { &mut *self.world }.remove_resource::<MainWorld>();
             }
         }
-        let _guard = UnparkOnDrop(self as *mut World);
+        let _guard = UnparkOnDrop {
+            world: self as *mut World,
+            token,
+        };
         f(self)
-    }
-
-    /// Park `main` as this world's [`MainWorld`] resource; called by
-    /// [`Self::with_parked_main_world`], which pairs it with the removal.
-    fn park_main_world(&mut self, main: &World) {
-        self.insert_resource(MainWorld::park(main));
-    }
-
-    /// Remove the parked [`MainWorld`], returning whether one was parked.
-    fn unpark_main_world(&mut self) -> bool {
-        self.remove_resource::<MainWorld>().is_some()
     }
 
     // ------------------------------------------------------------------
@@ -1271,38 +1274,49 @@ impl World {
 /// schedule runs so extract systems can read it through the `Extract`
 /// system parameter (moonfield-render-core).
 ///
-/// Worlds are neither `Send` nor `Sync` (deferred command queues carry
-/// unrestricted closures; archetype columns carry borrow flags), so the
-/// parked world travels as a raw pointer in `Send + Sync` clothing. The
-/// pointer's validity is upheld structurally: parking goes through
-/// [`World::with_parked_main_world`], which keeps the source world borrowed
-/// for the whole scope and removes this resource on every exit path,
-/// including unwinding. References derived from a `MainWorld` borrow are
-/// tied to that borrow, so one parked resource cannot mint overlapping world
-/// references with caller-chosen lifetimes.
-pub struct MainWorld(*const World);
+/// The shared token expires when [`World::with_parked_main_world`] exits,
+/// regardless of where the resource is stored. Only the parking thread may
+/// read through an active token. The resource can be moved between threads;
+/// the source world cannot be accessed from them.
+pub struct MainWorld(Arc<ParkedWorld>);
 
-// SAFETY: the struct is a bare pointer; every dereference goes through
-// `world`, whose contract the parker upholds.
-unsafe impl Send for MainWorld {}
-unsafe impl Sync for MainWorld {}
+struct ParkedWorld {
+    world: AtomicPtr<World>,
+    owner: ThreadId,
+}
 
 impl MainWorld {
     /// Park `world`; called by [`World::with_parked_main_world`], which owns
     /// the removal on every exit path.
     pub(crate) fn park(world: &World) -> Self {
-        Self(world as *const World)
+        Self(Arc::new(ParkedWorld {
+            world: AtomicPtr::new((world as *const World).cast_mut()),
+            owner: std::thread::current().id(),
+        }))
+    }
+
+    /// Whether this thread may access the source during its parking scope.
+    pub fn is_active(&self) -> bool {
+        self.0.owner == std::thread::current().id()
+            && !self.0.world.load(AtomicOrdering::Acquire).is_null()
+    }
+
+    fn pointer(&self) -> *mut World {
+        assert!(
+            self.is_active(),
+            "parked main world is expired or accessed from another thread"
+        );
+        self.0.world.load(AtomicOrdering::Acquire)
     }
 
     /// The parked world, borrowed for as long as `self` is borrowed.
     ///
     /// # Safety
     ///
-    /// The caller must uphold the parking contract: the parker keeps the
-    /// world alive and hands out only `&World`-compatible access until the
-    /// resource is removed.
+    /// The returned reference must not outlive the active parking scope,
+    /// and all source access must remain compatible with `&World`.
     pub unsafe fn world(&self) -> &World {
-        unsafe { &*self.0 }
+        unsafe { &*self.pointer() }
     }
 
     /// The parked world, mutably. The `&mut self` receiver guarantees at
@@ -1311,11 +1325,10 @@ impl MainWorld {
     /// # Safety
     ///
     /// Beyond the parking contract of [`Self::world`], the caller must
-    /// guarantee that no reference previously derived from this `MainWorld`
-    /// is still live — `&self` borrows of the resource cannot overlap the
-    /// `&mut self` borrow statically, but raw copies of the pointer can.
+    /// guarantee exclusive access to the source, including references held
+    /// by the parking caller or derived from other tokens.
     pub unsafe fn world_mut(&mut self) -> &mut World {
-        unsafe { &mut *self.0.cast_mut() }
+        unsafe { &mut *self.pointer() }
     }
 }
 
@@ -1384,6 +1397,75 @@ mod tests {
 
         assert!(result.is_err());
         assert!(render.get_resource::<MainWorld>().is_none());
+    }
+
+    #[test]
+    fn test_parked_main_world_escape_expires_after_scope() {
+        let mut render = World::new();
+        let escaped = {
+            let main = World::new();
+            render.with_parked_main_world(&main, |render| {
+                let parked = render.remove_resource::<MainWorld>().unwrap();
+                assert!(parked.is_active());
+                parked
+            })
+        };
+        assert!(!escaped.is_active());
+        render.insert_resource(escaped);
+        assert!(!render.get_resource::<MainWorld>().unwrap().is_active());
+    }
+
+    #[test]
+    fn test_parked_main_world_expires_when_destination_moves_on_unwind() {
+        let main = World::new();
+        let mut render = World::new();
+        let mut moved = None;
+        let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            render.with_parked_main_world(&main, |render| {
+                moved = Some(std::mem::take(render));
+                panic!("moved destination");
+            });
+        }));
+        assert!(result.is_err());
+        assert!(render.get_resource::<MainWorld>().is_none());
+        assert!(
+            !moved
+                .unwrap()
+                .get_resource::<MainWorld>()
+                .unwrap()
+                .is_active()
+        );
+    }
+
+    #[test]
+    fn test_parked_main_world_rejects_nested_scope_without_replacing_source() {
+        let main = World::new();
+        let nested = World::new();
+        let mut render = World::new();
+        render.with_parked_main_world(&main, |render| {
+            let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                render.with_parked_main_world(&nested, |_| ());
+            }));
+            assert!(result.is_err());
+            assert!(render.get_resource::<MainWorld>().unwrap().is_active());
+        });
+    }
+
+    #[test]
+    fn test_parked_main_world_is_inactive_on_other_threads() {
+        let main = World::new();
+        let mut render = World::new();
+        render.with_parked_main_world(&main, |render| {
+            let parked = render.remove_resource::<MainWorld>().unwrap();
+            let parked = std::thread::spawn(move || {
+                assert!(!parked.is_active());
+                parked
+            })
+            .join()
+            .unwrap();
+            assert!(parked.is_active());
+            render.insert_resource(parked);
+        });
     }
 
     #[test]

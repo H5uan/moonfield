@@ -11,6 +11,7 @@
 pub mod error;
 pub mod indirect;
 pub mod shader;
+pub mod testing;
 pub mod types;
 
 mod backend;

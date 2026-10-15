@@ -421,10 +421,9 @@ impl App {
     /// Startup runs lazily on the first call so a backend that drives
     /// `render` without `update` still initializes.
     ///
-    /// The park scope removes the parked resource even when an extract
-    /// system panics, and the panic is resumed only after the main world is
-    /// restored to the app — a panicking extractor leaves no dangling
-    /// pointer and no lost world.
+    /// The park scope invalidates its token even when an extractor moves
+    /// the resource or panics. The main world is restored to the app before
+    /// a panic resumes; an escaped resource cannot access it afterward.
     pub fn render(&mut self) {
         if !self.initialized {
             self.startup();

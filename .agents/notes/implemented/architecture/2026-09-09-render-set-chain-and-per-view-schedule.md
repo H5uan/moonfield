@@ -17,6 +17,12 @@ The `Render` schedule ordered its systems by function-name constraints: `main_op
 - Every view renders — the first-primary-view-per-target special case is gone. Offscreen targets no view claims are cleared to the background by `clear_orphan_view_targets` (after the driver, before `PostViews`).
 - The editor anchors the `PostViews` and `Submit` sets instead of render-feature system names.
 
+Set membership and neighboring-anchor edges are derived from the complete
+chain when rebuilding execution order, not when registering a system. Late
+anchors and chains merged during a running schedule participate in that same
+resolution. Adding sets in separate calls extends the chain; repeated anchors
+are not duplicated.
+
 ## Alternatives considered
 
 - **Explicit two-sided attachment (`before_set(X).after_set(Y)`).** Lost: forgetting one side silently under-orders a system; `in_set` derives both edges from the chain, so membership is one decision.

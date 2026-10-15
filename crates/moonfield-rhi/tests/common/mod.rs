@@ -14,7 +14,7 @@ pub fn headless_device() -> Option<Device> {
     let instance = match Instance::new_headless() {
         Ok(instance) => instance,
         Err(err) => {
-            eprintln!("skipping: no headless instance available ({err})");
+            moonfield_rhi::testing::skip_gpu(format!("no headless instance available ({err})"));
             return None;
         }
     };
@@ -22,7 +22,7 @@ pub fn headless_device() -> Option<Device> {
     match device {
         Ok(device) => Some(device),
         Err(err) => {
-            eprintln!("skipping: device creation failed ({err})");
+            moonfield_rhi::testing::skip_gpu(format!("device creation failed ({err})"));
             None
         }
     }

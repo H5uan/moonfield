@@ -17,6 +17,10 @@ Status: implemented
 - 每个 view 都渲染——首 primary view 特例消亡。没有 view 认领的离屏 target 由 `clear_orphan_view_targets`（driver 之后、`PostViews` 之前）清为背景色。
 - editor 锚定 `PostViews` 与 `Submit` 集合，不再引用 render-feature 系统名。
 
+集合成员关系和相邻锚点约束在重建执行顺序时根据完整链推导，而不是在注册系统时
+固化。晚注册的锚点和运行期间合并的集合链使用同一解析过程。分次添加集合会扩展
+已有链，重复锚点不会再次注册。
+
 ## Alternatives considered
 
 - **显式双边挂载（`before_set(X).after_set(Y)`）。** 落选：漏写一边就静默乱序；`in_set` 从链推导两条边，成员资格是一个决定。

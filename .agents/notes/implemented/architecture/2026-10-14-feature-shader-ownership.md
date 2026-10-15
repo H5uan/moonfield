@@ -38,6 +38,12 @@ does the same for the `Core3d` schedule's `Core3dOpaquePass` anchor
 (`RenderFeaturePlugin` missing). `Schedule::has_set` is the new query behind
 both.
 
+**Explicit requests take precedence over defaults.** Each
+`FeatureShaderSpec` names its pipeline before the file and request builder.
+Startup checks that name and loads only absent requests, preserving application
+handles, entry points, capabilities, and reflection choices without default
+file I/O. `PipelineShaders::push` remains the explicit replacement interface.
+
 ## Alternatives considered
 
 - **Loading feature shaders at plugin build time.** Lost: the application's

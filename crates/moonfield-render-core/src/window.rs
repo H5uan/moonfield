@@ -1041,7 +1041,7 @@ mod tests {
         let render_device = match RenderDevice::new() {
             Ok(render_device) => render_device,
             Err(e) => {
-                eprintln!("skipping: no Vulkan device available ({e})");
+                moonfield_rhi::testing::skip_gpu(format!("no Vulkan device available ({e})"));
                 return;
             }
         };

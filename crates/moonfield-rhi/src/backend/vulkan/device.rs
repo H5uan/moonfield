@@ -14,6 +14,15 @@ use gpu_allocator::vulkan::{Allocator, AllocatorCreateDesc};
 use std::ffi::{CStr, c_char};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex, OnceLock};
+use std::thread::ThreadId;
+
+fn assert_device_thread(owner: ThreadId) {
+    assert_eq!(
+        owner,
+        std::thread::current().id(),
+        "GPU operations must run on the device's owning thread"
+    );
+}
 
 // Required extensions are demanded unconditionally: the RHI targets recent
 // drivers (current NVIDIA and AMD proprietary both expose them), so there is
@@ -179,6 +188,7 @@ impl QueueFamilyIndices {
 /// last resource drop triggers. The `instance` keepalive chains the same
 /// guarantee one level up — the Vulkan instance outlives the device.
 pub(crate) struct DeviceShared {
+    owner: ThreadId,
     /// Logical device handle. Only core commands; extension entry points are
     /// in `extension_fns`.
     device: ash::Device,
@@ -212,13 +222,19 @@ pub(crate) struct DeviceShared {
 }
 
 impl DeviceShared {
+    pub(crate) fn assert_owner(&self) {
+        assert_device_thread(self.owner);
+    }
+
     /// Access the raw `ash::Device`.
     pub(crate) fn raw(&self) -> &ash::Device {
+        self.assert_owner();
         &self.device
     }
 
     /// The shared aggregated device-extension loaders.
     pub(crate) fn extension_fns(&self) -> &super::DeviceExtensionFunctions {
+        self.assert_owner();
         &self.extension_fns
     }
 
@@ -230,12 +246,14 @@ impl DeviceShared {
     /// The device's internal command pool, backing
     /// [`Device::command_buffer`].
     pub(crate) fn command_pool(&self) -> vk::CommandPool {
+        self.assert_owner();
         self.command_pool
     }
 
     /// Shared GPU memory allocator for buffers and images. Resources allocate
     /// through this and free their allocations on drop.
     pub(crate) fn allocator(&self) -> &Arc<Mutex<Allocator>> {
+        self.assert_owner();
         self.allocator
             .as_ref()
             .expect("allocator taken only during device teardown")
@@ -314,6 +332,10 @@ impl std::ops::Deref for DeviceContext {
 }
 
 /// Vulkan logical device and its primary queues.
+///
+/// GPU operations run on the thread that creates the device. Command
+/// recording, pool access, submission, and retirement draining panic on
+/// another thread before accessing the driver.
 pub struct Device {
     /// Shared teardown state; resources keep it alive through
     /// [`DeviceContext`]. Declared first so the OnceLock singletons below
@@ -748,6 +770,7 @@ impl Device {
         .map_err(|e| Error::Backend(format!("failed to create GPU allocator: {e}")))?;
 
         let shared = Arc::new(DeviceShared {
+            owner: std::thread::current().id(),
             device,
             command_pool,
             extension_fns,
@@ -862,6 +885,7 @@ impl Device {
 
     /// Access the graphics queue.
     pub(crate) fn graphics_queue(&self) -> vk::Queue {
+        self.shared.assert_owner();
         self.graphics_queue
     }
 
@@ -895,6 +919,7 @@ impl Device {
     /// so staged uploads need the timeline wait to be visible to shader
     /// reads.
     pub fn submit_and_wait(&self, command_buffers: &[&crate::CommandBuffer]) -> Result<()> {
+        self.shared.assert_owner();
         for command_buffer in command_buffers {
             command_buffer.end()?;
         }
@@ -1045,6 +1070,7 @@ impl Device {
 
     /// Access the presentation queue.
     pub(crate) fn present_queue(&self) -> vk::Queue {
+        self.shared.assert_owner();
         self.present_queue
     }
 
@@ -1139,12 +1165,14 @@ impl Device {
     /// and mark it the push target. Call once per acquired frame, before
     /// recording.
     pub fn begin_gpu_frame(&self, frame_slot: usize) {
+        self.shared.assert_owner();
         self.shared.ring().begin_frame(frame_slot);
     }
     /// Drain every retirement now. The GPU must be idle (device teardown,
     /// or a test after submit-and-wait); in-flight work must not reference
     /// retired resources.
     pub fn flush_retirements(&self) {
+        self.shared.assert_owner();
         self.shared.ring().drain_all();
     }
 }
@@ -1211,4 +1239,61 @@ fn pipeline_cache_path() -> std::path::PathBuf {
         })
         .unwrap_or_else(std::env::temp_dir);
     dir.join("moonfield").join("pipeline_cache.bin")
+}
+
+#[cfg(test)]
+mod thread_tests {
+    use super::*;
+
+    #[test]
+    fn test_device_thread_accepts_owner() {
+        assert_device_thread(std::thread::current().id());
+    }
+
+    #[test]
+    fn test_device_thread_rejects_other_thread() {
+        let owner = std::thread::current().id();
+        assert!(
+            std::thread::spawn(move || assert_device_thread(owner))
+                .join()
+                .is_err()
+        );
+    }
+
+    #[test]
+    fn test_command_operations_reject_foreign_threads_without_ending_buffer() {
+        let device = match crate::RenderDevice::new() {
+            Ok(device) => device,
+            Err(error) => {
+                crate::testing::skip_gpu(format!("no Vulkan device available ({error})"));
+                return;
+            }
+        };
+        let device = device.device();
+        let command = device
+            .command_buffer(CommandBufferUsage::ONE_TIME_SUBMIT)
+            .unwrap();
+        std::thread::scope(|scope| {
+            scope
+                .spawn(|| {
+                    let rejected = |operation: &dyn Fn()| {
+                        std::panic::catch_unwind(std::panic::AssertUnwindSafe(operation)).is_err()
+                    };
+                    assert!(rejected(&|| {
+                        let _ = device.command_buffer(CommandBufferUsage::ONE_TIME_SUBMIT);
+                    }));
+                    assert!(rejected(&|| command.push_data(0, &[0; 8])));
+                    assert!(rejected(&|| {
+                        let _ = command.end();
+                    }));
+                    assert!(rejected(&|| {
+                        let _ = device.submit_and_wait(&[&command]);
+                    }));
+                })
+                .join()
+                .unwrap();
+        });
+        command.push_data(0, &[0; 8]);
+        device.submit_and_wait(&[&command]).unwrap();
+    }
 }

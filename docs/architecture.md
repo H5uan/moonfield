@@ -38,7 +38,9 @@ still supported. `Component` and `Resource` are blanket impls — no derive.
 
 A `Schedule` groups systems under a `ScheduleLabel` and orders them with
 `before`/`after` constraints (stable topological sort, single-threaded
-executor). `Commands` queue into a world-global buffer that
+executor). Set membership derives its two-sided anchor constraints from the
+complete chain when rebuilding execution order, including late registration
+and mid-run schedule merges. `Commands` queue into a world-global buffer that
 `World::apply_commands` drains after **every** system run, so a system's
 commands are visible to later systems in the same run; the world's change tick
 advances once per system run. Running a schedule lifts its entry out of the
@@ -53,6 +55,13 @@ message buffer swap. Exit is signaled by inserting the `AppExit` resource (e.g.
 via `Commands::insert_resource`), not by a system return value. The low-level
 archetype query trait is `WorldQuery`, distinct from the `Query<Q>` system
 param.
+
+During extraction, `MainWorld` carries a shared token containing the source
+pointer and the parking thread. Scope exit invalidates the token before
+destination cleanup, including on unwind or after moving the destination;
+escaped resources cannot access the source. Nested parking into an occupied
+destination is rejected. `App::render` restores its main world before
+propagating an extraction panic.
 
 Queries accept an optional second type parameter — the filter:
 `Query<&Transform, With<MeshRenderer>>`, `Query<&mut Transform,
@@ -385,6 +394,12 @@ column-major, so matrices ship column-major and the shader declares them
 The Outliner dock panel lists the entity tree (from `ChildOf`/`Children`,
 labeled by `Name`) and selects an entity; the Details panel renders
 auto-generated editing UI for the selected entity's registered components.
+Editor operations use `EditorAction`; reversible results carry typed
+`EditorUndo` compensation. Batches reject deletion and saving before execution
+and report failed compensation alongside the original error. Redo records
+the inverse for the newly created entities, and failed history operations
+remain retryable. Inspector reflection and per-frame gizmo increments write
+directly; a completed gizmo gesture records one undo unit.
 Setting `MOONFIELD_EDITOR_AUTO_CLOSE=<frames>` signals exit via the shared
 `WindowControl` after N rendered frames, which allows automated smoke tests of
 startup/shutdown on a machine with a display.
@@ -479,23 +494,24 @@ compilation — entry points are discovered by Slang reflection at compile
 time. A pipeline declares its shader needs as a `PipelineShader` request
 (the asset handle, the entry points with their capabilities, and the entry
 whose reflection drives root binding) in the main-world `PipelineShaders`
-resource, populated by whoever loads the shader assets — the editor loads
-`core_3d.slang` and `egui.slang` (and, with the `splat` feature,
-`util/radix_sort.slang` for the splat sort pass) at startup, resolving the
+resource. Render-feature plugins load their default shaders during main-world
+`Startup`, but leave an existing request for the same pipeline untouched,
+including its asset handle and entry-point configuration. The editor owns
+`egui.slang`; mesh and splat plugins own their feature shaders, resolving the
 repository's asset root through `moonfield_asset::assets_dir` (one
 definition: a `MOONFIELD_ASSETS_DIR` override, then the compiled-in
 workspace path). `extract_shader_assets` copies
 the requested shaders (revision-matched, into `ExtractedShaders`) and the
 requests into the render world; `prepare_shaders` (`PrepareAssets`) compiles
-each request whose asset revision advanced, from the extracted source
+each request whose handle, asset revision, or request fingerprint changed, from the extracted source
 through the render-world `PreparedShaders` resource (which owns the shared
 `ShaderCache`). One linked program covers every declared entry point, so a
 single prepared reflection answers per-entry root-binding queries — the
 splat sort pass binds its three compute entries from it. A failed compile is
-recorded for the new revision — broken
+recorded for that request and revision — broken
 source is not retried every frame — and the pass keeps running the pipeline
 it already built. Passes (re)build their pipeline when their prepared
-shader's revision advances, and skip with a one-shot log while it isn't
+shader's successful artifact generation advances, and skip with a one-shot log while it isn't
 ready.
 
 ## Scenes and templates
@@ -570,9 +586,11 @@ autodiff path is the RHI's `gpu_tests::gaussian_fit` test.
 
 ## Threading model
 
-The winit event loop and all Vulkan objects live on the **main thread**; nothing
-is `Send` across threads yet. Render work and ECS `World` access are confined to
-that thread. Once multi-threaded rendering lands, gameplay code must hand off to
-a render thread via a command queue (the logic thread produces render commands,
-the render thread owns all Vulkan objects); GPU/native objects are never shared
-directly across threads.
+The winit event loop, render work, and Vulkan operations run on the **main
+thread**. GPU wrappers satisfy `Send + Sync` for ECS resource storage; this
+does not permit concurrent driver access. Device-context access, command
+recording, pool access, queue submission, and retirement draining check the
+device's owning thread before entering Vulkan. GPU objects must also be
+destroyed on that thread. Main-world extraction checks its parking token's
+thread and scope before accessing the source world. A multi-threaded renderer
+requires an explicit command handoff to the thread owning the GPU objects.

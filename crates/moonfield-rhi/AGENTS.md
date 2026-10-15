@@ -59,9 +59,10 @@ development builds.
 
 ## Object ownership and lifecycle
 
-- All Vulkan objects live on the main thread; nothing is `Send` across threads
-  yet. Raw `Vk*`/`ash` handles never leave the backend module (see Boundary
-  discipline).
+- Create, access, and destroy Vulkan objects on the main thread. GPU wrappers'
+  `Send + Sync` bounds support ECS storage, not cross-thread driver operations
+  (see [threading model](../../docs/architecture.md#threading-model)). Raw
+  `Vk*`/`ash` handles never leave the backend module (see Boundary discipline).
 - Every `unsafe` block carries a `// SAFETY:` comment arguing why it is sound
   (handle validity/lifetime, exclusivity, pointer bounds). A comment that
   cannot be written means the block needs a guard, not a waiver.

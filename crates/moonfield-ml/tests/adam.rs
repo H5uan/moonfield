@@ -64,14 +64,14 @@ fn two_steps_match_hand_computed_adam() {
     let instance = match Instance::new_headless() {
         Ok(instance) => instance,
         Err(err) => {
-            eprintln!("skipping: no Vulkan instance available ({err})");
+            moonfield_rhi::testing::skip_gpu(format!("no Vulkan instance available ({err})"));
             return;
         }
     };
     let device = match Device::new(&instance, None) {
         Ok(device) => device,
         Err(err) => {
-            eprintln!("skipping: no Vulkan device available ({err})");
+            moonfield_rhi::testing::skip_gpu(format!("no Vulkan device available ({err})"));
             return;
         }
     };
