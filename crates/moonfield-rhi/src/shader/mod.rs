@@ -12,9 +12,8 @@
 //!
 //! - `compile` — [`Compiler`], [`CompiledShader`], and the memoizing
 //!   [`ShaderCache`]: Slang source in, target code out.
-//! - `reflection` — [`Reflection`], a self-referential raw-pointer wrapper
-//!   (its module doc states the invariants), plus [`Layout`] and the
-//!   user-attribute types.
+//! - `reflection` — [`Reflection`], a synchronized program owner, plus
+//!   [`Layout`] snapshots and the user-attribute types.
 
 use crate::error::Error as RenderError;
 

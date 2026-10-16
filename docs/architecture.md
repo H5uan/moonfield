@@ -514,6 +514,15 @@ it already built. Passes (re)build their pipeline when their prepared
 shader's successful artifact generation advances, and skip with a one-shot log while it isn't
 ready.
 
+The compiler's `Arc<Mutex<GlobalSession>>` serializes Slang compilation,
+reflection queries, and reflected-program destruction across both cache
+tables. `Reflection` retains the originating global session and its linked
+program; `Layout` contains copied sizes and field offsets, not Slang pointers.
+`RootBinder::set_bytes` requires the complete reflected storage size, including
+padding. `Reflection::struct_rust_source` emits explicit inter-field and tail
+padding with the reflected alignment; matrix arrays include their storage
+padding and follow the shader's matrix layout mode.
+
 ## Scenes and templates
 
 Scene save/load is a synchronous miniature of the reference implementation's

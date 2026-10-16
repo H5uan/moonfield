@@ -44,7 +44,7 @@ impl RootParamPlace {
 /// not a hand-synced struct) and fills it by parameter name. The result is
 /// handed to `push_data` before the draw. The behavior of
 /// writing is checked against the reflection: unknown names, kind mismatches,
-/// and size overruns are errors instead of silent misplacement.
+/// and byte-length mismatches are errors instead of silent misplacement.
 #[derive(Clone)]
 pub struct RootBinder {
     /// The root blob, sized to the reflected layout and filled by [`set`].
@@ -77,7 +77,8 @@ impl RootBinder {
     }
 
     /// Write inline bytes to the named `uniform` root parameter (the whole
-    /// struct; typically `bytemuck::bytes_of(&root)`).
+    /// struct; typically `bytemuck::bytes_of(&root)`). The byte length must
+    /// equal the reflected storage size, including padding.
     pub fn set_bytes(&mut self, name: &str, bytes: &[u8]) -> RenderResult<()> {
         let (offset, size) = self.range(name, RootParamKind::Uniform, bytes.len())?;
         self.blob[offset..offset + size].copy_from_slice(bytes);
@@ -85,6 +86,17 @@ impl RootBinder {
     }
 
     fn range(&self, name: &str, kind: RootParamKind, size: usize) -> RenderResult<(usize, usize)> {
+        let param = self.param(name, kind)?;
+        if size != param.size {
+            return Err(RenderError::Backend(format!(
+                "{size} bytes for root parameter '{name}' does not match its {}-byte storage",
+                param.size
+            )));
+        }
+        Ok((param.offset, param.size))
+    }
+
+    fn param(&self, name: &str, kind: RootParamKind) -> RenderResult<&RootParam> {
         let param = self
             .params
             .iter()
@@ -96,13 +108,7 @@ impl RootBinder {
                 param.kind, kind
             )));
         }
-        if size > param.size {
-            return Err(RenderError::Backend(format!(
-                "{size} bytes for root parameter '{name}' exceeds its {}-byte storage",
-                param.size
-            )));
-        }
-        Ok((param.offset, param.size))
+        Ok(param)
     }
 
     /// The placement of the named `Ptr<T>` root parameter. Resolve once at
@@ -121,10 +127,10 @@ impl RootBinder {
     /// once at pipeline build; per-pass bytes are pushed at
     /// [`RootParamPlace::offset`].
     pub fn uniform_param(&self, name: &str) -> RenderResult<RootParamPlace> {
-        let (offset, size) = self.range(name, RootParamKind::Uniform, 0)?;
+        let param = self.param(name, RootParamKind::Uniform)?;
         Ok(RootParamPlace {
-            offset,
-            size,
+            offset: param.offset,
+            size: param.size,
             kind: RootParamKind::Uniform,
         })
     }
@@ -134,6 +140,48 @@ impl RootBinder {
 mod tests {
     use super::*;
     use crate::shader::{Compiler, ShaderTarget};
+
+    fn binder_with_root(kind: RootParamKind, size: usize) -> RootBinder {
+        RootBinder {
+            blob: vec![0xAA; size + 8],
+            params: vec![RootParam {
+                name: "root".into(),
+                kind,
+                offset: 4,
+                size,
+            }],
+        }
+    }
+
+    #[test]
+    fn test_uniform_write_rejects_length_mismatches_without_mutation() {
+        let mut binder = binder_with_root(RootParamKind::Uniform, 16);
+        let original = binder.blob().to_vec();
+        for size in [0, 12, 20] {
+            assert!(binder.set_bytes("root", &vec![0; size]).is_err());
+            assert_eq!(binder.blob(), original);
+        }
+    }
+
+    #[test]
+    fn test_uniform_write_fills_only_its_placement() {
+        let mut binder = binder_with_root(RootParamKind::Uniform, 16);
+        let place = binder.uniform_param("root").expect("placement");
+        assert_eq!((place.offset, place.size), (4, 16));
+        binder.set_bytes("root", &[0xBB; 16]).expect("write");
+        assert_eq!(&binder.blob()[..4], &[0xAA; 4]);
+        assert_eq!(&binder.blob()[4..20], &[0xBB; 16]);
+        assert_eq!(&binder.blob()[20..], &[0xAA; 4]);
+    }
+
+    #[test]
+    fn test_pointer_write_and_placement_reject_wrong_storage_size() {
+        let mut binder = binder_with_root(RootParamKind::Pointer, 16);
+        let original = binder.blob().to_vec();
+        assert!(binder.set_pointer("root", 1).is_err());
+        assert!(binder.pointer_param("root").is_err());
+        assert_eq!(binder.blob(), original);
+    }
 
     const VERTEX_SOURCE: &str = r#"
         struct DrawData { column_major float4x4 mvp; };

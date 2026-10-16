@@ -102,21 +102,20 @@ fn spirv_entry_name(bytecode: &[u8]) -> Option<String> {
 
 /// Slang compiler session wrapper.
 pub struct Compiler {
-    global_session: shader_slang::GlobalSession,
+    global_session: std::sync::Arc<std::sync::Mutex<shader_slang::GlobalSession>>,
 }
 
 /// Compile-once cache of [`CompiledShader`]s, keyed by the compile inputs.
 ///
-/// Every pipeline today compiles its shaders itself (`Compiler::new()`, then
-/// `compile_source`), so an N-pipeline app compiles the same file N times.
-/// This cache memoizes by `(file, source, entry, capabilities)`; the caller
-/// still creates backend shader modules (they are device-bound) via e.g.
+/// This cache memoizes by `(file, source, entry, capabilities, defines)`;
+/// callers create backend shader modules (they are device-bound) via e.g.
 /// the Vulkan `ShaderModule::from_compiled`, which is cheap.
 ///
 /// One cache serves one [`ShaderTarget`]; backends create their own.
 ///
-/// Slang sessions are not thread-safe, so compilation happens under a mutex;
-/// the cache itself is `Sync` for shared use from a render-world resource.
+/// Compilation and reflection queries share the compiler's global-session
+/// mutex. Cached bytecode is owned data; reflected layouts are copied while
+/// holding that mutex.
 pub struct ShaderCache {
     compiler: Compiler,
     target: ShaderTarget,
@@ -125,15 +124,6 @@ pub struct ShaderCache {
     reflections:
         std::sync::Mutex<std::collections::HashMap<ShaderCacheKey, std::sync::Arc<Reflection>>>,
 }
-
-// SAFETY: every compiler access happens under one of the two mutexes (both
-// `get_or_compile` and `compile_file_reflection` hold their lock while
-// compiling), so the Slang session is used from one thread at a time; the
-// cached values (`CompiledShader`, `Reflection`) are themselves
-// `Send + Sync`. Slang's global session is documented as usable from
-// multiple threads.
-unsafe impl Send for ShaderCache {}
-unsafe impl Sync for ShaderCache {}
 
 /// The inputs that determine a compiled artifact. All variants are stored so
 /// the key is the exact identity of a compile, not a hash of it.
@@ -322,7 +312,9 @@ impl Compiler {
         let global_session = shader_slang::GlobalSession::new().ok_or_else(|| {
             RenderError::Backend("failed to create Slang global session".to_string())
         })?;
-        Ok(Self { global_session })
+        Ok(Self {
+            global_session: std::sync::Arc::new(std::sync::Mutex::new(global_session)),
+        })
     }
 
     /// Compile a Slang file for the given entry point.
@@ -405,7 +397,11 @@ impl Compiler {
         capabilities: &[&str],
         defines: &[(&str, &str)],
     ) -> RenderResult<CompiledShader> {
-        let session = self.create_session(target, capabilities, defines)?;
+        let global_session = self
+            .global_session
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        let session = Self::create_session(&global_session, target, capabilities, defines)?;
         let module = match source {
             Some(source) => session
                 .load_module_from_source_string(module_name, module_name, source)
@@ -418,7 +414,7 @@ impl Compiler {
     /// Create a Slang session targeting `target` with the given capabilities
     /// and preprocessor macro definitions.
     fn create_session(
-        &self,
+        global_session: &shader_slang::GlobalSession,
         target: ShaderTarget,
         capabilities: &[&str],
         defines: &[(&str, &str)],
@@ -427,7 +423,7 @@ impl Compiler {
             .optimization(shader_slang::OptimizationLevel::High)
             .matrix_layout_row(true);
         for name in capabilities {
-            let capability = self.global_session.find_capability(name);
+            let capability = global_session.find_capability(name);
             if !capability.is_unknown() {
                 options = options.capability(capability);
             }
@@ -440,7 +436,7 @@ impl Compiler {
             .format(target.slang_target())
             .options(&options);
         if let Some(profile) = target.profile_name() {
-            target_desc = target_desc.profile(self.global_session.find_profile(profile));
+            target_desc = target_desc.profile(global_session.find_profile(profile));
         }
         let targets = [target_desc];
 
@@ -448,7 +444,7 @@ impl Compiler {
             .targets(&targets)
             .options(&options);
 
-        self.global_session
+        global_session
             .create_session(&session_desc)
             .ok_or_else(|| RenderError::Backend("failed to create Slang session".to_string()))
     }
@@ -525,7 +521,7 @@ impl Compiler {
     /// target- and profile-dependent, so this stays separate from the
     /// bytecode session (SPIR-V reflection compiles use `spirv_1_4`).
     fn create_reflection_session(
-        &self,
+        global_session: &shader_slang::GlobalSession,
         target: ShaderTarget,
     ) -> RenderResult<shader_slang::Session> {
         let options = shader_slang::CompilerOptions::default()
@@ -536,7 +532,7 @@ impl Compiler {
             .format(target.slang_target())
             .options(&options);
         if target == ShaderTarget::Spirv {
-            target_desc = target_desc.profile(self.global_session.find_profile("spirv_1_4"));
+            target_desc = target_desc.profile(global_session.find_profile("spirv_1_4"));
         }
         let targets = [target_desc];
 
@@ -544,7 +540,7 @@ impl Compiler {
             .targets(&targets)
             .options(&options);
 
-        self.global_session
+        global_session
             .create_session(&session_desc)
             .ok_or_else(|| RenderError::Backend("failed to create Slang session".to_string()))
     }
@@ -559,7 +555,11 @@ impl Compiler {
         entry_point: &str,
         target: ShaderTarget,
     ) -> RenderResult<Reflection> {
-        let session = self.create_reflection_session(target)?;
+        let global_session = self
+            .global_session
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        let session = Self::create_reflection_session(&global_session, target)?;
 
         let module = session.load_module(path).map_err(map_slang_error)?;
 
@@ -575,16 +575,7 @@ impl Compiler {
 
         let linked = program.link().map_err(map_slang_error)?;
 
-        // `layout(0)` returns a reference owned by `linked`; keep `linked` (and
-        // its dependencies) alive in the wrapper and store the raw pointer.
-        let reflection =
-            linked.layout(0).map_err(map_slang_error)? as *const shader_slang::reflection::Shader;
-
-        Ok(Reflection {
-            _session: session,
-            _linked: linked,
-            reflection,
-        })
+        Reflection::new(std::sync::Arc::clone(&self.global_session), session, linked)
     }
 
     /// Compile in-memory source and return a reflection object, like
@@ -604,7 +595,11 @@ impl Compiler {
         entry_points: &[&str],
         target: ShaderTarget,
     ) -> RenderResult<Reflection> {
-        let session = self.create_reflection_session(target)?;
+        let global_session = self
+            .global_session
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        let session = Self::create_reflection_session(&global_session, target)?;
 
         let module = session
             .load_module_from_source_string(module_name, module_name, source)
@@ -627,14 +622,7 @@ impl Compiler {
 
         let linked = program.link().map_err(map_slang_error)?;
 
-        let reflection =
-            linked.layout(0).map_err(map_slang_error)? as *const shader_slang::reflection::Shader;
-
-        Ok(Reflection {
-            _session: session,
-            _linked: linked,
-            reflection,
-        })
+        Reflection::new(std::sync::Arc::clone(&self.global_session), session, linked)
     }
 }
 
@@ -663,6 +651,86 @@ mod tests {
         #endif
         }
     "#;
+
+    #[test]
+    fn test_compile_and_reflection_queries_share_the_global_session_lock() {
+        use std::sync::{Arc, Barrier, mpsc};
+        use std::time::Duration;
+
+        let cache = Arc::new(ShaderCache::new(ShaderTarget::Spirv).expect("cache"));
+        let reflection = cache
+            .compile_source_reflection("locked", KERNEL, &["main"])
+            .expect("reflection");
+        let global_session = cache.compiler.global_session.lock().expect("session lock");
+        let barrier = Arc::new(Barrier::new(3));
+        let (sender, receiver) = mpsc::channel();
+        let compile_thread = {
+            let cache = Arc::clone(&cache);
+            let barrier = Arc::clone(&barrier);
+            let sender = sender.clone();
+            std::thread::spawn(move || {
+                barrier.wait();
+                let compiled = cache.compile_source("locked", KERNEL, "main", &[], &[]);
+                sender.send(()).expect("completion");
+                compiled.expect("compiled shader")
+            })
+        };
+        let query_thread = {
+            let barrier = Arc::clone(&barrier);
+            std::thread::spawn(move || {
+                barrier.wait();
+                let params = reflection.root_parameters("main");
+                sender.send(()).expect("completion");
+                params.expect("root parameters")
+            })
+        };
+        barrier.wait();
+        assert!(matches!(
+            receiver.recv_timeout(Duration::from_millis(50)),
+            Err(mpsc::RecvTimeoutError::Timeout)
+        ));
+        drop(global_session);
+        assert!(
+            !compile_thread
+                .join()
+                .expect("compile thread")
+                .code
+                .is_empty()
+        );
+        assert_eq!(query_thread.join().expect("query thread")[0].name, "out");
+    }
+
+    #[test]
+    fn test_cached_compilation_and_reflection_queries_across_threads() {
+        let cache = std::sync::Arc::new(ShaderCache::new(ShaderTarget::Spirv).expect("cache"));
+        let reflection = cache
+            .compile_source_reflection("shared", VARIANT_SOURCE, &["main"])
+            .expect("reflection");
+        std::thread::scope(|scope| {
+            for variant in ["1", "2", "3", "4"] {
+                let cache = &cache;
+                let reflection = &reflection;
+                scope.spawn(move || {
+                    for _ in 0..8 {
+                        let compiled = cache
+                            .compile_source(
+                                "shared",
+                                VARIANT_SOURCE,
+                                "main",
+                                &[],
+                                &[("VARIANT", variant)],
+                            )
+                            .expect("compile");
+                        assert_eq!(compiled.stage, shader_slang::Stage::Compute);
+                        assert_eq!(
+                            reflection.root_parameters("main").expect("roots")[0].size,
+                            8
+                        );
+                    }
+                });
+            }
+        });
+    }
 
     /// The cache must return the same artifact for identical inputs and a
     /// different one when the key differs — without recompiling.

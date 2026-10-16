@@ -81,7 +81,7 @@ development builds.
   `compile.rs` — `Compiler`/`CompiledShader`/`ShaderCache` with a
   `ShaderTarget` (`Spirv` for the backend; the other targets serve offline
   tooling);
-  `reflection.rs` — the self-referential `Reflection` wrapper, `Layout`,
+  `reflection.rs` — the synchronized `Reflection` owner, `Layout` snapshots,
   `RootParam`, and the user-attribute types;
   `root_binder.rs` — the root-parameter vocabulary
   (`RootBinder`/`RootParamPlace`), turning reflection results into push-data
