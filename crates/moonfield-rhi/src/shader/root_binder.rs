@@ -18,6 +18,19 @@ pub struct RootParamPlace {
 }
 
 impl RootParamPlace {
+    /// Validate complete inline storage without copying or allocating.
+    pub fn uniform_bytes<'a>(&self, bytes: &'a [u8]) -> RenderResult<&'a [u8]> {
+        if self.kind != RootParamKind::Uniform || bytes.len() != self.size {
+            return Err(RenderError::Backend(format!(
+                "uniform root encoding mismatch: placement is {:?} with {} bytes, input has {} bytes",
+                self.kind,
+                self.size,
+                bytes.len()
+            )));
+        }
+        Ok(bytes)
+    }
+
     /// A pointer parameter's 8 bytes, ready for `push_data` at this place's
     /// offset.
     pub fn pointer_bytes(&self, address: u64) -> RenderResult<[u8; 8]> {
@@ -67,6 +80,28 @@ impl RootBinder {
     /// The root blob, ready for `push_data`.
     pub fn blob(&self) -> &[u8] {
         &self.blob
+    }
+
+    /// Require exactly the named roots and delivery kinds a consumer writes.
+    pub fn validate_parameters(&self, expected: &[(&str, RootParamKind)]) -> RenderResult<()> {
+        if expected.len() != self.params.len() {
+            return Err(RenderError::Backend(format!(
+                "root parameter count mismatch: expected {}, shader has {}",
+                expected.len(),
+                self.params.len()
+            )));
+        }
+        for param in &self.params {
+            let kind = expected
+                .iter()
+                .find(|(name, _)| *name == param.name)
+                .map(|(_, kind)| *kind)
+                .ok_or_else(|| {
+                    RenderError::Backend(format!("unexpected root parameter '{}'", param.name))
+                })?;
+            self.param(&param.name, kind)?;
+        }
+        Ok(())
     }
 
     /// Write a GPU address to the named `Ptr<T>` root parameter.
@@ -151,6 +186,48 @@ mod tests {
                 size,
             }],
         }
+    }
+
+    #[test]
+    fn test_root_contract_rejects_additional_missing_and_wrong_kind_parameters() {
+        let binder = binder_with_root(RootParamKind::Uniform, 16);
+        assert!(
+            binder
+                .validate_parameters(&[("root", RootParamKind::Uniform)])
+                .is_ok()
+        );
+        assert!(binder.validate_parameters(&[]).is_err());
+        assert!(
+            binder
+                .validate_parameters(&[("missing", RootParamKind::Uniform)])
+                .is_err()
+        );
+        assert!(
+            binder
+                .validate_parameters(&[("root", RootParamKind::Pointer)])
+                .is_err()
+        );
+        assert!(
+            binder
+                .validate_parameters(&[
+                    ("root", RootParamKind::Uniform),
+                    ("extra", RootParamKind::Uniform)
+                ])
+                .is_err()
+        );
+    }
+
+    #[test]
+    fn test_uniform_placement_encoding_requires_exact_size_and_kind() {
+        let binder = binder_with_root(RootParamKind::Uniform, 16);
+        let place = binder.uniform_param("root").unwrap();
+        assert!(place.uniform_bytes(&[0; 16]).is_ok());
+        assert!(place.uniform_bytes(&[0; 12]).is_err());
+        assert!(place.uniform_bytes(&[0; 20]).is_err());
+        let pointer = binder_with_root(RootParamKind::Pointer, 8)
+            .pointer_param("root")
+            .unwrap();
+        assert!(pointer.uniform_bytes(&[0; 8]).is_err());
     }
 
     #[test]

@@ -32,7 +32,8 @@ use moonfield_rhi::types::WrapMode;
 use moonfield_rhi::{
     BlendMode, CompareOp, CullMode, CullState, DepthState, DescriptorHeap, Device, Extent2d,
     Filter, Format, FrameUploader, FrontFace, GpuAllocation, GraphicsPipeline, Offset2d, Rect2d,
-    RenderDevice, RootBinder, SamplerDesc, SamplerHandle, ShaderModule, Texture, TextureHandle,
+    RenderDevice, RootBinder, RootParamPlace, SamplerDesc, SamplerHandle, ShaderModule, Texture,
+    TextureHandle,
 };
 use moonfield_shader::Shader;
 use std::collections::HashMap;
@@ -102,6 +103,52 @@ struct PodVertex {
     color: u32,
 }
 
+fn validate_egui_entry_abi(
+    reflection: &moonfield_rhi::Reflection,
+    entry: &str,
+) -> moonfield_rhi::Result<RootParamPlace> {
+    let binder = RootBinder::new(reflection, entry)?;
+    binder.validate_parameters(&[("root", moonfield_rhi::RootParamKind::Uniform)])?;
+    let root = binder.uniform_param("root")?;
+    if root.size != std::mem::size_of::<EguiRoot>() {
+        return Err(moonfield_rhi::Error::Backend(format!(
+            "egui root size mismatch: Rust size {}, shader size {}",
+            std::mem::size_of::<EguiRoot>(),
+            root.size
+        )));
+    }
+    reflection
+        .entry_parameter_layout(entry, "root")?
+        .validate_rust_layout::<EguiRoot>(&[
+            (
+                "screen_size_in_points",
+                std::mem::offset_of!(EguiRoot, screen_size_in_points),
+            ),
+            ("dithering", std::mem::offset_of!(EguiRoot, dithering)),
+            (
+                "predictable_filtering",
+                std::mem::offset_of!(EguiRoot, predictable_filtering),
+            ),
+            ("vertices", std::mem::offset_of!(EguiRoot, vertices)),
+            ("indices", std::mem::offset_of!(EguiRoot, indices)),
+            ("texture", std::mem::offset_of!(EguiRoot, texture)),
+            ("sampler", std::mem::offset_of!(EguiRoot, sampler)),
+            ("index_base", std::mem::offset_of!(EguiRoot, index_base)),
+            ("_pad0", std::mem::offset_of!(EguiRoot, _pad0)),
+        ])?;
+    reflection
+        .entry_field_pointee_layout(entry, "root", "vertices")?
+        .validate_rust_layout::<PodVertex>(&[
+            ("pos", std::mem::offset_of!(PodVertex, pos)),
+            ("uv", std::mem::offset_of!(PodVertex, uv)),
+            ("color", std::mem::offset_of!(PodVertex, color)),
+        ])?;
+    reflection
+        .entry_field_pointee_layout(entry, "root", "indices")?
+        .validate_rust_layout::<u32>(&[])?;
+    Ok(root)
+}
+
 /// One mesh's draw parameters within a frame slot's shared arrays. The
 /// upload rewrites each mesh's local indices to absolute vertex indices, so
 /// a draw needs only its index range.
@@ -158,6 +205,7 @@ pub fn egui_shader(shader: Handle<Shader>) -> PipelineShader {
 /// shader's gamma values verbatim.
 pub struct EguiPipeline {
     pipeline: GraphicsPipeline,
+    root: RootParamPlace,
     /// The shared descriptor heap every egui texture/sampler slot lives in
     /// (samplers through its description cache).
     heap: Arc<DescriptorHeap>,
@@ -191,24 +239,28 @@ impl EguiPipeline {
                 .entry(name)
                 .ok_or_else(|| format!("prepared egui shader is missing '{name}'"))
         };
+        let root = validate_egui_entry_abi(
+            prepared
+                .reflection_for_entry("vs_main")
+                .map_err(|error| error.to_string())?,
+            "vs_main",
+        )
+        .map_err(|error| error.to_string())?;
+        let fragment_root = validate_egui_entry_abi(
+            prepared
+                .reflection_for_entry(fragment_entry)
+                .map_err(|error| error.to_string())?,
+            fragment_entry,
+        )
+        .map_err(|error| error.to_string())?;
+        if root != fragment_root {
+            return Err("egui root placement differs between vertex and fragment entries".into());
+        }
         let vertex_shader =
             ShaderModule::from_compiled(device, entry("vs_main")?).map_err(|e| e.to_string())?;
         let fragment_shader = ShaderModule::from_compiled(device, entry(fragment_entry)?)
             .map_err(|e| e.to_string())?;
 
-        // Reflect the entry point for the root blob and the layout guards.
-        let root = RootBinder::new(prepared.reflection(), "vs_main").map_err(|e| e.to_string())?;
-        // Layout alignment guard: the Rust `EguiRoot` struct pushed as root
-        // data must be exactly as large as the shader's reflected `uniform
-        // EguiRoot`, so the two can never silently drift.
-        if root.blob().len() != std::mem::size_of::<EguiRoot>() {
-            return Err(format!(
-                "EguiRoot layout mismatch: Rust struct is {} bytes, egui.slang \
-                 root is {} bytes",
-                std::mem::size_of::<EguiRoot>(),
-                root.blob().len()
-            ));
-        }
         // The varying fields (texture, sampler, index base) must be the
         // struct's tail: the pass pushes the static prefix once and every
         // draw pushes only the tail.
@@ -234,6 +286,7 @@ impl EguiPipeline {
 
         Ok(Self {
             pipeline,
+            root,
             heap: device.descriptor_heap(),
             options,
             shader,
@@ -679,8 +732,12 @@ pub fn record_egui(
         _pad0: 0,
     };
     let static_len = core::mem::offset_of!(EguiRoot, texture);
-    pass.push_data(0, &bytemuck::bytes_of(&static_prefix)[..static_len]);
-    let varying_offset = core::mem::offset_of!(EguiRoot, texture) as u32;
+    let root_bytes = pipeline
+        .root
+        .uniform_bytes(bytemuck::bytes_of(&static_prefix))
+        .expect("validated egui ABI");
+    pass.push_data(pipeline.root.offset as u32, &root_bytes[..static_len]);
+    let varying_offset = (pipeline.root.offset + core::mem::offset_of!(EguiRoot, texture)) as u32;
     let mut draws = frame.mesh_draws.iter();
     for clipped in primitives {
         let Primitive::Mesh(mesh) = &clipped.primitive else {
@@ -737,4 +794,53 @@ fn clip_rect_to_scissor(
             height: height as u32,
         },
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_egui_runtime_abi_accepts_default_stages_and_rejects_reordering() {
+        let path = moonfield_asset::assets_dir().join("shaders/egui.slang");
+        let source = std::fs::read_to_string(path).unwrap();
+        let compiler = moonfield_rhi::Compiler::new().unwrap();
+        let mut vertex_root = None;
+        for entry in EGUI_ENTRIES {
+            let reflection = compiler
+                .compile_source_to_reflection_with_options(
+                    "egui_abi",
+                    &source,
+                    &[entry.name],
+                    moonfield_rhi::ShaderTarget::Spirv,
+                    entry.capabilities,
+                    &[],
+                )
+                .unwrap();
+            let root = validate_egui_entry_abi(&reflection, entry.name).unwrap();
+            if let Some(expected) = vertex_root {
+                assert_eq!(root, expected);
+            } else {
+                vertex_root = Some(root);
+            }
+        }
+        let root_reordered = source.replace(
+            "uint texture;\n    uint sampler;",
+            "uint sampler;\n    uint texture;",
+        );
+        let vertex_reordered =
+            source.replace("float2 pos;\n    float2 uv;", "float2 uv;\n    float2 pos;");
+        for reordered in [root_reordered, vertex_reordered] {
+            assert_ne!(source, reordered);
+            let reflection = compiler
+                .compile_source_to_reflection(
+                    "egui_reordered",
+                    &reordered,
+                    &["vs_main"],
+                    moonfield_rhi::ShaderTarget::Spirv,
+                )
+                .unwrap();
+            assert!(validate_egui_entry_abi(&reflection, "vs_main").is_err());
+        }
+    }
 }

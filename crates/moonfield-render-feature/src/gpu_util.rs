@@ -15,6 +15,42 @@ use moonfield_shader::Shader;
 
 use crate::shader::PreparedShader;
 
+pub(crate) trait ShaderAbi: bytemuck::Pod {
+    const FIELDS: &'static [(&'static str, usize)];
+}
+
+macro_rules! impl_shader_abi {
+    ($host:ty { $($field:ident),* $(,)? }) => {
+        impl $crate::gpu_util::ShaderAbi for $host {
+            const FIELDS: &'static [(&'static str, usize)] = &[
+                $((stringify!($field), std::mem::offset_of!($host, $field))),*
+            ];
+        }
+    };
+}
+
+pub(crate) use impl_shader_abi;
+
+pub(crate) fn uniform_abi<T: ShaderAbi>(
+    reflection: &Reflection,
+    entry: &str,
+) -> Result<RootParamPlace> {
+    let binder = RootBinder::new(reflection, entry)?;
+    binder.validate_parameters(&[("params", moonfield_rhi::RootParamKind::Uniform)])?;
+    let place = binder.uniform_param("params")?;
+    if place.size != size_of::<T>() {
+        return Err(moonfield_rhi::Error::Backend(format!(
+            "root size mismatch for '{entry}': Rust size {}, shader size {}",
+            size_of::<T>(),
+            place.size
+        )));
+    }
+    reflection
+        .entry_parameter_layout(entry, "params")?
+        .validate_rust_layout::<T>(T::FIELDS)?;
+    Ok(place)
+}
+
 /// Root blob for the histogram entry: mirrors `HistogramParams` in
 /// `radix_sort.slang` field-for-field. Pointer fields are GPU addresses;
 /// scalar fields are inline u32s.
@@ -54,6 +90,40 @@ pub struct ScatterParams {
     groups: u32,
     shift: u32,
     _pad: u32,
+}
+
+impl_shader_abi!(HistogramParams {
+    keys,
+    hist,
+    count,
+    groups,
+    shift
+});
+impl_shader_abi!(ScanParams {
+    hist,
+    offsets,
+    total
+});
+impl_shader_abi!(ScatterParams {
+    keys_in,
+    values_in,
+    keys_out,
+    values_out,
+    offsets,
+    count,
+    groups,
+    shift
+});
+
+fn radix_entry_abi(reflection: &Reflection, entry: &str) -> Result<RootParamPlace> {
+    match entry {
+        "histogram" => uniform_abi::<HistogramParams>(reflection, entry),
+        "scan" => uniform_abi::<ScanParams>(reflection, entry),
+        "scatter" => uniform_abi::<ScatterParams>(reflection, entry),
+        _ => Err(moonfield_rhi::Error::Backend(format!(
+            "unknown radix sort entry '{entry}'"
+        ))),
+    }
 }
 
 /// A deterministic LSD radix sort over `(u32 key, u32 value)` pairs.
@@ -105,7 +175,12 @@ impl RadixSort {
             .map(|&entry| cache.compile_source(shader.path(), shader.source(), entry, &[], &[]))
             .collect::<Result<Vec<_>>>()?;
         let artifacts: Vec<&CompiledShader> = compiled.iter().map(|arc| &**arc).collect();
-        Self::from_reflection(device, &reflection, &artifacts, max_count)
+        Self::from_reflections(
+            device,
+            &[&reflection, &reflection, &reflection],
+            &artifacts,
+            max_count,
+        )
     }
 
     /// Builds the three pipelines from a prepared shader — the artifacts
@@ -127,30 +202,33 @@ impl RadixSort {
                 })
             })
             .collect::<Result<Vec<_>>>()?;
-        Self::from_reflection(device, prepared.reflection(), &artifacts, max_count)
+        let reflections = RADIX_SORT_ENTRIES
+            .iter()
+            .map(|entry| prepared.reflection_for_entry(entry))
+            .collect::<Result<Vec<_>>>()?;
+        Self::from_reflections(device, &reflections, &artifacts, max_count)
     }
 
-    /// Shared builder: the pipelines and root placements from one
-    /// multi-entry reflection plus the per-entry compiled artifacts.
-    fn from_reflection(
+    /// Shared builder: pipelines and validated root placements from each
+    /// entry's option-matched reflection and compiled artifact.
+    fn from_reflections(
         device: &Device,
-        reflection: &Reflection,
+        reflections: &[&Reflection],
         artifacts: &[&CompiledShader],
         max_count: usize,
     ) -> Result<Self> {
-        let build =
-            |entry: &str, artifact: &CompiledShader| -> Result<(ComputePipeline, RootParamPlace)> {
-                let binder = RootBinder::new(reflection, entry)?;
-                // Each entry takes a single `uniform Params` struct; reflect its
-                // one root placement and push it as one POD blob per dispatch.
-                let place = binder.uniform_param("params")?;
-                let module = ShaderModule::from_compiled(device, artifact)?;
-                let pipeline = ComputePipeline::new(device, &module)?;
-                Ok((pipeline, place))
-            };
-        let (histogram, histogram_place) = build("histogram", artifacts[0])?;
-        let (scan, scan_place) = build("scan", artifacts[1])?;
-        let (scatter, scatter_place) = build("scatter", artifacts[2])?;
+        let build = |entry: &str,
+                     reflection: &Reflection,
+                     artifact: &CompiledShader|
+         -> Result<(ComputePipeline, RootParamPlace)> {
+            let place = radix_entry_abi(reflection, entry)?;
+            let module = ShaderModule::from_compiled(device, artifact)?;
+            let pipeline = ComputePipeline::new(device, &module)?;
+            Ok((pipeline, place))
+        };
+        let (histogram, histogram_place) = build("histogram", reflections[0], artifacts[0])?;
+        let (scan, scan_place) = build("scan", reflections[1], artifacts[1])?;
+        let (scatter, scatter_place) = build("scatter", reflections[2], artifacts[2])?;
 
         let max_groups = max_count.div_ceil(256);
         let hist_bytes = (max_groups * 256 * size_of::<u32>()) as u64;
@@ -230,7 +308,9 @@ impl RadixSort {
             };
             compute.push_data(
                 self.histogram_place.offset as u32,
-                bytemuck::bytes_of(&hist_params),
+                self.histogram_place
+                    .uniform_bytes(bytemuck::bytes_of(&hist_params))
+                    .expect("validated histogram ABI"),
             );
             compute.dispatch(groups, 1, 1);
 
@@ -243,7 +323,9 @@ impl RadixSort {
             };
             compute.push_data(
                 self.scan_place.offset as u32,
-                bytemuck::bytes_of(&scan_params),
+                self.scan_place
+                    .uniform_bytes(bytemuck::bytes_of(&scan_params))
+                    .expect("validated scan ABI"),
             );
             compute.dispatch(1, 1, 1);
 
@@ -261,7 +343,9 @@ impl RadixSort {
             };
             compute.push_data(
                 self.scatter_place.offset as u32,
-                bytemuck::bytes_of(&scatter_params),
+                self.scatter_place
+                    .uniform_bytes(bytemuck::bytes_of(&scatter_params))
+                    .expect("validated scatter ABI"),
             );
             compute.dispatch(groups, 1, 1);
         }
@@ -272,6 +356,37 @@ impl RadixSort {
 mod tests {
     use super::*;
     use std::mem::{offset_of, size_of};
+
+    #[test]
+    fn test_runtime_radix_abi_accepts_defaults_and_rejects_field_reordering() {
+        let source = radix_sort_source();
+        let compiler = moonfield_rhi::Compiler::new().unwrap();
+        let reflection = compiler
+            .compile_source_to_reflection(
+                "radix_abi",
+                &source,
+                &RADIX_SORT_ENTRIES,
+                moonfield_rhi::ShaderTarget::Spirv,
+            )
+            .unwrap();
+        for entry in RADIX_SORT_ENTRIES {
+            radix_entry_abi(&reflection, entry).unwrap();
+        }
+        let reordered = source.replace(
+            "Ptr<uint32_t, Access.Read> keys;\n    Ptr<uint32_t, Access.ReadWrite> hist;",
+            "Ptr<uint32_t, Access.ReadWrite> hist;\n    Ptr<uint32_t, Access.Read> keys;",
+        );
+        assert_ne!(source, reordered);
+        let reflection = compiler
+            .compile_source_to_reflection(
+                "radix_reordered",
+                &reordered,
+                &RADIX_SORT_ENTRIES,
+                moonfield_rhi::ShaderTarget::Spirv,
+            )
+            .unwrap();
+        assert!(radix_entry_abi(&reflection, "histogram").is_err());
+    }
 
     /// The repository's `radix_sort.slang` source — the same file the sort
     /// pass loads through the asset server.

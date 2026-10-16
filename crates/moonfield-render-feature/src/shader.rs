@@ -126,7 +126,7 @@ impl ExtractedShaders {
     }
 }
 
-/// The compiled artifacts of one pipeline's shader: the module reflection
+/// The compiled artifacts of one pipeline's shader: option-matched reflections
 /// for root binding plus one compiled entry point per requested entry.
 /// Device-free — a pipeline turns them into `ShaderModule`s per device.
 pub struct PreparedShader {
@@ -139,13 +139,29 @@ pub struct PreparedShader {
     /// untouched.
     generation: u64,
     reflection: Arc<Reflection>,
+    entry_reflections: Vec<(&'static str, Arc<Reflection>)>,
     entries: Vec<(&'static str, Arc<CompiledShader>)>,
 }
 
 impl PreparedShader {
-    /// The module reflection compiled for the request's reflect entry.
+    /// The reflection group containing the request's primary reflect entry.
+    /// Other capability groups are accessed through `reflection_for_entry`.
     pub fn reflection(&self) -> &Reflection {
         &self.reflection
+    }
+
+    /// The reflection compiled with this entry's bytecode capabilities.
+    /// Entries with identical options share a linked reflection program.
+    pub fn reflection_for_entry(&self, name: &str) -> moonfield_rhi::Result<&Reflection> {
+        self.entry_reflections
+            .iter()
+            .find(|(entry, _)| *entry == name)
+            .map(|(_, reflection)| &**reflection)
+            .ok_or_else(|| {
+                moonfield_rhi::Error::Backend(format!(
+                    "prepared shader is missing reflection for '{name}'"
+                ))
+            })
     }
 
     /// The compiled artifact of an entry point, if the request declared it.
@@ -269,17 +285,44 @@ impl PreparedShaders {
         let shader = &extracted.shader;
         let (module, source) = (shader.path(), shader.source());
         let cache = self.cache()?;
-        // One linked program covers every declared entry point (plus the
-        // reflect entry when a request leaves it outside `entries`), so the
-        // single reflection answers per-entry root-binding queries for them
-        // all — the radix-sort pipeline binds three compute entries from it.
-        let mut entries: Vec<&str> = request.entries.iter().map(|entry| entry.name).collect();
-        if !entries.contains(&request.reflect_entry) {
-            entries.push(request.reflect_entry);
+        let mut groups: Vec<(&[&str], Vec<&'static str>)> = Vec::new();
+        let mut seen = HashSet::new();
+        for entry in request.entries {
+            if !seen.insert(entry.name) {
+                return Err(format!("duplicate shader entry '{}'", entry.name));
+            }
+            if let Some((_, entries)) = groups
+                .iter_mut()
+                .find(|(caps, _)| *caps == entry.capabilities)
+            {
+                entries.push(entry.name);
+            } else {
+                groups.push((entry.capabilities, vec![entry.name]));
+            }
         }
-        let reflection = cache
-            .compile_source_reflection(module, source, &entries)
-            .map_err(|e| e.to_string())?;
+        if !seen.contains(request.reflect_entry) {
+            if let Some((_, entries)) = groups.iter_mut().find(|(caps, _)| caps.is_empty()) {
+                entries.push(request.reflect_entry);
+            } else {
+                groups.push((&[], vec![request.reflect_entry]));
+            }
+        }
+        let mut entry_reflections = Vec::new();
+        for (caps, entries) in groups {
+            let reflection = cache
+                .compile_source_reflection_with_options(module, source, &entries, caps, &[])
+                .map_err(|error| error.to_string())?;
+            entry_reflections.extend(
+                entries
+                    .into_iter()
+                    .map(|entry| (entry, Arc::clone(&reflection))),
+            );
+        }
+        let reflection = entry_reflections
+            .iter()
+            .find(|(entry, _)| *entry == request.reflect_entry)
+            .map(|(_, reflection)| Arc::clone(reflection))
+            .expect("reflect entry was included");
         let mut compiled = Vec::with_capacity(request.entries.len());
         for entry in request.entries {
             let artifact = cache
@@ -292,6 +335,7 @@ impl PreparedShaders {
             // Assigned by `compile` once the compile succeeds.
             generation: 0,
             reflection,
+            entry_reflections,
             entries: compiled,
         })
     }
@@ -466,6 +510,56 @@ mod tests {
     use super::*;
     use moonfield_app::{App, ExtractSchedule, Render};
 
+    #[test]
+    fn test_prepared_reflections_match_entry_capabilities() {
+        const SOURCE: &str = r#"
+            [shader("compute")] [numthreads(1, 1, 1)]
+            void first(Ptr<uint, Access.ReadWrite> output) { output[0] = 1; }
+            [shader("compute")] [numthreads(1, 1, 1)]
+            void second(Ptr<uint, Access.ReadWrite> output) { output[0] = 2; }
+            [shader("compute")] [numthreads(1, 1, 1)]
+            void heap(Ptr<uint, Access.ReadWrite> output) { output[0] = 3; }
+        "#;
+        let mut assets = Assets::<Shader>::default();
+        let handle = assets.add(Shader::new(SOURCE.into(), "entry_caps.slang".into()));
+        const ENTRIES: &[ShaderEntry] = &[
+            ShaderEntry {
+                name: "first",
+                capabilities: &[],
+            },
+            ShaderEntry {
+                name: "second",
+                capabilities: &[],
+            },
+            ShaderEntry {
+                name: "heap",
+                capabilities: moonfield_rhi::shader_capabilities(),
+            },
+        ];
+        let request = PipelineShader {
+            pipeline: "entry_caps",
+            shader: handle,
+            reflect_entry: "first",
+            entries: ENTRIES,
+        };
+        let mut prepared = PreparedShaders::default();
+        prepared.compile(
+            &request,
+            &ExtractedShader {
+                revision: assets.revision(&handle).unwrap(),
+                shader: assets.get(&handle).unwrap().clone(),
+            },
+        );
+        let shader = prepared.get("entry_caps").expect("prepared shader");
+        let first = shader.reflection_for_entry("first").unwrap();
+        let second = shader.reflection_for_entry("second").unwrap();
+        let heap = shader.reflection_for_entry("heap").unwrap();
+        assert!(std::ptr::eq(first, second));
+        assert!(!std::ptr::eq(first, heap));
+        assert!(first.root_parameters("second").is_ok());
+        assert!(heap.root_parameters("heap").is_ok());
+        assert!(shader.reflection_for_entry("missing").is_err());
+    }
     const TEST_ENTRIES: &[ShaderEntry] = &[ShaderEntry {
         name: "main",
         capabilities: &[],

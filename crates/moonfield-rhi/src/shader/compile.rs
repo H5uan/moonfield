@@ -232,15 +232,42 @@ impl ShaderCache {
         path: &str,
         entry_point: &str,
     ) -> RenderResult<std::sync::Arc<Reflection>> {
+        self.compile_file_reflection_with_options(path, entry_point, &[], &[])
+    }
+
+    /// Reflect a file with the same session options as bytecode compilation.
+    /// Capabilities and macro definitions are part of the cache key.
+    pub fn compile_file_reflection_with_options(
+        &self,
+        path: &str,
+        entry_point: &str,
+        capabilities: &[&str],
+        defines: &[(&str, &str)],
+    ) -> RenderResult<std::sync::Arc<Reflection>> {
         let key = ShaderCacheKey {
             module_name: path.to_string(),
             source: String::new(),
             entry_point: entry_point.to_string(),
-            capabilities: Vec::new(),
-            defines: Vec::new(),
+            capabilities: capabilities.iter().map(|name| name.to_string()).collect(),
+            defines: defines
+                .iter()
+                .map(|(name, value)| (name.to_string(), value.to_string()))
+                .collect(),
         };
         self.get_or_reflect(key, |compiler, key| {
-            compiler.compile_file_to_reflection(&key.module_name, &key.entry_point, self.target)
+            let caps: Vec<&str> = key.capabilities.iter().map(String::as_str).collect();
+            let defs: Vec<(&str, &str)> = key
+                .defines
+                .iter()
+                .map(|(name, value)| (name.as_str(), value.as_str()))
+                .collect();
+            compiler.compile_file_to_reflection_with_options(
+                &key.module_name,
+                &key.entry_point,
+                self.target,
+                &caps,
+                &defs,
+            )
         })
     }
 
@@ -260,19 +287,43 @@ impl ShaderCache {
         source: &str,
         entry_points: &[&str],
     ) -> RenderResult<std::sync::Arc<Reflection>> {
+        self.compile_source_reflection_with_options(module_name, source, entry_points, &[], &[])
+    }
+
+    /// Reflect the listed entries under one capability and macro configuration.
+    /// The cache distinguishes both options as well as source and entry names.
+    pub fn compile_source_reflection_with_options(
+        &self,
+        module_name: &str,
+        source: &str,
+        entry_points: &[&str],
+        capabilities: &[&str],
+        defines: &[(&str, &str)],
+    ) -> RenderResult<std::sync::Arc<Reflection>> {
         let key = ShaderCacheKey {
             module_name: module_name.to_string(),
             source: source.to_string(),
             entry_point: entry_points.join(","),
-            capabilities: Vec::new(),
-            defines: Vec::new(),
+            capabilities: capabilities.iter().map(|name| name.to_string()).collect(),
+            defines: defines
+                .iter()
+                .map(|(name, value)| (name.to_string(), value.to_string()))
+                .collect(),
         };
         self.get_or_reflect(key, |compiler, key| {
-            compiler.compile_source_to_reflection(
+            let caps: Vec<&str> = key.capabilities.iter().map(String::as_str).collect();
+            let defs: Vec<(&str, &str)> = key
+                .defines
+                .iter()
+                .map(|(name, value)| (name.as_str(), value.as_str()))
+                .collect();
+            compiler.compile_source_to_reflection_with_options(
                 &key.module_name,
                 &key.source,
                 &key.entry_point.split(',').collect::<Vec<_>>(),
                 self.target,
+                &caps,
+                &defs,
             )
         })
     }
@@ -517,34 +568,6 @@ impl Compiler {
         })
     }
 
-    /// A Slang session for reflection-only compiles. Reflection layouts are
-    /// target- and profile-dependent, so this stays separate from the
-    /// bytecode session (SPIR-V reflection compiles use `spirv_1_4`).
-    fn create_reflection_session(
-        global_session: &shader_slang::GlobalSession,
-        target: ShaderTarget,
-    ) -> RenderResult<shader_slang::Session> {
-        let options = shader_slang::CompilerOptions::default()
-            .optimization(shader_slang::OptimizationLevel::High)
-            .matrix_layout_row(true);
-
-        let mut target_desc = shader_slang::TargetDesc::default()
-            .format(target.slang_target())
-            .options(&options);
-        if target == ShaderTarget::Spirv {
-            target_desc = target_desc.profile(global_session.find_profile("spirv_1_4"));
-        }
-        let targets = [target_desc];
-
-        let session_desc = shader_slang::SessionDesc::default()
-            .targets(&targets)
-            .options(&options);
-
-        global_session
-            .create_session(&session_desc)
-            .ok_or_else(|| RenderError::Backend("failed to create Slang session".to_string()))
-    }
-
     /// Compile a Slang file and return a reflection object that computes struct
     /// layouts on demand. Keeps the whole compile pipeline (session, program,
     /// linked component) alive so every reflection pointer stays valid for the
@@ -555,27 +578,20 @@ impl Compiler {
         entry_point: &str,
         target: ShaderTarget,
     ) -> RenderResult<Reflection> {
-        let global_session = self
-            .global_session
-            .lock()
-            .unwrap_or_else(|e| e.into_inner());
-        let session = Self::create_reflection_session(&global_session, target)?;
+        self.compile_file_to_reflection_with_options(path, entry_point, target, &[], &[])
+    }
 
-        let module = session.load_module(path).map_err(map_slang_error)?;
-
-        let entry = module
-            .find_entry_point_by_name(entry_point)
-            .ok_or_else(|| {
-                RenderError::Backend(format!("entry point '{}' not found", entry_point))
-            })?;
-
-        let program = session
-            .create_composite_component_type(&[module.into(), entry.into()])
-            .map_err(map_slang_error)?;
-
-        let linked = program.link().map_err(map_slang_error)?;
-
-        Reflection::new(std::sync::Arc::clone(&self.global_session), session, linked)
+    /// Reflect a file using the target profile, capabilities, and macros used
+    /// by [`compile_file_with_options`](Self::compile_file_with_options).
+    pub fn compile_file_to_reflection_with_options(
+        &self,
+        path: &str,
+        entry_point: &str,
+        target: ShaderTarget,
+        capabilities: &[&str],
+        defines: &[(&str, &str)],
+    ) -> RenderResult<Reflection> {
+        self.reflect_with_options(path, None, &[entry_point], target, capabilities, defines)
     }
 
     /// Compile in-memory source and return a reflection object, like
@@ -595,15 +611,57 @@ impl Compiler {
         entry_points: &[&str],
         target: ShaderTarget,
     ) -> RenderResult<Reflection> {
+        self.compile_source_to_reflection_with_options(
+            module_name,
+            source,
+            entry_points,
+            target,
+            &[],
+            &[],
+        )
+    }
+
+    /// Reflect source using the same session configuration as
+    /// [`compile_source_with_options`](Self::compile_source_with_options).
+    pub fn compile_source_to_reflection_with_options(
+        &self,
+        module_name: &str,
+        source: &str,
+        entry_points: &[&str],
+        target: ShaderTarget,
+        capabilities: &[&str],
+        defines: &[(&str, &str)],
+    ) -> RenderResult<Reflection> {
+        self.reflect_with_options(
+            module_name,
+            Some(source),
+            entry_points,
+            target,
+            capabilities,
+            defines,
+        )
+    }
+
+    fn reflect_with_options(
+        &self,
+        module_name: &str,
+        source: Option<&str>,
+        entry_points: &[&str],
+        target: ShaderTarget,
+        capabilities: &[&str],
+        defines: &[(&str, &str)],
+    ) -> RenderResult<Reflection> {
         let global_session = self
             .global_session
             .lock()
             .unwrap_or_else(|e| e.into_inner());
-        let session = Self::create_reflection_session(&global_session, target)?;
-
-        let module = session
-            .load_module_from_source_string(module_name, module_name, source)
-            .map_err(map_slang_error)?;
+        let session = Self::create_session(&global_session, target, capabilities, defines)?;
+        let module = match source {
+            Some(source) => session
+                .load_module_from_source_string(module_name, module_name, source)
+                .map_err(map_slang_error)?,
+            None => session.load_module(module_name).map_err(map_slang_error)?,
+        };
 
         let entries = entry_points
             .iter()
@@ -629,6 +687,134 @@ impl Compiler {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn test_reflection_cache_tracks_compile_options_and_macro_layouts() {
+        const SOURCE: &str = r#"
+            struct Root {
+                uint value;
+            #if WIDE
+                uint extra;
+            #endif
+            };
+            [shader("compute")]
+            [numthreads(1, 1, 1)]
+            void main(uniform Root root, Ptr<uint, Access.ReadWrite> output) {
+                output[0] = root.value;
+            }
+        "#;
+        let cache = ShaderCache::new(ShaderTarget::Spirv).expect("cache");
+        for wide in ["0", "1"] {
+            let defines = [("WIDE", wide)];
+            let compiled = cache
+                .compile_source("macro_layout", SOURCE, "main", &[], &defines)
+                .expect("bytecode");
+            assert_eq!(
+                u32::from_le_bytes(compiled.code[4..8].try_into().unwrap()),
+                0x00010500
+            );
+            let reflection = cache
+                .compile_source_reflection_with_options(
+                    "macro_layout",
+                    SOURCE,
+                    &["main"],
+                    &[],
+                    &defines,
+                )
+                .expect("reflection");
+            let repeated = cache
+                .compile_source_reflection_with_options(
+                    "macro_layout",
+                    SOURCE,
+                    &["main"],
+                    &[],
+                    &defines,
+                )
+                .expect("cached reflection");
+            assert!(std::sync::Arc::ptr_eq(&reflection, &repeated));
+            let layout = reflection
+                .entry_parameter_layout("main", "root")
+                .expect("root layout");
+            assert_eq!(layout.field_offset("extra").is_ok(), wide == "1");
+        }
+        let narrow = cache
+            .compile_source_reflection_with_options(
+                "macro_layout",
+                SOURCE,
+                &["main"],
+                &[],
+                &[("WIDE", "0")],
+            )
+            .unwrap();
+        let wide = cache
+            .compile_source_reflection_with_options(
+                "macro_layout",
+                SOURCE,
+                &["main"],
+                &[],
+                &[("WIDE", "1")],
+            )
+            .unwrap();
+        assert!(!std::sync::Arc::ptr_eq(&narrow, &wide));
+        let capable = cache
+            .compile_source_reflection_with_options(
+                "macro_layout",
+                SOURCE,
+                &["main"],
+                crate::shader_capabilities(),
+                &[("WIDE", "0")],
+            )
+            .unwrap();
+        assert!(!std::sync::Arc::ptr_eq(&narrow, &capable));
+    }
+
+    #[test]
+    fn test_file_reflection_receives_the_same_macros_as_bytecode() {
+        let path = std::env::temp_dir().join(format!(
+            "moonfield-file-options-{}.slang",
+            std::process::id()
+        ));
+        std::fs::write(
+            &path,
+            r#"
+            #if ENABLE_ENTRY
+            [shader("compute")] [numthreads(1, 1, 1)]
+            void main(Ptr<uint, Access.ReadWrite> output) { output[0] = 1; }
+            #endif
+        "#,
+        )
+        .unwrap();
+        let cache = ShaderCache::new(ShaderTarget::Spirv).unwrap();
+        let path_string = path.to_str().unwrap();
+        let defines = [("ENABLE_ENTRY", "1")];
+        let compiled = cache
+            .compile_file(path_string, "main", crate::shader_capabilities(), &defines)
+            .unwrap();
+        assert_eq!(compiled.stage, shader_slang::Stage::Compute);
+        let reflection = cache
+            .compile_file_reflection_with_options(
+                path_string,
+                "main",
+                crate::shader_capabilities(),
+                &defines,
+            )
+            .unwrap();
+        assert_eq!(
+            reflection.root_parameters("main").unwrap()[0].name,
+            "output"
+        );
+        let repeated = cache
+            .compile_file_reflection_with_options(
+                path_string,
+                "main",
+                crate::shader_capabilities(),
+                &defines,
+            )
+            .unwrap();
+        assert!(std::sync::Arc::ptr_eq(&reflection, &repeated));
+        assert!(cache.compile_file_reflection(path_string, "main").is_err());
+        std::fs::remove_file(path).unwrap();
+    }
 
     const KERNEL: &str = r#"
         [shader("compute")]

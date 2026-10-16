@@ -59,7 +59,7 @@ impl PhaseItem for Opaque3d {
 /// `pulling_vertex_shape`.
 #[repr(C)]
 #[derive(Clone, Copy, bytemuck::Pod, bytemuck::Zeroable)]
-struct DrawData {
+pub(crate) struct DrawData {
     model: [f32; 16],
     color: [f32; 4],
     positions: u64,
@@ -78,6 +78,20 @@ pub(crate) struct ViewUniforms {
     pub(crate) view_pos: [f32; 3],
     pub(crate) _pad0: f32,
 }
+
+crate::gpu_util::impl_shader_abi!(DrawData {
+    model,
+    color,
+    positions,
+    indices,
+    index_count,
+    _pad0
+});
+crate::gpu_util::impl_shader_abi!(ViewUniforms {
+    view_proj,
+    view_pos,
+    _pad0
+});
 
 /// The opaque phase's registered draw command. A marker type with no state.
 pub struct DrawMesh;

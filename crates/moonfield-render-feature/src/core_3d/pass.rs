@@ -33,7 +33,8 @@ use moonfield_rhi::{
 use moonfield_shader::Shader;
 use std::collections::HashMap;
 
-use crate::render_phase::{Opaque3d, ViewUniforms};
+use crate::gpu_util::ShaderAbi;
+use crate::render_phase::{DrawData, Opaque3d, ViewUniforms};
 use crate::shader::{
     PipelineShader, PipelineShaders, PreparedShader, PreparedShaders, ShaderEntry,
 };
@@ -87,6 +88,40 @@ pub struct Core3dPipeline {
     shader_generation: u64,
 }
 
+fn validate_mesh_abi(prepared: &PreparedShader) -> Result<(RootParamPlace, RootParamPlace)> {
+    let vertex = prepared.reflection_for_entry("vs_main")?;
+    let binder = RootBinder::new(vertex, "vs_main")?;
+    binder.validate_parameters(&[
+        ("root", moonfield_rhi::RootParamKind::Pointer),
+        ("view", moonfield_rhi::RootParamKind::Pointer),
+    ])?;
+    let root = binder.pointer_param("root")?;
+    let view = binder.pointer_param("view")?;
+    vertex
+        .entry_parameter_pointee_layout("vs_main", "view")?
+        .validate_rust_layout::<ViewUniforms>(ViewUniforms::FIELDS)?;
+    let fragment = prepared.reflection_for_entry("fs_main")?;
+    let fragment_binder = RootBinder::new(fragment, "fs_main")?;
+    fragment_binder.validate_parameters(&[("root", moonfield_rhi::RootParamKind::Pointer)])?;
+    if fragment_binder.pointer_param("root")? != root {
+        return Err(moonfield_rhi::Error::Backend(
+            "mesh root placement differs between vertex and fragment entries".into(),
+        ));
+    }
+    for (reflection, entry) in [(vertex, "vs_main"), (fragment, "fs_main")] {
+        reflection
+            .entry_parameter_pointee_layout(entry, "root")?
+            .validate_rust_layout::<DrawData>(DrawData::FIELDS)?;
+        reflection
+            .entry_field_pointee_layout(entry, "root", "positions")?
+            .validate_rust_layout::<[f32; 3]>(&[])?;
+        reflection
+            .entry_field_pointee_layout(entry, "root", "indices")?
+            .validate_rust_layout::<u32>(&[])?;
+    }
+    Ok((root, view))
+}
+
 impl Core3dPipeline {
     /// Build the pipeline variant for `color_format` from a prepared shader
     /// (compiled from the extracted asset by `prepare_shaders`).
@@ -97,9 +132,7 @@ impl Core3dPipeline {
         color_format: Format,
     ) -> Result<Self> {
         let device = render_device.device();
-        let binder = RootBinder::new(prepared.reflection(), "vs_main")?;
-        let root = binder.pointer_param("root")?;
-        let view = binder.pointer_param("view")?;
+        let (root, view) = validate_mesh_abi(prepared)?;
         let entry = |name: &str| {
             prepared.entry(name).ok_or_else(|| {
                 moonfield_rhi::Error::Backend(format!(
@@ -400,6 +433,31 @@ mod tests {
         AttachmentLayout, ClearValue, CommandBufferUsage, LoadOp, OffscreenTarget,
         RenderAttachment, StoreOp,
     };
+
+    #[test]
+    fn test_mesh_runtime_abi_accepts_defaults_and_rejects_reordered_records() {
+        let source = core_3d_source();
+        let reordered = source.replace(
+            "column_major float4x4 model;\n    float4 color;",
+            "float4 color;\n    column_major float4x4 model;",
+        );
+        assert_ne!(source, reordered);
+        for (source, valid) in [(source, true), (reordered, false)] {
+            let mut assets = Assets::<Shader>::default();
+            let handle = assets.add(Shader::new(source, "core_3d.slang".into()));
+            let request = core_3d_shader(handle);
+            let mut prepared = PreparedShaders::default();
+            prepared.compile(
+                &request,
+                &crate::shader::ExtractedShader {
+                    revision: assets.revision(&handle).unwrap(),
+                    shader: assets.get(&handle).unwrap().clone(),
+                },
+            );
+            let shader = prepared.get(CORE_3D_SHADER).expect("prepared mesh shader");
+            assert_eq!(validate_mesh_abi(shader).is_ok(), valid);
+        }
+    }
 
     const TEST_QUAD_VERTICES: &[[f32; 3]] = &[
         [-0.5, -0.5, 0.0],

@@ -86,6 +86,14 @@ impl Adam {
             cache.compile_source_reflection(shader.path(), shader.source(), &["adam_step"])?;
 
         let binder = RootBinder::new(&reflection, "adam_step")?;
+        binder.validate_parameters(&[
+            ("params", moonfield_rhi::RootParamKind::Pointer),
+            ("grads", moonfield_rhi::RootParamKind::Pointer),
+            ("moment1", moonfield_rhi::RootParamKind::Pointer),
+            ("moment2", moonfield_rhi::RootParamKind::Pointer),
+            ("config", moonfield_rhi::RootParamKind::Pointer),
+        ])?;
+        validate_adam_abi(&reflection)?;
         let places = AdamPlaces {
             params: binder.pointer_param("params")?,
             grads: binder.pointer_param("grads")?,
@@ -185,6 +193,25 @@ impl Adam {
     }
 }
 
+fn validate_adam_abi(reflection: &moonfield_rhi::Reflection) -> Result<()> {
+    reflection
+        .entry_parameter_pointee_layout("adam_step", "config")?
+        .validate_rust_layout::<AdamConfig>(&[
+            ("step", std::mem::offset_of!(AdamConfig, step)),
+            ("count", std::mem::offset_of!(AdamConfig, count)),
+            ("lr", std::mem::offset_of!(AdamConfig, lr)),
+            ("beta1", std::mem::offset_of!(AdamConfig, beta1)),
+            ("beta2", std::mem::offset_of!(AdamConfig, beta2)),
+            ("epsilon", std::mem::offset_of!(AdamConfig, epsilon)),
+        ])?;
+    for parameter in ["params", "grads", "moment1", "moment2"] {
+        reflection
+            .entry_parameter_pointee_layout("adam_step", parameter)?
+            .validate_rust_layout::<f32>(&[])?;
+    }
+    Ok(())
+}
+
 /// Push one pointer root parameter at its reflected place.
 fn push_ptr(cmd: &CommandBuffer, place: &RootParamPlace, alloc: &GpuAllocation) {
     let bytes = place
@@ -196,6 +223,29 @@ fn push_ptr(cmd: &CommandBuffer, place: &RootParamPlace, alloc: &GpuAllocation) 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn test_adam_runtime_abi_accepts_defaults_and_rejects_reordered_config() {
+        let path = moonfield_asset::assets_dir().join("shaders/ml/adam.slang");
+        let source = std::fs::read_to_string(path).unwrap();
+        let reordered = source.replace(
+            "uint32_t step;\n    uint32_t count;",
+            "uint32_t count;\n    uint32_t step;",
+        );
+        assert_ne!(source, reordered);
+        let compiler = moonfield_rhi::Compiler::new().unwrap();
+        for (source, valid) in [(source, true), (reordered, false)] {
+            let reflection = compiler
+                .compile_source_to_reflection(
+                    "adam_abi",
+                    &source,
+                    &["adam_step"],
+                    moonfield_rhi::ShaderTarget::Spirv,
+                )
+                .unwrap();
+            assert_eq!(validate_adam_abi(&reflection).is_ok(), valid);
+        }
+    }
 
     /// Guards the `#[repr(C)]` mirror against field-type changes: the Slang
     /// side expects six 4-byte scalars.

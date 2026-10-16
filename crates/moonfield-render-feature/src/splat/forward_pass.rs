@@ -42,7 +42,7 @@ use moonfield_render_core::{
 };
 use moonfield_rhi::{
     ComputePipeline, Device, Format, GpuAllocation, GpuPtr, MemoryResidency, RenderDevice, Result,
-    RootBinder, RootParamPlace, ShaderModule, Texture,
+    RootParamPlace, ShaderModule, Texture,
 };
 use moonfield_shader::Shader;
 
@@ -55,7 +55,7 @@ use crate::shader::{
 use crate::splat::cloud::SplatCloudHandle;
 use crate::splat::forward::{
     BlendParams, ClearParams, ClearTileRangesParams, CompositeParams, DuplicateKeysParams,
-    GatherParams, ProjectCullParams, SplatRecord, SplatView, TileRangesParams,
+    GatherParams, ProjectCullParams, SplatRecord, SplatView, TileRangesParams, validate_entry_abi,
 };
 use crate::splat::prepare::{PreparedSplats, extract_splat_assets, prepare_splats};
 use crate::splat::sort_pass::SPLAT_SORT_SHADER;
@@ -153,8 +153,7 @@ impl ForwardEntry {
     /// single `uniform Params` struct; reflect its one root placement and
     /// push it as one POD blob per dispatch.
     fn from_prepared(device: &Device, prepared: &PreparedShader, entry: &str) -> Result<Self> {
-        let binder = RootBinder::new(prepared.reflection(), entry)?;
-        let place = binder.uniform_param("params")?;
+        let place = validate_entry_abi(prepared.reflection_for_entry(entry)?, entry)?;
         let artifact = prepared.entry(entry).ok_or_else(|| {
             moonfield_rhi::Error::Backend(format!("prepared shader is missing '{entry}'"))
         })?;
@@ -476,8 +475,17 @@ pub fn prepare_splat_forward(world: &mut World) {
                     || pipelines.shader_generation != shader.generation()
             });
         if stale {
-            SplatForwardPipelines::from_prepared(render_device.device(), request.shader, shader)
-                .ok()
+            match SplatForwardPipelines::from_prepared(
+                render_device.device(),
+                request.shader,
+                shader,
+            ) {
+                Ok(pipelines) => Some(pipelines),
+                Err(error) => {
+                    error!("failed to build splat forward pipelines: {error}");
+                    None
+                }
+            }
         } else {
             None
         }
@@ -518,13 +526,17 @@ fn prepare_splat_composite(world: &mut World, render_device: &RenderDevice) {
                     || pipeline.shader_generation != shader.generation()
             });
         if stale {
-            ForwardEntry::from_prepared(render_device.device(), shader, "composite")
-                .map(|entry| SplatCompositePipeline {
+            match ForwardEntry::from_prepared(render_device.device(), shader, "composite") {
+                Ok(entry) => Some(SplatCompositePipeline {
                     entry,
                     shader: request.shader,
                     shader_generation: shader.generation(),
-                })
-                .ok()
+                }),
+                Err(error) => {
+                    error!("failed to build splat composite pipeline: {error}");
+                    None
+                }
+            }
         } else {
             None
         }
@@ -576,7 +588,13 @@ fn record<T: bytemuck::Pod>(
     groups: (u32, u32, u32),
 ) {
     compute.bind_pipeline(&entry.pipeline);
-    compute.push_data(entry.place.offset as u32, bytemuck::bytes_of(params));
+    compute.push_data(
+        entry.place.offset as u32,
+        entry
+            .place
+            .uniform_bytes(bytemuck::bytes_of(params))
+            .expect("validated splat ABI"),
+    );
     compute.dispatch(groups.0, groups.1, groups.2);
 }
 
@@ -729,13 +747,13 @@ pub fn splat_composite(world: &mut World) {
     let Some(mut compute) = ctx.compute() else {
         return;
     };
-    compute.bind_pipeline(&pipeline.entry.pipeline);
     let params = CompositeParams::new(splat_image, target_image, width, height);
-    compute.push_data(
-        pipeline.entry.place.offset as u32,
-        bytemuck::bytes_of(&params),
+    record(
+        &mut compute,
+        &pipeline.entry,
+        &params,
+        (width.div_ceil(TILE_SIZE), height.div_ceil(TILE_SIZE), 1),
     );
-    compute.dispatch(width.div_ceil(TILE_SIZE), height.div_ceil(TILE_SIZE), 1);
 }
 
 /// Record the full chain for one view. Every link's read-after-write hazard

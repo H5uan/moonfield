@@ -63,6 +63,81 @@ impl Reflection {
         query(state.linked.layout(0).map_err(map_slang_error)?)
     }
 
+    fn with_parameter_layout<T>(
+        &self,
+        entry_name: &str,
+        parameter: &str,
+        query: impl FnOnce(&shader_slang::reflection::TypeLayout) -> RenderResult<T>,
+    ) -> RenderResult<T> {
+        self.with_shader(|shader| {
+            let entry = shader
+                .find_entry_point_by_name(entry_name)
+                .map_err(map_slang_error)?
+                .ok_or_else(|| {
+                    RenderError::Backend(format!("entry point '{entry_name}' not found"))
+                })?;
+            let layout = entry
+                .parameters()
+                .find(|param| param.name() == Some(parameter))
+                .and_then(|param| param.type_layout())
+                .ok_or_else(|| {
+                    RenderError::Backend(format!(
+                        "parameter '{entry_name}.{parameter}' has no layout"
+                    ))
+                })?;
+            query(layout)
+        })
+    }
+
+    /// The storage layout of a named entry parameter, including inline padding.
+    pub fn entry_parameter_layout(
+        &self,
+        entry_name: &str,
+        parameter: &str,
+    ) -> RenderResult<Layout<'_>> {
+        self.with_parameter_layout(entry_name, parameter, |layout| {
+            Ok(Layout::from_slang(layout))
+        })
+    }
+
+    /// The natural layout dereferenced by a named `Ptr<T>` entry parameter.
+    pub fn entry_parameter_pointee_layout(
+        &self,
+        entry_name: &str,
+        parameter: &str,
+    ) -> RenderResult<Layout<'_>> {
+        self.with_parameter_layout(entry_name, parameter, |layout| {
+            Ok(Layout::from_slang(pointer_pointee(layout, parameter)?))
+        })
+    }
+
+    /// The pointee layout of a pointer field inside an entry parameter or its
+    /// pointee struct. Missing fields and non-pointer fields return errors.
+    pub fn entry_field_pointee_layout(
+        &self,
+        entry_name: &str,
+        parameter: &str,
+        field: &str,
+    ) -> RenderResult<Layout<'_>> {
+        self.with_parameter_layout(entry_name, parameter, |layout| {
+            let layout = if layout.kind() == shader_slang::TypeKind::Pointer {
+                pointer_pointee(layout, parameter)?
+            } else {
+                layout
+            };
+            let field_layout = layout
+                .fields()
+                .find(|member| member.name() == Some(field))
+                .and_then(|member| member.type_layout())
+                .ok_or_else(|| {
+                    RenderError::Backend(format!(
+                        "field '{entry_name}.{parameter}.{field}' has no layout"
+                    ))
+                })?;
+            Ok(Layout::from_slang(pointer_pointee(field_layout, field)?))
+        })
+    }
+
     /// Generate a `#[repr(C)]` Rust struct skeleton for a reflected Slang
     /// struct, with `bytemuck` derives and per-field offset comments.
     ///
@@ -221,6 +296,18 @@ impl Reflection {
             Ok(Layout::from_slang(pointee))
         })
     }
+}
+
+fn pointer_pointee<'a>(
+    layout: &'a shader_slang::reflection::TypeLayout,
+    name: &str,
+) -> RenderResult<&'a shader_slang::reflection::TypeLayout> {
+    if layout.kind() != shader_slang::TypeKind::Pointer {
+        return Err(RenderError::Backend(format!("'{name}' is not a pointer")));
+    }
+    layout
+        .element_type_layout()
+        .ok_or_else(|| RenderError::Backend(format!("pointer '{name}' has no pointee layout")))
 }
 
 /// A field's `[Attribute(...)]` annotation: name plus typed arguments.
@@ -415,6 +502,44 @@ impl<'a> Layout<'a> {
         self.size
     }
 
+    /// Check Rust storage size and the complete shader field list against this
+    /// layout. Offsets come from `offset_of!`; Rust-only padding is omitted.
+    /// This checks storage layout, not scalar interpretation or matrix order.
+    pub fn validate_rust_layout<T>(&self, fields: &[(&str, usize)]) -> RenderResult<()> {
+        let name = std::any::type_name::<T>();
+        let size = std::mem::size_of::<T>();
+        if size != self.size {
+            return Err(RenderError::Backend(format!(
+                "layout mismatch for '{name}': Rust size {size}, shader size {}",
+                self.size
+            )));
+        }
+        if fields.len() != self.fields.len() {
+            return Err(RenderError::Backend(format!(
+                "field count mismatch for '{name}': expected {}, shader has {}",
+                fields.len(),
+                self.fields.len()
+            )));
+        }
+        for (field, shader_offset) in &self.fields {
+            let offset = fields
+                .iter()
+                .find(|(name, _)| *name == field)
+                .map(|(_, offset)| *offset)
+                .ok_or_else(|| {
+                    RenderError::Backend(format!(
+                        "layout mismatch for '{name}': shader field '{field}' has no Rust offset"
+                    ))
+                })?;
+            if offset != *shader_offset {
+                return Err(RenderError::Backend(format!(
+                    "layout mismatch for '{name}.{field}': Rust offset {offset}, shader offset {shader_offset}"
+                )));
+            }
+        }
+        Ok(())
+    }
+
     /// The byte offset of a field by name, across the field's own categories.
     pub fn field_offset(&self, name: &str) -> RenderResult<usize> {
         self.fields
@@ -431,6 +556,102 @@ impl<'a> Layout<'a> {
 mod tests {
     use super::super::compile::Compiler;
     use super::*;
+
+    #[test]
+    fn test_rust_layout_validation_rejects_size_offsets_and_missing_fields() {
+        #[repr(C)]
+        struct Host {
+            first: u32,
+            second: u32,
+        }
+        let layout = Layout {
+            size: 8,
+            fields: vec![("first".into(), 0), ("second".into(), 4)],
+            _reflection: std::marker::PhantomData,
+        };
+        assert!(
+            layout
+                .validate_rust_layout::<Host>(&[("first", 0), ("second", 4)])
+                .is_ok()
+        );
+        assert!(layout.validate_rust_layout::<u32>(&[("first", 0)]).is_err());
+        assert!(
+            layout
+                .validate_rust_layout::<Host>(&[("first", 4), ("second", 0)])
+                .is_err()
+        );
+        assert!(
+            layout
+                .validate_rust_layout::<Host>(&[("missing", 0)])
+                .is_err()
+        );
+        assert!(
+            layout
+                .validate_rust_layout::<Host>(&[("first", 0), ("first", 0)])
+                .is_err()
+        );
+    }
+
+    #[test]
+    fn test_entry_layouts_distinguish_inline_and_pointer_storage() {
+        const SOURCE: &str = r#"
+            struct Record { float head; float3 tail; };
+            struct Root { Ptr<Record> record; };
+            [shader("compute")]
+            [numthreads(1, 1, 1)]
+            void main(uniform Root root, Ptr<Record> record,
+                      Ptr<float, Access.ReadWrite> output) {
+                output[0] = root.record[0].tail.x + record[0].head;
+            }
+        "#;
+        let compiler = Compiler::new().unwrap();
+        let reflection = compiler
+            .compile_source_to_reflection(
+                "entry_layouts",
+                SOURCE,
+                &["main"],
+                crate::ShaderTarget::Spirv,
+            )
+            .unwrap();
+        let direct = reflection
+            .entry_parameter_pointee_layout("main", "record")
+            .unwrap();
+        let nested = reflection
+            .entry_field_pointee_layout("main", "root", "record")
+            .unwrap();
+        assert_eq!(direct.size(), 16);
+        assert_eq!(direct.field_offset("tail").unwrap(), 4);
+        assert_eq!(nested.size(), direct.size());
+        assert_eq!(nested.field_offset("tail").unwrap(), 4);
+        assert_eq!(
+            reflection
+                .struct_layout("Record")
+                .unwrap()
+                .field_offset("tail")
+                .unwrap(),
+            16
+        );
+        assert!(
+            reflection
+                .entry_parameter_layout("missing", "root")
+                .is_err()
+        );
+        assert!(
+            reflection
+                .entry_parameter_layout("main", "missing")
+                .is_err()
+        );
+        assert!(
+            reflection
+                .entry_parameter_pointee_layout("main", "root")
+                .is_err()
+        );
+        assert!(
+            reflection
+                .entry_field_pointee_layout("main", "root", "missing")
+                .is_err()
+        );
+    }
 
     fn assert_generated_layout(reflection: &Reflection, name: &str, fields: &[&str]) {
         use std::sync::atomic::{AtomicU64, Ordering};

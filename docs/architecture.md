@@ -505,14 +505,22 @@ the requested shaders (revision-matched, into `ExtractedShaders`) and the
 requests into the render world; `prepare_shaders` (`PrepareAssets`) compiles
 each request whose handle, asset revision, or request fingerprint changed, from the extracted source
 through the render-world `PreparedShaders` resource (which owns the shared
-`ShaderCache`). One linked program covers every declared entry point, so a
-single prepared reflection answers per-entry root-binding queries — the
-splat sort pass binds its three compute entries from it. A failed compile is
+`ShaderCache`). Entries with identical capabilities share one linked reflection
+program; `PreparedShader::reflection_for_entry` selects the option-matched
+program for root binding. The splat sort pass's three compute entries share
+one group. An extra `reflect_entry` outside the compiled entries uses empty
+capabilities. A failed compile is
 recorded for that request and revision — broken
 source is not retried every frame — and the pass keeps running the pipeline
 it already built. Passes (re)build their pipeline when their prepared
 shader's successful artifact generation advances, and skip with a one-shot log while it isn't
 ready.
+
+Bytecode and reflection use the same session builder for target profile,
+matrix layout, optimization, capabilities, and macro definitions. Reflection
+cache keys include capabilities and definitions; the convenience reflection
+methods select empty options. Prepared shader entries use their declared
+capabilities and empty macro definitions for both artifacts.
 
 The compiler's `Arc<Mutex<GlobalSession>>` serializes Slang compilation,
 reflection queries, and reflected-program destruction across both cache
@@ -522,6 +530,17 @@ program; `Layout` contains copied sizes and field offsets, not Slang pointers.
 padding. `Reflection::struct_rust_source` emits explicit inter-field and tail
 padding with the reflected alignment; matrix arrays include their storage
 padding and follow the shader's matrix layout mode.
+
+Pipeline builders check the root names and delivery kinds they write, Rust
+storage sizes, and the complete shader field lists and offsets. Inline mirrors
+use entry-parameter layouts; buffer records use the actual pointer-pointee
+layouts, not default type layouts. Mesh, egui, splat, radix sort, and Adam
+validate their host records before accepting a pipeline. Mesh and egui also
+require shared roots to have the same placement across graphics stages.
+Uniform recording through `RootParamPlace::uniform_bytes` checks complete
+storage lengths without allocation; egui's validated root is split into its
+static prefix and per-draw tail at the reflected base offset. These checks
+cover storage layout, not same-size scalar substitutions or matrix semantics.
 
 ## Scenes and templates
 

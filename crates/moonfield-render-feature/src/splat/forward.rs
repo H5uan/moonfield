@@ -9,6 +9,8 @@
 //! natural layout rules make `#[repr(C)]` exact; the in-module layout test
 //! pins every size and offset against Slang reflection.
 
+use crate::gpu_util::{ShaderAbi, impl_shader_abi, uniform_abi};
+
 /// The `Gaussian3D` AoS record: mirrors `Gaussian3D` in `gs/types.slang`
 /// field-for-field (log-space scales, logit opacity, (w, x, y, z) rotation).
 /// The record crosses as a `Ptr` pointee, whose natural layout packs
@@ -370,11 +372,202 @@ impl CompositeParams {
     }
 }
 
+impl_shader_abi!(Gaussian3D {
+    mean,
+    log_scale,
+    rotation,
+    logit_opacity,
+    sh_dc
+});
+impl_shader_abi!(SplatView {
+    w,
+    cam_pos,
+    fx,
+    fy,
+    pp
+});
+impl_shader_abi!(SplatRecord {
+    screen,
+    conic,
+    depth,
+    color,
+    alpha,
+    tile_min,
+    tile_max
+});
+impl_shader_abi!(ClearParams {
+    tile_keys,
+    counters,
+    capacity
+});
+impl_shader_abi!(ProjectCullParams {
+    gaussians,
+    records,
+    view,
+    count,
+    tiles_x,
+    tiles_y
+});
+impl_shader_abi!(DuplicateKeysParams {
+    records,
+    counters,
+    tile_keys,
+    depth_keys,
+    values,
+    count,
+    tiles_x,
+    capacity,
+    base
+});
+impl_shader_abi!(GatherParams {
+    indices,
+    tile_keys,
+    ids,
+    tile_keys_out,
+    ids_out,
+    count
+});
+impl_shader_abi!(ClearTileRangesParams { ranges, tile_count });
+impl_shader_abi!(TileRangesParams {
+    tile_keys,
+    ranges,
+    entry_count
+});
+impl_shader_abi!(BlendParams {
+    records,
+    values,
+    ranges,
+    transmittance,
+    image,
+    width,
+    height,
+    tiles_x
+});
+impl_shader_abi!(CompositeParams {
+    splat_image,
+    target_image,
+    width,
+    height
+});
+
+pub(crate) fn validate_entry_abi(
+    reflection: &moonfield_rhi::Reflection,
+    entry: &str,
+) -> moonfield_rhi::Result<moonfield_rhi::RootParamPlace> {
+    let place = match entry {
+        "clear" => uniform_abi::<ClearParams>(reflection, entry),
+        "project_cull" => uniform_abi::<ProjectCullParams>(reflection, entry),
+        "duplicate_keys" => uniform_abi::<DuplicateKeysParams>(reflection, entry),
+        "gather" => uniform_abi::<GatherParams>(reflection, entry),
+        "clear_tile_ranges" => uniform_abi::<ClearTileRangesParams>(reflection, entry),
+        "tile_ranges" => uniform_abi::<TileRangesParams>(reflection, entry),
+        "blend" => uniform_abi::<BlendParams>(reflection, entry),
+        "composite" => uniform_abi::<CompositeParams>(reflection, entry),
+        _ => Err(moonfield_rhi::Error::Backend(format!(
+            "unknown splat entry '{entry}'"
+        ))),
+    }?;
+    if entry == "project_cull" {
+        reflection
+            .entry_field_pointee_layout(entry, "params", "gaussians")?
+            .validate_rust_layout::<Gaussian3D>(Gaussian3D::FIELDS)?;
+        reflection
+            .entry_field_pointee_layout(entry, "params", "view")?
+            .validate_rust_layout::<SplatView>(SplatView::FIELDS)?;
+    }
+    if matches!(entry, "project_cull" | "duplicate_keys" | "blend") {
+        reflection
+            .entry_field_pointee_layout(entry, "params", "records")?
+            .validate_rust_layout::<SplatRecord>(SplatRecord::FIELDS)?;
+    }
+    Ok(place)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use moonfield_rhi::{Compiler, RootBinder, ShaderTarget};
     use std::mem::{offset_of, size_of};
+
+    #[test]
+    fn test_runtime_abi_rejects_reordered_root_and_changed_pointee() {
+        const REORDERED: &str = r#"
+            struct ClearParams { uint capacity; Ptr<uint> tile_keys; Ptr<uint> counters; };
+            [shader("compute")] [numthreads(1, 1, 1)]
+            void clear(uniform ClearParams params) {}
+        "#;
+        let compiler = Compiler::new().unwrap();
+        const EXTRA_FIELD: &str = r#"
+            struct ClearParams { Ptr<uint> tile_keys; Ptr<uint> counters; uint capacity; uint extra; };
+            [shader("compute")] [numthreads(1, 1, 1)]
+            void clear(uniform ClearParams params) {}
+        "#;
+        const EXTRA_ROOT: &str = r#"
+            struct ClearParams { Ptr<uint> tile_keys; Ptr<uint> counters; uint capacity; };
+            [shader("compute")] [numthreads(1, 1, 1)]
+            void clear(uniform ClearParams params, Ptr<uint> extra) {}
+        "#;
+        for source in [REORDERED, EXTRA_FIELD, EXTRA_ROOT] {
+            let reflection = compiler
+                .compile_source_to_reflection(
+                    "invalid_clear",
+                    source,
+                    &["clear"],
+                    ShaderTarget::Spirv,
+                )
+                .unwrap();
+            assert!(validate_entry_abi(&reflection, "clear").is_err());
+        }
+        const WRONG_POINTEE: &str = r#"
+            struct WrongGaussian { float4 mean; };
+            struct Params {
+                Ptr<WrongGaussian> gaussians; Ptr<uint> records; Ptr<uint> view;
+                uint count; uint tiles_x; uint tiles_y;
+            };
+            [shader("compute")] [numthreads(1, 1, 1)]
+            void project_cull(uniform Params params) {}
+        "#;
+        let reflection = compiler
+            .compile_source_to_reflection(
+                "wrong_pointee",
+                WRONG_POINTEE,
+                &["project_cull"],
+                ShaderTarget::Spirv,
+            )
+            .unwrap();
+        assert!(validate_entry_abi(&reflection, "project_cull").is_err());
+    }
+
+    #[test]
+    fn test_runtime_abi_accepts_default_forward_and_composite_entries() {
+        let compiler = Compiler::new().unwrap();
+        let (path, source) = gaussian_source();
+        let reflection = compiler
+            .compile_source_to_reflection_with_options(
+                &path,
+                &source,
+                &FORWARD_ENTRIES,
+                ShaderTarget::Spirv,
+                moonfield_rhi::shader_capabilities(),
+                &[],
+            )
+            .unwrap();
+        for entry in FORWARD_ENTRIES {
+            validate_entry_abi(&reflection, entry).unwrap();
+        }
+        let (path, source) = composite_source();
+        let reflection = compiler
+            .compile_source_to_reflection_with_options(
+                &path,
+                &source,
+                &["composite"],
+                ShaderTarget::Spirv,
+                moonfield_rhi::shader_capabilities(),
+                &[],
+            )
+            .unwrap();
+        validate_entry_abi(&reflection, "composite").unwrap();
+    }
 
     /// The repository's `gaussian.slang` — the `gaussian` module's primary
     /// source, with the forward kernels pulled in through its `__include`.
