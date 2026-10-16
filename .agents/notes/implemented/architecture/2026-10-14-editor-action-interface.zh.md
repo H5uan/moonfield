@@ -13,7 +13,7 @@ Status: implemented
 ## Decision
 
 **用户动作和补偿使用不同类型。** `EditorAction` 表达导入、场景加载/保存、
-变换编辑、删除及可逆批次。`EditorUndo` 表达恢复变换、移除新建根实体及按序
+变换及反射字段编辑、删除及可逆批次。`EditorUndo` 表达恢复值、移除新建根实体及按序
 执行的补偿组。`ActionOutcome` 返回受影响实体、状态和可选补偿。
 `perform` 记录成功动作；`record` 合并已完成的 gizmo 手势。
 
@@ -27,9 +27,10 @@ Status: implemented
 不保留上一次实体的代际。失败的撤销或重做将记录保留在原栈，允许重试。
 新的可逆编辑和显式删除清空 redo；保存文件不丢弃 redo。
 
-UI 面板调用 `perform`；键盘快捷键调用 `undo` 和 `redo`。
+离散的 UI 操作调用 `perform`；键盘快捷键调用 `undo` 和 `redo`。
 Gizmo 增量直接写入以提供同帧反馈，手势结束后记录一个补偿。
-Inspector 的反射编辑和渲染帧交接不属于该历史接口。
+[Inspector 字段事务](../bug-fix/2026-10-16-inspector-edit-transactions.zh.md)
+使用同一历史接口。渲染帧交接不属于该接口。
 
 ## Alternatives considered
 
@@ -50,5 +51,5 @@ Inspector 的反射编辑和渲染帧交接不属于该历史接口。
 - 导入和场景加载使用当前实体代际支持重复撤销/重做；失败的历史操作可以重试。
 - 删除和保存作为独立动作执行，不进入可逆批次。
 - 无窗口测试与 UI 使用相同的执行和补偿接口。
-- 删除丢弃任意组件，不可逆。Inspector 修改不创建历史记录；hook 和模板副作用
+- 删除丢弃任意组件，不可逆。Hook 和模板副作用
   没有通用回滚机制。

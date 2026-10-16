@@ -15,8 +15,8 @@ accepting deletion or file writes that have no compensation.
 ## Decision
 
 **User actions and compensation have separate types.** `EditorAction`
-expresses import, scene load/save, transform edits, deletion, and reversible
-batches. `EditorUndo` expresses restoring a transform, removing created
+expresses import, scene load/save, transform and reflected-field edits,
+deletion, and reversible batches. `EditorUndo` expresses restoring values, removing created
 roots, and ordered groups of compensation. `ActionOutcome` returns the
 affected entity, status, and optional compensation. `perform` records a
 successful action; `record` coalesces a completed gizmo gesture.
@@ -36,10 +36,11 @@ the previous entities' generations. Failed undo or redo keeps its entry on
 the original stack for retry. New reversible edits and explicit deletion
 clear redo; saving a file does not discard redo.
 
-UI panels call `perform`; keyboard shortcuts call `undo` and
+Discrete UI operations call `perform`; keyboard shortcuts call `undo` and
 `redo`. Gizmo increments write directly for same-frame feedback and
-record one compensation when the gesture ends. Inspector reflection and the
-render-frame handoff remain outside this history interface.
+record one compensation when the gesture ends.
+[Inspector field transactions](../bug-fix/2026-10-16-inspector-edit-transactions.md)
+use the same history. The render-frame handoff remains outside this interface.
 
 ## Alternatives considered
 
@@ -63,6 +64,5 @@ the user's operation without flooding history with intermediate increments.
   generations, and rejected history operations remain retryable.
 - Deletion and saving execute as standalone actions, not reversible batches.
 - Windowless tests use the same execution and compensation interfaces as UI.
-- Deletion discards arbitrary components and is not reversible. Inspector
-  changes do not create history entries; hook and template side effects have
+- Deletion discards arbitrary components and is not reversible. Hook and template side effects have
   no general rollback mechanism.

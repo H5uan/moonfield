@@ -398,8 +398,9 @@ Editor operations use `EditorAction`; reversible results carry typed
 `EditorUndo` compensation. Batches reject deletion and saving before execution
 and report failed compensation alongside the original error. Redo records
 the inverse for the newly created entities, and failed history operations
-remain retryable. Inspector reflection and per-frame gizmo increments write
-directly; a completed gizmo gesture records one undo unit.
+remain retryable. Per-frame gizmo increments write directly; a completed
+gizmo gesture records one undo unit. Inspector editing uses the same history
+through the reflected-field transactions described below.
 Setting `MOONFIELD_EDITOR_AUTO_CLOSE=<frames>` signals exit via the shared
 `WindowControl` after N rendered frames, which allows automated smoke tests of
 startup/shutdown on a machine with a display.
@@ -423,6 +424,23 @@ The editor's Inspector is fully generic over it: `EditorPlugin` inserts an
 and each registered component on the selected entity renders as a collapsing
 header via the `reflect_ui` walker — nested structs recurse, leaf widgets
 dispatch by downcast (quaternions edit as Euler-XYZ degrees).
+
+The walker reads components through shared references and edits owned leaf
+drafts. `EditorAction::SetField` resolves an entity generation, concrete
+component type, and nested field-name path on each execution. Missing targets
+and mismatched leaf types fail before mutable ECS access. Equal leaf values
+produce no compensation and do not mark the component `Changed`; floating
+values compare by their stored bits. History retains only field values, not
+whole-component snapshots, so editing does not require component cloning.
+
+Drag and text edits apply increments for same-frame feedback and retain their
+initial and final field values as one undo unit. Release, focus loss, field or
+selection changes, and hiding the widget finish that unit. History operations
+and other performed actions finish pending Inspector edits before proceeding.
+An edit ending at its initial value creates no history entry. Undo validates
+all field targets in a compensation batch before mutation; failed undo/redo
+entries remain retryable. Unsupported leaves remain read-only labels, and
+arbitrary mutations outside editor actions are not recorded.
 
 ## Assets
 

@@ -15,10 +15,17 @@ use moonfield_scene::SceneRegistry;
 
 mod undo;
 pub use undo::EditorUndo;
+pub mod field;
+use field::{FieldValue, ReflectedField};
 
 /// One editor operation.
 #[derive(Debug, Clone)]
 pub enum EditorAction {
+    /// Set one supported reflected leaf without replacing its component.
+    SetField {
+        field: ReflectedField,
+        value: FieldValue,
+    },
     /// Import an asset file, spawning its entity (mesh or splat cloud, by
     /// content).
     ImportAsset {
@@ -56,6 +63,8 @@ pub enum EditorAction {
 /// Errors produced by executing an [`EditorAction`].
 #[derive(Debug, thiserror::Error)]
 pub enum ActionError {
+    #[error("reflected field edit failed: {0}")]
+    ReflectedField(String),
     /// The asset import failed (I/O or parse).
     #[error("asset import failed: {0}")]
     Import(String),
@@ -100,6 +109,17 @@ pub struct ActionOutcome {
 /// panics.
 pub fn execute(world: &mut World, action: &EditorAction) -> Result<ActionOutcome, ActionError> {
     match action {
+        EditorAction::SetField { field, value } => {
+            let before = field.write(world, value)?;
+            Ok(ActionOutcome {
+                message: format!("Edited {:?}", field.entity),
+                entity: Some(field.entity),
+                undo: before.map(|value| EditorUndo::SetField {
+                    field: field.clone(),
+                    value,
+                }),
+            })
+        }
         EditorAction::ImportAsset { path } => {
             let entity = crate::scene_io::load_asset(world, path).map_err(ActionError::Import)?;
             Ok(ActionOutcome {
@@ -240,6 +260,7 @@ pub struct EditorHistory {
 /// Reversible edits and explicit deletion clear redo; saving leaves history
 /// unchanged.
 pub fn perform(world: &mut World, action: EditorAction) -> Result<ActionOutcome, ActionError> {
+    crate::registry::edits::flush(world);
     let outcome = execute(world, &action)?;
     if matches!(action, EditorAction::DeleteEntity { .. })
         && let Some(mut history) = world.get_resource_mut::<EditorHistory>()
@@ -260,6 +281,11 @@ pub fn perform(world: &mut World, action: EditorAction) -> Result<ActionOutcome,
 /// applied its own increments (e.g. a gizmo drag), turned into one undo
 /// unit. `done` is the gesture's end state, `undo` restores the start.
 pub fn record(world: &mut World, done: EditorAction, undo: EditorUndo) {
+    crate::registry::edits::flush(world);
+    record_completed(world, done, undo);
+}
+
+pub(crate) fn record_completed(world: &mut World, done: EditorAction, undo: EditorUndo) {
     world.init_resource::<EditorHistory>();
     world
         .get_resource_mut::<EditorHistory>()
@@ -278,6 +304,7 @@ impl EditorHistory {
 /// undo; `Some(Err(_))` when the inverse no longer applies (e.g. its entity
 /// is gone).
 pub fn undo(world: &mut World) -> Option<Result<ActionOutcome, ActionError>> {
+    crate::registry::edits::flush(world);
     world
         .try_resource_scope(|world, history: &mut EditorHistory| {
             history.undo.pop().map(|entry| {
@@ -295,6 +322,7 @@ pub fn undo(world: &mut World) -> Option<Result<ActionOutcome, ActionError>> {
 
 /// Redo the most recently undone action.
 pub fn redo(world: &mut World) -> Option<Result<ActionOutcome, ActionError>> {
+    crate::registry::edits::flush(world);
     world
         .try_resource_scope(|world, history: &mut EditorHistory| {
             history.redo.pop().map(|mut entry| {

@@ -9,6 +9,11 @@ use super::{ActionError, ActionOutcome, EditorAction, execute};
 /// batch may produce cleanup inverses without accepting irreversible edits.
 #[derive(Debug, Clone)]
 pub enum EditorUndo {
+    /// Restore a supported reflected leaf after validating its target.
+    SetField {
+        field: super::field::ReflectedField,
+        value: super::field::FieldValue,
+    },
     /// Restore an entity's local transform.
     SetTransform {
         entity: Entity,
@@ -27,6 +32,13 @@ impl EditorUndo {
     pub fn apply(&self, world: &mut World) -> Result<ActionOutcome, ActionError> {
         self.validate(world)?;
         match self {
+            Self::SetField { field, value } => execute(
+                world,
+                &EditorAction::SetField {
+                    field: field.clone(),
+                    value: value.clone(),
+                },
+            ),
             Self::SetTransform { entity, transform } => execute(
                 world,
                 &EditorAction::SetTransform {
@@ -64,6 +76,9 @@ impl EditorUndo {
 
     fn validate(&self, world: &World) -> Result<(), ActionError> {
         match self {
+            Self::SetField { field, value } => {
+                field.validate(world, value)?;
+            }
             Self::SetTransform { entity, .. } => {
                 if !world.contains(*entity) {
                     return Err(ActionError::MissingEntity(*entity));

@@ -1,8 +1,8 @@
 //! Editor dock layout, UE5-style: viewport center, outliner (hierarchy) and
 //! details (inspector) stacked in the right column, content browser below.
 //!
-//! The hierarchy and inspector panels read and edit the ECS world directly
-//! (the single-threaded render seam). [`collect_hierarchy_into`] is factored
+//! The panels read the ECS world on the single-threaded render seam and
+//! submit edits through editor actions. [`collect_hierarchy_into`] is factored
 //! out as a pure world-reading function so it can be tested without a
 //! display.
 
@@ -107,6 +107,7 @@ pub fn initial_dock_state() -> DockState<Tab> {
 /// here (`Frame::NONE` is transparent and margin-less). `show_inside`
 /// derives the dock style from the egui style when none is set.
 pub fn show(ui: &mut egui::Ui, dock_state: &mut DockState<Tab>, context: &mut TabContext) {
+    crate::registry::edits::begin_frame(context.world);
     // Editor-global shortcuts, through the same action history the panels
     // use: Ctrl/Cmd+Z undoes, Ctrl/Cmd+Shift+Z (or Ctrl/Cmd+Y) redoes —
     // unless a text field has keyboard focus.
@@ -134,6 +135,7 @@ pub fn show(ui: &mut egui::Ui, dock_state: &mut DockState<Tab>, context: &mut Ta
         .show(ui, |ui| {
             DockArea::new(dock_state).show_inside(ui, &mut EditorTabViewer { context });
         });
+    crate::registry::edits::finish_frame(context.world, *context.selection);
 }
 
 struct EditorTabViewer<'a, 'w> {
